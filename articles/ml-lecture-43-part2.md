@@ -1,5 +1,5 @@
 ---
-title: "第43回 (Part 2): Diffusion Transformers & 高速生成: 30秒の驚き→数式修行→実装マスター"
+title: "第43回 (Part 2): Diffusion Transformers & 高速生成: 30秒の驚き→数式修行→実装マスター""
 emoji: "🎨"
 type: "tech"
 topics: ["machinelearning", "deeplearning", "diffusiontransformers", "julia", "dit"]

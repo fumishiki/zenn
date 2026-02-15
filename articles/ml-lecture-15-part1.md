@@ -1,5 +1,5 @@
 ---
-title: "第15回: Attention 類似手法 & Sparse Attention: 30秒の驚き→数式修行→実装マスター"
+title: "第15回: Attention 類似手法 & Sparse Attention: 30秒の驚き→数式修行→実装マスター""
 emoji: "⚡"
 type: "tech"
 topics: ["machinelearning", "deeplearning", "attention", "julia", "rust"]

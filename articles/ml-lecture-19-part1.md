@@ -1,5 +1,5 @@
 ---
-title: "第19回: 環境構築 & FFI & 分散基盤: 30秒の驚き→数式修行→実装マスター"
+title: "第19回: 環境構築 & FFI & 分散基盤: 30秒の驚き→数式修行→実装マスター""
 emoji: "⚡"
 type: "tech"
 topics: ["machinelearning", "julia", "rust", "elixir", "ffi"]

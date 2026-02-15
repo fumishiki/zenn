@@ -1,5 +1,5 @@
 ---
-title: "第31回: MLOps完全版【前編】理論編: 30秒の驚き→数式修行"
+title: "第31回: MLOps完全版【前編】理論編: 30秒の驚き→数式修行""
 emoji: "🔄"
 type: "tech"
 topics: ["machinelearning", "mlops", "rust", "julia", "elixir"]

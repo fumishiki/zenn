@@ -1,3 +1,11 @@
+---
+title: "第20回: VAE/GAN/Transformerフルスタック実装 & 分散サービング: 30秒の驚き→数式修行→実装マスター 【後編】実装編"
+emoji: "🔥"
+type: "tech"
+topics: ["machinelearning", "deeplearning", "julia", "rust", "elixir"]
+published: true
+---
+
 ## 💻 4. 実装ゾーン（45分）— 3言語パイプライン完全構築
 
 数式を理解した。今度は**動かす**。Julia訓練→Rust推論→Elixir配信の完全パイプラインを実装する。

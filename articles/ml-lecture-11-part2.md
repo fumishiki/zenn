@@ -1,3 +1,10 @@
+---
+title: "第11回: 最適輸送理論: 30秒の驚き→数式修行→実装マスター 【後編】実装編"
+emoji: "🚛"
+type: "tech"
+topics: ["machinelearning", "deeplearning", "optimaltransport", "julia", "rust"]
+published: true
+---
 
 ## 💻 4. 実装ゾーン（45分）— Julia + Rust でOTを実装する
 

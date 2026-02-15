@@ -1,3 +1,10 @@
+---
+title: "第38回: Flow Matching & 生成モデル統一理論: 30秒の驚き→数式修行→実装マスター 【後編】実装編"
+emoji: "🌀"
+type: "tech"
+topics: ["machinelearning", "deeplearning", "flowmatching", "julia", "diffusion"]
+published: true
+---
 
 ## Zone 4: 実装ゾーン — Julia Flow Matching実装
 

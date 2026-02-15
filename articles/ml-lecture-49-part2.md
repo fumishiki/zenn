@@ -1,5 +1,5 @@
 ---
-title: "第49回 (Part 2): マルチモーダル統合 & 推論時スケーリング: 30秒の驚き→数式修行→実装マスター"
+title: "第49回 (Part 2): マルチモーダル統合 & 推論時スケーリング: 30秒の驚き→数式修行→実装マスター""
 emoji: "🌐"
 type: "tech"
 topics: ["machinelearning", "deeplearning", "multimodal", "julia", "inference"]

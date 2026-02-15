@@ -1,5 +1,5 @@
 ---
-title: "第26回: 推論最適化 & Production品質: 30秒の驚き→数式修行→実装マスター【後編】実装編"
+title: "第26回: 推論最適化 & Production品質: 30秒の驚き→数式修行→実装マスター【後編】実装編""
 slug: "ml-lecture-26-part2"
 emoji: "⚡"
 type: "tech"

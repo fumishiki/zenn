@@ -1,3 +1,10 @@
+---
+title: "第16回: SSM理論 & Mambaの克服: 30秒の驚き→数式修行→実装マスター 【後編】実装編"
+emoji: "🦛"
+type: "tech"
+topics: ["machinelearning", "deeplearning", "ssm", "julia", "rust"]
+published: true
+---
 
 ## 💻 4. 実装ゾーン(45分) — JuliaとRustでSSMを動かす
 

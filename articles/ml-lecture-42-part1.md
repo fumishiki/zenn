@@ -1,5 +1,5 @@
 ---
-title: "第42回: 全生成モデル理論の統一的整理 + Course IV 総括: 30秒の驚き→数式修行→実装マスター"
+title: "第42回: 全生成モデル理論の統一的整理 + Course IV 総括: 30秒の驚き→数式修行→実装マスター""
 emoji: "🏆"
 type: "tech"
 topics: ["machinelearning", "deeplearning", "generativemodels", "julia", "unifiedtheory"]

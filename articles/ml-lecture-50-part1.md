@@ -1,5 +1,5 @@
 ---
-title: "第50回: フロンティア総括 & 卒業制作 — 全50回最終章: 30秒の驚き→数式修行→実装マスター"
+title: "第50回: フロンティア総括 & 卒業制作 — 全50回最終章: 30秒の驚き→数式修行→実装マスター""
 emoji: "🏆"
 type: "tech"
 topics: ["machinelearning", "deeplearning", "generativemodels", "julia", "rust", "elixir", "production"]

@@ -1,3 +1,10 @@
+---
+title: "第12回: GAN: 基礎からStyleGANまで: 30秒の驚き→数式修行→実装マスター 【後編】実装編"
+emoji: "⚔️"
+type: "tech"
+topics: ["machinelearning", "deeplearning", "gan", "julia", "rust"]
+published: true
+---
 
 ## 💻 4. 実装ゾーン（45分）— Julia訓練 + Rust推論
 

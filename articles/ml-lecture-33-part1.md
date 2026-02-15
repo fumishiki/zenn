@@ -1,5 +1,5 @@
 ---
-title: "第33回: Normalizing Flows【前編】理論編: 30秒の驚き→数式修行"
+title: "第33回: Normalizing Flows【前編】理論編: 30秒の驚き→数式修行""
 emoji: "🔄"
 type: "tech"
 topics: ["machinelearning"]

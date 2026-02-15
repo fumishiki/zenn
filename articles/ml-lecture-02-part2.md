@@ -1,5 +1,5 @@
 ---
-title: "第2回: 線形代数 I: ベクトル・行列・基底 — 30秒の驚き→数式修行→実装マスター 【後編】実装編
+title: "第2回: 線形代数 I: ベクトル・行列・基底 — 30秒の驚き→数式修行→実装マスター 【後編】実装編"
 emoji: "📐"
 type: "tech"
 topics: ["machinelearning", "deeplearning", "linearalgebra", "python"]

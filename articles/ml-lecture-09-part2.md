@@ -1,5 +1,5 @@
 ---
-title: "第9回: NN基礎&変分推論&ELBO — Python地獄からRust救済へ 【後編】実装編
+title: "第9回: NN基礎&変分推論&ELBO — Python地獄からRust救済へ 【後編】実装編"
 emoji: "🧠"
 type: "tech"
 topics: ["machinelearning", "deeplearning", "variationalinference", "rust", "python"]

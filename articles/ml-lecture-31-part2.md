@@ -1,5 +1,5 @@
 ---
-title: "第31回: MLOps完全版【後編】実装編: Julia/Rust/Elixir実装→マスター"
+title: "第31回: MLOps完全版【後編】実装編: Julia/Rust/Elixir実装→マスター""
 emoji: "🔄"
 type: "tech"
 topics: ["machinelearning", "mlops", "rust", "julia", "elixir"]

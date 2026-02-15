@@ -1,5 +1,5 @@
 ---
-title: "第41回 (Part 2): World Models & 環境シミュレータ理論🌍: 30秒の驚き→数式修行→実装マスター"
+title: "第41回 (Part 2): World Models & 環境シミュレータ理論🌍: 30秒の驚き→数式修行→実装マスター""
 emoji: "🌍"
 type: "tech"
 topics: ["machinelearning", "deeplearning", "worldmodels", "julia", "jepa"]

@@ -1,5 +1,5 @@
 ---
-title: "第33回: Normalizing Flows【後編】実装編: 実装→実験→マスター"
+title: "第33回: Normalizing Flows【後編】実装編: 実装→実験→マスター""
 emoji: "🔄"
 type: "tech"
 topics: ["machinelearning"]

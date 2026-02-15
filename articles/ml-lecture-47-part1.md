@@ -1,5 +1,5 @@
 ---
-title: "第47回: モーション・4D生成 & Diffusion Policy: 30秒の驚き→数式修行→実装マスター"
+title: "第47回: モーション・4D生成 & Diffusion Policy: 30秒の驚き→数式修行→実装マスター""
 emoji: "🕺"
 type: "tech"
 topics: ["machinelearning", "deeplearning", "motion", "4d", "robotics"]

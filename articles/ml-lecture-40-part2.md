@@ -1,3 +1,10 @@
+---
+title: "第40回: ⚡ Consistency Models & 高速生成理論: 30秒の驚き→数式修行→実装マスター 【後編】実装編"
+emoji: "⚡"
+type: "tech"
+topics: ["machinelearning", "deeplearning", "consistencymodels", "julia", "diffusion"]
+published: true
+---
 
 ## 💻 4. 実装ゾーン（45分）— Julia Consistency Model完全実装
 

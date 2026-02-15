@@ -1,5 +1,5 @@
 ---
-title: "第1回: 概論: 数式と論文の読み方 — 30秒の驚き→数式修行→実装マスター 【後編】実装編
+title: "第1回: 概論: 数式と論文の読み方 — 30秒の驚き→数式修行→実装マスター 【後編】実装編"
 emoji: "🧭"
 type: "tech"
 topics: ["machinelearning", "deeplearning", "math", "python"]

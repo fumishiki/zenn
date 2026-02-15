@@ -1,5 +1,5 @@
 ---
-title: "第6回: 情報理論・最適化理論: 30秒の驚き→数式修行→実装マスター 【前編】理論編
+title: "第6回: 情報理論・最適化理論: 30秒の驚き→数式修行→実装マスター 【前編】理論編"
 emoji: "📡"
 type: "tech"
 topics: ["machinelearning", "deeplearning", "informationtheory", "python"]

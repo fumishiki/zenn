@@ -1,5 +1,5 @@
 ---
-title: "第14回: Attention — 化石からの脱却: 30秒の驚き→数式修行→実装マスター"
+title: "第14回: Attention — 化石からの脱却: 30秒の驚き→数式修行→実装マスター""
 emoji: "🔍"
 type: "tech"
 topics: ["machinelearning", "deeplearning", "transformer", "julia", "rust"]

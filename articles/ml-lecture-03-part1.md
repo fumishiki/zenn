@@ -1,5 +1,5 @@
 ---
-title: "第3回: 線形代数 II: SVD・行列微分・テンソル — 万能ナイフSVDと逆伝播の数学 【前編】理論編
+title: "第3回: 線形代数 II: SVD・行列微分・テンソル — 万能ナイフSVDと逆伝播の数学 【前編】理論編"
 emoji: "🔬"
 type: "tech"
 topics: ["machinelearning", "deeplearning", "linearalgebra", "python"]

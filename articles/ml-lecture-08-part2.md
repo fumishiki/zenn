@@ -1,5 +1,5 @@
 ---
-title: "第8回: 潜在変数モデル & EM算法: 30秒の驚き→数式修行→実装マスター 【後編】実装編
+title: "第8回: 潜在変数モデル & EM算法: 30秒の驚き→数式修行→実装マスター 【後編】実装編"
 emoji: "🔍"
 type: "tech"
 topics: ["machinelearning", "deeplearning", "statistics", "python"]

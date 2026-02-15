@@ -1,5 +1,5 @@
 ---
-title: "第20回: VAE/GAN/Transformerフルスタック実装 & 分散サービング: 30秒の驚き→数式修行→実装マスター"
+title: "第20回: VAE/GAN/Transformerフルスタック実装 & 分散サービング: 30秒の驚き→数式修行→実装マスター""
 emoji: "🔥"
 type: "tech"
 topics: ["machinelearning", "deeplearning", "julia", "rust", "elixir"]

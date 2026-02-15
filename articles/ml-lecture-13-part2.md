@@ -1,3 +1,11 @@
+---
+title: "第13回: 自己回帰モデル: 30秒の驚き→数式修行→実装マスター 【後編】実装編"
+emoji: "🔄"
+type: "tech"
+topics: ["machinelearning", "deeplearning", "autoregressive", "julia", "rust"]
+published: true
+---
+
 ## 💻 4. 実装ゾーン(45分)— PixelCNN/WaveNetをJulia+Rustで構築
 
 ### 4.1 環境構築

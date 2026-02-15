@@ -1,5 +1,5 @@
 ---
-title: "第4回: 確率論・統計学: 30秒の驚き→数式修行→実装マスター 【前編】理論編
+title: "第4回: 確率論・統計学: 30秒の驚き→数式修行→実装マスター 【前編】理論編"
 emoji: "🎲"
 type: "tech"
 topics: ["machinelearning", "deeplearning", "probability", "python"]

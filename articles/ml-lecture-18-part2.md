@@ -1,3 +1,10 @@
+---
+title: "第18回: Attention × Mamba ハイブリッド: 30秒の驚き→数式修行→実装マスター 【後編】実装編"
+emoji: "🔀"
+type: "tech"
+topics: ["machinelearning", "deeplearning", "attention", "mamba", "julia"]
+published: true
+---
 
 ## 💻 4. 実装ゾーン（45分）— Julia/Rust Hybrid実装
 

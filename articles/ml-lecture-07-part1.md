@@ -1,5 +1,5 @@
 ---
-title: "第7回: 最尤推定と統計的推論: 30秒の驚き→数式修行→実装マスター 【前編】理論編
+title: "第7回: 最尤推定と統計的推論: 30秒の驚き→数式修行→実装マスター 【前編】理論編"
 emoji: "🗺️"
 type: "tech"
 topics: ["machinelearning", "deeplearning", "statistics", "python"]

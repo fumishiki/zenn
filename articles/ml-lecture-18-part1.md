@@ -1,5 +1,5 @@
 ---
-title: "第18回: Attention × Mamba ハイブリッド: 30秒の驚き→数式修行→実装マスター"
+title: "第18回: Attention × Mamba ハイブリッド: 30秒の驚き→数式修行→実装マスター""
 emoji: "🔀"
 type: "tech"
 topics: ["machinelearning", "deeplearning", "attention", "mamba", "julia"]

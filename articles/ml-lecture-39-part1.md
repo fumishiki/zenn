@@ -1,5 +1,5 @@
 ---
-title: "第39回: Latent Diffusion Models: 30秒の驚き→数式修行→実装マスター"
+title: "第39回: Latent Diffusion Models: 30秒の驚き→数式修行→実装マスター""
 emoji: "🖼️"
 type: "tech"
 topics: ["machinelearning", "deeplearning", "ldm", "julia", "stablediffusion"]

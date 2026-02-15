@@ -1,5 +1,5 @@
 ---
-title: "第21回: データサイエンス & HuggingFace Datasets: 30秒の驚き→数式修行→実装マスター【後編】実装編"
+title: "第21回: データサイエンス & HuggingFace Datasets: 30秒の驚き→数式修行→実装マスター【後編】実装編""
 slug: "ml-lecture-21-part2"
 emoji: "📊"
 type: "tech"

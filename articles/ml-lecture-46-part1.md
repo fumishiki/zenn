@@ -1,5 +1,5 @@
 ---
-title: "第46回: 3D生成 & Neural Rendering: 30秒の驚き→数式修行→実装マスター"
+title: "第46回: 3D生成 & Neural Rendering: 30秒の驚き→数式修行→実装マスター""
 emoji: "🧊"
 type: "tech"
 topics: ["machinelearning", "deeplearning", "3dgeneration", "nerf", "3dgs"]

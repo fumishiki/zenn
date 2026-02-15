@@ -1,5 +1,5 @@
 ---
-title: "第48回: 科学・分子生成（AI for Science）: 30秒の驚き→数式修行→実装マスター"
+title: "第48回: 科学・分子生成（AI for Science）: 30秒の驚き→数式修行→実装マスター""
 emoji: "🧬"
 type: "tech"
 topics: ["machinelearning","deeplearning","science","julia","rust"]

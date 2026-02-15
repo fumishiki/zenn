@@ -1,3 +1,10 @@
+---
+title: "第17回: Mamba発展 & 類似手法: 30秒の驚き→数式修行→実装マスター 【後編】実装編"
+emoji: "🔀"
+type: "tech"
+topics: ["machinelearning", "deeplearning", "mamba", "julia", "rust"]
+published: true
+---
 
 ## 💻 4. 実装ゾーン（45分）— Julia & Rust で全て実装
 

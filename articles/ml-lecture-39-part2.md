@@ -1,3 +1,10 @@
+---
+title: "第39回: Latent Diffusion Models: 30秒の驚き→数式修行→実装マスター 【後編】実装編"
+emoji: "🖼️"
+type: "tech"
+topics: ["machinelearning", "deeplearning", "ldm", "julia", "stablediffusion"]
+published: true
+---
 
 ## 💻 4. 実装ゾーン（45分）— LDM訓練→推論パイプライン
 
