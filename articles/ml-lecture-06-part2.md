@@ -2,13 +2,13 @@
 title: "第6回: 情報理論・最適化理論: 30秒の驚き→数式修行→実装マスター 【後編】実装編"
 emoji: "📡"
 type: "tech"
-topics: ["machinelearning", "deeplearning", "informationtheory", "python"]
+topics: ["machinelearning", "deeplearning", "informationtheory", "statistics", "python"]
 published: true
 time_estimate: "90 minutes"
 slug: "ml-lecture-06-part2"
 difficulty: "intermediate"
 languages: ["Python"]
-keywords: ["クロスエントロピー", "KLダイバージェンス", "SGD", "Adam", "学習率", "勾配降下法", "情報理論"]
+keywords: ["クロスエントロピー", "KLダイバージェンス", "Adam", "勾配降下法", "情報理論"]
 ---
 
 > **Note:** **📘 本記事は後編（実装編）です**: [前編（理論編）はこちら](/articles/ml-lecture-06-part1)

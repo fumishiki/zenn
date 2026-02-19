@@ -2,13 +2,13 @@
 title: "第2回: 線形代数 I: ベクトル・行列・基底 — 30秒の驚き→数式修行→実装マスター 【前編】理論編"
 emoji: "📐"
 type: "tech"
-topics: ["machinelearning", "deeplearning", "linearalgebra", "python"]
+topics: ["machinelearning", "deeplearning", "linearalgebra", "math", "python"]
 published: true
 slug: "ml-lecture-02-part1"
 difficulty: "intermediate"
 time_estimate: "90 minutes"
 languages: ["Python"]
-keywords: ["線形代数", "ベクトル空間", "内積", "行列", "固有値分解", "Cholesky分解", "射影", "最小二乗法"]
+keywords: ["線形代数", "内積", "固有値分解", "射影", "最小二乗法"]
 ---
 
 

@@ -8,7 +8,7 @@ slug: "ml-lecture-05-part1"
 difficulty: "advanced"
 time_estimate: "90 minutes"
 languages: ["Python"]
-keywords: ["measure theory", "Lebesgue integration", "Brownian motion", "Itô calculus", "stochastic differential equations", "Markov chain", "Radon-Nikodym", "diffusion models"]
+keywords: ["measure theory", "Itô calculus", "stochastic differential equations", "Markov chain", "diffusion models"]
 ---
 
 # 第5回: 測度論的確率論・確率過程入門【前編】— 確率の「文法」を手に入れる

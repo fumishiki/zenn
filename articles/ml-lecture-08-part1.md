@@ -2,13 +2,13 @@
 title: "第8回: 潜在変数モデル & EM算法 (Part1: 理論編)"
 emoji: "🧩"
 type: "tech"
-topics: ["machinelearning", "statistics", "math", "python"]
+topics: ["machinelearning", "deeplearning", "statistics", "math", "python"]
 published: false
 slug: "ml-lecture-08-part1"
 difficulty: "advanced"
 time_estimate: "90 minutes"
 languages: ["Python"]
-keywords: ["潜在変数", "EM算法", "Jensen不等式", "ELBO", "GMM", "責任度", "Q関数", "変分推論"]
+keywords: ["EM算法", "Jensen不等式", "ELBO", "GMM", "変分推論"]
 ---
 
 > **前編リンク**: [第7回 Part2（最尤推定 実装編）](/articles/ml-lecture-07-part2)

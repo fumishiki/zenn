@@ -2,13 +2,13 @@
 title: "第7回: 最尤推定と統計的推論 (Part2: 実装編)"
 emoji: "📊"
 type: "tech"
-topics: ["machinelearning", "statistics", "math", "python"]
+topics: ["machinelearning", "deeplearning", "statistics", "math", "python"]
 published: false
 slug: "ml-lecture-07-part2"
 difficulty: "intermediate"
 time_estimate: "90 minutes"
 languages: ["Python"]
-keywords: ["最尤推定", "MLE", "Cross-Entropy", "KL", "forward KL", "reverse KL", "FID", "評価指標"]
+keywords: ["最尤推定", "MLE", "Cross-Entropy", "forward KL", "reverse KL"]
 ---
 
 > **この講義について**

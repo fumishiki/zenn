@@ -2,13 +2,13 @@
 title: "第3回: 線形代数 II: SVD・行列微分・テンソル — 万能ナイフSVDと逆伝播の数学 【前編】理論編"
 emoji: "🔬"
 type: "tech"
-topics: ["machinelearning", "deeplearning", "linearalgebra", "python"]
+topics: ["machinelearning", "deeplearning", "linearalgebra", "math", "python"]
 published: true
 slug: "ml-lecture-03-part1"
 difficulty: "advanced"
 time_estimate: "90 minutes"
 languages: ["Python"]
-keywords: ["SVD", "特異値分解", "行列微分", "テンソル演算", "自動微分", "逆伝播", "Jacobian", "Hessian", "Eckart-Young"]
+keywords: ["SVD", "特異値分解", "行列微分", "自動微分", "逆伝播"]
 ---
 
 # 第3回: 線形代数 II — SVD・行列微分・テンソル

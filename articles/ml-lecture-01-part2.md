@@ -2,13 +2,13 @@
 title: "第1回: 概論: 数式と論文の読み方 — 30秒の驚き→数式修行→実装マスター 【後編】実装編"
 emoji: "🧭"
 type: "tech"
-topics: ["machinelearning", "deeplearning", "math", "python"]
+topics: ["machinelearning", "deeplearning", "math", "statistics", "python"]
 published: true
 slug: "ml-lecture-01-part2"
 difficulty: "beginner"
 time_estimate: "90 minutes"
 languages: ["Python"]
-keywords: ["環境構築", "LaTeX", "arXiv", "Git", "jj", "Obsidian", "HuggingFace", "OSSライセンス"]
+keywords: ["環境構築", "arXiv", "Git", "HuggingFace", "OSSライセンス"]
 ---
 
 > **📖 この記事は後編（実装編）です**

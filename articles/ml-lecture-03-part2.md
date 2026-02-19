@@ -2,13 +2,13 @@
 title: "第3回: 線形代数 II: SVD・行列微分・テンソル — 万能ナイフSVDと逆伝播の数学 【後編】実装編"
 emoji: "🔬"
 type: "tech"
-topics: ["machinelearning", "deeplearning", "linearalgebra", "python"]
+topics: ["machinelearning", "deeplearning", "linearalgebra", "math", "python"]
 published: true
 slug: "ml-lecture-03-part2"
 difficulty: "advanced"
 time_estimate: "90 minutes"
 languages: ["Python"]
-keywords: ["SVD", "低ランク近似", "Randomized SVD", "行列微分", "数値微分", "einsum", "自動微分", "Dual Numbers", "LoRA", "AdaLoRA", "Tikhonov正則化", "Attention", "LayerNorm", "FlashAttention"]
+keywords: ["SVD", "低ランク近似", "行列微分", "自動微分", "LoRA"]
 ---
 
 # 第3回: 線形代数 II — SVD・行列微分・テンソル【後編：実装編】

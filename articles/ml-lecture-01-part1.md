@@ -2,13 +2,13 @@
 title: "第1回: 概論: 数式と論文の読み方 — 30秒の驚き→数式修行→実装マスター 【前編】理論編"
 emoji: "🧭"
 type: "tech"
-topics: ["machinelearning", "deeplearning", "math", "python"]
+topics: ["machinelearning", "deeplearning", "math", "statistics", "python"]
 published: true
 slug: "ml-lecture-01-part1"
 difficulty: "beginner"
 time_estimate: "90 minutes"
 languages: ["Python"]
-keywords: ["数式記法", "LaTeX", "論文読解", "Softmax", "Attention", "Cross-Entropy", "arXiv"]
+keywords: ["数式記法", "LaTeX", "Softmax", "Attention", "Cross-Entropy"]
 ---
 
 

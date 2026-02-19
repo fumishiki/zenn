@@ -2,13 +2,13 @@
 title: "第4回: 確率論・統計学【前編】— Kolmogorovの公理系からベイズ推論まで"
 emoji: "🎲"
 type: "tech"
-topics: ["machinelearning", "probability", "statistics", "python"]
+topics: ["machinelearning", "probability", "statistics", "math", "python"]
 published: false
 slug: "ml-lecture-04-part1"
 difficulty: "advanced"
 time_estimate: "90 minutes"
 languages: ["Python"]
-keywords: ["確率論", "Kolmogorov", "ベイズの定理", "MLE", "指数型分布族", "正規分布", "多変量正規分布", "自己回帰モデル"]
+keywords: ["確率論", "ベイズの定理", "MLE", "指数型分布族", "多変量正規分布"]
 ---
 
 # 第4回: 確率論・統計学【前編】

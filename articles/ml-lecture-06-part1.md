@@ -2,13 +2,13 @@
 title: "第6回: 情報理論・最適化理論: 30秒の驚き→数式修行→実装マスター 【前編】理論編"
 emoji: "📡"
 type: "tech"
-topics: ["machinelearning", "deeplearning", "informationtheory", "python"]
+topics: ["machinelearning", "deeplearning", "informationtheory", "statistics", "python"]
 published: true
 time_estimate: "90 minutes"
 slug: "ml-lecture-06-part1"
 difficulty: "intermediate"
 languages: ["Python"]
-keywords: ["エントロピー", "KLダイバージェンス", "相互情報量", "最適化", "SGD", "Adam", "学習率スケジューラ"]
+keywords: ["エントロピー", "KLダイバージェンス", "相互情報量", "SGD", "Adam"]
 ---
 
 

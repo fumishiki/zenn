@@ -2,13 +2,13 @@
 title: "第7回: 最尤推定と統計的推論 (Part1: 理論編)"
 emoji: "📊"
 type: "tech"
-topics: ["machinelearning", "statistics", "math", "python"]
+topics: ["machinelearning", "deeplearning", "statistics", "math", "python"]
 published: false
 slug: "ml-lecture-07-part1"
 difficulty: "intermediate"
 time_estimate: "90 minutes"
 languages: ["Python"]
-keywords: ["最尤推定", "MLE", "Fisher情報量", "KLダイバージェンス", "生成モデル", "統計的推論"]
+keywords: ["最尤推定", "MLE", "Fisher情報量", "KLダイバージェンス", "生成モデル"]
 ---
 
 > **後編はこちら**: [第7回 Part2（実装編）](/articles/ml-lecture-07-part2)

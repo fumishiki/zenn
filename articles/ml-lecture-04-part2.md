@@ -2,13 +2,13 @@
 title: "第4回: 確率論・統計学: 30秒の驚き→数式修行→実装マスター 【後編】実装編"
 emoji: "🎲"
 type: "tech"
-topics: ["machinelearning", "deeplearning", "probability", "python"]
+topics: ["machinelearning", "deeplearning", "probability", "statistics", "python"]
 published: true
 slug: "ml-lecture-04-part2"
 difficulty: "intermediate"
 time_estimate: "90 minutes"
 languages: ["Python"]
-keywords: ["確率分布実装", "MLE実装", "ベイズ推論", "SciPy", "NumPy", "統計的推定"]
+keywords: ["確率分布実装", "MLE実装", "ベイズ推論", "SciPy", "統計的推定"]
 ---
 
 # 第4回: 確率論・統計学【後編】

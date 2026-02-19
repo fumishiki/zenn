@@ -2,13 +2,13 @@
 title: "第8回: 潜在変数モデル & EM算法 (Part2: 実装編)"
 emoji: "🧩"
 type: "tech"
-topics: ["machinelearning", "statistics", "math", "python"]
+topics: ["machinelearning", "deeplearning", "statistics", "math", "python"]
 published: false
 slug: "ml-lecture-08-part2"
 difficulty: "intermediate"
 time_estimate: "90 minutes"
 languages: ["Python"]
-keywords: ["GMM", "EM", "log-sum-exp", "BIC", "AIC", "初期化"]
+keywords: ["GMM", "EM", "log-sum-exp", "BIC", "AIC"]
 ---
 
 > **前編**: [第8回 Part1（理論編）](/articles/ml-lecture-08-part1) | **後編**: 本記事
