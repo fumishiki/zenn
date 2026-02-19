@@ -2,7 +2,7 @@
 title: "第7回: 最尤推定と統計的推論 (Part2: 実装編)"
 emoji: "📊"
 type: "tech"
-topics: ["machinelearning", "deeplearning", "statistics", "math", "python"]
+topics: ["機械学習", "深層学習", "統計学", "数学", "Python"]
 published: false
 slug: "ml-lecture-07-part2"
 difficulty: "intermediate"

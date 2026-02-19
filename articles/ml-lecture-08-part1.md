@@ -2,7 +2,7 @@
 title: "第8回: 潜在変数モデル & EM算法 (Part1: 理論編)"
 emoji: "🧩"
 type: "tech"
-topics: ["machinelearning", "deeplearning", "statistics", "math", "python"]
+topics: ["機械学習", "深層学習", "統計学", "数学", "Python"]
 published: false
 slug: "ml-lecture-08-part1"
 difficulty: "advanced"

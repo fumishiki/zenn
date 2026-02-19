@@ -2,7 +2,7 @@
 title: "第6回: 情報理論・最適化理論: 30秒の驚き→数式修行→実装マスター 【後編】実装編"
 emoji: "📡"
 type: "tech"
-topics: ["machinelearning", "deeplearning", "informationtheory", "statistics", "python"]
+topics: ["機械学習", "深層学習", "情報理論", "統計学", "Python"]
 published: true
 time_estimate: "90 minutes"
 slug: "ml-lecture-06-part2"

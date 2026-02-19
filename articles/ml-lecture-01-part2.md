@@ -2,7 +2,7 @@
 title: "第1回: 概論: 数式と論文の読み方 — 30秒の驚き→数式修行→実装マスター 【後編】実装編"
 emoji: "🧭"
 type: "tech"
-topics: ["machinelearning", "deeplearning", "math", "statistics", "python"]
+topics: ["機械学習", "深層学習", "数学", "統計学", "Python"]
 published: true
 slug: "ml-lecture-01-part2"
 difficulty: "beginner"

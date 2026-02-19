@@ -2,7 +2,7 @@
 title: "「東大松尾研の講義は3年遅れ」- 現役AIエンジニアが教える、東大講義の完全上位互換・全50講義（無料公開）"
 emoji: "🔥"
 type: "tech"
-topics: ["machinelearning", "deeplearning", "python", "math", "statistics"]
+topics: ["機械学習", "深層学習", "Python", "数学", "統計学"]
 published: true
 slug: "ml-lecture-00"
 difficulty: "beginner"

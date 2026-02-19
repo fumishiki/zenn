@@ -2,7 +2,7 @@
 title: "第4回: 確率論・統計学【前編】— Kolmogorovの公理系からベイズ推論まで"
 emoji: "🎲"
 type: "tech"
-topics: ["machinelearning", "probability", "statistics", "math", "python"]
+topics: ["機械学習", "確率論", "統計学", "数学", "Python"]
 published: false
 slug: "ml-lecture-04-part1"
 difficulty: "advanced"

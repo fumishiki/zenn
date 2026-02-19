@@ -2,7 +2,7 @@
 title: "第4回: 確率論・統計学: 30秒の驚き→数式修行→実装マスター 【後編】実装編"
 emoji: "🎲"
 type: "tech"
-topics: ["machinelearning", "deeplearning", "probability", "statistics", "python"]
+topics: ["機械学習", "確率論", "統計学", "数学", "Python"]
 published: true
 slug: "ml-lecture-04-part2"
 difficulty: "intermediate"

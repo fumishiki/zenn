@@ -2,7 +2,7 @@
 title: "第5回: 測度論的確率論・確率過程入門【前編】理論編 — 確率の「文法」を手に入れる"
 emoji: "📏"
 type: "tech"
-topics: ["machinelearning", "deeplearning", "measuretheory", "stochasticprocesses", "python"]
+topics: ["機械学習", "深層学習", "確率論", "統計学", "Python"]
 published: true
 slug: "ml-lecture-05-part1"
 difficulty: "advanced"

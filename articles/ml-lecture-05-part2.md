@@ -2,7 +2,7 @@
 title: "第5回: 測度論的確率論・確率過程入門: 30秒の驚き→数式修行→実装マスター 【後編】実装編"
 emoji: "📏"
 type: "tech"
-topics: ["machinelearning", "deeplearning", "measuretheory", "stochasticprocesses", "python"]
+topics: ["機械学習", "深層学習", "確率論", "統計学", "Python"]
 published: true
 slug: "ml-lecture-05-part2"
 difficulty: "advanced"
