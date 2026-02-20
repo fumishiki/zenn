@@ -8,9 +8,7 @@ published: true
 
 # S3: 開発環境・CLIツール — AIで開発環境を整える
 
-:::message
-**この記事のゴール**: Gemini CLIをインストールして、ターミナルからAIに質問できる状態にする。
-:::
+> **Note:** **この記事のゴール**: Gemini CLIをインストールして、ターミナルからAIに質問できる状態にする。
 
 ## はじめに
 
@@ -30,11 +28,10 @@ published: true
 
 最終的に、**Gemini CLI**（無料）をターミナルにインストールして、AIに質問する体験まで到達する。
 
-:::message alert
-**前提**: この記事はプログラミング初心者を対象にしています。「ターミナルって何？」というレベルから始めるので、経験者はターミナル入門セクションを飛ばしてOK。
-:::
+> **⚠️ Warning:** **前提**: この記事はプログラミング初心者を対象にしています。「ターミナルって何？」というレベルから始めるので、経験者はターミナル入門セクションを飛ばしてOK。
 
-:::details 📋 この記事に出てくるツール一覧と所要時間の目安
+<details><summary>📋 この記事に出てくるツール一覧と所要時間の目安</summary>
+
 | カテゴリ | ツール | 所要時間 |
 |:---------|:-------|:---------|
 | エディタ | VSCode / Cursor / Zed / Antigravity | 比較: 15分、インストール: 5分 |
@@ -46,7 +43,8 @@ published: true
 
 **全部読むと**: 約60-90分。
 **ゴール（Gemini CLIインストール）まで**: 約30分。
-:::
+
+</details>
 
 ```mermaid
 graph TD
@@ -77,14 +75,16 @@ Visual Studio Code（通称VSCode）はMicrosoftが開発する**無料**のコ�
 
 **インストール**: [公式サイト](https://code.visualstudio.com/) からダウンロード → インストール → 拡張機能から「Japanese Language Pack」を入れて日本語化。
 
-:::details 💡 VSCodeとVisual Studioは別物
+<details><summary>💡 VSCodeとVisual Studioは別物</summary>
+
 - **Visual Studio**（無印）: 重量級IDE。主にC#/.NET用。数GB必要
 - **Visual Studio Code**: 軽量エディタ。あらゆる言語対応。数百MBで動く
 
 この記事で紹介するのはVSCode（軽い方）。
-:::
 
-:::details 🔧 VSCodeのAI拡張機能（2026年注目の5つ）
+</details>
+
+<details><summary>🔧 VSCodeのAI拡張機能（2026年注目の5つ）</summary>
 
 v1.109でCopilotが標準搭載されたが、それ以外にもAI拡張は豊富だ。
 
@@ -98,9 +98,9 @@ v1.109でCopilotが標準搭載されたが、それ以外にもAI拡張は豊�
 
 初心者は標準搭載のCopilotだけで十分。「ローカルで動くAIを試したい」という人はContinueが面白い。
 
-:::
+</details>
 
-@[card](https://code.visualstudio.com/)
+<https://code.visualstudio.com/>
 
 ---
 
@@ -114,7 +114,7 @@ CursorはVSCodeをフォークして作られている。見た目もショー�
 
 もう1つの強力機能が`.cursorrules`（`.cursor/rules/*.mdc`）。プロジェクト固有のAIルールを定義するファイルで、コード規約やフレームワーク指定を書いておくとAIが常にそれに従う。
 
-:::details 🔧 .cursorrules の実例 — AIの「性格」をカスタマイズ
+<details><summary>🔧 .cursorrules の実例 — AIの「性格」をカスタマイズ</summary>
 
 `.cursor/rules/*.mdc` にプロジェクト固有のルールを書くと、AIの出力がプロジェクトに最適化される。
 
@@ -129,13 +129,11 @@ CursorはVSCodeをフォークして作られている。見た目もショー�
 
 このファイルをチームで共有すれば、「AIが生成するコードのスタイル」をチーム全体で統一できる。VSCodeの`.vscode/settings.json` に相当する概念だが、対象が「人間の設定」ではなく「AIの振る舞い」という点が新しい。
 
-:::
+</details>
 
 **料金**（2026年2月時点）: Free $0 | Pro $16/月（Tab補完無制限+$16分のAIクレジット） | Ultra $200/月
 
-:::message alert
-**⚠️ 料金体系変更に注意**: 2025年6月にクレジット制に移行。Pro ($16/月) に含まれる$16分のクレジットを超えると追加料金が発生する。「月$16で使い放題」ではない。
-:::
+> **⚠️ Warning:** **⚠️ 料金体系変更に注意**: 2025年6月にクレジット制に移行。Pro ($16/月) に含まれる$16分のクレジットを超えると追加料金が発生する。「月$16で使い放題」ではない。
 
 | 強み | 弱み |
 |:-----|:-----|
@@ -144,7 +142,7 @@ CursorはVSCodeをフォークして作られている。見た目もショー�
 | Plan Mode で事前に計画を提示 | アップデートがVSCode本家より遅れることがある |
 | Background Agents（非同期処理） | 無料プランの機能制限が厳しい |
 
-@[card](https://cursor.com/)
+<https://cursor.com/>
 
 ---
 
@@ -160,11 +158,13 @@ AtomとTree-sitterの生みの親Nathan Soboが作った次世代エディタ。
 
 **正直な評価**: 速さは本物。ファイルを開く、検索する、スクロールする — 全てがVSCodeより体感で速い。ただし拡張機能のエコシステムはVSCodeに遠く及ばない。「拡張に頼らずシンプルに使いたい」人には最高の選択肢。
 
-:::details 💡 なぜRustで書かれていると速いのか？
-VSCodeやCursorはElectron（Webブラウザ技術）で作られている。Zedが使うRust言語はネイティブコードにコンパイルされ、JavaScriptの数十倍速い。だからZedは120fpsで描画できる。
-:::
+<details><summary>💡 なぜRustで書かれていると速いのか？</summary>
 
-@[card](https://zed.dev/)
+VSCodeやCursorはElectron（Webブラウザ技術）で作られている。Zedが使うRust言語はネイティブコードにコンパイルされ、JavaScriptの数十倍速い。だからZedは120fpsで描画できる。
+
+</details>
+
+<https://zed.dev/>
 
 ---
 
@@ -176,7 +176,8 @@ VSCodeやCursorはElectron（Webブラウザ技術）で作られている。Zed
 
 **料金**: 2026年2月時点でパブリックプレビュー中の**無料**。正式料金未発表。
 
-:::details 💡 Antigravityの「Managerビュー」が示す未来
+<details><summary>💡 Antigravityの「Managerビュー」が示す未来</summary>
+
 Antigravityの最も興味深い点は、「コードを書く」ではなく「AIを管理する」が主な作業になること。Managerビューでは:
 
 - 5つのAIエージェントを同時に起動して、それぞれ別のファイルを編集させる
@@ -184,9 +185,10 @@ Antigravityの最も興味深い点は、「コードを書く」ではなく「
 - 生成されたコードをレビューして承認/却下
 
 これは「プログラマー」という職業が「AIマネージャー」に変わりうる未来を示唆している。まだプレビュー段階だが、この方向性は覚えておいて損はない。
-:::
 
-@[card](https://developers.googleblog.com/build-with-google-antigravity-our-new-agentic-development-platform/)
+</details>
+
+<https://developers.googleblog.com/build-with-google-antigravity-our-new-agentic-development-platform/>
 
 ---
 
@@ -201,11 +203,9 @@ Antigravityの最も興味深い点は、「コードを書く」ではなく「
 
 **初心者はVSCode一択**。困ったときに検索して出てくる情報量が圧倒的だ。慣れてきたら: AI全振り→Cursor / 速さ重視→Zed / 最先端→Antigravity。全部無料で始められる。
 
-:::message
-**「エディタ選びに時間をかけすぎない」こと**。完璧な選択肢はない。VSCodeで始めて、不満が出てきたら乗り換えればいい。エディタ間の移行は思ったより簡単だ（ショートカットキーのマッピングを入れれば操作感はほぼ同じになる）。
-:::
+> **Note:** **「エディタ選びに時間をかけすぎない」こと**。完璧な選択肢はない。VSCodeで始めて、不満が出てきたら乗り換えればいい。エディタ間の移行は思ったより簡単だ（ショートカットキーのマッピングを入れれば操作感はほぼ同じになる）。
 
-:::details 💡 エディタの歴史 — なぜこんなに種類があるのか
+<details><summary>💡 エディタの歴史 — なぜこんなに種類があるのか</summary>
 
 プログラマーにとってエディタは「1日8時間使う道具」。だから好みが激しく分かれる。
 
@@ -222,7 +222,8 @@ Antigravityの最も興味深い点は、「コードを書く」ではなく「
 エディタの世界では「10年に1度の地殻変動」が起きる。2025-2026年のAI統合はまさにその変動期。VSCodeが10年間の覇権を守れるか、CursorやAntigravityに取って代わられるかは、まだ分からない。
 
 Emacs vs Vim の「エディタ戦争」は40年以上続いている。プログラマーのエディタ愛は、宗教のようなものだ。
-:::
+
+</details>
 
 ---
 
@@ -234,13 +235,11 @@ Emacs vs Vim の「エディタ戦争」は40年以上続いている。プロ�
 
 Chromiumベースのブラウザ。サイドバーでページ内容について即座にChatGPTに質問でき、ブラウザメモリで30日間の閲覧情報を蓄積。エージェントモード（有料のみ）ではAIがWebを自律操作。
 
-:::message alert
-**⚠️ プライバシー注意**: ブラウザメモリは閲覧情報をOpenAIサーバーに保存する。仕事用と分けるのが安全。
-:::
+> **⚠️ Warning:** **⚠️ プライバシー注意**: ブラウザメモリは閲覧情報をOpenAIサーバーに保存する。仕事用と分けるのが安全。
 
 **対応OS**: macOSのみ（2026年2月時点）。
 
-@[card](https://openai.com/index/introducing-chatgpt-atlas/)
+<https://openai.com/index/introducing-chatgpt-atlas/>
 
 ### Perplexity Comet — 無料のエージェント型ブラウザ
 
@@ -252,7 +251,7 @@ Chromiumベースのブラウザ。サイドバーでページ内容について
 
 **対応OS**: Windows / macOS / Android（2026年2月時点。iOS版は開発中）。
 
-@[card](https://www.perplexity.ai/comet)
+<https://www.perplexity.ai/comet>
 
 ### AIブラウザ比較
 
@@ -266,13 +265,15 @@ Chromiumベースのブラウザ。サイドバーでページ内容について
 
 **今すぐ試すならComet**。無料でエージェント機能が使え、ソース付き回答でハルシネーション対策になる。ただし2026年2月時点では、両方とも「サブブラウザ」として使い分けるのが現実的。
 
-:::details 💡 AIブラウザの使い分け — メインとサブの考え方
+<details><summary>💡 AIブラウザの使い分け — メインとサブの考え方</summary>
+
 Chrome / Safari / Firefox をメインブラウザとして使い続けて、「調べ物をするとき」だけCometを開く。この使い分けが現時点では最も実用的。
 
 なぜメインにしないのか？ まだ拡張機能のエコシステムがChromeに追いついていないのと、パスワードマネージャーや各種サービスのログイン状態をメインブラウザから移行するのが面倒だから。「AIの調査力」と「ブラウザとしての完成度」はまだ別の軸だ。
 
 ただし、この状況は急速に変わるかもしれない。Chrome自体にGeminiが深く統合されれば、わざわざ別のAIブラウザを使う理由が薄れる。逆にCometの拡張機能エコシステムが充実すれば、メインブラウザになりうる。1年後にもう一度見直す価値がある分野だ。
-:::
+
+</details>
 
 ---
 
@@ -312,7 +313,8 @@ graph LR
     style E fill:#26d,color:#fff
 ```
 
-:::details 💡 ターミナル、シェル、コンソール — 何が違うの？
+<details><summary>💡 ターミナル、シェル、コンソール — 何が違うの？</summary>
+
 厳密には別物だが、初心者は全部「ターミナル」と呼んで問題ない。
 
 - **ターミナル**: テキストを表示するアプリケーション（画面の枠）
@@ -320,7 +322,8 @@ graph LR
 - **コンソール**: 物理的な端末（今はほぼ使わない用語）
 
 macOSのデフォルトシェルは**zsh**。Windowsは**PowerShell**。Linuxは多くの場合**bash**。
-:::
+
+</details>
 
 ### ターミナルの開き方
 
@@ -328,7 +331,8 @@ macOSのデフォルトシェルは**zsh**。Windowsは**PowerShell**。Linuxは
 - **Windows**: `Windows + X` → 「ターミナル」を選ぶ（Windows Terminal推奨）
 - **Linux**: `Ctrl + Alt + T`
 
-:::details 🔰 Windowsユーザーへ: WSL2という選択肢
+<details><summary>🔰 Windowsユーザーへ: WSL2という選択肢</summary>
+
 WSL2（Windows Subsystem for Linux 2）はWindows上でLinux環境を動かす公式機能。macOS/Linux専用のAIツールがそのまま動く。
 
 ```powershell
@@ -337,7 +341,8 @@ wsl --install
 ```
 
 たった1行。再起動するとUbuntuが使える。Windows Home Editionでも使える。
-:::
+
+</details>
 
 ### 最低限覚える5つのコマンド
 
@@ -349,9 +354,7 @@ wsl --install
 | 4 | `mkdir` | フォルダを作る | `mkdir my-project` |
 | 5 | `clear` | 画面をきれいにする | `clear` |
 
-:::message
-**Windows（コマンドプロンプト）の場合**: `pwd` → `cd`（引数なし）、`ls` → `dir` と読み替えてください。Windows Terminalなら `pwd` も `ls` もそのまま使えます。
-:::
+> **Note:** **Windows（コマンドプロンプト）の場合**: `pwd` → `cd`（引数なし）、`ls` → `dir` と読み替えてください。Windows Terminalなら `pwd` も `ls` もそのまま使えます。
 
 ### ハンズオン: 実際に手を動かしてみよう
 
@@ -365,13 +368,13 @@ cd ai-practice         # Step 6: フォルダに入る
 pwd                    # Step 7: 確認 → /Users/tanaka/Desktop/ai-practice
 ```
 
-:::message
-**ここまでできたら準備完了！** 次のセクションで、この場所にGemini CLIをインストールする。
-:::
+> **Note:** **ここまでできたら準備完了！** 次のセクションで、この場所にGemini CLIをインストールする。
 
-:::details 🔰 「パス」の読み方
+<details><summary>🔰 「パス」の読み方</summary>
+
 `/Users/tanaka/Desktop` のような文字列を**パス**（path）と呼ぶ。`/` はフォルダの区切り、左から右に読む。`..` は「一つ上のフォルダ」、`~` は「ホームディレクトリ」。
-:::
+
+</details>
 
 ### ターミナルカスタマイズ（余裕があれば）
 
@@ -430,9 +433,7 @@ tmux                  # 起動
 # Ctrl+b → 矢印キーでペイン移動
 ```
 
-:::message
-**tmuxは慣れるまで少し大変**。最初はOh My ZshとStarshipだけで十分。ターミナル操作に慣れてきたらtmuxを試してみよう。
-:::
+> **Note:** **tmuxは慣れるまで少し大変**。最初はOh My ZshとStarshipだけで十分。ターミナル操作に慣れてきたらtmuxを試してみよう。
 
 ---
 
@@ -484,9 +485,7 @@ git log --oneline
 # → 2つのコミットが表示される
 ```
 
-:::message
-**これがGitの基本サイクル**: ファイルを変更 → `git add` → `git commit` → 繰り返し。これだけで「いつでも過去に戻れる」保険がかかる。
-:::
+> **Note:** **これがGitの基本サイクル**: ファイルを変更 → `git add` → `git commit` → 繰り返し。これだけで「いつでも過去に戻れる」保険がかかる。
 
 ### AIとGitの組み合わせ — 失敗を恐れなくなる
 
@@ -505,11 +504,9 @@ graph LR
     style E fill:#d92,color:#fff
 ```
 
-:::message
-**GitとGitHubは別物**: Git=カメラ（写真を撮る道具）、GitHub=フォトアルバム（写真を保管・共有する場所）。今はGitだけで十分。
-:::
+> **Note:** **GitとGitHubは別物**: Git=カメラ（写真を撮る道具）、GitHub=フォトアルバム（写真を保管・共有する場所）。今はGitだけで十分。
 
-:::details 🔧 .gitignore — Gitに「無視してほしいファイル」を伝える
+<details><summary>🔧 .gitignore — Gitに「無視してほしいファイル」を伝える</summary>
 
 プロジェクトには「記録したくないファイル」が必ずある。パスワードが入った設定ファイル、OSが自動生成する隠しファイル、ダウンロードした大きなライブラリ。`.gitignore` というファイルを作ると、Gitがそれらを無視してくれる。
 
@@ -523,7 +520,7 @@ node_modules/ # ダウンロードしたライブラリ（巨大）
 
 プロジェクトの最初に `.gitignore` を作る習慣をつけておこう。GitHubには言語・フレームワーク別のテンプレートが用意されている。
 
-:::
+</details>
 
 ---
 
@@ -545,7 +542,8 @@ node_modules/ # ダウンロードしたライブラリ（巨大）
 
 **前提**: Node.js 18以上が必要。
 
-:::details 🔰 Node.jsのインストール方法
+<details><summary>🔰 Node.jsのインストール方法</summary>
+
 ```bash
 # macOS（Homebrew）
 brew install node
@@ -563,7 +561,8 @@ sudo apt update && sudo apt install nodejs npm
 /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
 ```
 Homebrewはmacのパッケージマネージャー。「アプリのApp Store」のターミナル版だと思えばいい。一度入れておけば `brew install ○○` で各種ツールをインストールできる。
-:::
+
+</details>
 
 #### Step 1: インストール
 
@@ -571,10 +570,12 @@ Homebrewはmacのパッケージマネージャー。「アプリのApp Store」
 npm install -g @google/gemini-cli
 ```
 
-:::details ❓ エラーが出た場合
+<details><summary>❓ エラーが出た場合</summary>
+
 - `EACCES: permission denied` → `sudo npm install -g @google/gemini-cli`
 - `npm: command not found` → Node.jsをインストールしてやり直す
-:::
+
+</details>
 
 #### Step 2: 起動
 
@@ -584,9 +585,7 @@ gemini
 
 初回起動時にGoogleアカウント認証が必要。ブラウザが開くので個人の@gmail.comでログイン。
 
-:::message alert
-**⚠️ 会社のGoogle Workspaceアカウントだと管理者設定でブロックされる場合がある。個人アカウントを使おう。**
-:::
+> **⚠️ Warning:** **⚠️ 会社のGoogle Workspaceアカウントだと管理者設定でブロックされる場合がある。個人アカウントを使おう。**
 
 #### Step 3: 最初の質問
 
@@ -607,11 +606,9 @@ gemini
 
 終了は `/quit` または `Ctrl + C`。
 
-:::message
-**🎯 ここまでできたらゴール達成！** 以降は「他のツールも試したい」人向けの内容。
-:::
+> **Note:** **🎯 ここまでできたらゴール達成！** 以降は「他のツールも試したい」人向けの内容。
 
-:::details ❓ Gemini CLIがうまく動かないときのトラブルシューティング
+<details><summary>❓ Gemini CLIがうまく動かないときのトラブルシューティング</summary>
 
 **Q: `gemini` コマンドが見つからない**
 → ターミナルを再起動してみる。それでもダメなら `npm list -g @google/gemini-cli` でインストール確認。
@@ -627,7 +624,8 @@ gemini
 
 **Q: レスポンスが遅い**
 → ネットワーク環境を確認。Gemini CLIはクラウド上のAIモデルと通信するので、インターネット接続が必要。VPN経由だと遅くなることがある。
-:::
+
+</details>
 
 #### Gemini CLIの便利機能
 
@@ -665,16 +663,18 @@ gemini "Pythonでfizzbuzzを書いて" > fizzbuzz.py
 
 対話モードに入らず、結果をファイルにリダイレクトできる。自動化との相性が良い。
 
-:::details 💡 Gemini CLI vs ChatGPTのWebインターフェース
+<details><summary>💡 Gemini CLI vs ChatGPTのWebインターフェース</summary>
+
 「ブラウザでChatGPTを使うのと何が違うの？」という疑問は自然だ。最大の違いは**ファイルシステムとの統合**。
 
 - ブラウザ版: テキストをコピペしてAIに渡す → 回答をコピペして自分のファイルに貼る
 - CLI版: ターミナルの中でファイルを直接読み書きさせる → コピペ不要
 
 さらに、パイプやリダイレクトでUNIXツールと連携できる。これが「プログラマブルなAI」の入り口になる。
-:::
 
-@[card](https://github.com/google-gemini/gemini-cli)
+</details>
+
+<https://github.com/google-gemini/gemini-cli>
 
 ---
 
@@ -698,7 +698,7 @@ macOS/Linuxが正式対応。Windowsは実験的（WSL2推奨）。
 
 **向いている人**: ChatGPT Plusに加入済みで、追加コストなしでCLI AIを使いたい人。
 
-@[card](https://developers.openai.com/codex/cli/)
+<https://developers.openai.com/codex/cli/>
 
 ---
 
@@ -718,7 +718,7 @@ GitHub Copilotは他のAI CLIツールとは少し毛色が違う。ターミナ
 
 VSCode v1.109以降はCopilotが初めから組み込まれている。初回起動時にGitHubログインするだけ。
 
-:::details 🔧 Copilotの使い方のコツ
+<details><summary>🔧 Copilotの使い方のコツ</summary>
 
 **Tab補完を最大限活用する**:
 1. 関数名だけ書く → AIが中身を提案 → Tabで確定
@@ -734,9 +734,9 @@ VSCode v1.109以降はCopilotが初めから組み込まれている。初回起
 - レビューやテストも自動化
 - 「人間がIssueを書いてAIが実装する」ワークフローが現実に
 
-:::
+</details>
 
-@[card](https://github.com/features/copilot)
+<https://github.com/features/copilot>
 
 ---
 
@@ -753,9 +753,7 @@ AI CLIツールの中で**最も「賢い」**と評価されることが多い�
 | **Claude Max 20x** | $200 | Proの20倍 |
 | **API直接利用** | 従量課金 | 開発者の平均 $6/日、90%が $12/日以下 |
 
-:::message alert
-**⚠️ $20プランの罠**: 大きなプロジェクトだと数時間で上限に達する。APIに切り替えると月$180-$360も珍しくない。まずGemini CLI（無料）で慣れてから検討しよう。
-:::
+> **⚠️ Warning:** **⚠️ $20プランの罠**: 大きなプロジェクトだと数時間で上限に達する。APIに切り替えると月$180-$360も珍しくない。まずGemini CLI（無料）で慣れてから検討しよう。
 
 **強み**: プロジェクト全体の自動理解、マルチファイル編集の整合性、Agent Teams（複数AIの並列実行）。
 
@@ -768,11 +766,9 @@ claude
 
 **CLAUDE.md**: Gemini CLIの `GEMINI.md`、Cursorの `.cursorrules` に相当する設定ファイル。プロジェクトルートに `CLAUDE.md` を置くとAIの振る舞いをカスタマイズできる。各ツールが独自の「AI設定ファイル」を持っている点は注目に値する。
 
-:::message
-**AI設定ファイルの共通パターン**: Gemini CLI → `GEMINI.md`、Cursor → `.cursorrules`、Claude Code → `CLAUDE.md`。名前は違うが、「プロジェクト固有のルールをAIに伝える」という概念は共通。このパターンは2026年のAI開発ツールのスタンダードになりつつある。
-:::
+> **Note:** **AI設定ファイルの共通パターン**: Gemini CLI → `GEMINI.md`、Cursor → `.cursorrules`、Claude Code → `CLAUDE.md`。名前は違うが、「プロジェクト固有のルールをAIに伝える」という概念は共通。このパターンは2026年のAI開発ツールのスタンダードになりつつある。
 
-@[card](https://claude.com/pricing)
+<https://claude.com/pricing>
 
 ---
 
@@ -816,9 +812,7 @@ graph TD
 
 面白いのは、**同じ質問なのに回答のスタイルが全く違う**こと。Gemini CLIはシンプルさ重視、Codex CLIは実用性重視、Claude Codeは完成度重視。どれが「正解」ということはない。[S2](./ml-spinoff-02.md)で学んだように、「何のために使うか」で最適な回答は変わる。
 
-:::message
-**4つとも試す必要はない**。まずGemini CLI（無料）で十分。「他のツールの回答も気になる」と思ったときが、2つ目を試すタイミングだ。
-:::
+> **Note:** **4つとも試す必要はない**。まずGemini CLI（無料）で十分。「他のツールの回答も気になる」と思ったときが、2つ目を試すタイミングだ。
 
 ### 料金シミュレーション
 
@@ -888,7 +882,7 @@ graph TD
 
 **初心者が知るべき3点**: MITとApacheは安心して使える。GPLは要注意（「GPL汚染」— GPLコードを組み込むとプロジェクト全体をGPLで公開する義務が発生する可能性）。AIが生成したコードの著作権は法的にグレーゾーン — AI出力を参考にして自分で書き直すのがベスト。
 
-:::details 💡 OSSライセンス判断フローチャート — 迷ったらこれ
+<details><summary>💡 OSSライセンス判断フローチャート — 迷ったらこれ</summary>
 
 実際にOSSを使う場面で迷ったときの判断基準:
 
@@ -907,7 +901,7 @@ graph TD
 - 安全策: AIの出力をそのままコピペせず、自分で理解して書き直す
 - Copilotの「パブリックコードに一致する提案をフィルター」オプションをONにしておくと安心
 
-:::
+</details>
 
 ### 「README.md」を読む習慣をつけよう
 
@@ -1074,9 +1068,7 @@ Oh My ZshとStarshipを入れるだけで、ターミナルが一気に使いや
 **5. 「AIにこれ聞いたらどうなるだろう？」を繰り返す**
 AIの限界は使ってこそ見えてくる。「正しいこと」を聞くだけでなく、わざと変な質問をしてみるのも面白い。好奇心の種で触れた「存在しないプログラミング言語」の実験を、ぜひ試してみてほしい。
 
-:::message
-**💡 好奇心の種、覚えてる？** AIはコードを「理解」しているのか「模倣」しているのか。環境は整った。次はAIの「使い方」の幅を広げよう。
-:::
+> **Note:** **💡 好奇心の種、覚えてる？** AIはコードを「理解」しているのか「模倣」しているのか。環境は整った。次はAIの「使い方」の幅を広げよう。
 
 ---
 
