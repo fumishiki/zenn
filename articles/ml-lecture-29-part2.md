@@ -1057,13 +1057,13 @@ end
 **Precision@k**: Top-k件中の関連文書の割合
 
 $$
-\text{Precision@}k = \frac{\text{# of relevant docs in top-}k}{k}
+\text{Precision@}k = \frac{\text{\# of relevant docs in top-}k}{k}
 $$
 
 **Recall@k**: 全関連文書中、Top-k件に含まれる割合
 
 $$
-\text{Recall@}k = \frac{\text{# of relevant docs in top-}k}{\text{# of all relevant docs}}
+\text{Recall@}k = \frac{\text{\# of relevant docs in top-}k}{\text{\# of all relevant docs}}
 $$
 
 **Mean Reciprocal Rank (MRR)**: 最初の関連文書のランクの逆数の平均
@@ -1099,7 +1099,7 @@ end
 **Answer Faithfulness**: 生成された回答がコンテキストに忠実か
 
 $$
-\text{Faithfulness} = \frac{\text{# of claims supported by context}}{\text{# of total claims}}
+\text{Faithfulness} = \frac{\text{\# of claims supported by context}}{\text{\# of total claims}}
 $$
 
 **Answer Relevance**: 生成された回答がクエリに関連しているか

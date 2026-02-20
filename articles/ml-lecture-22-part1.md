@@ -1206,7 +1206,7 @@ $$
 **評価指標**:
 
 $$
-\text{Accuracy} = \min\left(1, \frac{\text{#正解した人間アノテータ}}{3}\right)
+\text{Accuracy} = \min\left(1, \frac{\text{\#正解した人間アノテータ}}{3}\right)
 $$
 
 3人以上のアノテータが同じ答えなら正解（soft matching）。
