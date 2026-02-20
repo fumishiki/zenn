@@ -332,7 +332,9 @@ graph LR
 
 :::details 🧮 数式で覗いてみる: Attentionの核心 — たった1つの式
 
-$$\text{Attention}(Q, K, V) = \text{softmax}\left(\frac{QK^T}{\sqrt{d_k}}\right)V$$
+$$
+\text{Attention}(Q, K, V) = \text{softmax}\left(\frac{QK^T}{\sqrt{d_k}}\right)V
+$$
 
 | 記号 | 意味 | 直感 |
 |:--|:--|:--|
@@ -668,7 +670,9 @@ Level 2が必要になるのは:
 
 :::details 🧮 数式で覗いてみる: 勾配降下法 — AIの「学習」の本質
 
-$$\theta_{t+1} = \theta_t - \eta \nabla L(\theta_t)$$
+$$
+\theta_{t+1} = \theta_t - \eta \nabla L(\theta_t)
+$$
 
 | 記号 | 意味 | 直感 |
 |:--|:--|:--|
@@ -1027,7 +1031,9 @@ S8: **中身を知れ。** ブラックボックスが怖いのは、中身を�
 
 ### 最後の数式 — このシリーズの全てを1行に
 
-$$\text{理解} = \lim_{n \to \infty} \text{好奇心}^n$$
+$$
+\text{理解} = \lim_{n \to \infty} \text{好奇心}^n
+$$
 
 > **好奇心を持ち続ける限り、理解は深まり続ける。**
 

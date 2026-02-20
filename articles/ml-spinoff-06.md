@@ -914,7 +914,9 @@ V7やFLUX.2が改善できたのは、手に特化した学習データの追加
 
 **拡散過程**（きれいな画像 → ノイズだらけの画像）:
 
-$$x_t = \sqrt{\bar{\alpha}_t} \cdot x_0 + \sqrt{1 - \bar{\alpha}_t} \cdot \epsilon$$
+$$
+x_t = \sqrt{\bar{\alpha}_t} \cdot x_0 + \sqrt{1 - \bar{\alpha}_t} \cdot \epsilon
+$$
 
 $x_0$ が元のきれいな画像、$\epsilon$ がランダムなノイズ、$\bar{\alpha}_t$ がタイムステップ $t$ でのノイズの量を制御するスケジュール。$t$ が大きくなるほど $\bar{\alpha}_t$ は0に近づき、画像はノイズに埋もれていく。
 
@@ -922,7 +924,9 @@ AIは「逆方向」を学ぶ。ノイズだらけの画像から、元のきれ
 
 **逆拡散過程**（ノイズだらけ → きれいな画像）:
 
-$$x_{t-1} = \frac{1}{\sqrt{\alpha_t}}\left(x_t - \frac{1-\alpha_t}{\sqrt{1-\bar{\alpha}_t}} \epsilon_\theta(x_t, t)\right) + \sigma_t z$$
+$$
+x_{t-1} = \frac{1}{\sqrt{\alpha_t}}\left(x_t - \frac{1-\alpha_t}{\sqrt{1-\bar{\alpha}_t}} \epsilon_\theta(x_t, t)\right) + \sigma_t z
+$$
 
 $\epsilon_\theta$ がAIが学習した「このノイズを取り除けばきれいになるはず」という予測。$z$ はランダム性を加える項（だから同じプロンプトでも毎回違う画像が出る）。
 
@@ -934,7 +938,9 @@ $\epsilon_\theta$ がAIが学習した「このノイズを取り除けばきれ
 :::details 数式で覗いてみる — CLIPとプロンプト
 「テキストを書くと画像が出てくる」のはなぜか。ここにCLIP（Contrastive Language-Image Pre-training）という技術がある。
 
-$$\text{score} = \cos(\text{text\_embedding}, \text{image\_embedding})$$
+$$
+\text{score} = \cos(\text{text\_embedding}, \text{image\_embedding})
+$$
 
 CLIPは、テキストと画像を**同じベクトル空間**にマッピングする。「猫が寝ている」というテキストのベクトルと、実際に猫が寝ている画像のベクトルが、空間上で近い位置に配置される。
 
