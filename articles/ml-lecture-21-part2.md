@@ -440,8 +440,8 @@ plot(p_orig, p_aug, layout=(1, 2))
 
 | 拡張 | 数式 | Augmentor.jl |
 |:-----|:-----|:------------|
-| 回転 | $\begin{bmatrix} \cos\theta & -\sin\theta \\ \sin\theta & \cos\theta \end{bmatrix}$ | `Rotate(-15:15)` |
-| せん断 | $\begin{bmatrix} 1 & \lambda_x \\ 0 & 1 \end{bmatrix}$ | `ShearX(-10:10)` |
+| 回転 | $\bigl(\begin{smallmatrix} \cos\theta & -\sin\theta \\ \sin\theta & \cos\theta \end{smallmatrix}\bigr)$ | `Rotate(-15:15)` |
+| せん断 | $\bigl(\begin{smallmatrix} 1 & \lambda_x \\ 0 & 1 \end{smallmatrix}\bigr)$ | `ShearX(-10:10)` |
 | 反転 | $x' = w - x$ | `FlipX(0.5)` |
 | クロップ | Random $[x, y, w, h]$ | `CropRatio(0.9)` |
 

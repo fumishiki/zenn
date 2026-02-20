@@ -368,7 +368,11 @@ rank-$k$ 近似 $B$ を考えると、$A - B$ の特異値は $\{\sigma_{k+1}, \
 
 **数値例**:
 
-$3 \times 2$ 行列 $A = \begin{bmatrix} 4 & 0 \\ 3 & -5 \\ 0 & 3 \end{bmatrix}$ でEckart-Young定理を確認する。
+$3 \times 2$ 行列 $A$ でEckart-Young定理を確認する:
+
+$$
+A = \begin{bmatrix} 4 & 0 \\ 3 & -5 \\ 0 & 3 \end{bmatrix}
+$$
 
 まず $A^\top A$ を計算:
 

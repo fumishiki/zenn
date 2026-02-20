@@ -1395,7 +1395,11 @@ $$
 (\text{RoPE}(q, m))^\top (\text{RoPE}(k, n)) = q^\top R(m)^\top R(n) k = q^\top R(n - m) k
 $$
 
-ここで $R(m) = \begin{pmatrix} \cos(m\theta) & -\sin(m\theta) \\ \sin(m\theta) & \cos(m\theta) \end{pmatrix}$ は回転行列で、$R(m)^\top R(n) = R(n-m)$（回転行列の乗法性）。
+ここで $R(m)$ は回転行列（$R(m)^\top R(n) = R(n-m)$、回転行列の乗法性）:
+
+$$
+R(m) = \begin{pmatrix} \cos(m\theta) & -\sin(m\theta) \\ \sin(m\theta) & \cos(m\theta) \end{pmatrix}
+$$
 
 **核心**: 内積が **位置差 $n - m$ のみ**に依存する。つまりRoPEは「トークン $m$ とトークン $n$ は $|n - m|$ だけ離れている」という相対位置情報を自動的にAttentionスコアに埋め込む。Sinusoidal PEが絶対位置を符号化するのに対し、RoPEは相対位置を符号化 — 文脈長の一般化（訓練時より長い系列への転移）においてRoPEが優れている理由だ。
 

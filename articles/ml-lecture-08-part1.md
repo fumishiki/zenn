@@ -1384,7 +1384,13 @@ $$
 Q_{\Sigma_1} = -\frac{N_1}{2}\log\det\Sigma_1 - \frac{1}{2}\sum_{i=1}^N \gamma_{i1}(x_i-\mu_1)^\top\Sigma_1^{-1}(x_i-\mu_1)
 $$
 
-$d=2, \Sigma_1 = \begin{pmatrix}\sigma_{11}^2 & \rho\sigma_{11}\sigma_{12}\\ \rho\sigma_{11}\sigma_{12} & \sigma_{12}^2\end{pmatrix}$（相関係数 $\rho$）とすると:
+$d=2$ として、$\Sigma_1$（相関係数 $\rho$）を:
+
+$$
+\Sigma_1 = \begin{pmatrix}\sigma_{11}^2 & \rho\sigma_{11}\sigma_{12}\\ \rho\sigma_{11}\sigma_{12} & \sigma_{12}^2\end{pmatrix}
+$$
+
+とすると:
 
 $$
 \det\Sigma_1 = \sigma_{11}^2\sigma_{12}^2(1-\rho^2)

@@ -567,7 +567,7 @@ $$
 \begin{pmatrix} \dot{q} \\ \dot{p} \end{pmatrix} = \left(J - R\right) \nabla H + B\, u
 $$
 
-ここで$J = \begin{pmatrix} 0 & I \\ -I & 0 \end{pmatrix}$（シンプレクティック行列）、$R \succeq 0$（散逸行列）、$B$は入力行列。$u = 0$かつ$R = 0$のとき古典的HNNに帰着する。Port-HNN（PHNN）はロボットの関節制御（バネ-ダンパー系）や流体力学における世界モデル構築に応用されている。
+ここで$J = \bigl(\begin{smallmatrix} 0 & I \\ -I & 0 \end{smallmatrix}\bigr)$（シンプレクティック行列）、$R \succeq 0$（散逸行列）、$B$は入力行列。$u = 0$かつ$R = 0$のとき古典的HNNに帰着する。Port-HNN（PHNN）はロボットの関節制御（バネ-ダンパー系）や流体力学における世界モデル構築に応用されている。
 
 ### 3.5 Energy-based World Models
 

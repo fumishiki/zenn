@@ -428,7 +428,11 @@ $\text{tr}(\Delta R) = 2\cos30° + 1 = 2\times0.866 + 1 = 2.732$
 
 $\theta = \arccos\!\left(\frac{2.732-1}{2}\right) = \arccos(0.866) = 30° = \frac{\pi}{6}$
 
-$\log(\Delta R) = \frac{\pi}{6}\begin{pmatrix}0&-1&0\\1&0&0\\0&0&0\end{pmatrix}$ （$z$ 軸回り $30°$ の歪対称表現）
+$$
+\log(\Delta R) = \frac{\pi}{6}\begin{pmatrix}0&-1&0\\1&0&0\\0&0&0\end{pmatrix}
+$$
+
+（$z$ 軸回り $30°$ の歪対称表現）
 
 Isotropic Gaussian on SO(3) の分散 $\sigma_t^2$ はこの $\mathfrak{so}(3) \cong \mathbb{R}^3$ 上で定義される。
 

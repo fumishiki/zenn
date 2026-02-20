@@ -1416,8 +1416,17 @@ $(n \times m) \cdot (m \times d_v) = (n \times d_v)$。重み付き平均で Val
 - クエリは1個（$n=1$）、キーは2個（$m=2$）
 - 次元は $d_k=2$
 - $q = \begin{pmatrix}1 & 0\end{pmatrix}$（$1\times 2$）
-- $K = \begin{pmatrix}1 & 0\\ 0 & 1\end{pmatrix}$（$2\times 2$）
-- $V = \begin{pmatrix}10 & 0\\ 0 & 10\end{pmatrix}$（$2\times 2$）
+- $K$（$2\times 2$）:
+
+$$
+K = \begin{pmatrix}1 & 0\\ 0 & 1\end{pmatrix}
+$$
+
+- $V$（$2\times 2$）:
+
+$$
+V = \begin{pmatrix}10 & 0\\ 0 & 10\end{pmatrix}
+$$
 
 このとき $Q$ は $q$ 1行だけの行列として $Q=q$。
 
