@@ -363,7 +363,7 @@ graph TD
    - **σ-加法性**: 互いに素な $A_1, A_2, \ldots \in \mathcal{A}$ に対して:
      $$
      \mu\left(\bigcup_{n=1}^\infty A_n\right) = \sum_{n=1}^\infty \mu(A_n)
-     ```
+     $$
 
 **確率測度**: $\mu(S) = 1$ を追加で要求する特殊な測度。確率論は「測度1の測度空間」上の理論。
 
@@ -421,7 +421,7 @@ graph TD
 1. **同値関係の定義**: $[0,1]$ 上で:
    $$
    x \sim y \iff x - y \in \mathbb{Q}
-   ```
+   $$
 
    例: $0 \sim 1/2 \sim 1/3 \sim \ldots$（全て同じ同値類）
 
@@ -510,7 +510,7 @@ Lebesgue測度は、我々の直感的な「長さ・面積・体積」を数学
 3. **σ-加法性**: 互いに素な可測集合 $A_1, A_2, \ldots$ に対して:
    $$
    \lambda\left(\bigcup_{n=1}^\infty A_n\right) = \sum_{n=1}^\infty \lambda(A_n)
-   ```
+   $$
 
 この3性質を満たす測度として、Lebesgue測度は **一意** に定まる。
 
@@ -641,7 +641,7 @@ $$
 
    $$
    \int s \, d\mu = \sum_{i=1}^{n} c_i \cdot \mu(A_i)
-   ```
+   $$
 
 2. **非負可測関数**: $f \geq 0$ に対して:
 
@@ -1194,7 +1194,7 @@ $$
 
    $$
    q_t(\mathbf{x}_{t-1}, A) = \int_A \mathcal{N}(\mathbf{x}_t; \sqrt{1-\beta_t}\mathbf{x}_{t-1}, \beta_t \mathbf{I}) \, d\lambda(\mathbf{x}_t)
-   ```
+   $$
 
 3. **Radon-Nikodym導関数**: $q_t$ は $\lambda$ に関して絶対連続。その密度:
 

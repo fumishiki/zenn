@@ -764,7 +764,7 @@ $$
 
    $$
    \frac{\partial p_t}{\partial t} = p_t \mathbf{Q}_t
-   ```
+   $$
 
    **問題**：状態空間が大きいと$\mathbf{Q}_t$の次元爆発
 
