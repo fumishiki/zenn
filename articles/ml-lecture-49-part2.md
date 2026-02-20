@@ -4,7 +4,14 @@ emoji: "🌐"
 type: "tech"
 topics: ["machinelearning", "deeplearning", "multimodal", "julia", "inference"]
 published: true
+slug: "ml-lecture-49-part2"
+difficulty: "advanced"
+time_estimate: "90 minutes"
+languages: ["Julia", "Rust"]
+keywords: ["機械学習", "深層学習", "生成モデル"]
 ---
+**← 理論編**: [第49回 Part 1: 理論・数式修行](https://zenn.dev/fumishiki/articles/ml-lecture-49-part1)
+
 ## 💻 4. 実装ゾーン（45分）— Julia+Rust+Elixir フルスタック統合
 
 **ゴール**: 統合マルチモーダルモデルと推論時スケーリングを、3言語で実装する。
@@ -487,9 +494,7 @@ graph LR
 - **Rust**: プロダクション推論 (低レイテンシ、高スループット)
 - **Elixir**: サービング・分散処理 (耐障害性、並行処理)
 
-:::message
-**ここまでで全体の70%完了！** 実装ゾーン完了。Julia訓練 + Rust推論 + Elixir分散サービングのフルスタックを構築した。次は実験で動作を確認する。
-:::
+> **Note:** **ここまでで全体の70%完了！** 実装ゾーン完了。Julia訓練 + Rust推論 + Elixir分散サービングのフルスタックを構築した。次は実験で動作を確認する。
 
 ---
 
@@ -511,24 +516,13 @@ struct ModalAphasiaTest
 end
 
 function evaluate_modal_aphasia(test::ModalAphasiaTest; num_samples=10)
-    results = Dict(:visual_accuracy => [], :textual_accuracy => [])
+    imgs = test.test_images[1:num_samples]
 
-    for i in 1:num_samples
-        img = test.test_images[i]
+    visual_acc  = [pixel_similarity(img, generate_image_from_image(test.model, img)) for img in imgs]
+    textual_acc = [pixel_similarity(img, generate_image_from_text(test.model,
+                       generate_text_from_image(test.model, img))) for img in imgs]
 
-        # Task 1: 画像 → 画像再生成
-        reconstructed_img = generate_image_from_image(test.model, img)
-        visual_acc = pixel_similarity(img, reconstructed_img)
-        push!(results[:visual_accuracy], visual_acc)
-
-        # Task 2: 画像 → テキスト記述 → 画像再生成
-        description = generate_text_from_image(test.model, img)
-        img_from_text = generate_image_from_text(test.model, description)
-        textual_acc = pixel_similarity(img, img_from_text)
-        push!(results[:textual_accuracy], textual_acc)
-    end
-
-    return results
+    return Dict(:visual_accuracy => visual_acc, :textual_accuracy => textual_acc)
 end
 
 # ダミー実装
@@ -569,15 +563,7 @@ end
 using Plots
 
 function test_inference_time_scaling(; max_iterations=10)
-    quality_scores = Float64[]
-
-    for k in 1:max_iterations
-        # k回の反復改善
-        quality = inference_with_k_iterations(k)
-        push!(quality_scores, quality)
-    end
-
-    return quality_scores
+    [inference_with_k_iterations(k) for k in 1:max_iterations]
 end
 
 function inference_with_k_iterations(k)
@@ -624,29 +610,17 @@ K=20: 0.82
 # World Model temporal consistency test
 function evaluate_temporal_consistency(num_frames=60)
     frames = generate_world_model_video(num_frames)
-
-    # 隣接フレーム間の差分
-    consistency_scores = Float64[]
-    for t in 2:num_frames
-        diff = mean(abs.(frames[t] .- frames[t-1]))
-        push!(consistency_scores, diff)
-    end
-
-    return mean(consistency_scores), maximum(consistency_scores)
+    diffs = [mean(abs.(frames[t] .- frames[t-1])) for t in 2:num_frames]
+    return mean(diffs), maximum(diffs)
 end
 
 function generate_world_model_video(T)
-    frames = []
     state = randn(64, 64, 3)
-
-    for t in 1:T
-        # 次フレーム = 前フレーム + 微小変化
+    map(1:T) do _
         action = randn(3) .* 0.1  # カメラ移動
         state = state .+ randn(size(state)) .* 0.05 .+ reshape(action, 1, 1, 3)
-        push!(frames, copy(state))
+        copy(state)
     end
-
-    return frames
 end
 
 mean_diff, max_diff = evaluate_temporal_consistency()
@@ -685,9 +659,12 @@ println("=== Pipeline Latency Benchmark ===")
 println("(Benchmarkはコメントアウト — 実際の実行時に測定)")
 ```
 
-:::message
-**ここまでで全体の85%完了！** 実験ゾーン完了。Modal Aphasia、推論時スケーリング、World Modelの一貫性を定量評価した。次は最新研究の発展と今後の展望。
-:::
+> **Note:** **ここまでで全体の85%完了！** 実験ゾーン完了。Modal Aphasia、推論時スケーリング、World Modelの一貫性を定量評価した。次は最新研究の発展と今後の展望。
+
+> Progress: 85%
+> **理解度チェック**
+> 1. Modal Aphasiaを定量評価するcross-modal retrievalで、Recall@1とモダリティバイアス指標 $\Delta_\text{modal}$ はどう計算されるか？実験設計の注意点を述べよ。
+> 2. 推論時スケーリングの実験で、計算コスト $C$ を2倍にしたとき性能は何倍になるか？べき乗則の指数 $\alpha$ の典型的な範囲はいくらか？
 
 ---
 
@@ -802,9 +779,12 @@ graph TD
 - Modal Aphasiaの情報理論的分析 → 新しい訓練手法提案
 - 推論時スケーリングの収束保証 → 最適停止戦略
 
-:::message
-**ここまでで全体の100%完了！** 発展ゾーン完了。2025-2026年のフロンティアを完全把握し、次のブレイクスルーを予測できるようになった。
-:::
+> **Note:** **ここまでで全体の100%完了！** 発展ゾーン完了。2025-2026年のフロンティアを完全把握し、次のブレイクスルーを予測できるようになった。
+
+> Progress: 95%
+> **理解度チェック**
+> 1. 2025年の統合マルチモーダルモデルの最大の限界を1つ挙げ、2026-2027年に想定される解決アプローチを提案せよ。
+> 2. Test-Time Training（TTT）とFine-tuningの違いを目的関数 $\mathcal{L}_\text{TTT}(\theta; \mathbf{x}_\text{test})$ と $\mathcal{L}_\text{FT}(\theta; \mathcal{D}_\text{train})$ で表し、それぞれの適用条件を述べよ。
 
 ---
 
@@ -896,7 +876,7 @@ Genie 3は汎用性、GWM-1は実用性を優先。
 **A**: Show-o2[^10]は改良版:
 - **3D Causal VAE**: 画像+動画を統一的に扱う
 - **Dual-path fusion**: 空間と時間の融合
-- **Flow Matching**: Diffusionに加えてFlow Matchingも統合
+- **Flow Matching**: DiffusionとFlow Matchingを統合
 - **2段階訓練**: 小規模事前学習 → 大規模ファインチューニング
 
 Show-oは画像中心、Show-o2は画像+動画を統一。
@@ -940,9 +920,7 @@ Show-oは画像中心、Show-o2は画像+動画を統一。
 
 **最終講義で会おう。全50回の旅を、共に完走しよう。**
 
-:::message
-**🎉 第49回 完全制覇！** 全モダリティ統合と推論時スケーリングの革命を理解した。次は最終回 — 全50回の総括と卒業制作だ。
-:::
+> **Note:** **🎉 第49回 完全制覇！** 全モダリティ統合と推論時スケーリングの革命を理解した。次は最終回 — 全50回の総括と卒業制作だ。
 
 ---
 
@@ -1023,31 +1001,31 @@ Show-o、BAGEL、GPT-4o — 全て「統合マルチモーダル」を目指す�
 ### 主要論文
 
 [^1]: Wu, S., Fei, H., et al. (2023). "Show-o: One Single Transformer to Unify Multimodal Understanding and Generation". *ICLR 2025*. arXiv:2408.12528
-@[card](https://arxiv.org/abs/2408.12528)
+<https://arxiv.org/abs/2408.12528>
 
-[^2]: ByteDance (2025). "Emerging Properties in Unified Multimodal Pretraining". arXiv:2505.14683
-@[card](https://arxiv.org/abs/2505.14683)
+[^2]: Deng, C., et al. (2025). "Emerging Properties in Unified Multimodal Pretraining". arXiv:2505.14683
+<https://arxiv.org/abs/2505.14683>
 
 [^3]: Wu, S., Fei, H., et al. (2023). "NExT-GPT: Any-to-Any Multimodal LLM". arXiv:2309.05519
-@[card](https://arxiv.org/abs/2309.05519)
+<https://arxiv.org/abs/2309.05519>
 
 [^4]: Aerni, M., et al. (2025). "Modal Aphasia: Can Unified Multimodal Models Describe Images From Memory?". arXiv:2510.21842
-@[card](https://arxiv.org/abs/2510.21842)
+<https://arxiv.org/abs/2510.21842>
 
 [^5]: Li, S., et al. (2025). "Reflect-DiT: Inference-Time Scaling for Text-to-Image Diffusion Transformers via In-Context Reflection". *ICCV 2025*. arXiv:2503.12271
-@[card](https://arxiv.org/abs/2503.12271)
+<https://arxiv.org/abs/2503.12271>
 
 [^6]: Dalal, K., et al. (2025). "One-Minute Video Generation with Test-Time Training". *CVPR 2025*. arXiv:2504.05298
-@[card](https://arxiv.org/abs/2504.05298)
+<https://arxiv.org/abs/2504.05298>
 
 [^10]: ShowLab (2025). "Show-o2: Improved Native Unified Multimodal Models". *NeurIPS 2025*. arXiv:2506.15564
-@[card](https://arxiv.org/abs/2506.15564)
+<https://arxiv.org/abs/2506.15564>
 
 Zhang, H., et al. (2025). "Unified Multimodal Understanding and Generation Models: Advances, Challenges, and Opportunities". arXiv:2505.02567
-@[card](https://arxiv.org/abs/2505.02567)
+<https://arxiv.org/abs/2505.02567>
 
 Zhang, L., et al. (2025). "The Art of Scaling Test-Time Compute for Large Language Models". arXiv:2512.02008
-@[card](https://arxiv.org/abs/2512.02008)
+<https://arxiv.org/abs/2512.02008>
 
 ### 教科書・サーベイ
 
@@ -1058,39 +1036,12 @@ Zhang, L., et al. (2025). "The Art of Scaling Test-Time Compute for Large Langua
 ### Web Resources
 
 [^7]: Google DeepMind (2026). "Genie 3: A New Frontier for World Models". https://deepmind.google/models/genie/
-@[card](https://deepmind.google/blog/genie-3-a-new-frontier-for-world-models/)
+<https://deepmind.google/blog/genie-3-a-new-frontier-for-world-models/>
 
 [^8]: Runway (2025). "Introducing Runway GWM-1". https://runwayml.com/research/introducing-runway-gwm-1
-@[card](https://runwayml.com/research/introducing-runway-gwm-1)
+<https://runwayml.com/research/introducing-runway-gwm-1>
 
 [^9]: Waymo (2026). "Waymo Taps Google DeepMind Genie 3 for Self-Driving Simulation". https://winbuzzer.com/2026/02/07/waymo-google-deepmind-genie-3-autonomous-driving-simulation-xcxwbn/
-
----
-
-## 記法規約
-
-| 記法 | 意味 | 例 |
-|:-----|:-----|:---|
-| $p_\theta(x)$ | パラメータ $\theta$ のモデル分布 | DiT, VAE |
-| $\mathcal{L}$ | 損失関数 | $\mathcal{L}_{\text{unified}}$ |
-| $z$ | 潜在変数・共通潜在空間 | VAE潜在、共通埋め込み |
-| $E_m, D_m$ | モダリティ $m$ のエンコーダ・デコーダ | $E_{\text{text}}, D_{\text{image}}$ |
-| $o_t, a_t, s_t$ | World Model: 観測・アクション・状態 | Genie 3, GWM-1 |
-| $K$ | 推論時反復回数 | Reflect-DiT の $K$ |
-| $\text{KL}[q \| p]$ | KLダイバージェンス | VAE正則化項 |
-| $\mathbb{E}_{q}[\cdot]$ | 分布 $q$ での期待値 | ELBO定義 |
-
-**モダリティ記法**:
-- $x_{\text{text}}$: テキストデータ
-- $x_{\text{image}}$: 画像データ
-- $x_{\text{audio}}$: 音声データ
-- $x_{\text{video}}$: 動画データ
-
-**プロセス記法**:
-- AR: Autoregressive (自己回帰)
-- Diffusion: 拡散モデル
-- FM: Flow Matching
-- TTT: Test-Time Training
 
 ---
 
@@ -1595,373 +1546,13 @@ println("示唆: η が大きすぎると発散、小さすぎると収束が遅
 
 ---
 
-## 📚 補遺C: Modal Aphasia の定量的分析
-
-### C.1 Cross-modal Retrieval 実験の詳細
-
-**実験設計**:
-1. データセット: 1000 画像-テキストペア
-2. モデル: 統合マルチモーダルモデル (共通潜在空間512-d)
-3. タスク:
-   - Image→Image retrieval (同じ画像を再取得)
-   - Image→Text retrieval (画像から記述テキストを取得)
-   - Text→Image retrieval (テキストから画像を取得)
-
-**評価指標**: Recall@K (上位K件に正解が含まれる確率)
-
-```julia
-# Cross-modal retrieval simulation
-using LinearAlgebra
-
-function cross_modal_retrieval_experiment(; N=1000, latent_dim=512)
-    # ダミーデータ生成
-    images = [randn(latent_dim) for _ in 1:N]
-    texts = [randn(latent_dim) .+ 0.3 .* images[i] for i in 1:N]  # テキストは画像と相関
-
-    # 統合エンコーダ (共通潜在空間へ)
-    encode_image(img) = img / norm(img)  # 正規化
-    encode_text(txt) = txt / norm(txt)
-
-    z_images = [encode_image(img) for img in images]
-    z_texts = [encode_text(txt) for txt in texts]
-
-    # Image→Image retrieval
-    recalls_img2img = recall_at_k(z_images, z_images, k=5)
-
-    # Image→Text retrieval
-    recalls_img2txt = recall_at_k(z_images, z_texts, k=5)
-
-    # Text→Image retrieval
-    recalls_txt2img = recall_at_k(z_texts, z_images, k=5)
-
-    return recalls_img2img, recalls_img2txt, recalls_txt2img
-end
-
-function recall_at_k(queries, database, k=5)
-    # コサイン類似度で検索
-    N = length(queries)
-    correct = 0
-
-    for i in 1:N
-        q = queries[i]
-        similarities = [dot(q, db) for db in database]
-        top_k_indices = partialsortperm(similarities, 1:k, rev=true)
-
-        if i in top_k_indices
-            correct += 1
-        end
-    end
-
-    return correct / N
-end
-
-recall_ii, recall_it, recall_ti = cross_modal_retrieval_experiment()
-
-println("=== Cross-modal Retrieval Results ===")
-println("Image→Image Recall@5: $(round(recall_ii, digits=3))")
-println("Image→Text  Recall@5: $(round(recall_it, digits=3))")
-println("Text→Image  Recall@5: $(round(recall_ti, digits=3))")
-println()
-
-gap_ii_it = recall_ii - recall_it
-gap_ii_ti = recall_ii - recall_ti
-
-println("Modal Aphasia Gap:")
-println("  Image→Image vs Image→Text: $(round(gap_ii_it, digits=3))")
-println("  Image→Image vs Text→Image: $(round(gap_ii_ti, digits=3))")
-
-if gap_ii_it > 0.1
-    println()
-    println("⚠️ Significant Modal Aphasia detected!")
-    println("   Visual memory is superior to textual memory.")
-end
-```
-
-### C.2 情報理論的分析
-
-**相互情報量** $I(X; Z)$ でモダリティ $X$ と潜在表現 $Z$ の情報保持を測定:
-
-$$
-I(X; Z) = H(X) - H(X | Z)
-$$
-
-- $H(X)$: エントロピー (元のモダリティの情報量)
-- $H(X|Z)$: 条件付きエントロピー (潜在表現 $Z$ 与えられた時の不確実性)
-
-$I(X; Z)$ が高いほど、$Z$ は $X$ の情報を保持している。
-
-**仮説**: $I(X_{\text{image}}; Z) > I(X_{\text{text}}; Z)$ → Modal Aphasia
-
-```julia
-# 情報理論的分析 (ダミー)
-function mutual_information_estimate(X, Z)
-    # 簡略化: ガウス仮定下での相互情報量
-    # I(X;Z) = 0.5 * log(det(Cov(X)) / det(Cov(X|Z)))
-
-    cov_X = cov(hcat(X...)')
-    cov_X_given_Z = cov(hcat(X...)' - hcat(Z...)')  # 残差の共分散
-
-    mi = 0.5 * (logdet(cov_X) - logdet(cov_X_given_Z + I * 1e-6))  # 数値安定性のため微小項追加
-    return mi
-end
-
-# ダミーデータ
-N = 100
-latent_dim = 512
-image_dim = 256 * 256 * 3
-text_dim = 100  # トークン数
-
-images = [randn(image_dim) for _ in 1:N]
-texts = [randn(text_dim) for _ in 1:N]
-latents = [randn(latent_dim) for _ in 1:N]
-
-# 相互情報量計算 (実際にはもっと複雑)
-mi_image = 8.5 + randn() * 0.5  # ダミー値
-mi_text = 5.2 + randn() * 0.3
-
-println("=== 相互情報量分析 ===")
-println("I(X_image; Z) = $(round(mi_image, digits=2)) bits")
-println("I(X_text; Z)  = $(round(mi_text, digits=2)) bits")
-println("Gap = $(round(mi_image - mi_text, digits=2)) bits")
-println()
-println("解釈: 画像は潜在空間でより多くの情報を保持")
-println("      → テキストは情報損失が大きい → Modal Aphasia")
-```
-
-### C.3 Modal Aphasia の軽減戦略の実験的評価
-
-**戦略1: Modality-specific Decoder Heads**
-
-```julia
-# 戦略1: モダリティ特化デコーダを深くする
-struct ModalitySpecificDecoder
-    shared_encoder::Chain
-    image_decoder::Chain  # 深い (8層)
-    text_decoder::Chain   # 深い (8層)
-end
-
-function evaluate_modal_aphasia_mitigation()
-    # Before: 浅いデコーダ (2層)
-    gap_before = 0.24  # Image→Image vs Image→Text のRecall gap
-
-    # After: 深いデコーダ (8層)
-    gap_after = 0.12  # 改善
-
-    println("=== Modal Aphasia 軽減戦略評価 ===")
-    println("戦略1: Modality-specific Deep Decoders")
-    println("  Before: Gap = $(gap_before)")
-    println("  After:  Gap = $(gap_after)")
-    println("  Improvement: $(round((gap_before - gap_after) / gap_before * 100, digits=1))%")
-    println()
-end
-
-evaluate_modal_aphasia_mitigation()
-```
-
-**戦略2: Multi-task Learning with Auxiliary Losses**
-
-```julia
-# 戦略2: 補助タスク追加
-function multi_task_training_experiment()
-    # 主タスク: Image→Text, Text→Image
-    # 補助タスク: Image→Image Autoencoder, Text→Text Autoencoder
-
-    # Before: 主タスクのみ
-    recall_it_before = 0.68
-    recall_ti_before = 0.72
-
-    # After: 補助タスク追加
-    recall_it_after = 0.76  # 改善
-    recall_ti_after = 0.78
-
-    println("戦略2: Multi-task Learning with Auxiliary Autoencoding")
-    println("  Image→Text Recall:")
-    println("    Before: $(recall_it_before)")
-    println("    After:  $(recall_it_after) (+$(round((recall_it_after - recall_it_before) * 100, digits=1))%)")
-    println("  Text→Image Recall:")
-    println("    Before: $(recall_ti_before)")
-    println("    After:  $(recall_ti_after) (+$(round((recall_ti_after - recall_ti_before) * 100, digits=1))%)")
-    println()
-end
-
-multi_task_training_experiment()
-```
-
----
-
-## 📚 補遺D: Generative World Models の応用事例
-
-### D.1 ゲーム開発への応用
-
-**Procedural World Generation with Player Adaptation**:
-
-```julia
-# ゲームWorld Modelの実装コンセプト
-struct GameWorldModel
-    terrain_generator::Function  # テキスト→地形
-    npc_behavior::Function       # プレイヤー行動→NPC反応
-    quest_generator::Function    # プレイヤースキル→クエスト難易度
-end
-
-function generate_adaptive_world(model::GameWorldModel, player_state)
-    # プレイヤー状態: スキルレベル、好み、過去の行動
-    skill_level = player_state[:skill]
-    preferences = player_state[:preferences]
-
-    # 地形生成 (プレイヤーの好みに応じて)
-    terrain_prompt = "Generate a $(preferences[:biome]) biome with difficulty $(skill_level)"
-    terrain = model.terrain_generator(terrain_prompt)
-
-    # NPC配置 (プレイヤーの過去行動から予測)
-    npc_positions = model.npc_behavior(player_state[:past_actions])
-
-    # クエスト生成 (適応的難易度)
-    quest = model.quest_generator(skill_level)
-
-    return (terrain=terrain, npcs=npc_positions, quest=quest)
-end
-
-# 使用例
-player = Dict(
-    :skill => 7,  # 1-10
-    :preferences => Dict(:biome => "forest"),
-    :past_actions => ["探索", "戦闘", "クラフト"]
-)
-
-# world = generate_adaptive_world(game_model, player)
-println("=== ゲームWorld Model応用 ===")
-println("プレイヤースキル: $(player[:skill])/10")
-println("生成される世界:")
-println("  - 地形: $(player[:preferences][:biome]) (難易度 $(player[:skill]))")
-println("  - NPCは過去の行動から配置")
-println("  - クエスト難易度は自動調整")
-println()
-println("利点: 無限の再プレイ性、個別化体験")
-```
-
-### D.2 ロボティクスへの応用
-
-**Sim-to-Real Transfer with Counterfactual Simulation**:
-
-```julia
-# ロボットWorld Modelでのシミュレーション訓練
-struct RobotWorldModel
-    physics_engine::Function
-    sensor_simulator::Function
-    reward_predictor::Function
-end
-
-function train_robot_policy_in_simulation(model::RobotWorldModel, task)
-    # 1. シミュレーション環境生成
-    sim_env = model.physics_engine(task)
-
-    # 2. ポリシー訓練ループ
-    policy = initialize_policy()
-
-    for episode in 1:1000
-        state = reset(sim_env)
-        total_reward = 0.0
-
-        for step in 1:100
-            # アクション選択
-            action = policy(state)
-
-            # World Modelで次状態を予測
-            next_state_pred = model.physics_engine(state, action)
-            sensor_obs = model.sensor_simulator(next_state_pred)
-            reward = model.reward_predictor(next_state_pred, task)
-
-            # ポリシー更新 (PPO, SAC, etc.)
-            update_policy!(policy, state, action, reward, sensor_obs)
-
-            state = next_state_pred
-            total_reward += reward
-        end
-
-        if episode % 100 == 0
-            println("Episode $episode: Total reward = $(round(total_reward, digits=2))")
-        end
-    end
-
-    return policy
-end
-
-# 反実仮想シミュレーション
-function counterfactual_simulation(model::RobotWorldModel, real_trajectory, alternative_action)
-    # 実際の軌跡: [(s1, a1), (s2, a2), ...]
-    # 反実仮想: s3で a3' を選んだらどうなったか？
-
-    counterfactual_trajectory = []
-
-    for (i, (state, action)) in enumerate(real_trajectory)
-        if i == 3  # 3ステップ目で介入
-            action_cf = alternative_action
-        else
-            action_cf = action
-        end
-
-        next_state = model.physics_engine(state, action_cf)
-        push!(counterfactual_trajectory, (state, action_cf, next_state))
-    end
-
-    return counterfactual_trajectory
-end
-
-println("=== ロボットWorld Model応用 ===")
-println("1. シミュレーションで安全にポリシー訓練")
-println("2. 反実仮想シミュレーションで「もしも」を検証")
-println("3. Sim-to-Real: シミュレーション訓練→実世界転移")
-println()
-println("Waymo × Genie 3: 未遭遇シナリオを生成→自動運転の安全性向上")
-```
-
-### D.3 映像制作への応用
-
-**Interactive Storyboarding with GWM-1 Avatars**:
-
-```julia
-# Runway GWM-1 Avatars を使った対話的ストーリーボード
-struct AvatarWorldModel
-    avatar_generator::Function
-    dialogue_synthesizer::Function
-    emotion_controller::Function
-end
-
-function create_interactive_scene(model::AvatarWorldModel, script)
-    # スクリプト: "Character A says 'Hello' with joy, Character B responds sadly"
-
-    scenes = []
-
-    for line in script
-        character = line[:character]
-        dialogue = line[:text]
-        emotion = line[:emotion]
-
-        # アバター生成 (音声駆動)
-        audio = model.dialogue_synthesizer(dialogue, emotion)
-        avatar_video = model.avatar_generator(character, audio)
-
-        # 感情制御 (表情、ジェスチャー)
-        avatar_video = model.emotion_controller(avatar_video, emotion)
-
-        push!(scenes, avatar_video)
-    end
-
-    return vcat(scenes...)  # 全シーンを連結
-end
-
-# 使用例
-script = [
-    Dict(:character => "Alice", :text => "こんにちは！", :emotion => "joy"),
-    Dict(:character => "Bob", :text => "元気ないね...", :emotion => "sadness"),
-]
-
-# video = create_interactive_scene(avatar_model, script)
-println("=== 映像制作World Model応用 ===")
-println("スクリプト入力 → アバター自動生成 → リアルタイム編集")
-println("Runway GWM-1 Avatars: 音声駆動で自然な表情・動作")
-println()
----
+## 著者リンク
+
+- Blog: https://fumishiki.dev
+- X: https://x.com/fumishiki
+- LinkedIn: https://www.linkedin.com/in/fumitakamurakami
+- GitHub: https://github.com/fumishiki
+- Hugging Face: https://huggingface.co/fumishiki
 
 ## ライセンス
 

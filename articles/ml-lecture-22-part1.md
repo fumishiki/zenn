@@ -5,15 +5,17 @@ emoji: "👁️"
 type: "tech"
 topics: ["machinelearning", "deeplearning", "multimodal", "julia", "rust"]
 published: true
+difficulty: "advanced"
+time_estimate: "90 minutes"
+languages: ["Julia", "Rust", "Elixir"]
+keywords: ["機械学習", "深層学習", "生成モデル"]
 ---
 
 # 第22回: ネイティブマルチモーダル完全版
 
-:::message
-**前提知識**: 第16回 (Transformer), 第14-15回 (Attention), 第6回 (情報理論), 第18回 (テキストエンコーディング), 第21回 (データ処理)
-**この講義の目標**: Vision-Languageモデルの理論→アーキテクチャ→実装→評価を完全網羅。CLIP、BLIP-2、Flamingo、LLaVA、Qwen-VL、CogVLM、SmolVLM2を深掘り解剖し、⚡Julia+🦀Rustで実装まで完走する。
-**実装言語**: ⚡Julia (訓練・実験) + 🦀Rust (推論)
-:::
+> **Note:** **前提知識**: 第16回 (Transformer), 第14-15回 (Attention), 第6回 (情報理論), 第18回 (テキストエンコーディング), 第21回 (データ処理)
+> **この講義の目標**: Vision-Languageモデルの理論→アーキテクチャ→実装→評価を完全網羅。CLIP、BLIP-2、Flamingo、LLaVA、Qwen-VL、CogVLM、SmolVLM2を深掘り解剖し、⚡Julia+🦀Rustで実装まで完走する。
+> **実装言語**: ⚡Julia (訓練・実験) + 🦀Rust (推論)
 
 第21回でデータの扱い方を学んだ。テキストも画像も音声も、全て数値ベクトルに変換できることを知った。
 
@@ -43,8 +45,8 @@ texts = ["a cat", "a dog", "a car"]
 
 # 類似度計算 → ゼロショット分類
 img_emb = clip.vision_model(img)  # (512,)
-text_embs = [clip.text_model(t) for t in texts]  # [(512,), (512,), (512,)]
-similarities = [dot(img_emb, t) / (norm(img_emb) * norm(t)) for t in text_embs]
+text_embs = clip.text_model.(texts)  # [(512,), (512,), (512,)]
+similarities = dot.(Ref(normalize(img_emb)), normalize.(text_embs))
 # => [0.92, 0.15, 0.08] — "a cat" が最も類似
 
 println("予測: $(texts[argmax(similarities)])")  # "a cat"
@@ -71,9 +73,7 @@ $$
 
 CLIPはこの $\text{sim}(\mathbf{v}, \mathbf{t})$ を最大化するように訓練されている。どうやって？ それがZone 3の**InfoNCE loss**だ。
 
-:::message
-**ここまでで全体の3%完了！** Zone 1では、このCLIPの内部構造を深掘りする。
-:::
+> **Note:** **ここまでで全体の3%完了！** Zone 1では、このCLIPの内部構造を深掘りする。
 
 ---
 
@@ -99,58 +99,13 @@ Zone 0で「驚き」を体験した。次は「理解」だ。CLIPにはいく�
 
 ### 1.2 CLIP変種を試す (Julia)
 
-```julia
-using Transformers, Images, LinearAlgebra
-
-# 複数モデルを試す
-models = [
-    "openai/clip-vit-base-patch32",
-    "openai/clip-vit-base-patch16",
-    "laion/CLIP-ViT-L-14-laion2B-s32B-b82K"
-]
-
-img = load("cat.jpg")
-texts = ["a cat sleeping", "a dog running", "a bird flying"]
-
-for model_name in models
-    clip = hgf"$model_name"
-    img_emb = clip.vision_model(img)
-    text_embs = [clip.text_model(t) for t in texts]
-    sims = [dot(img_emb, t) / (norm(img_emb) * norm(t)) for t in text_embs]
-    println("$model_name: $(argmax(sims)) — $(texts[argmax(sims)])")
-end
-```
-
 **出力例**:
-```
-openai/clip-vit-base-patch32: 1 — a cat sleeping
-openai/clip-vit-base-patch16: 1 — a cat sleeping
-laion/CLIP-ViT-L-14-laion2B-s32B-b82K: 1 — a cat sleeping
-```
 
 全てのモデルが正解した。では、**微妙なケース**ではどうか？
 
 ### 1.3 ハードケース: "a tabby cat" vs "a cat"
 
-```julia
-texts_hard = ["a tabby cat on a sofa", "a cat on a sofa", "a dog on a sofa"]
-# tabby cat = トラ猫 (細かい特徴)
-
-for model_name in models
-    clip = hgf"$model_name"
-    img_emb = clip.vision_model(img)  # トラ猫の画像
-    text_embs = [clip.text_model(t) for t in texts_hard]
-    sims = [dot(img_emb, t) / (norm(img_emb) * norm(t)) for t in text_embs]
-    println("$model_name: $(texts_hard[argmax(sims)]) (sim: $(maximum(sims)))")
-end
-```
-
 **出力例**:
-```
-openai/clip-vit-base-patch32: a cat on a sofa (sim: 0.78)
-openai/clip-vit-base-patch16: a tabby cat on a sofa (sim: 0.81)
-laion/CLIP-ViT-L-14-laion2B-s32B-b82K: a tabby cat on a sofa (sim: 0.84)
-```
 
 **観察**:
 - ViT-B/32は"tabby"の細かい特徴を捉えられなかった。
@@ -160,28 +115,7 @@ laion/CLIP-ViT-L-14-laion2B-s32B-b82K: a tabby cat on a sofa (sim: 0.84)
 
 CLIPの類似度計算には、**温度パラメータ $\tau$** が隠れている。これは後で詳しく見るが、簡単に言えば「分布の鋭さ」を制御する。
 
-```julia
-# 類似度 → softmax確率分布
-function clip_probs(img_emb, text_embs, τ=0.07)
-    logits = [dot(img_emb, t) / (norm(img_emb) * norm(t)) for t in text_embs]
-    logits_scaled = logits ./ τ
-    exp_logits = exp.(logits_scaled)
-    return exp_logits ./ sum(exp_logits)
-end
-
-τ_values = [0.01, 0.07, 0.5]
-for τ in τ_values
-    probs = clip_probs(img_emb, text_embs, τ)
-    println("τ=$τ: $(round.(probs, digits=3))")
-end
-```
-
 **出力例**:
-```
-τ=0.01: [1.000, 0.000, 0.000]  # 極端に鋭い
-τ=0.07: [0.921, 0.052, 0.027]  # CLIPデフォルト
-τ=0.5:  [0.412, 0.321, 0.267]  # なだらか
-```
 
 $\tau$ が小さいほど、最高スコアのクラスに確率が集中する。CLIPは $\tau=0.07$ をデフォルトとする。これは**InfoNCE lossの最適化**と深く関係している（Zone 3.4で導出）。
 
@@ -201,38 +135,23 @@ graph LR
 
 ### 1.6 PyTorchとの比較 (参考)
 
-:::details PyTorchでの実装
-
-```python
-import torch
-from transformers import CLIPProcessor, CLIPModel
-from PIL import Image
-
-model = CLIPModel.from_pretrained("openai/clip-vit-base-patch32")
-processor = CLIPProcessor.from_pretrained("openai/clip-vit-base-patch32")
-
-image = Image.open("cat.jpg")
-texts = ["a cat", "a dog", "a car"]
-
-inputs = processor(text=texts, images=image, return_tensors="pt", padding=True)
-outputs = model(**inputs)
-
-logits_per_image = outputs.logits_per_image  # (1, 3)
-probs = logits_per_image.softmax(dim=1)  # (1, 3)
-print(f"予測: {texts[probs.argmax()]}")
-```
+<details><summary>PyTorchでの実装</summary>
 
 **Juliaとの違い**:
 - JuliaはTransformers.jlで同等の機能を提供。
 - Pythonは`processor`でトークン化と前処理を一括処理するが、Juliaは手動で制御しやすい。
 - 推論速度はほぼ同等（バックエンドが同じ）。
-:::
 
-:::message
-**ここまでで全体の10%完了！** 次のZone 2では、「なぜマルチモーダルが必要なのか」を直感的に理解する。
-:::
+</details>
+
+> **Note:** **ここまでで全体の10%完了！** 次のZone 2では、「なぜマルチモーダルが必要なのか」を直感的に理解する。
 
 ---
+
+> **Progress: 10%**
+> **理解度チェック**
+> 1. Early Fusion・Late Fusion・Deep Fusionのそれぞれで、視覚特徴とテキスト特徴はどの段階で統合されるか？
+> 2. ViTにおいてCLS tokenが「画像全体の表現」として機能する仕組みを説明せよ。
 
 ## 🧩 2. 直感ゾーン（15分）— なぜマルチモーダルなのか？
 
@@ -341,7 +260,7 @@ graph TD
 
 ### 2.7 Trojan Horse: Python完全離脱の達成
 
-:::details Trojan Horse確認
+<details><summary>Trojan Horse確認</summary>
 
 第19回でPythonとの決別を宣言し、第20回でJulia+Rustの基盤を整備し、第21回でデータ処理をマスターした。
 
@@ -355,13 +274,17 @@ graph TD
 - 第24回以降: ⚡🦀🔮 (Elixir再登場)
 
 Pythonは第18回で最後に登場し、それ以降は一切使わない。本シリーズは**Production-ready実装**を目指しており、Juliaの訓練速度とRustの推論性能が最適解だ。
-:::
 
-:::message
-**ここまでで全体の20%完了！** Zone 3では、マルチモーダルの数学的基礎を完全に理解する。数式修行の時間だ。
-:::
+</details>
+
+> **Note:** **ここまでで全体の20%完了！** Zone 3では、マルチモーダルの数学的基礎を完全に理解する。数式修行の時間だ。
 
 ---
+
+> **Progress: 20%**
+> **理解度チェック**
+> 1. CLIPがゼロショット分類を実現できる理由を、Dual Encoderと対照学習の観点から説明せよ。
+> 2. Modality Gap（モダリティギャップ）とは何か？なぜ発生し、どう対処するか？
 
 ## 📐 3. 数式修行ゾーン（60分）— 理論完全版
 
@@ -455,29 +378,7 @@ $\mathbf{q}$ は「画像とテキストの統合表現」。
 
 #### 3.1.5 数値例: Modality Gap
 
-```julia
-using LinearAlgebra, Random
-
-# 擬似的な画像・テキスト埋め込み（訓練前）
-Random.seed!(42)
-v_embeddings = randn(10, 512)  # 10画像
-t_embeddings = randn(10, 512) .+ 5.0  # 10テキスト（平均がずれている）
-
-# Modality Gapを計算
-gap = mean([norm(v_embeddings[i, :] - t_embeddings[i, :]) for i in 1:10])
-println("訓練前のModality Gap: $gap")  # ≈7.2
-
-# Contrastive学習後（擬似的にテキスト埋め込みをシフト）
-t_embeddings_aligned = t_embeddings .- mean(t_embeddings, dims=1) .+ mean(v_embeddings, dims=1)
-gap_after = mean([norm(v_embeddings[i, :] - t_embeddings_aligned[i, :]) for i in 1:10])
-println("訓練後のModality Gap: $gap_after")  # ≈0.5
-```
-
 **出力**:
-```
-訓練前のModality Gap: 7.234
-訓練後のModality Gap: 0.512
-```
 
 Contrastive学習により、Gapが**約14分の1**に縮小した。
 
@@ -523,38 +424,6 @@ $$
 
 **実装（Julia）**:
 
-```julia
-using Flux
-
-# Patch Embedding層
-struct PatchEmbed
-    patch_size::Int
-    embed_dim::Int
-    proj::Dense
-end
-
-function PatchEmbed(img_size::Int, patch_size::Int, embed_dim::Int, in_channels::Int=3)
-    num_patches = (img_size ÷ patch_size)^2
-    proj = Dense(patch_size^2 * in_channels, embed_dim)
-    return PatchEmbed(patch_size, embed_dim, proj)
-end
-
-function (pe::PatchEmbed)(x)
-    # x: (H, W, C, B) — バッチ画像
-    B = size(x, 4)
-    H, W, C = size(x, 1), size(x, 2), size(x, 3)
-    P = pe.patch_size
-
-    # パッチに分割: (H, W, C, B) → (P, P, C, num_patches, B)
-    patches = reshape(x, (P, H÷P, P, W÷P, C, B))
-    patches = permutedims(patches, (1, 3, 5, 2, 4, 6))  # (P, P, C, H/P, W/P, B)
-    patches = reshape(patches, (P^2 * C, (H÷P)*(W÷P), B))  # (P²C, N, B)
-
-    # 線形投影: (P²C, N, B) → (d, N, B)
-    embeddings = pe.proj(patches)
-    return embeddings
-end
-```
 
 #### 3.2.3 Positional Encoding
 
@@ -581,24 +450,6 @@ ViTは**Learnableを採用**している理由は、画像の2D構造を自動�
 
 **実装（Julia）**:
 
-```julia
-# Learnable Positional Encoding
-struct PositionalEncoding
-    num_patches::Int
-    embed_dim::Int
-    pos_embed::Param  # 学習可能パラメータ
-end
-
-function PositionalEncoding(num_patches::Int, embed_dim::Int)
-    pos_embed = Param(randn(embed_dim, num_patches + 1) .* 0.02)  # +1 for CLS
-    return PositionalEncoding(num_patches, embed_dim, pos_embed)
-end
-
-function (pe::PositionalEncoding)(x)
-    # x: (d, N+1, B)
-    return x .+ pe.pos_embed
-end
-```
 
 #### 3.2.4 CLS token
 
@@ -644,25 +495,6 @@ $$
 
 **実装（Julia）**:
 
-```julia
-using Flux
-
-function self_attention(Z::Matrix, W_Q::Matrix, W_K::Matrix, W_V::Matrix)
-    d_k = size(W_Q, 1)
-    Q = W_Q * Z  # (d_k, N+1)
-    K = W_K * Z  # (d_k, N+1)
-    V = W_V * Z  # (d_v, N+1)
-
-    # Attention weights
-    scores = Q' * K ./ sqrt(d_k)  # (N+1, N+1)
-    A = softmax(scores, dims=2)  # 各行がsoftmax
-
-    # 出力
-    Z_out = V * A'  # (d_v, N+1)
-    return Z_out, A
-end
-```
-
 #### 3.2.6 ViT vs CNN: なぜViTが勝つのか？
 
 | 項目 | CNN (ResNet) | ViT (Vision Transformer) |
@@ -680,20 +512,7 @@ end
 
 **数値例: Attentionの可視化**
 
-```julia
-# 擬似的なAttention weights
-A = softmax(randn(197, 197), dims=2)  # 197 = 196パッチ + 1 CLS
-
-# CLS tokenが注目しているパッチ（上位5個）
-cls_attention = A[1, 2:end]  # CLSは1番目
-top5 = sortperm(cls_attention, rev=true)[1:5]
-println("CLSが注目しているパッチ: $top5")
-```
-
 **出力例**:
-```
-CLSが注目しているパッチ: [42, 103, 78, 156, 21]
-```
 
 これらのパッチは、画像中の**重要な領域**（例: 物体の中心部）に対応している。
 
@@ -755,20 +574,18 @@ $$
 
 Frozen LMとの統合時、**急激な変更を防ぐ**ため。初期はゲートを閉じておき（$\alpha \approx 0$）、訓練が進むにつれて徐々に開く。
 
+**ゲートの勾配解析**:
+
+$\alpha$ の勾配を求めると:
+
+$$
+\frac{\partial \mathcal{L}}{\partial \alpha} = \frac{\partial \mathcal{L}}{\partial \mathbf{Z}^t_{\text{out}}} \cdot (1 - \tanh^2(\alpha)) \odot \text{CrossAttn}(\mathbf{Z}^t, \mathbf{Z}^v)
+$$
+
+初期化 $\alpha = 0$ のとき $\tanh'(0) = 1$、すなわち勾配フローが最大になる。ゲートが開いていくほど（$|\alpha| \to \infty$）$\tanh'(\alpha) \to 0$ となり、$\alpha$ の変化が抑制される。これは訓練初期は積極的に適応し、収束後は安定するという良い性質。
+
 **実装（Julia）**:
 
-```julia
-struct GatedCrossAttention
-    cross_attn::MultiHeadAttention
-    gate::Param  # スカラー
-end
-
-function (gca::GatedCrossAttention)(Z_t, Z_v)
-    attn_out = gca.cross_attn(Z_t, Z_v, Z_v)  # Query=Z_t, Key=Value=Z_v
-    gated_out = Z_t .+ tanh(gca.gate[]) .* attn_out
-    return gated_out
-end
-```
 
 #### 3.3.4 Perceiver Resampler (Flamingo)
 
@@ -794,65 +611,26 @@ $$
 - $N$ が何であれ、出力は常に $M$ 個のトークン。
 - $\mathbf{L}$ は「学習可能なクエリ」で、画像の重要な情報を**圧縮**する。
 
-**実装（Julia）**:
+**Perceiver Resampler の訓練ダイナミクス**:
 
-```julia
-struct PerceiverResampler
-    num_latents::Int
-    latents::Param  # (d, M)
-    cross_attn::MultiHeadAttention
-end
+学習可能なクエリ $\mathbf{L}$ は、訓練中に「何を問い合わせるか」を自動的に学ぶ。最初は無意味なランダム初期化だが、勾配流により「テキストの指示に応じて視覚情報のどの部分が重要か」を選択的に抽出できるように収束する。
 
-function (pr::PerceiverResampler)(Z_v)
-    # Z_v: (d, N) — 可変長画像特徴
-    Q = pr.latents  # (d, M)
-    K = Z_v
-    V = Z_v
+より精密には、Perceiver Resampler は複数の Cross-Attention + Self-Attention ブロックを積み重ねる。$L$ 層のとき $\ell$ 番目のブロック:
 
-    Z_resampled = pr.cross_attn(Q, K, V)  # (d, M)
-    return Z_resampled
-end
-```
+$$
+\mathbf{L}^{(\ell)} = \text{Self-Attn}\!\left(\text{Cross-Attn}\!\left(\mathbf{L}^{(\ell-1)},\; \mathbf{Z}^v\right)\right)
+$$
+
+Self-Attention は学習可能なクエリ間の相互作用を許すため、複数のクエリが互いに補完的な情報を分担して抽出できる（例: あるクエリが物体の位置を担当し、別のクエリがテクスチャを担当）。
+
+**Flamingo の効率化の数値**:
+
+ViT-L/14 は $N = 256$ トークンを生成するが、Perceiver Resampler は $M = 64$ トークンに圧縮する（75% 削減）。動画の場合、$T$ フレームで $T \times 256$ トークンを $T \times 64$ に圧縮しつつ、フレーム間の時間的整合性も学習できる。
 
 #### 3.3.5 数値例: Cross-Modal Attentionの効果
 
-```julia
-using LinearAlgebra
-
-# 擬似データ
-d = 512
-L = 10  # テキスト長
-N = 196  # 画像パッチ数
-
-Z_t = randn(d, L)
-Z_v = randn(d, N)
-
-# Cross-Modal Attention (簡易版)
-W_Q = randn(d, d)
-W_K = randn(d, d)
-W_V = randn(d, d)
-
-Q = W_Q * Z_t  # (d, L)
-K = W_K * Z_v  # (d, N)
-V = W_V * Z_v  # (d, N)
-
-# Attention weights
-scores = Q' * K ./ sqrt(d)  # (L, N)
-A = softmax(scores, dims=2)  # 各行がsoftmax
-
-# 出力
-Z_t_out = V * A'  # (d, L)
-
-# Attention強度を確認
-println("テキストトークン1が最も注目しているパッチ: $(argmax(A[1, :]))")
-println("平均Attention強度: $(mean(A))")
-```
 
 **出力例**:
-```
-テキストトークン1が最も注目しているパッチ: 78
-平均Attention強度: 0.0051  # 1/N ≈ 0.0051
-```
 
 ---
 
@@ -976,48 +754,6 @@ $\tau \to 0$ のとき、$\text{softmax}(s_i / \tau) \to \mathbb{1}_{[i = \arg\m
 
 #### 3.4.7 InfoNCE lossの実装（Julia完全版）
 
-```julia
-using Flux, LinearAlgebra
-
-"""
-InfoNCE loss for CLIP training.
-
-# Arguments
-- `v_embeds`: 画像埋め込み (d, N)
-- `t_embeds`: テキスト埋め込み (d, N)
-- `τ`: 温度パラメータ (default 0.07)
-
-# Returns
-- `loss`: InfoNCE loss (scalar)
-"""
-function infonce_loss(v_embeds, t_embeds, τ=0.07)
-    N = size(v_embeds, 2)
-
-    # 正規化
-    v_embeds = v_embeds ./ sqrt.(sum(v_embeds.^2, dims=1))  # (d, N)
-    t_embeds = t_embeds ./ sqrt.(sum(t_embeds.^2, dims=1))  # (d, N)
-
-    # 類似度行列: S[i,j] = cos(v_i, t_j)
-    S = v_embeds' * t_embeds  # (N, N)
-
-    # 温度スケーリング
-    logits = S ./ τ  # (N, N)
-
-    # 正例ラベル: 対角成分
-    labels = 1:N  # [1, 2, ..., N]
-
-    # v→t の損失
-    loss_v2t = Flux.logitcrossentropy(logits, labels)
-
-    # t→v の損失（転置）
-    loss_t2v = Flux.logitcrossentropy(logits', labels)
-
-    # 対称性を持たせる
-    loss = (loss_v2t + loss_t2v) / 2
-
-    return loss
-end
-```
 
 **数式↔コード対応**:
 
@@ -1031,54 +767,53 @@ $$
 
 #### 3.4.8 数値検証: InfoNCE lossの挙動
 
-```julia
-using Random
-
-Random.seed!(42)
-d = 512
-N = 8
-
-# 擬似埋め込み
-v_embeds = randn(d, N)
-t_embeds = randn(d, N)
-
-# 正例ペアの類似度を高くする（擬似的に訓練済み）
-for i in 1:N
-    t_embeds[:, i] = 0.8 * v_embeds[:, i] + 0.2 * randn(d)
-end
-
-# InfoNCE loss計算
-loss = infonce_loss(v_embeds, t_embeds, 0.07)
-println("InfoNCE loss: $loss")
-
-# 類似度行列を確認
-v_norm = v_embeds ./ sqrt.(sum(v_embeds.^2, dims=1))
-t_norm = t_embeds ./ sqrt.(sum(t_embeds.^2, dims=1))
-S = v_norm' * t_norm
-println("類似度行列（対角成分）:")
-println(diag(S))  # 正例ペアの類似度
-```
-
 **出力例**:
-```
-InfoNCE loss: 0.523
-類似度行列（対角成分）:
-[0.89, 0.91, 0.87, 0.92, 0.88, 0.90, 0.86, 0.93]
-```
 
 対角成分（正例ペア）の類似度が高い（0.86〜0.93）ことが確認できた。訓練が進むと、対角成分はさらに1に近づき、非対角成分は0に近づく。
 
 #### 3.4.9 InfoNCE lossの理論的性質
 
-**性質1: 下界の最大化**
+**性質1: 下界の最大化（詳細導出）**
 
-InfoNCE lossは、**相互情報量 $I(\mathbf{v}; \mathbf{t})$ の下界**を最大化している（第6回の相互情報量を参照）:
+InfoNCE lossは、**相互情報量 $I(\mathbf{v}; \mathbf{t})$ の下界**を最大化している。これを丁寧に導出する。
+
+視覚エンコーダ $f_v$、テキストエンコーダ $f_t$ を経た埋め込み空間における相互情報量の定義から始める:
 
 $$
-I(\mathbf{v}; \mathbf{t}) \geq \mathbb{E}_{(v,t) \sim p(v,t)} \left[ \log \frac{p(v, t)}{p(v)p(t)} \right] - \log N
+I(v; t) = \mathbb{E}_{p(v,t)}\left[\log \frac{p(v, t)}{p(v)p(t)}\right]
 $$
 
-InfoNCE lossを最小化することは、この下界を最大化することに等しい。
+バッチサイズ $N$ のとき、InfoNCE lossは:
+
+$$
+\mathcal{L}_i^{v \to t} = -\log \frac{\exp(s_{ii}/\tau)}{\sum_{j=1}^N \exp(s_{ij}/\tau)}
+$$
+
+**下界の導出手順**:
+
+まず、正例 $t_i$ と負例 $t_j$（$j \neq i$）を対称的に扱うため、以下の確率を定義する:
+
+$$
+p_{\text{data}} = p(t_i \mid v_i) = \text{(真の正例確率)}
+$$
+
+$$
+p_{\text{model}} = \frac{\exp(f_v(v_i)^T f_t(t_i)/\tau)}{\sum_{j=1}^N \exp(f_v(v_i)^T f_t(t_j)/\tau)}
+$$
+
+Jensen の不等式と $\log$ の凹性により:
+
+$$
+\mathbb{E}\left[-\mathcal{L}_{\text{InfoNCE}}\right] = \mathbb{E}\left[\log p_{\text{model}}\right] \leq I(v; t) - \log(N - 1) + \log(N)
+$$
+
+整理すると:
+
+$$
+I(v; t) \geq \mathbb{E}_{(v,t) \sim p(v,t)}\left[\log \frac{\exp(f_v^T f_t / \tau)}{\frac{1}{N}\sum_j \exp(f_v^T f_{t_j} / \tau)}\right] = \log N - \mathcal{L}_{\text{InfoNCE}}
+$$
+
+すなわち $I(v;t) \geq \log N - \mathcal{L}_{\text{InfoNCE}}$。$\mathcal{L}_{\text{InfoNCE}}$ を最小化することは、この相互情報量の下界を**最大化**することと等価。$N$ が大きいほど下界が tight になる（上限 $\log N$ が相互情報量の上限として機能）。
 
 **性質2: Hard Negative Mining**
 
@@ -1088,7 +823,11 @@ $$
 \frac{\partial \mathcal{L}_i^{v \to t}}{\partial s_{ij}} = \frac{1}{\tau} \left( \frac{\exp(s_{ij}/\tau)}{\sum_k \exp(s_{ik}/\tau)} - \mathbb{1}_{[j=i]} \right)
 $$
 
-$s_{ij}$ が大きいほど、勾配が大きくなる。これにより、Hard Negativeが自動的に強調される。
+$j = i$（正例）のとき: 勾配は $\frac{1}{\tau}(p_{ii} - 1) < 0$（損失を下げる方向）。
+
+$j \neq i$（負例）のとき: 勾配は $\frac{1}{\tau} p_{ij} > 0$（$s_{ij}$ が大きいほど急峻）。
+
+これにより、Hard Negative（正例に近い偽物）が自動的に強調される。明示的なマイニングなしに難しい負例から学べる。
 
 **性質3: Large Batch Sizeの重要性**
 
@@ -1096,17 +835,18 @@ $s_{ij}$ が大きいほど、勾配が大きくなる。これにより、Hard 
 
 CLIPの論文では、**バッチサイズ 32,768**を使用している。
 
+バッチサイズ $N$ が増えると下界 $\log N - \mathcal{L}_{\text{InfoNCE}}$ が $I(v;t)$ に近づく。つまり「バッチサイズを増やす = 相互情報量推定の精度を上げる」という直接的な関係がある。
+
 ---
 
 **ボス撃破！**
 
 InfoNCE lossの完全導出を終えた。ここまで来れば、CLIPの訓練メカニズムを完全に理解したことになる。
 
-:::message
-**ここまでで全体の50%完了！** Zone 4では、この理論を実装に落とし込む。⚡JuliaでCLIP訓練、🦀RustでSmolVLM2推論を完全実装する。
-:::
+> **Note:** **ここまでで全体の50%完了！** Zone 4では、この理論を実装に落とし込む。⚡JuliaでCLIP訓練、🦀RustでSmolVLM2推論を完全実装する。
 
 ### 3.5 最新の視覚言語モデル研究（2023-2026）
+
 
 CLIPやBLIPの基礎を学んだところで、最新の研究動向を見ていこう。2023-2026年は視覚言語モデルの**爆発的進化**の時代だ [^20]。
 
@@ -1115,10 +855,6 @@ CLIPやBLIPの基礎を学んだところで、最新の研究動向を見てい
 BLIP-2 [^21] (Li et al., 2023) は、**凍結された画像エンコーダと凍結されたLLM**を接続することで、効率的に視覚言語事前学習を実現する。
 
 **アーキテクチャ**:
-
-```
-Frozen Image Encoder → Q-Former → Frozen LLM
-```
 
 **Q-Former（Querying Transformer）**:
 
@@ -1173,10 +909,6 @@ BLIP-2は、**パラメータ数1/15でFlamingo-80Bを超える**性能を達成
 LLaVA (Large Language and Vision Assistant) [^22] は、視覚エンコーダとLLMを**Instruction Tuning**で結合する。
 
 **アーキテクチャ**:
-
-```
-CLIP Vision Encoder → Linear Projection → LLaMA / Vicuna
-```
 
 **数式**:
 
@@ -1358,27 +1090,6 @@ CLIPの訓練では**バッチサイズ32,768**が使われている。これを
 
 **Gradient Accumulation**:
 
-```julia
-# Pseudo-code for gradient accumulation
-accum_steps = 32  # 32回累積してから更新
-batch_size_per_step = 1024  # 実効バッチサイズ = 1024 * 32 = 32768
-
-for epoch in 1:n_epochs
-    grads_accum = zero_grads()
-
-    for step in 1:accum_steps
-        # ミニバッチで順伝播
-        loss = forward(batch[step])
-        # 勾配計算（累積）
-        grads = gradient(loss)
-        grads_accum += grads / accum_steps
-    end
-
-    # 累積勾配で更新
-    update_weights!(grads_accum)
-end
-```
-
 **数式**:
 
 $$
@@ -1389,41 +1100,11 @@ $$
 
 **Mixed Precision Training** (FP16):
 
-```julia
-using Flux
-using CUDA
-
-# FP16で順伝播
-@autocast begin
-    loss = model(x)
-end
-
-# 勾配スケーリングで数値安定性確保
-scaled_loss = loss * scale
-grads = gradient(scaled_loss)
-grads = grads ./ scale
-```
 
 メモリ使用量を**半減**し、訓練速度を**1.5-2x高速化**。
 
 #### 3.6.2 効率的な埋め込み正規化
 
-```julia
-# ℓ2正規化（効率版）
-function normalize_embeddings(x::AbstractMatrix)
-    # x: (d, N) — d次元埋め込み、Nサンプル
-    norms = sqrt.(sum(x.^2, dims=1))
-    return x ./ (norms .+ 1e-8)
-end
-
-# GPU最適化版
-function normalize_embeddings_gpu(x::CuArray)
-    # CUDAカーネルで並列化
-    d, N = size(x)
-    norms = CUDA.@cuda threads=256 blocks=ceil(Int, N/256) norm_kernel(x)
-    return x ./ (norms .+ 1e-8)
-end
-```
 
 **数式**:
 
@@ -1433,9 +1114,7 @@ $$
 
 $\epsilon = 10^{-8}$ でゼロ除算を防ぐ。
 
-:::message
-**進捗: 60% 完了** 最新のVLM研究（BLIP-2, LLaVA, TokenFusion, GeminiFusion）と、2023-2026年のトレンドを完全に把握した。次は実装ゾーンで、⚡JuliaでCLIP訓練、🦀RustでSmolVLM2推論を完全実装する。
-:::
+> **Note:** **進捗: 60% 完了** 最新のVLM研究（BLIP-2, LLaVA, TokenFusion, GeminiFusion）と、2023-2026年のトレンドを完全に把握した。次は実装ゾーンで、⚡JuliaでCLIP訓練、🦀RustでSmolVLM2推論を完全実装する。
 
 ### 3.7 視覚言語モデルの評価手法
 
@@ -1457,25 +1136,6 @@ VLMの性能を正しく評価するには、複数のベンチマークが必�
 
 **評価方法**:
 
-```julia
-function zero_shot_classification(model, image, class_names)
-    # 1. 画像エンコード
-    img_emb = model.vision_encoder(image)  # (d,)
-
-    # 2. プロンプトテンプレート
-    prompts = ["a photo of a $class" for class in class_names]
-
-    # 3. テキストエンコード
-    text_embs = [model.text_encoder(p) for p in prompts]  # [(d,), ...]
-
-    # 4. コサイン類似度
-    scores = [dot(img_emb, t) / (norm(img_emb) * norm(t)) for t in text_embs]
-
-    # 5. 最大スコアのクラスを予測
-    pred_idx = argmax(scores)
-    return class_names[pred_idx], scores[pred_idx]
-end
-```
 
 **数式**:
 
@@ -1521,28 +1181,6 @@ $$
 
 **実装**:
 
-```julia
-function image_text_retrieval(model, images, texts, top_k=5)
-    # 画像埋め込み: (d, N_img)
-    img_embs = hcat([model.vision_encoder(img) for img in images]...)
-
-    # テキスト埋め込み: (d, N_txt)
-    txt_embs = hcat([model.text_encoder(txt) for txt in texts]...)
-
-    # 正規化
-    img_embs = img_embs ./ sqrt.(sum(img_embs.^2, dims=1))
-    txt_embs = txt_embs ./ sqrt.(sum(txt_embs.^2, dims=1))
-
-    # 類似度行列: (N_img, N_txt)
-    sim_matrix = img_embs' * txt_embs
-
-    # Image → Text Retrieval
-    i2t_ranks = [findall(sortperm(sim_matrix[i, :], rev=true) .== i)[1] for i in 1:size(sim_matrix, 1)]
-    recall_at_k = mean(i2t_ranks .<= top_k)
-
-    return recall_at_k, median(i2t_ranks)
-end
-```
 
 **CLIP性能** (Radford et al., 2021):
 
@@ -1681,18 +1319,6 @@ CLIP-ViT-L/14の場合:
 
 メモリ使用量を削減（速度は20%低下）:
 
-```julia
-using Flux
-
-# 通常
-y = layer3(layer2(layer1(x)))  # 全中間値を保存
-
-# Gradient Checkpointing
-y = checkpoint() do
-    layer3(layer2(layer1(x)))  # 中間値を再計算
-end
-```
-
 メモリ削減率: **40-50%**
 
 **2. Flash Attention**:
@@ -1706,16 +1332,6 @@ AttentionのメモリとFLOPsを削減:
 **3. Quantization（量子化）**:
 
 FP32 → INT8で推論を高速化:
-
-```julia
-# Post-Training Quantization
-model_fp32 = load_model("clip-vit-b32.safetensors")
-model_int8 = quantize(model_fp32, bits=8)
-
-# 推論速度比較
-@time img_emb_fp32 = model_fp32.vision_encoder(img)  # 50ms
-@time img_emb_int8 = model_int8.vision_encoder(img)  # 15ms (3.3x faster)
-```
 
 **精度劣化**: ImageNet Top-1で0.5-1%程度（許容範囲）。
 
@@ -1744,36 +1360,6 @@ model_int8 = quantize(model_fp32, bits=8)
 1. **Gradient Accumulation**で実効バッチサイズを増やす
 2. **Memory Bank**で過去のサンプルを負例に使う:
 
-```julia
-# Memory bank (過去のサンプルを保存)
-memory_bank = CircularBuffer{Matrix{Float64}}(capacity=65536)
-
-function infonce_with_memory(v_emb, t_emb, memory_bank)
-    # 現在のバッチ: N samples
-    N_curr = size(v_emb, 2)
-
-    # Memory bankから負例を取得: M samples
-    v_memory = hcat(memory_bank...)
-    M = size(v_memory, 2)
-
-    # 拡張類似度行列: (N, N + M)
-    S_curr = v_emb' * t_emb
-    S_memory = v_emb' * v_memory
-
-    S_full = hcat(S_curr, S_memory)
-
-    # InfoNCE loss（正例は対角のみ）
-    logits = S_full ./ τ
-    labels = 1:N_curr
-    loss = Flux.logitcrossentropy(logits, labels)
-
-    # Memory bankを更新
-    push!(memory_bank, v_emb)
-
-    return loss
-end
-```
-
 #### 3.9.2 温度パラメータ $\tau$ の調整
 
 **問題**: $\tau$ が適切でないと、学習が不安定。
@@ -1784,25 +1370,6 @@ end
 - SigLIP: $\tau = 10.0$（Sigmoid lossと併用）
 
 **調整方法**:
-
-```julia
-# τを学習可能パラメータにする
-struct LearnableTemperature
-    logit_scale::Flux.Params
-end
-
-function LearnableTemperature(init_temp=0.07)
-    # log(1/τ) を学習
-    logit_scale = Flux.param([log(1/init_temp)])
-    return LearnableTemperature(logit_scale)
-end
-
-function apply_temperature(S, temp_module)
-    # exp(logit_scale) = 1/τ
-    scale = exp(temp_module.logit_scale[1])
-    return S .* scale
-end
-```
 
 CLIPでは、訓練中に $\tau$ が $0.07 \to 0.05$ に変化する。
 
@@ -1821,13 +1388,180 @@ CLIPでは、訓練中に $\tau$ が $0.07 \to 0.05$ に変化する。
 2. **Balanced Sampling**: クラスごとにサンプル数を均等化
 3. **Debiasing Fine-tuning**: バイアス除去データセットで追加訓練
 
-:::message
-**進捗: 75% 完了** VLMの評価手法、訓練コスト、実装の落とし穴まで完全に理解した。次は実装ゾーンで実際にコードを書く。
-:::
+### 3.10 Qwen-VL・CogVLM・SmolVLM2: 効率化アーキテクチャの完全解剖
+
+マルチモーダル研究の第5の潮流が「小型・高効率・多機能」だ。GPT-4Vのような数百億パラメータのモデルを使わずに、限られた計算資源で competitive な性能を達成する設計思想が急速に成熟している。
+
+#### 3.10.1 CogVLM: Visual Expert による深い視覚-言語統合
+
+CogVLM は「凍結LLM + 追加の視覚専用ウェイト」という設計で、言語能力を保持しながら視覚理解を大幅に向上させた。
+
+**Visual Expert機構**:
+
+LLMの各 Transformer 層に、テキスト用 FFN と並列に**視覚専用 FFN**（Visual Expert）を追加する。
+
+通常のLLMのフォワードパス（1トークンに対して）:
+
+$$
+\mathbf{h}' = \mathbf{h} + \text{Attn}(\mathbf{h}) + \text{FFN}(\mathbf{h})
+$$
+
+CogVLMでは、視覚トークン $\mathbf{h}_v$ に対して:
+
+$$
+\mathbf{h}_v' = \mathbf{h}_v + \text{Attn}_v(\mathbf{h}_v) + \text{FFN}_v(\mathbf{h}_v)
+$$
+
+$\text{Attn}_v$ と $\text{FFN}_v$ は視覚専用の重み（訓練済みLLMの重みと独立）。テキストトークン $\mathbf{h}_t$ は通常の $\text{Attn}_t$、$\text{FFN}_t$ を使う。
+
+**設計の動機**: Q-FormerやMLP Projectionのような「ボトルネック」を通じて視覚特徴を圧縮するのではなく、LLMの各層全体を通して視覚情報を処理することで深い視覚-言語統合を実現する。
+
+**Q-Former との比較**:
+
+| 設計 | アーキテクチャ | 視覚情報の流れ | 利点 |
+|:----|:------------|:------------|:-----|
+| Q-Former (BLIP-2) | 32 query tokens で凍結ViTを圧縮 | ボトルネック | 計算効率 |
+| MLP Projection (LLaVA) | 線形変換のみ | 直接マッピング | シンプル |
+| **Visual Expert (CogVLM)** | LLM全層に専用 FFN | 全層処理 | 深い統合 |
+
+**パラメータ数**: Visual Expert の追加により、17B パラメータのベースLLMに対して約 6B の視覚専用パラメータが追加される（総計 ≈ 23B）。
+
+#### 3.10.2 Qwen-VL: Dynamic Resolution と RoPE 2D
+
+**Dynamic Resolution（動的解像度）**:
+
+固定サイズ（例: 224×224）にリサイズする代わりに、パッチ数の上限 $N_{\max}$ 内で縦横比を保ちながら高解像度を維持する:
+
+$$
+(H_{\text{model}}, W_{\text{model}}) = \arg\max_{H \times W \leq N_{\max}} \left\{ H \times W : \frac{H}{W} \approx \frac{H_{\text{orig}}}{W_{\text{orig}}} \right\}
+$$
+
+OCR（文字認識）や細密な図形理解など、高解像度が重要なタスクでの性能が大幅に改善する。
+
+**RoPE 2D（2次元回転位置エンコーディング）**:
+
+通常の1次元 RoPE はシーケンス位置 $m$ のみを扱うが、Qwen-VL では画像パッチの2次元座標 $(m, n)$ を同時にエンコードする。
+
+1次元 RoPE の回転行列 $R_{\Theta, m}$ は、次元 $2i$, $2i+1$ のペアに対して:
+
+$$
+R_{\Theta, m} = \begin{pmatrix} \cos(m\theta_i) & -\sin(m\theta_i) \\ \sin(m\theta_i) & \cos(m\theta_i) \end{pmatrix}, \quad \theta_i = 10000^{-2i/d}
+$$
+
+2次元版では、次元の前半 $d/2$ を行方向 $m$、後半 $d/2$ を列方向 $n$ に割り当てる:
+
+$$
+R_{\Theta, m, n} = \begin{pmatrix} R_{\Theta^{(1)}, m} & 0 \\ 0 & R_{\Theta^{(2)}, n} \end{pmatrix}
+$$
+
+この設計により、画像パッチ間の**相対的な2次元位置関係**が attention に正確に反映される。例えば行方向に隣接する2パッチは $m$ のみが異なり、縦横の異なる近接関係を区別できる。
+
+**Naive Deduplication**:
+
+高解像度化によるトークン数爆発を制御するため、隣接するビジュアルトークン間の類似度が高い場合に重複トークンを除去する:
+
+$$
+\text{keep}(i) = \mathbb{1}\bigl[\|\mathbf{v}_i - \mathbf{v}_{i-1}\|_2 > \epsilon\bigr]
+$$
+
+背景・余白など情報量の少い領域でトークンを大幅削減できる。
+
+#### 3.10.3 SmolVLM2: 超小型VLMの内部機構
+
+SmolVLM2（HuggingFace, 2024）は 256M–2B パラメータという極限的な小型化を実現しながら、より大きなモデルに匹敵する性能を示す。
+
+**アーキテクチャの選択**:
+
+| 設計判断 | SmolVLM2 の選択 | 背景 |
+|:---------|:--------------|:-----|
+| Vision Encoder | SigLIP-400M (frozen) | Sigmoid loss でより安定した対比学習 |
+| Visual Projector | MLP (2層) | Q-Former より高速、性能差は軽微 |
+| Language Model | SmolLM2-135M/360M/1.7B | 蒸留により同パラメータ数の標準LMより高性能 |
+| Resolution | 動的タイリング（任意解像度） | Qwen-VL と同様の思想 |
+
+**動的タイリング（Dynamic Tiling）**:
+
+入力画像を複数のサブ画像（タイル）に分割し、それぞれを独立してエンコードする:
+
+$$
+\text{Tiles} = \text{split}(I,\; H_{\text{tile}} \times W_{\text{tile}}) \cup \{I_{\text{resized}}\}
+$$
+
+最後に縮小版の全体画像を追加することで、局所情報と大局情報の両方を保持する。タイル数は画像解像度に応じて動的に変わる（最大 $4 \times 4 = 16$ タイル等）。
+
+**SigLIP の損失関数**:
+
+CLIPの InfoNCE（Softmax + Cross-Entropy）に代わり、SigLIP は各画像-テキストペアを独立した 2 値分類として扱う**Sigmoid Loss**を使う:
+
+$$
+\mathcal{L}_{\text{SigLIP}} = -\frac{1}{N^2} \sum_{i,j} \log \sigma\!\left(y_{ij} \cdot (\text{sim}(z_i^I, z_j^T) - b)\right)
+$$
+
+$$
+y_{ij} = \begin{cases} +1 & (i = j \text{、マッチするペア}) \\ -1 & (i \neq j \text{、非マッチ}) \end{cases}
+$$
+
+$b$ は学習可能なバイアス項。Softmax と異なり、各ペアの判定が独立するため**大バッチが不要**。小型モデルの訓練において訓練安定性が著しく改善する。
+
+**蒸留（Distillation）による性能向上**:
+
+SmolVLM2 は大型 VLM（教師モデル）の出力分布を模倣することで、パラメータ数の割に高い性能を達成する。温度 $\tau$ でスケーリングした soft label の KL 距離を最小化:
+
+$$
+\mathcal{L}_{\text{distill}} = \tau^2 \cdot \text{KL}\!\left(p_T^\tau \;\|\; p_S^\tau\right) = \tau^2 \sum_k p_T^\tau(k) \log \frac{p_T^\tau(k)}{p_S^\tau(k)}
+$$
+
+$p^\tau(k) = \text{softmax}(\text{logit}(k)/\tau)$。温度 $\tau > 1$ は予測の「曖昧さ」を増幅して暗黙知識の転移を促進する（Hinton et al., 2015）。$\tau^2$ の係数は soft gradient を hard label gradient と同スケールに揃えるための補正。
+
+**効率化の定量的インパクト**:
+
+| モデル | パラメータ | MMMU (val) | TextVQA | 推論メモリ |
+|:-------|:----------|:----------|:--------|:----------|
+| LLaVA-1.5 (7B) | 7B | 35.7% | 58.2% | 14 GB |
+| Qwen-VL (7B) | 7B | 39.0% | 63.8% | 14 GB |
+| SmolVLM2-2B | 2B | 41.6% | 73.2% | **5.2 GB** |
+| SmolVLM2-256M | 256M | 38.8% | 66.1% | **1.8 GB** |
+
+SmolVLM2-256M は LLaVA-1.5 (7B) より少ないメモリで同等性能 — 1/27 のパラメータ数で競合する。
+
+**5大 VLM アーキテクチャの設計比較**:
+
+| モデル | 視覚-言語結合方式 | LLM凍結? | 訓練可能パラメータ | 核心的革新 |
+|:-------|:----------------|:---------|:-----------------|:---------|
+| BLIP-2 | Q-Former（32クエリ） | ✅ 凍結 | 54M のみ | 2段階事前学習 |
+| LLaVA | MLP Projection | ❌ 全更新 | 全パラメータ | Instruction Tuning |
+| Flamingo | Gated Cross-Attn | ✅ 凍結 | Cross-Attn のみ | Few-shot ICL |
+| CogVLM | Visual Expert (全層) | ✅ 凍結 | 視覚専用 6B | 深い層での統合 |
+| Qwen-VL | Position-Aware Adapter | ❌ 全更新 | 全パラメータ | Dynamic Resolution + RoPE 2D |
+| SmolVLM2 | MLP + SigLIP | ✅ 凍結 | Projector のみ | 蒸留による超小型化 |
+
+「凍結+少数パラメータ」設計（BLIP-2, Flamingo, SmolVLM2）は計算効率と知識保持を優先し、「全更新」設計（LLaVA, Qwen-VL）は細粒度適応を優先する。
+
+> **理解度チェック**
+> 1. CogVLM の Visual Expert 機構は Q-Former（BLIP-2）と何が根本的に異なるか？それぞれの「情報圧縮」の設計思想を対比せよ。
+> 2. Qwen-VL の RoPE 2D において、行方向と列方向の位置情報を分離してエンコードする利点を説明せよ。
+> 3. SmolVLM2-256M の蒸留温度 $\tau > 1$ を使う理由を、soft label のエントロピー（情報量）の観点から説明せよ。
+
+> **Note:** **進捗: 85% 完了** VLMの評価手法、訓練コスト、実装の落とし穴に加え、Qwen-VL・CogVLM・SmolVLM2の効率化アーキテクチャを完全マスター。
 
 ---
 
 ---
+
+> 📌 **後編（実装）**: [第22回 後編](./ml-lecture-22-part2)
+
+> **Progress: 50%**
+> **理解度チェック**
+> 1. InfoNCE損失 $\mathcal{L}_i = -\log \frac{\exp(\text{sim}(z_i, z_i^+)/\tau)}{\sum_j \exp(\text{sim}(z_i, z_j)/\tau)}$ で温度 $\tau$ が小さいと何が起きるか？
+> 2. BLIP-2のQ-Formerが「Frozen Vision Encoder + Frozen LLM」を橋渡しできる理由を説明せよ。
+
+## 著者リンク
+
+- Blog: https://fumishiki.dev
+- X: https://x.com/fumishiki
+- LinkedIn: https://www.linkedin.com/in/fumitakamurakami
+- GitHub: https://github.com/fumishiki
+- Hugging Face: https://huggingface.co/fumishiki
 
 ## ライセンス
 

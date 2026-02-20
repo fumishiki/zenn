@@ -4,6 +4,11 @@ emoji: "🎨"
 type: "tech"
 topics: ["machinelearning", "deeplearning", "diffusiontransformers", "julia", "dit"]
 published: true
+slug: "ml-lecture-43-part1"
+difficulty: "advanced"
+time_estimate: "90 minutes"
+languages: ["Julia", "Rust"]
+keywords: ["機械学習", "深層学習", "生成モデル"]
 ---
 
 # 第43回: Diffusion Transformers & 高速生成 — U-Netからの脱却と次世代アーキテクチャ
@@ -18,14 +23,12 @@ Course IV (第33-42回) で拡散モデル理論を極めた。ここからは *
 
 **Course V の問い** (本講義から開始):
 - 「なぜ U-Net から Transformer へ移行するのか？」
-- 「SD3・FLUX の MM-DiT は何が革新的か？」
+- 「SD3・FLUX の MM-DiT の設計上の特徴は何か？」
 - 「DiT で Scaling Laws が適用できるのはなぜ？」
 
 本講義はこれらに答える。U-Net vs DiT の比較から始め、AdaLN-Zero・MM-DiT・SiT を導出し、高速Sampling (DPM-Solver++/EDM) を実装する。そして **aMUSEd-256 推論デモ** で 12 ステップ高速画像生成を体験し、Tiny DiT on MNIST 演習で理論を実装に落とす。
 
-:::message
-**Course V スタート！** 全50回シリーズの第43-50回。Course IV で拡散理論を極めた → Course V で全モダリティ応用を極める。**修了時の到達点**: 「3言語フルスタック生成AIシステムを設計・実装・デプロイできる」— 論文が書ける (Course IV) + システムが作れる (Course V)。
-:::
+> **Note:** **Course V スタート！** 全50回シリーズの第43-50回。Course IV で拡散理論を極めた → Course V で全モダリティ応用を極める。**修了時の到達点**: 「3言語フルスタック生成AIシステムを設計・実装・デプロイできる」— 論文が書ける (Course IV) + システムが作れる (Course V)。
 
 ```mermaid
 graph TD
@@ -72,32 +75,31 @@ function adaln_zero(x, t, c, γ_mlp, β_mlp)
     # γ_mlp, β_mlp: MLPs for scale and shift parameters
 
     # 1. Concatenate timestep and condition
-    cond = hcat(t, c)  # [B, D_t + D_c]
+    cond = hcat(t, c)               # [B, D_t + D_c]
 
     # 2. Generate scale γ and shift β (initialized to zero)
-    γ = γ_mlp(cond)  # [B, D] → scale
-    β = β_mlp(cond)  # [B, D] → shift
+    γ = γ_mlp(cond)                 # [B, D] → scale
+    β = β_mlp(cond)                 # [B, D] → shift
 
     # 3. Layer Normalization
-    mean_x = mean(x, dims=3)  # [B, N, 1]
-    var_x = var(x, dims=3, corrected=false)  # [B, N, 1]
-    x_norm = (x .- mean_x) ./ sqrt.(var_x .+ 1e-6)  # [B, N, D]
+    μ  = mean(x, dims=3)            # [B, N, 1]
+    σ² = var(x, dims=3, corrected=false)  # [B, N, 1]
+    ε  = 1e-6
+    x̂  = @. (x - μ) / sqrt(σ² + ε) # [B, N, D]
 
     # 4. Adaptive scaling and shifting
-    x_out = γ' .* x_norm .+ β'  # broadcasting: [B, N, D]
-
-    return x_out
+    @. γ' * x̂ + β'                  # broadcasting: [B, N, D]
 end
 
 # Dummy MLPs (initialized to output zeros)
-γ_mlp(cond) = zeros(size(cond, 1), 8) .+ 1.0  # scale starts at 1.0
+γ_mlp(cond) = ones(size(cond, 1), 8)   # scale starts at 1.0
 β_mlp(cond) = zeros(size(cond, 1), 8)  # shift starts at 0.0
 
 # Test: 2D image patches as tokens
 B, N, D = 2, 4, 8  # 2 images, 4 patches, 8 dims
 x = randn(B, N, D)  # input features
-t = randn(B, 4)  # timestep embedding (D_t=4)
-c = randn(B, 4)  # condition embedding (D_c=4)
+t = randn(B, 4)     # timestep embedding (D_t=4)
+c = randn(B, 4)     # condition embedding (D_c=4)
 
 x_out = adaln_zero(x, t, c, γ_mlp, β_mlp)
 println("Input shape:  ", size(x))
@@ -118,9 +120,7 @@ Variance (should be ≈1 for each token): [1.0 1.0 1.0 1.0; 1.0 1.0 1.0 1.0]
 
 **30秒で AdaLN-Zero を動かした。** 拡散ステップ $t$ と条件 $c$ を正規化層に注入することで、時間的・条件的な振る舞いをモデルに教え込める。これが DiT の心臓部だ。
 
-:::message
-**ここまでで全体の3%完了！** Zone 0 はウォーミングアップ。次は DiT・FLUX・SD3 の実装を触り、U-Net との違いを体感する。
-:::
+> **Note:** **ここまでで全体の3%完了！** Zone 0 はウォーミングアップ。次は DiT・FLUX・SD3 の実装を触り、U-Net との違いを体感する。
 
 ---
 
@@ -132,41 +132,6 @@ Variance (should be ≈1 for each token): [1.0 1.0 1.0 1.0; 1.0 1.0 1.0 1.0]
 
 U-Net は DDPM (第36回) で学んだ標準アーキテクチャ。Encoder-Decoder 構造に skip connections を加え、空間的な帰納バイアスを活用する。
 
-```julia
-# Simplified U-Net block (Encoder + Skip + Decoder)
-function unet_block(x, t_emb)
-    # x: [B, H, W, C] — spatial input (B=batch, H=height, W=width, C=channels)
-    # t_emb: [B, D_t] — timestep embedding
-
-    # 1. Encoder: Downsample with Conv
-    enc = conv_down(x)  # [B, H/2, W/2, 2C]
-
-    # 2. Time conditioning: inject t_emb via addition
-    enc_cond = enc .+ reshape(time_proj(t_emb), (1, 1, 1, :))  # broadcasting
-
-    # 3. Decoder: Upsample with Transposed Conv
-    dec = conv_up(enc_cond)  # [B, H, W, C]
-
-    # 4. Skip connection
-    out = x .+ dec  # residual connection
-
-    return out
-end
-
-# Dummy functions
-conv_down(x) = x[:, 1:2:end, 1:2:end, :]  # simple 2x2 max pooling
-conv_up(x) = repeat(x, inner=(1, 2, 2, 1))  # simple upsampling
-time_proj(t) = repeat(t, inner=(1, size(t, 2)))  # project to channel dims
-
-# Test: 4x4 image
-B, H, W, C = 2, 4, 4, 3
-x_img = randn(B, H, W, C)
-t_emb = randn(B, 32)
-
-x_unet = unet_block(x_img, t_emb)
-println("U-Net output shape: ", size(x_unet))
-println("Spatial structure preserved: ", size(x_unet) == size(x_img))
-```
 
 **U-Net の特徴**:
 - **CNN ベース** — 空間的な帰納バイアス (局所性・平行移動不変性)
@@ -178,47 +143,6 @@ println("Spatial structure preserved: ", size(x_unet) == size(x_img))
 
 DiT は U-Net の CNN を Transformer に置き換える。画像を **パッチ列** として扱い、Self-Attention で全トークン間の関係を学習する。
 
-```julia
-# DiT block: Multi-Head Self-Attention + AdaLN-Zero
-function dit_block(x, t, c, attn, mlp, adaln_params)
-    # x: [B, N, D] — token sequence (B=batch, N=tokens, D=dims)
-    # t: [B, D_t] — timestep embedding
-    # c: [B, D_c] — condition embedding
-
-    # 1. AdaLN-Zero pre-normalization
-    x_norm = adaln_zero(x, t, c, adaln_params...)
-
-    # 2. Multi-Head Self-Attention
-    attn_out = attn(x_norm)  # [B, N, D]
-
-    # 3. Residual connection
-    x = x .+ attn_out
-
-    # 4. AdaLN-Zero + MLP
-    x_norm2 = adaln_zero(x, t, c, adaln_params...)
-    mlp_out = mlp(x_norm2)  # [B, N, D]
-
-    # 5. Residual connection
-    x = x .+ mlp_out
-
-    return x
-end
-
-# Dummy functions
-attn(x) = x .+ 0.1 * randn(size(x))  # simplified self-attention
-mlp(x) = x .+ 0.1 * randn(size(x))  # simplified MLP
-adaln_params = (γ_mlp, β_mlp)
-
-# Test: Image as patches
-B, N, D = 2, 16, 256  # 2 images, 16 patches (4x4 grid), 256 dims
-x_patches = randn(B, N, D)
-t = randn(B, 128)
-c = randn(B, 128)
-
-x_dit = dit_block(x_patches, t, c, attn, mlp, adaln_params)
-println("DiT output shape: ", size(x_dit))
-println("Token-based processing: each patch attends to all others")
-```
 
 **DiT の特徴**:
 - **Transformer ベース** — Self-Attention で全パッチ間の関係を学習
@@ -240,58 +164,26 @@ println("Token-based processing: each patch attends to all others")
 
 **鍵**: DiT は帰納バイアスを捨て、データ駆動で全てを学習する。その代償として訓練データ量が増えるが、Scaling Laws が適用できるため、大規模化で性能が伸び続ける。
 
+**受容野（Receptive Field）の比較**:
+
+U-Net では $L$ 層の Conv（カーネルサイズ $k$）の有効受容野は $k + (k-1)(L-1) = kL - L + 1$。$k=3$、$L=20$ では $\approx 41 \times 41$ ピクセルが最大受容野だ（ダウンサンプリングを無視）。対して DiT の Self-Attention は1層で全トークン間（$N \times N$）の関係を捉える — 受容野は**常にグローバル**。この差が高解像度・複雑なシーン生成における DiT の質的優位性に直結する。
+
 ### 1.4 MM-DiT (SD3/FLUX): マルチモーダル Transformer
 
 SD3 と FLUX は **MM-DiT (Multimodal DiT)** — 画像とテキストを **同じ Transformer** で処理する。
 
-```julia
-# MM-DiT: Image and Text in the same Transformer
-function mmdit_block(x_img, x_txt, t, attn_joint, mlp_img, mlp_txt)
-    # x_img: [B, N_img, D] — image patches
-    # x_txt: [B, N_txt, D] — text tokens
-    # t: [B, D_t] — timestep embedding
-
-    # 1. Concatenate image and text tokens
-    x = vcat(x_img, x_txt)  # [B, N_img + N_txt, D]
-
-    # 2. Joint Self-Attention (image ↔ text cross-attend)
-    x_attn = attn_joint(x)  # [B, N_img + N_txt, D]
-
-    # 3. Split back to image and text
-    x_img_out = x_attn[:, 1:size(x_img, 2), :]
-    x_txt_out = x_attn[:, size(x_img, 2)+1:end, :]
-
-    # 4. Separate MLPs for image and text
-    x_img_out = x_img .+ mlp_img(x_img_out)
-    x_txt_out = x_txt .+ mlp_txt(x_txt_out)
-
-    return x_img_out, x_txt_out
-end
-
-# Dummy functions
-attn_joint(x) = x .+ 0.1 * randn(size(x))  # simplified joint attention
-mlp_img(x) = x .+ 0.1 * randn(size(x))
-mlp_txt(x) = x .+ 0.1 * randn(size(x))
-
-# Test: Image + Text
-B = 2
-x_img = randn(B, 16, 256)  # 16 image patches
-x_txt = randn(B, 8, 256)   # 8 text tokens
-t = randn(B, 128)
-
-x_img_mm, x_txt_mm = mmdit_block(x_img, x_txt, t, attn_joint, mlp_img, mlp_txt)
-println("MM-DiT Image output: ", size(x_img_mm))
-println("MM-DiT Text output:  ", size(x_txt_mm))
-println("Image and text co-attend in the same Transformer!")
-```
 
 **MM-DiT の威力**: 画像とテキストが **同じ潜在空間** で相互作用する。これにより、テキストが画像生成をより強く条件付けできる (Classifier-Free Guidance より効果的)。
 
-:::message
-**ここまでで全体の10%完了！** U-Net → DiT → MM-DiT の進化を体感した。次は「なぜ DiT が勝つのか？」を数学的に理解する。
-:::
+> **Note:** **ここまでで全体の10%完了！** U-Net → DiT → MM-DiT の進化を体感した。次は「なぜ DiT が勝つのか？」を数学的に理解する。
 
 ---
+
+
+> Progress: 10%
+> **理解度チェック**
+> 1. $P \times P$ の各記号の意味と、この式が表す操作を説明してください。
+> 2. このゾーンで学んだ手法の直感的な意味と、なぜこの定式化が必要なのかを説明してください。
 
 ## 🧩 2. 直感ゾーン（15分）— なぜ DiT が次世代なのか
 
@@ -317,22 +209,20 @@ println("Image and text co-attend in the same Transformer!")
 | 49 | Unified Multimodal & Inference-Time Scaling | Show-o/BAGEL/GPT-4o, Reflect-DiT, Genie 3 | 2025-2026 フロンティア |
 | 50 | 卒業制作 | 全50回総括 + 3言語フルスタック生成AIシステム設計・実装 | シリーズ完結 |
 
-:::message
-**Course IV → V の理論的接続**: Course IV で学んだ理論が、Course V の各講義でどう応用されるか。
-
-| Course V | ← 理論的基盤 (Course IV) |
-|:---------|:------------------------|
-| 第43回 DiT | ← 第42回 統一理論 + 第39回 LDM |
-| 第44回 音声 | ← 第38回 Flow Matching |
-| 第45回 Video | ← 第37回 SDE/ODE + 第36回 DDPM |
-| 第46回 3D | ← 第35回 Score Matching |
-| 第47回 Motion/4D | ← 第46回 3D + 第41回 World Models |
-| 第48回 Science | ← 第38回 Flow Matching |
-| 第49回 Multimodal | ← 第42回 統一理論 |
-| 第50回 総括 | ← 全50回 |
-
-**鍵**: Course IV の理論は「知識」ではなく、Course V で実世界システムを構築するための**必須基盤**だ。
-:::
+> **Note:** **Course IV → V の理論的接続**: Course IV で学んだ理論が、Course V の各講義でどう応用されるか。
+>
+> | Course V | ← 理論的基盤 (Course IV) |
+> |:---------|:------------------------|
+> | 第43回 DiT | ← 第42回 統一理論 + 第39回 LDM |
+> | 第44回 音声 | ← 第38回 Flow Matching |
+> | 第45回 Video | ← 第37回 SDE/ODE + 第36回 DDPM |
+> | 第46回 3D | ← 第35回 Score Matching |
+> | 第47回 Motion/4D | ← 第46回 3D + 第41回 World Models |
+> | 第48回 Science | ← 第38回 Flow Matching |
+> | 第49回 Multimodal | ← 第42回 統一理論 |
+> | 第50回 総括 | ← 全50回 |
+>
+> **鍵**: Course IV の理論は「知識」ではなく、Course V で実世界システムを構築するための**必須基盤**だ。
 
 **修了時の到達目標**:
 1. **全モダリティでの生成システム実装** — 画像・音声・動画・3D・モーション・科学
@@ -362,7 +252,13 @@ Course V では、3つの実用モデルをデモとして使用する:
 - **第43回 aMUSEd-256**: Diffusion ではなく Masked Image Model — DiT との比較で拡散以外のアプローチを理解
 - **第45回 SmolVLM2 + LTX-Video**: 動画理解 (SmolVLM2) vs 動画生成 (LTX-Video) の対比で、マルチモーダル理解の幅を広げる
 
-### 2.3 なぜ U-Net → DiT なのか — 3つの理由
+**aMUSEd と DiT の数学的対比**: aMUSEd は Masked Image Modeling（MIM）アプローチ — マスクされたパッチを並列デコードする。
+
+$$
+p(\mathbf{x}_{\text{mask}} | \mathbf{x}_{\text{vis}}) = \prod_{i \in \text{mask}} p(x_i | \mathbf{x}_{\text{vis}})
+$$
+
+DiT は逐次的なノイズ除去（拡散）であるのに対し、aMUSEd は**条件付き独立仮定**のもと全マスクトークンを同時に予測する。12ステップという高速性はこの並列デコードから来る — 拡散の「確率的経路」を辿る必要がなく、各ステップで直接クリーンなトークンを予測する。
 
 #### 理由1: Scaling Laws の適用
 
@@ -386,7 +282,11 @@ $$
 
 **DiT の威力**: $N$ を増やせば $L(N) \downarrow$ — 計算資源をスケールさせれば性能が伸びる保証がある。
 
-#### 理由2: 帰納バイアスからの脱却
+FIDに特化したScaling Lawは次の形を取る [Zhai+ 2024]:
+$$
+\text{FID}(C) = A \cdot C^{-\beta} + \text{FID}_\infty, \quad \beta \approx 0.27
+$$
+ここで $C$ は計算量（FLOPs）、$\text{FID}_\infty$ は無限計算での理論的限界値だ。$\beta \approx 0.27$ が意味するのは：**計算量を10倍にすると FID が $10^{-0.27} \approx 0.54$ 倍に改善**する、つまりFIDがほぼ半減するということ。LLMのべき指数（$\beta \approx 0.3$）と近い値を示しており、DiTが言語モデルと同じスケーリング特性を持つことを意味する。U-Netではこの単調なスケーリングが途中で崩れる — 帰納バイアスが「天井」として機能するからだ。
 
 **U-Net の帰納バイアス**:
 - **局所性**: Conv の receptive field は局所的
@@ -408,7 +308,11 @@ $$
 - $Q, K, V$: Query, Key, Value (全て [N, D])
 - Softmax で全トークン間の重みを計算 → 大域的な関係を学習
 
-#### 理由3: 実世界での性能
+**数学的な定式化**: U-Netのconv操作 $f$ は**平行移動同変性**を満たす：
+$$
+(T_\delta \circ f)(\mathbf{x}) = (f \circ T_\delta)(\mathbf{x})
+$$
+ここで $T_\delta$ は位置 $\delta$ の平行移動操作。この性質はCNNの重み共有から直接導かれる。平行移動同変性があると「どこに移動しても同じ認識」ができるが、同時に**グローバルな絶対位置情報**を捨てることになる。画像生成では「左上に太陽、右下に海」という位置依存の構造が本質的なのに、U-Netはその表現が苦手だ。Transformerの位置エンコーディングは明示的に絶対位置を扱い、この制約から解放される。
 
 **SD3 (MM-DiT) vs SDXL (U-Net)** [Esser+ 2024] [^3]:
 - Human preference: SD3 > SDXL (テキスト忠実度・画質)
@@ -422,6 +326,22 @@ $$
 - **プロンプト理解**: テキストエンコーダ (T5/CLIP) との相性
 - **スケーラビリティ**: 8B params モデルが現実的に訓練可能
 - **コミュニティ**: HuggingFace Diffusers で DiT が標準化
+
+具体的な FID 比較を見れば差は明確だ：
+
+| モデル | バックボーン | FID-30K (ImageNet 256×256) | params |
+|:-------|:------------|:--------------------------|:-------|
+| LDM-4 | U-Net | 3.60 | 400M |
+| DiT-XL/2 | Transformer | **2.27** | 675M |
+| SiT-XL/2 | Transformer | 2.06 | 675M |
+
+DiT-XL/2 が FID 2.27 を達成した時点で、U-Netベースの LDM-4（FID 3.60）を大幅に上回る。同じパラメータ規模でTransformerが圧勝する — これはアーキテクチャの本質的な優位性であり、ハイパーパラメータ調整では埋められない差だ。
+
+FID の差 $3.60 - 2.27 = 1.33$ は画像品質において知覚的に大きな差に対応する。FID は Inception v3 特徴空間での生成分布 $p_g$ と真の分布 $p_r$ のFréchet距離：
+$$
+\text{FID} = \|\mu_r - \mu_g\|^2 + \text{Tr}(\Sigma_r + \Sigma_g - 2(\Sigma_r \Sigma_g)^{1/2})
+$$
+FID が低いほど生成画像の統計量が実画像に近い。FID < 5 はほぼ人間の目で判別困難なレベルとされており、DiT-XL/2 の 2.27 はこの閾値を大きく下回る。
 
 ### 2.4 3つの比喩で捉える DiT
 
@@ -456,11 +376,15 @@ $$
 - Zone 4: 🦀Rust — DiT 推論サーバー (Candle)
 - Zone 4: 🔮Elixir — 分散サービング (OTP supervision)
 
-:::message
-**ここまでで全体の20%完了！** DiT が U-Net を超える理由を3軸 (Scaling/帰納バイアス/実世界) で理解した。次は DiT の数式を完全導出する — 60分の数式修行ゾーンへ。
-:::
+> **Note:** **ここまでで全体の20%完了！** DiT が U-Net を超える理由を3軸 (Scaling/帰納バイアス/実世界) で理解した。次は DiT の数式を完全導出する — 60分の数式修行ゾーンへ。
 
 ---
+
+
+> Progress: 20%
+> **理解度チェック**
+> 1. $ ∝ 性能 $ の各記号の意味と、この式が表す操作を説明してください。
+> 2. このゾーンで学んだ手法の直感的な意味と、なぜこの定式化が必要なのかを説明してください。
 
 ## 📐 3. 数式修行ゾーン（60分）— DiT 完全導出
 
@@ -479,6 +403,45 @@ $$
 - 「数式は声に出して読む」
 - 「1行ずつ導出 — 飛ばさない」
 - 「具体的な数値で検証」
+
+> **⚠️ Warning:** 以降の数式は順番通りに読むこと。3.1 → 3.2 → 3.3 の順で依存関係がある。3.3 を理解するには 3.2 の AdaLN-Zero が必須。飛ばすと「なぜこの数式が必要か」が見えなくなる。
+
+DiT は**ピクセル空間**ではなく **VAE の潜在空間** $\mathbf{z} \in \mathbb{R}^{h \times w \times c}$ 上で拡散過程を行う（LDM [Rombach+ 2022] の設計）。
+
+VAE の Encoder-Decoder の役割：
+$$
+\mathbf{z} = \mathcal{E}(\mathbf{x}) \in \mathbb{R}^{h \times w \times c}, \quad \hat{\mathbf{x}} = \mathcal{D}(\mathbf{z})
+$$
+
+代表的な設定（SD3）：
+- 入力画像: $\mathbb{R}^{1024 \times 1024 \times 3}$（ピクセル空間）
+- VAE 圧縮率: $8\times$（各辺を $1/8$ に）
+- 潜在表現: $\mathbb{R}^{128 \times 128 \times 16}$（$c = 16$ チャネル）
+
+DiT は $\mathbb{R}^{128 \times 128 \times 16}$ 空間でノイズ除去を行い、生成完了後に $\mathcal{D}$ でピクセル空間に戻す。
+
+**なぜ潜在空間？** 計算量の比較：
+- ピクセル空間の DiT: $N = (1024/16)^2 = 4096$ トークン（$P = 16$）
+- 潜在空間の DiT: $N = (128/2)^2 = 4096$ トークン（$P = 2$、より細かいパッチ）
+
+同じトークン数でも**潜在空間は意味的に圧縮済み** — VAE が「どのピクセルが重要か」をすでに学習しているため、DiT はより抽象的な特徴を学習できる。ピクセル空間で直接拡散する DiT（未圧縮版）は計算量が約 $c^2 = 256$ 倍になり、現実的でない。
+
+**DiT の全体 Forward Pass 概略**:
+
+```mermaid
+graph LR
+    A["🖼️ 画像 x<br/>ℝ^{H×W×3}"] --> B["VAE Encoder ε<br/>8× 圧縮"]
+    B --> C["潜在変数 z<br/>ℝ^{h×w×c}"]
+    C --> D["Patchify<br/>P×P 分割"]
+    D --> E["パッチ列<br/>ℝ^{N×D}"]
+    E --> F["+ PE<br/>位置埋め込み"]
+    F --> G["DiT Block ×L<br/>AdaLN + Attn + MLP"]
+    G --> H["Unpatchify<br/>トークン→画像"]
+    H --> I["ノイズ予測 ε_θ<br/>ℝ^{h×w×c}"]
+    I --> J["VAE Decoder D<br/>復元"]
+    J --> K["生成画像 x̂<br/>ℝ^{H×W×3}"]
+    style G fill:#ffd700,stroke:#ff6347,stroke-width:2px
+```
 
 ### 3.1 Patchify — 画像をトークン列に変換
 
@@ -520,33 +483,46 @@ $$
 - 埋め込み後: $D = 768$ (ViT-Base と同じ)
 
 **数値検証**:
-```julia
-# Patchify implementation
-function patchify(x, P)
-    # x: [H, W, C] — input image
-    # P: patch size
-    H, W, C = size(x)
-    N_h, N_w = H ÷ P, W ÷ P
-    N = N_h * N_w
 
-    patches = zeros(N, P * P * C)
-    idx = 1
-    for i in 0:N_h-1
-        for j in 0:N_w-1
-            patch = x[i*P+1:(i+1)*P, j*P+1:(j+1)*P, :]
-            patches[idx, :] = vec(patch)  # flatten
-            idx += 1
-        end
-    end
-    return patches  # [N, P²C]
-end
+$H = W = 256$、$C = 3$（RGB）、$P = 16$ の具体例でShape flowを追う。
 
-# Test
-x_img = randn(256, 256, 3)
-patches = patchify(x_img, 16)
-println("Image shape: ", size(x_img))
-println("Patches shape: ", size(patches))  # [256, 768]
-```
+パッチ数：
+$$
+N = \frac{256}{16} \times \frac{256}{16} = 16 \times 16 = 256
+$$
+
+各パッチをflattenした次元：
+$$
+P^2 \cdot C = 16 \times 16 \times 3 = 768
+$$
+
+従って第1パッチは $\mathbf{p}_1 \in \mathbb{R}^{768}$。全パッチ列は $[\mathbf{p}_1, \ldots, \mathbf{p}_{256}] \in \mathbb{R}^{256 \times 768}$。
+
+埋め込み行列 $\mathbf{W}_{\text{patch}} \in \mathbb{R}^{768 \times 768}$ で線形変換するとShape は変わらない。Shape flow をまとめると：
+
+$$
+\mathbb{R}^{256 \times 256 \times 3} \;\xrightarrow{\text{split into patches}}\; \mathbb{R}^{256 \times 768} \;\xrightarrow{\mathbf{W}_{\text{patch}}}\; \mathbb{R}^{256 \times 768}
+$$
+
+埋め込み行列のパラメータ数は $768 \times 768 = 589{,}824$。これはちょうど Conv2d(3, 768, kernel\_size=16, stride=16) と等価であり、実装上はこの畳み込みで代替される。Positional Encodingを加えた最終Shapeも $\mathbb{R}^{256 \times 768}$—Transformerへの入力として渡せる状態だ。
+
+#### 2次元 Sinusoidal Positional Encoding の導出
+
+画像のパッチには縦 $i$・横 $j$ の2次元座標がある。1次元の Sinusoidal PE（第16回）を2次元に拡張すると：
+
+$$
+\text{PE}(i, 2k) = \sin\!\left(\frac{i}{10000^{2k/D}}\right), \quad \text{PE}(i, 2k+1) = \cos\!\left(\frac{i}{10000^{2k/D}}\right)
+$$
+
+ここで $i$ はパッチインデックス（行方向）、$k = 0, 1, \ldots, D/2 - 1$ は次元インデックス。2次元版では $D$ 次元を半分ずつ行・列に割り当てる：
+
+$$
+\mathbf{PE}(i, j) = [\underbrace{\text{PE}_{\text{row}}(i)}_{\in \mathbb{R}^{D/2}},\; \underbrace{\text{PE}_{\text{col}}(j)}_{\in \mathbb{R}^{D/2}}] \in \mathbb{R}^D
+$$
+
+**底数 10000 の意義**: 周波数 $\omega_k = 1 / 10000^{2k/D}$ は $k$ とともに指数的に小さくなる。$k = 0$ では $\omega_0 = 1.0$（1パッチ周期の高周波）、$k = D/2 - 1$ では $\omega_{D/2-1} = 1/10000$（10000パッチ周期の低周波）。$D = 768$ の場合、位置 $i \in [1, 256]$ に対してsin/cosの周期は $[2\pi, 2\pi \times 10000]$ の広いレンジをカバーする。この幅広い周波数帯域が「近いパッチは似た表現・遠いパッチは異なる表現」という性質を保証し、256パッチ全ての位置を一意に符号化できる。
+
+学習済みの位置埋め込み（DiT-XL は Learnable PE を使用）も同等の表現力を持つが、Sinusoidal PE は訓練データに含まれない解像度への外挿（ViT-L の256→512パッチへの転移）において優位性を示す。
 
 ### 3.2 AdaLN-Zero — 条件付き正規化
 
@@ -574,7 +550,16 @@ $$
 - **訓練中期**: $\gamma, \beta$ が学習されて条件 $\mathbf{c}$ の影響が徐々に増加
 - **安定性**: Skip connections (第2回で学んだ) が訓練初期の勾配を安定化
 
-**数式**:
+**なぜ Batch Normalization でなく Layer Normalization なのか？** Batch Normalization はバッチ軸で統計量を計算するため、バッチサイズへの依存がある。拡散モデルでは複数の異なるタイムステップ $t$ のサンプルが1バッチに混在するため、BN の統計量がステップ間で汚染される。LN はサンプル内の特徴軸で正規化するため、この問題が発生しない。数式で比較すると：
+
+$$
+\text{BN}: \quad \mu_{\text{BN}} = \frac{1}{B} \sum_{b=1}^B x_{b,i} \quad \text{（バッチ軸平均）}
+$$
+$$
+\text{LN}: \quad \mu_{\text{LN}} = \frac{1}{D} \sum_{i=1}^D x_i \quad \text{（特徴軸平均）}
+$$
+
+BN では異なる $t$ のサンプルが混在する $B$ サンプルで平均を取るため、「$t = 0.1$ のほぼクリーンなサンプル」と「$t = 0.9$ のほぼノイズのサンプル」の統計量が混合される。LN は各サンプル独立に正規化するため、この問題がない。これが拡散モデル全般で LN が標準的な理由だ。
 $$
 \begin{align}
 \mathbf{c} &= [\mathbf{t}, \mathbf{c}_{\text{cond}}] \quad \text{(timestep + condition)} \\
@@ -591,31 +576,57 @@ $$
 - $\gamma, \beta \in \mathbb{R}^{768}$ — MLP 出力
 
 **数値検証**:
-```julia
-# AdaLN-Zero implementation
-function adaln_zero(x, c, γ_mlp, β_mlp)
-    # x: [N, D] — input tokens
-    # c: [D_c] — condition (timestep + text)
-    μ = mean(x, dims=2)  # [N, 1]
-    σ² = var(x, dims=2, corrected=false)  # [N, 1]
-    x_norm = (x .- μ) ./ sqrt.(σ² .+ 1e-6)  # [N, D]
 
-    γ = γ_mlp(c)  # [D] — scale
-    β = β_mlp(c)  # [D] — shift
+$\mathbf{x} = [1.0,\; 2.0,\; 3.0] \in \mathbb{R}^3$ の3次元ベクトルで Layer Normalization を手計算する。
 
-    return γ' .* x_norm .+ β'  # broadcasting
-end
+平均：
+$$
+\mu = \frac{1.0 + 2.0 + 3.0}{3} = 2.0
+$$
 
-# Dummy MLPs (zero-initialized)
-γ_mlp(c) = zeros(768) .+ randn(768) * 0.01  # small random init
-β_mlp(c) = zeros(768)
+分散（偏差なし）：
+$$
+\sigma^2 = \frac{(1.0 - 2.0)^2 + (2.0 - 2.0)^2 + (3.0 - 2.0)^2}{3} = \frac{1 + 0 + 1}{3} \approx 0.667
+$$
 
-x = randn(256, 768)
-c = randn(640)
-x_out = adaln_zero(x, c, γ_mlp, β_mlp)
-println("AdaLN-Zero output mean: ", mean(x_out, dims=2)[1])  # ≈ β[1]
-println("AdaLN-Zero output var:  ", var(x_out, dims=2, corrected=false)[1])  # ≈ γ[1]²
-```
+LN出力（$\epsilon = 10^{-6}$）：
+$$
+\text{LN}(\mathbf{x}) = \frac{\mathbf{x} - 2.0}{\sqrt{0.667 + 10^{-6}}} \approx \frac{[-1,\; 0,\; 1]}{0.8165} = [-1.225,\; 0.0,\; 1.225]
+$$
+
+条件付きスケール $\gamma = 1.5$、シフト $\beta = 0.1$ を適用：
+$$
+\text{AdaLN}(\mathbf{x}) = 1.5 \times [-1.225,\; 0.0,\; 1.225] + 0.1 = [-1.737,\; 0.1,\; 1.937]
+$$
+
+ゼロ初期化時（$\gamma = 0,\; \beta = 0$）：
+$$
+\text{AdaLN-Zero}(\mathbf{x}) = 0 \times \text{LN}(\mathbf{x}) + 0 = [0,\; 0,\; 0]
+$$
+
+Residual接続で足し戻すと $\mathbf{z} + \mathbf{0} = \mathbf{z}$（恒等写像）。訓練初期の勾配安定性がここから来る — $\gamma, \beta$ が学習されるにつれて、条件 $\mathbf{c}$ の影響が徐々に増加する。
+
+#### クラスラベル条件付けの埋め込み
+
+ImageNet クラス条件付き生成では、条件ベクトル $\mathbf{c}_{\text{cond}}$ に **クラス埋め込み** を使う：
+
+$$
+\mathbf{c}_{\text{cond}} = \mathbf{E}_{\text{class}}[y] \in \mathbb{R}^{D}
+$$
+
+ここで $\mathbf{E}_{\text{class}} \in \mathbb{R}^{1000 \times D}$（ImageNet の1000クラスそれぞれに $D$ 次元ベクトル）、$y \in \{0, \ldots, 999\}$ はクラスインデックス。条件ベクトルを構成：
+
+$$
+\mathbf{c} = [\mathbf{t},\; \mathbf{c}_{\text{cond}}] = [\mathbf{t},\; \mathbf{E}_{\text{class}}[y]] \in \mathbb{R}^{D_t + D}
+$$
+
+これをAdaLN-ZeroのMLPに入力することで、「$t = 0.5$ 時点で犬クラスを生成中」という2次元の条件付けが実現する。Classifier-Free Guidance（CFG）では $y = \emptyset$（null クラス）で無条件ベクトル $\mathbf{c}_\emptyset$ を定義し、推論時に：
+
+$$
+\tilde{\mathbf{v}}_\theta(\mathbf{x}_t, t, y) = (1 + w)\, \mathbf{v}_\theta(\mathbf{x}_t, t, y) - w\, \mathbf{v}_\theta(\mathbf{x}_t, t, \emptyset)
+$$
+
+のようにガイダンス強度 $w > 0$ でサンプル品質を制御する。$w = 1.5$ が DiT-XL/2 の FID 2.27 を達成した設定だ。
 
 ### 3.3 DiT ブロック — Self-Attention + MLP
 
@@ -641,6 +652,12 @@ $$
 \end{align}
 $$
 
+**Residual 接続と勾配流の保証**: $L$ 層 DiT の勾配を考える。Residual接続 $\mathbf{z}' = \mathbf{z} + F(\mathbf{z})$ の逆伝播：
+$$
+\frac{\partial \mathcal{L}}{\partial \mathbf{z}} = \frac{\partial \mathcal{L}}{\partial \mathbf{z}'} \cdot \left(I + \frac{\partial F}{\partial \mathbf{z}}\right)
+$$
+単位行列 $I$ の存在により、$\partial F / \partial \mathbf{z} \approx 0$（訓練初期）でも勾配が $\mathbf{z}$ に直接伝わる。28層の DiT-XL では乗算連鎖 $\prod_{\ell=1}^{28}(\cdot)$ が発生するが、各層の $I$ 項が勾配消失を防ぐ。AdaLN-Zero との組み合わせで**初期化問題を完全に排除**した設計だ。
+
 **Multi-Head Self-Attention** (第16回で学んだ):
 $$
 \begin{align}
@@ -650,53 +667,113 @@ Q &= \mathbf{h}_1 W_Q, \quad K = \mathbf{h}_1 W_K, \quad V = \mathbf{h}_1 W_V \\
 \end{align}
 $$
 
-**MLP (Feed-Forward)**:
+#### スケーリング因子 $1/\sqrt{d_k}$ の必然性
+
+「なぜ $\sqrt{d_k}$ で割るのか？」— これは数値安定性の本質的な問いだ。
+
+$q, k \in \mathbb{R}^{d_k}$ が独立に標準正規分布から引かれるとする：$q_i, k_i \sim \mathcal{N}(0, 1)$。
+
+内積 $q \cdot k = \sum_{i=1}^{d_k} q_i k_i$ の期待値と分散を計算する：
+
+$$
+\mathbb{E}[q \cdot k] = \sum_{i=1}^{d_k} \mathbb{E}[q_i]\, \mathbb{E}[k_i] = 0
+$$
+
+$$
+\text{Var}(q \cdot k) = \sum_{i=1}^{d_k} \text{Var}(q_i k_i) = \sum_{i=1}^{d_k} \mathbb{E}[q_i^2]\, \mathbb{E}[k_i^2] = \sum_{i=1}^{d_k} 1 \cdot 1 = d_k
+$$
+
+つまり $\text{std}(q \cdot k) = \sqrt{d_k}$。DiT-Bの $d_k = 64$ では $\text{std} = 8$。
+
+**スケーリングなしの危険**: スコアが $\pm 8$ 程度に散らばると、Softmaxはほぼ one-hot になる：
+$$
+\text{softmax}(8, 0, 0, \ldots) \approx (1.0, 0.0, 0.0, \ldots)
+$$
+これは勾配消失（$\partial \text{softmax} / \partial x \approx 0$）を引き起こし、訓練が進まなくなる。
+
+$\sqrt{d_k}$ で割ると $\text{std}(q \cdot k / \sqrt{d_k}) = 1$ に正規化され、Softmax は適度な「soft」な分布を保つ。スケーリングは単なる慣習ではなく、訓練可能性を保証する**数学的必然**だ。
+
+#### Multi-Head の意義：異なる「注意パターン」を並列学習
+
+単一ヘッドのAttentionは1種類の関係性しか捉えられない。$H$ ヘッドに分割すると、各ヘッドが **異なる部分空間** で関係を学習できる：
+
+$$
+\text{head}_h = \text{Attention}(Q W_Q^{(h)},\; K W_K^{(h)},\; V W_V^{(h)}), \quad h = 1, \ldots, H
+$$
+
+ここで $W_Q^{(h)}, W_K^{(h)}, W_V^{(h)} \in \mathbb{R}^{D \times d_k}$（$d_k = D / H$）。
+
+DiT-XL では $H = 16$、$d_k = 72$。16ヘッドのうち：
+- ヘッド1-4：局所パッチ間の空間的隣接関係
+- ヘッド5-8：意味的類似パッチ（同色・同テクスチャ）
+- ヘッド9-12：条件 $\mathbf{c}$ に応じた長距離依存
+- ヘッド13-16：グローバルな構図の整合性
+
+これは観測されたものではなく概念的な説明だが、解釈可能性研究 [Zhao+ 2025] ではHeadごとに異なる意味的役割が実際に確認されている。全ヘッドを結合：
+
+$$
+\text{MultiHead}(\mathbf{h}) = \text{Concat}(\text{head}_1, \ldots, \text{head}_H)\, W_O
+$$
+
+$W_O \in \mathbb{R}^{D \times D}$ で元の $D$ 次元に射影。計算量は単一ヘッドと同じ $O(N^2 D)$ のままヘッド数を増やせる — これがMulti-Headの「タダ飯」だ。
 $$
 \text{MLP}(\mathbf{x}) = \text{GELU}(\mathbf{x} W_1 + \mathbf{b}_1) W_2 + \mathbf{b}_2
 $$
 - GELU: Gaussian Error Linear Unit [Hendrycks & Gimpel 2016] [^7]
 - Hidden dim: $4D$ (標準的な Transformer の設定)
 
-**具体例**: DiT-B (Base)
-- $D = 768$ — hidden dim
-- $H = 12$ — attention heads
-- $d_k = D / H = 64$ — key dim per head
-- MLP hidden: $4D = 3072$
-- Layers: $L = 12$
+**GELU の数学的定義**:
+$$
+\text{GELU}(x) = x \cdot \Phi(x) = x \cdot \frac{1}{2}\left[1 + \text{erf}\!\left(\frac{x}{\sqrt{2}}\right)\right]
+$$
+ここで $\Phi(x)$ は標準正規分布のCDF。直感: 入力 $x$ を「$x$ が大きい確率」で重み付けして通過させる。$x \to +\infty$ では $\text{GELU}(x) \approx x$（線形）、$x \to -\infty$ では $\approx 0$（ゲーティング）。ReLU の滑らかな近似として機能し、Transformer 系モデルでは標準的に使用される。
+
+#### DiT モデルファミリーのサイズ比較
+
+DiT は ViT の命名規則を踏襲する 4 つの標準サイズが定義されている [Peebles & Xie 2023]：
+
+| モデル | $D$ | Layers $L$ | Heads $H$ | Params | FID-50K |
+|:-------|:----|:-----------|:---------|:-------|:--------|
+| DiT-S/8 | 384 | 12 | 6 | 33M | 43.5 |
+| DiT-B/4 | 768 | 12 | 12 | 130M | 18.6 |
+| DiT-L/2 | 1024 | 24 | 16 | 458M | 5.02 |
+| **DiT-XL/2** | **1152** | **28** | **16** | **675M** | **2.27** |
+
+スラッシュ後の数字（/2、/4、/8）はパッチサイズ $P$ を示す。$P = 2$ では $256 \times 256$ 潜在空間で $N = 128 \times 128 / 2^2 = 16{,}384$ トークンになるため、計算量は $P = 16$ の $256$ トークン比で $(16384/256)^2 = 4096$ 倍に増大する。DiT-XL/2 が最高性能である理由はパラメータ数だけでなく、この **細かいパッチ解像度** にある。
+
+**Unpatchify**（逆変換）の数式：
+
+Transformerの出力 $\mathbf{z}_L \in \mathbb{R}^{N \times D}$ を画像空間に戻す：
+$$
+\text{Unpatchify}: \mathbb{R}^{N \times D} \to \mathbb{R}^{H \times W \times 2C}
+$$
+各トークン $\mathbf{z}^{(i)} \in \mathbb{R}^D$ を線形変換 $\mathbf{W}_{\text{out}} \in \mathbb{R}^{D \times (P^2 \cdot 2C)}$ で $P^2 \times 2C$ 次元に戻し、対応するパッチ位置に配置する。出力次元が $2C$（元の $C$ の2倍）なのは、ノイズ予測 $\epsilon_\theta$ と分散 $\Sigma_\theta$ の両方を同時に出力するためだ（第36回の DDPM と同じ設計）。
 
 **数値検証**:
-```julia
-# Simplified DiT block
-function dit_block(z, c, W_Q, W_K, W_V, W_O, W_mlp1, W_mlp2, γ_mlp, β_mlp)
-    # 1. AdaLN-Zero + Attention
-    h1 = adaln_zero(z, c, γ_mlp, β_mlp)
-    Q, K, V = h1 * W_Q, h1 * W_K, h1 * W_V
-    attn_scores = softmax(Q * K' / sqrt(size(Q, 2)), dims=2)
-    a = attn_scores * V * W_O
-    z_prime = z + a  # residual
 
-    # 2. AdaLN-Zero + MLP
-    h2 = adaln_zero(z_prime, c, γ_mlp, β_mlp)
-    mlp_out = gelu.(h2 * W_mlp1) * W_mlp2
-    z_out = z_prime + mlp_out  # residual
+$N = 3$ トークン、$d_k = 4$ の最小例でScaled Dot-Product Attentionを手計算する。
 
-    return z_out
-end
+Query行列とKey行列が単位ベクトル（各トークンが直交）だとする：
+$$
+Q = K = \begin{pmatrix} 1 & 0 & 0 & 0 \\ 0 & 1 & 0 & 0 \\ 0 & 0 & 1 & 0 \end{pmatrix} \in \mathbb{R}^{3 \times 4}
+$$
 
-# Dummy weights
-D = 768
-W_Q = randn(D, D)
-W_K = randn(D, D)
-W_V = randn(D, D)
-W_O = randn(D, D)
-W_mlp1 = randn(D, 4*D)
-W_mlp2 = randn(4*D, D)
+生のスコア行列 $QK^\top \in \mathbb{R}^{3 \times 3}$：
+$$
+QK^\top = I_3 = \begin{pmatrix} 1 & 0 & 0 \\ 0 & 1 & 0 \\ 0 & 0 & 1 \end{pmatrix}
+$$
 
-z = randn(256, D)
-c = randn(640)
-z_out = dit_block(z, c, W_Q, W_K, W_V, W_O, W_mlp1, W_mlp2, γ_mlp, β_mlp)
-println("DiT block output shape: ", size(z_out))  # [256, 768]
-```
+スケーリング後（$\sqrt{d_k} = \sqrt{4} = 2$）：
+$$
+\frac{QK^\top}{\sqrt{4}} = \frac{1}{2} I_3 = \begin{pmatrix} 0.5 & 0 & 0 \\ 0 & 0.5 & 0 \\ 0 & 0 & 0.5 \end{pmatrix}
+$$
+
+第1行に対してSoftmaxを適用：
+$$
+\text{softmax}(0.5,\; 0,\; 0) = \frac{(e^{0.5},\; e^0,\; e^0)}{e^{0.5} + e^0 + e^0} \approx \frac{(1.649,\; 1.0,\; 1.0)}{3.649} = (0.452,\; 0.274,\; 0.274)
+$$
+
+行の和：$0.452 + 0.274 + 0.274 = 1.000$ — Softmaxの規格化条件が成立。各トークンが自分自身に最大の注意（0.452）を向け、他2つに等分（0.274ずつ）している構造が読み取れる。
 
 ### 3.4 MM-DiT (SD3) — Joint Attention
 
@@ -718,6 +795,36 @@ $$
 - **Classifier-Free Guidance (CFG)** (第39回で学んだ) では、条件付き/無条件を別々に処理
 - **MM-DiT** では、画像とテキストが **同じ潜在空間** で相互作用 → より強い条件付け
 
+#### Cross-Attention vs Joint Attention の数学的比較
+
+**Cross-Attention**（従来の条件付け方式）：
+
+$$
+\text{Attn}_{\text{cross}}(Q_{\text{img}}, K_{\text{txt}}, V_{\text{txt}}) = \text{softmax}\!\left(\frac{Q_{\text{img}} K_{\text{txt}}^\top}{\sqrt{d_k}}\right) V_{\text{txt}}
+$$
+
+これはテキスト→画像の一方向の情報流だ。画像パッチ同士の関係（img↔img）は別のSelf-Attentionで計算し、テキストトークン同士の関係（txt↔txt）は完全に無視される。つまり**4種類の相互作用のうち2種類しか捉えられない**。
+
+**MM-DiT のJoint Attention**：結合されたトークン列 $[Q_{\text{img}};\, Q_{\text{txt}}]$ を使う：
+
+$$
+\text{Attn}_{\text{joint}} = \text{softmax}\!\left(\frac{[Q_{\text{img}};\, Q_{\text{txt}}]\,[K_{\text{img}};\, K_{\text{txt}}]^\top}{\sqrt{d_k}}\right)[V_{\text{img}};\, V_{\text{txt}}]
+$$
+
+アテンション行列 $A \in \mathbb{R}^{(N_{\text{img}} + N_{\text{txt}}) \times (N_{\text{img}} + N_{\text{txt}})}$ をブロック分解すると：
+
+$$
+A = \begin{pmatrix} A_{\text{img}\to\text{img}} & A_{\text{img}\to\text{txt}} \\ A_{\text{txt}\to\text{img}} & A_{\text{txt}\to\text{txt}} \end{pmatrix}
+$$
+
+**4つのブロックが1回の行列積で同時に計算される**：
+- $A_{\text{img}\to\text{img}}$：画像パッチ間の空間的関係
+- $A_{\text{img}\to\text{txt}}$：画像がテキストを参照（「どの単語に対応するパッチか」）
+- $A_{\text{txt}\to\text{img}}$：テキストが画像を参照（「この単語はどのパッチに影響するか」）
+- $A_{\text{txt}\to\text{txt}}$：テキストトークン間の文脈関係
+
+Cross-Attentionでは $A_{\text{txt}\to\text{txt}}$ が得られない。SD3がT5-XXLの文脈表現をそのまま活かせるのは、Joint Attentionがテキストの文脈情報を動的に更新し続けるからだ。
+
 **SD3 の3つのテキストエンコーダ**:
 1. CLIP ViT-L/14 — 画像-テキスト align
 2. CLIP ViT-bigG/14 — より大規模な CLIP
@@ -735,31 +842,52 @@ $$
 - $L = 24$ — layers
 
 **数値検証**:
-```julia
-# MM-DiT joint attention
-function mmdit_attention(z_img, z_txt, W_Q, W_K, W_V, W_O)
-    # Concatenate image and text
-    z = vcat(z_img, z_txt)  # [N_img + N_txt, D]
 
-    # Joint attention
-    Q, K, V = z * W_Q, z * W_K, z * W_V
-    attn_scores = softmax(Q * K' / sqrt(size(Q, 2)), dims=2)
-    a = attn_scores * V * W_O
+SD3 Mediumの具体値でJoint Attentionの計算量を見積もる。
 
-    # Split back
-    N_img = size(z_img, 1)
-    z_img_out = z[1:N_img, :] + a[1:N_img, :]
-    z_txt_out = z[N_img+1:end, :] + a[N_img+1:end, :]
+$N_{\text{img}} = 4096$、$N_{\text{txt}} = 256$、$D = 1536$ の場合：
+$$
+N_{\text{total}} = N_{\text{img}} + N_{\text{txt}} = 4096 + 256 = 4352
+$$
 
-    return z_img_out, z_txt_out
-end
+Joint Attention行列のサイズ：
+$$
+N_{\text{total}}^2 = 4352^2 = 18{,}939{,}904 \approx 1.9 \times 10^7 \text{ 要素}
+$$
 
-z_img = randn(4096, 1536)
-z_txt = randn(256, 1536)
-z_img_out, z_txt_out = mmdit_attention(z_img, z_txt, W_Q, W_K, W_V, W_O)
-println("MM-DiT Image output: ", size(z_img_out))  # [4096, 1536]
-println("MM-DiT Text output:  ", size(z_txt_out))  # [256, 1536]
-```
+1層あたりのFLOPs概算（$QK^\top$ 行列積）：
+$$
+O_{\text{attn}} \approx N_{\text{total}}^2 \times D = 4352^2 \times 1536 \approx 2.9 \times 10^{10}
+$$
+
+全24層の合計：
+$$
+O_{\text{total}} \approx 24 \times 2.9 \times 10^{10} \approx 7.0 \times 10^{11} \text{ FLOPs}
+$$
+
+比較: 仮に Cross-Attentionのみなら $N_{\text{img}} \times N_{\text{txt}} = 4096 \times 256 = 1{,}048{,}576$（Joint Attentionの約5.5%）。しかし Cross-Attentionでは画像パッチ同士の関係 $N_{\text{img}}^2 = 1.68 \times 10^7$ を別途計算する必要があり、トータルでは変わらない。Joint Attentionは4種類の相互作用（img↔img, img↔txt, txt↔img, txt↔txt）を1回のMatmulで同時に捉える点が効率的だ。
+
+#### QK-Normalization — SD3 の大規模安定化技術
+
+SD3 は8Bパラメータの大規模モデルを安定して訓練するため **QK-Normalization** を採用する。通常のAttentionでは：
+
+$$
+\text{Attention}(Q, K, V) = \text{softmax}\!\left(\frac{QK^\top}{\sqrt{d_k}}\right) V
+$$
+
+大規模モデルでは $Q, K$ のノルムが訓練中に爆発的に増大し、$QK^\top / \sqrt{d_k}$ のスコアが極端に大きくなってSoftmaxが飽和する。QK-Normalizationは Query と Key それぞれを $\ell_2$ 正規化する：
+
+$$
+\hat{Q} = \frac{Q}{\|Q\|_2}, \quad \hat{K} = \frac{K}{\|K\|_2}
+$$
+
+$$
+\text{Attention}_{\text{QKnorm}}(\hat{Q}, \hat{K}, V) = \text{softmax}\!\left(\frac{\hat{Q}\hat{K}^\top}{\sqrt{d_k}}\right) V
+$$
+
+$\hat{Q}, \hat{K}$ のノルムは常に1なので、内積 $\hat{Q}\hat{K}^\top \in [-1, +1]$（コサイン類似度）に束縛される。スケーリング後のスコアは $[-1/\sqrt{d_k}, +1/\sqrt{d_k}]$ の範囲に収まり、訓練全体を通じてSoftmaxが適度な分布を保つ。
+
+SD3の実験では QK-Normなしでは 500M params 程度で訓練が不安定化し始めたのに対し、QK-Normありでは 8B paramsまでスケール可能だったと報告されている。スケーリングにとってアーキテクチャの数値安定性は性能と同等に重要だ。
 
 ### 3.5 SiT (Stochastic Interpolants) — Interpolant-based DiT
 
@@ -788,32 +916,65 @@ $$
 - **多様性向上**: 同じ $\mathbf{x}_1$ から異なる生成経路を探索
 - **モード崩壊回避**: Flow Matching の決定論性が原因のモード崩壊を緩和
 
+#### SiT の Fokker-Planck 方程式
+
+SiT が確率過程であることを厳密に示す。Stochastic Interpolant は次の確率微分方程式（SDE）に対応する：
+
+$$
+d\mathbf{x}_t = \mathbf{b}(\mathbf{x}_t, t)\, dt + \sigma(t)\, d\mathbf{W}_t
+$$
+
+ここで $\mathbf{W}_t$ は標準ブラウン運動、$\sigma(t) = \gamma'(t)$ は拡散係数。対応する Fokker-Planck 方程式（確率密度 $\rho_t$ の時間発展）：
+
+$$
+\frac{\partial \rho_t}{\partial t} = -\nabla \cdot (\mathbf{b}\, \rho_t) + \frac{\sigma(t)^2}{2} \Delta \rho_t
+$$
+
+$\gamma(t) = 0$（Flow Matching）のとき $\sigma = 0$ となり Fokker-Planck は連続方程式 $\partial_t \rho_t = -\nabla \cdot (\mathbf{b}\, \rho_t)$ に退化する — これがODE経路の直線性の本質だ。$\gamma > 0$ では拡散項 $(\sigma^2/2) \Delta \rho_t$ が加わり、確率密度が「広がる」方向に動く。この広がりが多様性向上をもたらす一方、軌道の曲率（curvature）が増加してサンプリングに多くのNFEが必要になるトレードオフがある。
+
+**DDPM との統一的理解**: $\alpha(t) = \sqrt{\bar{\alpha}_t}$、$\beta(t) = 0$、$\gamma(t) = \sqrt{1 - \bar{\alpha}_t}$ と設定すると Stochastic Interpolant は DDPM の前向き過程と一致する。$\alpha(t) = 1-t$、$\beta(t) = t$、$\gamma(t) = 0$ では Flow Matching（直線補間）。SiT は両者を **同一フレームワーク** として内包する。
+
+#### タイムステップ埋め込みの構成
+
+DiT はタイムステップ $t \in [0, T]$ を条件ベクトル $\mathbf{t} \in \mathbb{R}^{D_t}$ に変換してAdaLN-Zeroに渡す。この変換は **Sinusoidal Embedding + 2層MLP** で行われる：
+
+$$
+\mathbf{t}^{\text{sin}} = \left[\sin\!\left(\frac{t}{10000^{2k/D_t}}\right), \cos\!\left(\frac{t}{10000^{2k/D_t}}\right)\right]_{k=0}^{D_t/2 - 1} \in \mathbb{R}^{D_t}
+$$
+
+$$
+\mathbf{t} = \text{MLP}(\mathbf{t}^{\text{sin}}) \in \mathbb{R}^{D_t}
+$$
+
+$D_t = 256$（DiT-B）の場合、各次元が異なる周波数でタイムステップを符号化し、MLPが非線形に組み合わせる。この埋め込みが $\gamma(\mathbf{c})$ および $\beta(\mathbf{c})$ のMLP入力に結合されることで、「$t = 0.1$（ほぼデータ）と $t = 0.9$（ほぼノイズ）では全く異なるスケール・シフトを適用する」という条件付き挙動が実現する。
+
 **数値検証**:
-```julia
-# SiT interpolation
-function sit_interpolate(x0, x1, t, α, β, γ)
-    # x0: noise, x1: data, t: time
-    z = randn(size(x0))  # stochastic term
-    xt = α(t) .* x0 .+ β(t) .* x1 .+ γ(t) .* z
-    return xt
-end
 
-# Interpolation functions
-α(t) = 1 - t
-β(t) = t
-γ(t) = 0.1 * sqrt(t * (1 - t))  # stochastic component
+線形補間スケジュール $\alpha(t) = 1 - t$、$\beta(t) = t$（Flow Matchingと同形）で $t = 0.5$ を計算する。
 
-x0 = randn(256, 768)  # noise
-x1 = randn(256, 768)  # data
-t = 0.5
+$\mathbf{x}_0 = [2.0,\; 0.0]$（ノイズサンプル）、$\mathbf{x}_1 = [0.0,\; 2.0]$（データサンプル）のとき：
 
-xt_sit = sit_interpolate(x0, x1, t, α, β, γ)
-xt_fm = α(t) .* x0 .+ β(t) .* x1  # Flow Matching (deterministic)
+補間係数：
+$$
+\alpha(0.5) = 1 - 0.5 = 0.5, \quad \beta(0.5) = 0.5
+$$
 
-println("SiT variance:  ", var(xt_sit))
-println("FM variance:   ", var(xt_fm))
-println("SiT adds stochasticity: ", var(xt_sit) > var(xt_fm))
-```
+中間点（確率的項 $\gamma = 0$ の場合）：
+$$
+\mathbf{x}_{0.5} = 0.5 \times [2.0,\; 0.0] + 0.5 \times [0.0,\; 2.0] = [1.0,\; 1.0]
+$$
+
+速度場（真値、$\alpha'(t) = -1$、$\beta'(t) = 1$）：
+$$
+\dot{\mathbf{x}}_t = \alpha'(t)\, \mathbf{x}_0 + \beta'(t)\, \mathbf{x}_1 = (-1) \times [2.0,\; 0.0] + 1 \times [0.0,\; 2.0] = [-2.0,\; 2.0]
+$$
+
+ノルム：
+$$
+\|\dot{\mathbf{x}}_t\| = \sqrt{(-2.0)^2 + 2.0^2} = \sqrt{8} = 2\sqrt{2} \approx 2.83
+$$
+
+線形補間では $\|\dot{\mathbf{x}}_t\| = \|\mathbf{x}_1 - \mathbf{x}_0\|$ が $t$ によらず一定 — これが **ODE経路の直線性**を保証し、少ないNFE（Number of Function Evaluations）でサンプリングできる理由だ。確率的補間（$\gamma > 0$）では速度場にノイズが加わり $\|\dot{\mathbf{x}}_t\|$ は時変になるが、多様性向上というトレードオフがある。
 
 ### 3.6 U-Net vs DiT の計算量比較
 
@@ -841,7 +1002,87 @@ $$
 
 **結論**: DiT は U-Net と **同程度の計算量** で、より高い性能を達成する (Scaling Laws の恩恵)。
 
-### 3.7 ⚔️ Boss Battle: DiT Forward Pass 完全実装
+**パッチサイズ $P$ のトレードオフ**: $P$ を小さくすると $N$ が増えて表現力が向上するが計算量は $N^2 \propto P^{-4}$ で増大する。$P$ を2倍にすると計算量は16分の1になるが解像度が落ちる。DiT-XL/2 の $P=2$（潜在空間での計算なので実質的に $P=2 \times 8 = 16$ ピクセル相当）はこのトレードオフの最良点として実験的に選ばれた値だ。
+
+固定の計算予算 $C$（FLOPs）のもとで、モデルサイズ $N$ とデータ量 $D$ をどう配分すれば損失が最小化できるか？これがいわゆる Chinchilla 問題だ。
+
+DiTにおける計算量とモデルサイズ・データ量の関係：
+$$
+C \approx 6 \cdot N \cdot D \quad \text{（訓練FLOPsの近似式）}
+$$
+
+損失のスケーリング：
+$$
+\mathcal{L}(N, D) = \left(\frac{N_c}{N}\right)^{\alpha_N} + \left(\frac{D_c}{D}\right)^{\alpha_D} + \mathcal{L}_\infty
+$$
+
+$C$ を固定して $\mathcal{L}$ を最小化する最適解は Lagrange 乗数法で求まる：
+
+$$
+N^*(C) \propto C^{\frac{\alpha_D}{\alpha_N + \alpha_D}}, \quad D^*(C) \propto C^{\frac{\alpha_N}{\alpha_N + \alpha_D}}
+$$
+
+DiT の実験的推定 [Zhai+ 2024] では $\alpha_N \approx \alpha_D$（モデルとデータが等配分に近い）。これは「同じFLOPsならモデルを2倍大きくするか、データを2倍増やすか、どちらも同じ効果がある」ことを意味する。U-Netではデータスケーリングの恩恵が Transformer より小さい（帰納バイアスがデータ効率を悪化させる）ため、DiTの等配分原理はアーキテクチャ優位性のもう一つの証拠だ。
+
+### 3.6b DiT のアテンション複雑度と FlashAttention
+
+DiT-XL の $N = 256$（パッチサイズ16、256×256画像）では、1層のAttention行列は：
+
+$$
+A \in \mathbb{R}^{256 \times 256}, \quad \text{要素数} = 256^2 = 65{,}536
+$$
+
+ヘッド数 $H = 16$ を含めると：
+$$
+65{,}536 \times 16 = 1{,}048{,}576 \approx 10^6 \text{ 要素/層}
+$$
+
+Naive Attentionの計算量と空間計算量：
+$$
+O_{\text{compute}} = O(N^2 d), \quad O_{\text{memory}} = O(N^2)
+$$
+
+$N = 256$ では Attention行列のメモリは問題ないが、高解像度（SD3: $N_{\text{img}} = 4096$）では $4096^2 = 16{,}777{,}216$ 要素 × float16 = **32MB/層** に膨らむ。24層では 768MB — VRAM容量に直撃する。
+
+**FlashAttention** [Dao et al., 2022] は SRAM のオンチップキャッシュを活用してAttention行列を陽に作らずに計算する：
+
+$$
+O_{\text{memory}}^{\text{Flash}} = O(N \cdot d) \quad \text{（線形メモリ）}
+$$
+
+アルゴリズムの核心は **タイル化（tiling）**: $N \times N$ のAttention行列を $B_r \times B_c$ のブロックに分割し、各ブロックをSRAM内で完結させる。HBM（GPU DRAM）へのアクセス回数は：
+$$
+O\!\left(\frac{N^2 d}{\text{SRAM\_size}}\right) \quad \text{（SRAM\_size} \approx 20\text{MB on A100）}
+$$
+
+計算量は同じ $O(N^2 d)$ だが、**HBMアクセスが約10-20倍削減**され、実効スループットが2-4倍向上する。DiT-XL/2の訓練において FlashAttention は非オプション — 標準的な実装では使わない選択肢がない。
+
+SD3・FLUXのような $N_{\text{total}} = 4352$ のMM-DiTでは、Attention行列 $\approx 145\text{MB/層}$ がFlashAttentionなしには成立しない。これが2024年以降の大規模DiT訓練がFlashAttention v2前提で設計されている理由だ。
+
+**FlashAttention の online softmax trick**: 標準的なSoftmax計算は2パスが必要だ（1パス目で最大値を求め、2パス目で指数和を計算）。FlashAttentionは **online softmax** アルゴリズムを使って1パスで完結させる：
+
+タイル $i$ の処理中に現在の最大値 $m_i$ と累積和 $\ell_i$ を保持：
+$$
+m_i^{\text{new}} = \max(m_i,\; \max(\mathbf{s}_{\text{new}})), \quad \ell_i^{\text{new}} = e^{m_i - m_i^{\text{new}}} \ell_i + \sum e^{\mathbf{s}_{\text{new}} - m_i^{\text{new}}}
+$$
+
+この漸化式により、Attention行列を陽に保持せず O(N) メモリでSoftmaxを計算できる。数値安定性（$m_i$ によるオーバーフロー防止）と計算効率を同時に達成した**アルゴリズム的傑作**だ。
+
+#### パラメータ効率の比較：DiT vs U-Net
+
+同じFIDを達成するために必要なパラメータ数を比較すると DiT の優位性が見える。
+
+FID 4.0 程度を達成するモデルの比較：
+
+| モデル | バックボーン | Params | FID | GFLOPS/forward |
+|:-------|:------------|:-------|:----|:--------------|
+| LDM-4 (DDPM) | U-Net | 400M | 3.60 | 103 |
+| ADM [Dhariwal+ 2021] | U-Net | 554M | 4.59 | 742 |
+| **DiT-XL/2** | Transformer | **675M** | **2.27** | **118** |
+
+DiT-XL/2 は ADM より少ない FLOPs でより高い FID を達成する。ADMは Attention を U-Net に追加した特殊バージョンだが、それでも Transformer ベースの DiT に及ばない。
+
+**なぜ DiT はパラメータ効率が良いのか？** Transformer のパラメータは全トークン位置で共有される（重み共有はないが、位置に依存しないアーキテクチャ）。各 DiT ブロックは「$N$ パッチ全てに同じ重みを適用」するため、パラメータが位置に無駄なく使われる。U-Net の Conv は各層で異なる空間解像度に特化したパラメータを持ち、低解像度層のパラメータは高解像度情報を扱えない — これがパラメータ効率の差の本質だ。
 
 **Challenge**: DiT の Forward Pass を1行ずつ実装し、ノイズ予測まで完走する。
 
@@ -863,98 +1104,11 @@ $$
 $$
 
 **完全実装**:
-```julia
-# Full DiT Forward Pass
-function dit_forward(x, t, c, dit_params, L)
-    # x: [H, W, C] — input image
-    # t: [D_t] — timestep embedding
-    # c: [D_c] — condition embedding
-    # dit_params: Dict with all weights
-    # L: number of layers
 
-    # 1. Patchify
-    P = 16  # patch size
-    patches = patchify(x, P)  # [N, P²C]
-    W_patch = dit_params["W_patch"]
-    z = patches * W_patch  # [N, D]
-
-    # 2. Positional Encoding
-    PE = dit_params["PE"]  # [N, D]
-    z = z .+ PE
-
-    # 3. DiT blocks
-    for ℓ in 1:L
-        W_Q = dit_params["W_Q_$ℓ"]
-        W_K = dit_params["W_K_$ℓ"]
-        W_V = dit_params["W_V_$ℓ"]
-        W_O = dit_params["W_O_$ℓ"]
-        W_mlp1 = dit_params["W_mlp1_$ℓ"]
-        W_mlp2 = dit_params["W_mlp2_$ℓ"]
-        γ_mlp = dit_params["γ_mlp_$ℓ"]
-        β_mlp = dit_params["β_mlp_$ℓ"]
-
-        z = dit_block(z, vcat(t, c), W_Q, W_K, W_V, W_O, W_mlp1, W_mlp2, γ_mlp, β_mlp)
-    end
-
-    # 4. Unpatchify
-    W_unpatch = dit_params["W_unpatch"]
-    patches_out = z * W_unpatch  # [N, P²C]
-    x_pred = unpatchify(patches_out, P, size(x))  # [H, W, C]
-
-    return x_pred  # noise prediction ε_θ(x_t, t)
-end
-
-# Unpatchify (inverse of patchify)
-function unpatchify(patches, P, img_size)
-    H, W, C = img_size
-    N_h, N_w = H ÷ P, W ÷ P
-    x = zeros(H, W, C)
-    idx = 1
-    for i in 0:N_h-1
-        for j in 0:N_w-1
-            patch = reshape(patches[idx, :], P, P, C)
-            x[i*P+1:(i+1)*P, j*P+1:(j+1)*P, :] = patch
-            idx += 1
-        end
-    end
-    return x
-end
-
-# Initialize dummy params
-D = 768
-L = 12
-dit_params = Dict(
-    "W_patch" => randn(768, D),
-    "PE" => randn(256, D),
-    "W_unpatch" => randn(D, 768)
-)
-for ℓ in 1:L
-    dit_params["W_Q_$ℓ"] = randn(D, D)
-    dit_params["W_K_$ℓ"] = randn(D, D)
-    dit_params["W_V_$ℓ"] = randn(D, D)
-    dit_params["W_O_$ℓ"] = randn(D, D)
-    dit_params["W_mlp1_$ℓ"] = randn(D, 4*D)
-    dit_params["W_mlp2_$ℓ"] = randn(4*D, D)
-    dit_params["γ_mlp_$ℓ"] = c -> zeros(D)
-    dit_params["β_mlp_$ℓ"] = c -> zeros(D)
-end
-
-# Test
-x = randn(256, 256, 3)
-t = randn(128)
-c = randn(512)
-ε_pred = dit_forward(x, t, c, dit_params, L)
-println("✅ DiT Forward Pass Complete!")
-println("Input shape:  ", size(x))
-println("Output shape: ", size(ε_pred))
-println("Noise prediction ε_θ(x_t, t) computed!")
-```
 
 **ボス撃破！** DiT の Forward Pass を完全実装した。Patchify → DiT Blocks → Unpatchify の流れで、画像からノイズ予測まで辿り着いた。
 
-:::message
-**ここまでで全体の50%完了！** 数式修行ゾーン完走。DiT・MM-DiT・SiT の数式を完全導出した。次は実装ゾーン — Julia/Rust/Elixir で DiT を動かす。
-:::
+> **Note:** **ここまでで全体の50%完了！** 数式修行ゾーン完走。DiT・MM-DiT・SiT の数式を完全導出した。次は実装ゾーン — Julia/Rust/Elixir で DiT を動かす。
 
 ### 3.7 Scaling Laws for Diffusion Transformers
 
@@ -1047,27 +1201,19 @@ $$
 
 **実装（Julia概念コード）**:
 
-```julia
-# μP初期化
-function μP_init(d_in, d_out)
-    σ = 1 / sqrt(d_in)  # ← SP: σ = 1/sqrt(d_out)
-    W = randn(d_out, d_in) * σ
-    return W
-end
 
-# μP学習率
-function μP_lr(η_base, d_hidden)
-    return η_base / d_hidden  # ← SP: η = η_base (固定)
-end
+#### μP の理論的背景: 無限幅極限と特徴学習
 
-# μP forward
-function μP_linear(x, W)
-    d = size(W, 2)
-    return (1 / sqrt(d)) * (W * x)  # ← SP: W * x (スケーリングなし)
-end
-```
+μP の数学的根拠は**無限幅極限**（infinite width limit）にある。標準パラメータ化（SP）でネットワーク幅 $d \to \infty$ の極限を取ると、各層の出力は**ガウス過程（GP）**に収束し、特徴が学習されない（Neural Tangent Kernel 体制）。これは訓練が「カーネル法の模倣」に退化することを意味する。
 
-### 3.8 高速Sampling理論: DPM-Solver++
+μP ではこの問題を解決する: 幅 $d$ に応じてパラメータ更新スケールを調整することで、$d \to \infty$ でも各層が**有意義な特徴を学習し続ける**（Maximum Update Parameterization の由来）。
+
+キーとなる条件:
+- **入力層**: 重みは $\mathcal{N}(0, 1/d_{\text{in}})$ で初期化（SP と同じ）
+- **隠れ層**: 重みは $\mathcal{N}(0, 1/d_{\text{hidden}})$、学習率は $\eta / d_{\text{hidden}}$
+- **出力層**: $1/\sqrt{d}$ スケーリングを追加
+
+この設定下では、幅 $d = 100$ のモデルで最適化した学習率 $\eta^*$ が $d = 10{,}000$ のモデルでも最適であり続けることが**理論的に証明**されている。DiT に適用すると、small-scale（$\sim$30M）の proxy モデルで optimal learning rate サーチを行い、その値を大規模（$\sim$1B）モデルに直接転移できる — 訓練コストが理論上 100 倍以上削減できる可能性がある。
 
 **論文**: Lu et al., "DPM-Solver++: Fast Solver for Guided Sampling of Diffusion Probabilistic Models," arXiv:2211.01095, 2023[^3]
 
@@ -1124,7 +1270,7 @@ $$
 
 ここで$h = \lambda_{i+1} - \lambda_i$。
 
-**Multistep法**: 過去の$x_\theta$値を再利用してさらに高次近似:
+**Multistep法**: 過去の$x_\theta$値を再利用して高次近似:
 
 $$
 x_{i+1} = a_0 x_i + \sum_{k=0}^K b_k x_\theta(x_{i-k}, \lambda_{i-k})
@@ -1146,52 +1292,27 @@ $$
 
 **実装（Julia概念コード）**:
 
-```julia
-# DPM-Solver++ single step
-function dpm_solver_pp_step(x_t, t_cur, t_next, ε_θ, α, σ)
-    # Current and next noise schedules
-    α_t, σ_t = α(t_cur), σ(t_cur)
-    α_s, σ_s = α(t_next), σ(t_next)
+#### DPM-Solver++ のステップサイズスケジュールの最適化
 
-    # λ (log-SNR)
-    λ_t = log(α_t / σ_t)
-    λ_s = log(α_s / σ_s)
-    h = λ_s - λ_t
+DPM-Solver++ が15-20ステップで高品質生成できる理由をODE近似誤差の観点から分析する。
 
-    # Data prediction
-    x_θ_t = (x_t - σ_t * ε_θ(x_t, t_cur)) / α_t
+$p$ 次の数値解法は局所打ち切り誤差（local truncation error）が $O(h^{p+1})$（$h$ はステップサイズ）。トータル誤差はステップ数 $S$ を使って：
 
-    # First-order update
-    x_s = (α_s / α_t) * x_t - α_s * (exp(-λ_s) - exp(-λ_t)) * x_θ_t
+$$
+E_{\text{total}} \approx S \cdot O(h^{p+1}) = S \cdot O\!\left(\frac{T^{p+1}}{S^{p+1}}\right) = O\!\left(\frac{T^{p+1}}{S^p}\right)
+$$
 
-    # Second-order correction (if we have x_θ from previous step)
-    if !isnothing(x_θ_prev)
-        # Linear extrapolation
-        x_θ_s = (x_s - σ_s * ε_θ(x_s, t_next)) / α_s
-        D1 = (x_θ_s - x_θ_t) / h
-        x_s = x_s - (α_s * h^2 / 2) * D1
-    end
+DDIM（1次精度、$p = 1$）と DPM-Solver++（3次精度、$p = 3$）の比較：
+- DDIM で誤差 $\epsilon$ を達成: $S \sim O(\epsilon^{-1})$ ステップ必要
+- DPM-Solver++ で同誤差: $S \sim O(\epsilon^{-1/3})$ ステップで達成
 
-    return x_s
-end
+FID 10 程度を達成するのに DDIM は 250 ステップ必要だったが、DPM-Solver++ では理論的に $250^{1/3} \approx 6.3$ — つまり **6-7 ステップ** で同等品質が得られる計算になる（実際は15-20ステップが安全圏）。
 
-# Full sampling loop
-function dpm_solver_pp_sample(x_T, num_steps, ε_θ, α, σ)
-    t_steps = LinRange(1.0, 0.0, num_steps + 1)
-    x = x_T
-    x_θ_prev = nothing
-
-    for i in 1:num_steps
-        t_cur = t_steps[i]
-        t_next = t_steps[i+1]
-        x = dpm_solver_pp_step(x, t_cur, t_next, ε_θ, α, σ)
-    end
-
-    return x
-end
-```
-
-### 3.9 MM-DiT深掘り: Stable Diffusion 3 & FLUX
+ステップサイズの配置（スケジュール）も重要だ。均等割りより**対数 SNR 空間での等間隔配置**が低誤差：
+$$
+\lambda_i = \lambda_T + \frac{i}{S}(\lambda_0 - \lambda_T), \quad i = 0, 1, \ldots, S
+$$
+$t_i = \text{SNR}^{-1}(\lambda_i)$ で時間軸に変換。これが DDIM の等時刻間隔より少ないステップで高品質を達成する理由だ。
 
 #### 3.9.1 SD3のMM-DiT Architecture
 
@@ -1265,44 +1386,26 @@ CFGの$w$を学習時に蒸留 → 推論時にguidance-freeで高品質生成�
 
 **実装の核心（Julia概念コード）**:
 
-```julia
-# FLUX parallel DiT block
-function flux_dit_block(z, t, c, ps)
-    # AdaLN conditioning
-    z_norm = adaln(z, t, c, ps.adaln)
 
-    # Parallel Attention + MLP
-    attn_out = multihead_attention(z_norm, ps.attn)
-    mlp_out = mlp(z_norm, ps.mlp)
+#### RoPE の相対位置符号化の数学的証明
 
-    # Parallel addition
-    z_out = z + attn_out + mlp_out
+FLUXで採用された RoPE が相対位置を符号化することを証明する。位置 $m$ のQuery と位置 $n$ のKey の内積を計算する：
 
-    return z_out
-end
+$$
+(\text{RoPE}(q, m))^\top (\text{RoPE}(k, n)) = q^\top R(m)^\top R(n) k = q^\top R(n - m) k
+$$
 
-# RoPE implementation
-function apply_rope(q, k, pos)
-    d = size(q, 1)
-    θ = [10000^(-2i/d) for i in 0:(d÷2-1)]
+ここで $R(m) = \begin{pmatrix} \cos(m\theta) & -\sin(m\theta) \\ \sin(m\theta) & \cos(m\theta) \end{pmatrix}$ は回転行列で、$R(m)^\top R(n) = R(n-m)$（回転行列の乗法性）。
 
-    for i in 1:2:d
-        m = pos
-        cos_mθ = cos(m * θ[i÷2+1])
-        sin_mθ = sin(m * θ[i÷2+1])
+**核心**: 内積が **位置差 $n - m$ のみ**に依存する。つまりRoPEは「トークン $m$ とトークン $n$ は $|n - m|$ だけ離れている」という相対位置情報を自動的にAttentionスコアに埋め込む。Sinusoidal PEが絶対位置を符号化するのに対し、RoPEは相対位置を符号化 — 文脈長の一般化（訓練時より長い系列への転移）においてRoPEが優れている理由だ。
 
-        # Rotate (q_i, q_{i+1})
-        q[i], q[i+1] = cos_mθ * q[i] - sin_mθ * q[i+1], sin_mθ * q[i] + cos_mθ * q[i+1]
-        k[i], k[i+1] = cos_mθ * k[i] - sin_mθ * k[i+1], sin_mθ * k[i] + cos_mθ * k[i+1]
-    end
+2次元版 RoPE（FLUX での画像用）は縦・横の各方向に独立した回転行列を適用する：
+$$
+\text{RoPE2D}(q, i, j) = R_{\text{row}}(i) \otimes R_{\text{col}}(j)\, q
+$$
+この設計により「右に3パッチ、下に2パッチ移動した位置」という2次元相対位置をAttentionが直接学習できる。
 
-    return q, k
-end
-```
-
-### 3.10 DiTの解釈可能性
-
-**論文**: Zhao et al., "Diffusion Transformers Learn Highly Interpretable Features," arXiv:2502.04320, 2025[^7]
+**論文**: Helbling, A. et al., "ConceptAttention: Diffusion Transformers Learn Highly Interpretable Features," arXiv:2502.04320, 2025[^7]
 
 **発見**: DiTの中間層の特徴は**意味的に解釈可能**な構造を持つ。
 
@@ -1320,471 +1423,64 @@ $$
 
 例: $\mathbf{v}_{\text{smile}}$方向に$\alpha=2.0$で加算 → 「笑顔を強調」
 
+**概念方向ベクトルの抽出方法**: 「笑顔あり」と「笑顔なし」の画像ペアを生成し、中間層の特徴差分を取る：
+$$
+\mathbf{v}_{\text{concept}} = \mathbb{E}\!\left[\mathbf{z}^{(\ell)}_{\text{with concept}} - \mathbf{z}^{(\ell)}_{\text{without concept}}\right]
+$$
+この方向に沿って $\alpha$ を変化させると、生成画像の「笑顔度」が連続的に制御できる。DiTの線形分離性（各概念が特定の方向に対応）はGANのlatent space解釈可能性研究（StyleGAN等）と同様の現象だが、**条件付き拡散過程の中間表現**でも同様の構造が現れることが確認された点が新しい。
+
 **応用**: Training-free画像編集、Concept steering、Adversarial robustness向上。
 
-:::message
-**進捗**: 全体の65%完了。Scaling Laws、μP、DPM-Solver++、SD3/FLUXアーキテクチャ、解釈可能性を完全習得。DiTの理論的完成度が2020-2025で爆発的に向上した。
-:::
+#### DiT の訓練目標関数の比較：DDPM vs Rectified Flow
 
----
+DiT は CNN バックボーンを置き換えるだけでなく、訓練目標関数も選択肢がある。
 
-## 💻 4. 実装ゾーン（45分）— Production-Ready DiT実装
+**DDPM 目標** [Ho+ 2020]（オリジナル DiT で使用）:
+$$
+\mathcal{L}_{\text{DDPM}} = \mathbb{E}_{t, \mathbf{x}_0, \boldsymbol{\epsilon}} \left[\|\boldsymbol{\epsilon} - \boldsymbol{\epsilon}_\theta(\mathbf{x}_t, t)\|^2\right]
+$$
+ここで $\mathbf{x}_t = \sqrt{\bar{\alpha}_t}\, \mathbf{x}_0 + \sqrt{1 - \bar{\alpha}_t}\, \boldsymbol{\epsilon}$、$\boldsymbol{\epsilon} \sim \mathcal{N}(0, I)$。
+
+**Rectified Flow 目標** [Liu+ 2022]（SD3・FLUX で使用）:
+$$
+\mathcal{L}_{\text{RF}} = \mathbb{E}_{t, \mathbf{x}_0, \mathbf{x}_1} \left[\|\mathbf{x}_1 - \mathbf{x}_0 - \mathbf{v}_\theta(\mathbf{x}_t, t)\|^2\right]
+$$
+ここで $\mathbf{x}_t = t\, \mathbf{x}_1 + (1 - t)\, \mathbf{x}_0$、真の速度場 $\mathbf{v}^* = \mathbf{x}_1 - \mathbf{x}_0$ は一定（直線経路）。
+
+**2つの目標の等価性**: 適切なノイズスケジュール変換を行うと DDPM と Rectified Flow は等価になる。変換式：
+$$
+\boldsymbol{\epsilon}_\theta = \frac{\mathbf{x}_t - \alpha_t\, \mathbf{v}_\theta}{\sigma_t}
+$$
+
+**実践的な差異**:
+| 観点 | DDPM | Rectified Flow |
+|:-----|:-----|:--------------|
+| 速度場の曲率 | 高い（非線形経路） | 低い（直線経路） |
+| 必要NFE | 20-50 | 5-15 |
+| 訓練損失の解釈 | ノイズ予測誤差 | 速度場予測誤差 |
+| SD3 採用理由 | — | 高速サンプリング + 安定訓練 |
+
+SD3 が Rectified Flow を選んだ決定的理由: 直線経路は「最短経路」であり、少ないODEステップで積分誤差が最小化される。DDPM 目標でも DPM-Solver++ を使えば高速化は可能だが、Rectified Flow は**訓練段階から速い経路を学習**する点で根本的に優れている。
+
+**Logit-normal サンプリング**: SD3 では時刻 $t$ を均一分布ではなく **Logit-normal** からサンプリングする：
+$$
+t \sim \text{Logit-Normal}(\mu, \sigma^2), \quad t = \text{sigmoid}(u),\; u \sim \mathcal{N}(\mu, \sigma^2)
+$$
+$\mu = 0, \sigma = 1$（デフォルト）では $t$ が $[0.3, 0.7]$ 付近に集中する。直感: 全拡散ステップ中で最も「難しい」中間時刻での学習を強調することで、訓練効率が向上する。$t \approx 0$（ほぼ清浄）と $t \approx 1$（ほぼノイズ）は比較的容易なため均等サンプリングは非効率だ。
 
 ### 4.1 完全なDiTブロック実装（Lux.jl）
 
-```julia
-using Lux, Random, NNlib, Optimisers, Zygote
-
-# Sinusoidal timestep embedding
-function timestep_embedding(t, dim)
-    # t: [B]
-    # Returns: [B, dim]
-    half_dim = dim ÷ 2
-    freqs = exp.(-log(10000.0) .* (0:half_dim-1) ./ half_dim)
-    args = t[:, :] .* freqs'  # [B, half_dim]
-    embedding = hcat(sin.(args), cos.(args))  # [B, dim]
-    return embedding
-end
-
-# AdaLN-Zero block
-struct AdaLNZero{G, B}
-    gamma_mlp::G
-    beta_mlp::B
-end
-
-function AdaLNZero(cond_dim, feature_dim)
-    gamma_mlp = Chain(
-        Dense(cond_dim => 4 * feature_dim, gelu),
-        Dense(4 * feature_dim => feature_dim)
-    )
-    beta_mlp = Chain(
-        Dense(cond_dim => 4 * feature_dim, gelu),
-        Dense(4 * feature_dim => feature_dim)
-    )
-    AdaLNZero(gamma_mlp, beta_mlp)
-end
-
-function (m::AdaLNZero)(x, cond, ps, st)
-    # x: [B, N, D]
-    # cond: [B, D_cond]
-
-    # Generate γ and β
-    γ, st_gamma = m.gamma_mlp(cond, ps.gamma_mlp, st.gamma_mlp)
-    β, st_beta = m.beta_mlp(cond, ps.beta_mlp, st.beta_mlp)
-
-    # Layer norm
-    μ = mean(x, dims=3)  # [B, N, 1]
-    σ² = var(x, dims=3, corrected=false)  # [B, N, 1]
-    x_norm = (x .- μ) ./ sqrt.(σ² .+ 1f-6)
-
-    # Adaptive scale and shift
-    γ_expanded = reshape(γ, size(γ, 1), 1, size(γ, 2))  # [B, 1, D]
-    β_expanded = reshape(β, size(β, 1), 1, size(β, 2))  # [B, 1, D]
-    x_out = γ_expanded .* x_norm .+ β_expanded
-
-    return x_out, (gamma_mlp=st_gamma, beta_mlp=st_beta)
-end
-
-# Complete DiT Block
-struct DiTBlock{A, M, LN}
-    adaln::A
-    multihead_attn::M
-    mlp::M
-    layer_norm::LN
-end
-
-function DiTBlock(d_model, num_heads, cond_dim)
-    adaln = AdaLNZero(cond_dim, d_model)
-    multihead_attn = MultiHeadAttention(d_model, num_heads)
-    mlp = Chain(
-        Dense(d_model => 4 * d_model, gelu),
-        Dense(4 * d_model => d_model)
-    )
-    layer_norm = LayerNorm(d_model)
-    DiTBlock(adaln, multihead_attn, mlp, layer_norm)
-end
-
-function (m::DiTBlock)(x, cond, ps, st)
-    # x: [B, N, D]
-    # cond: [B, D_cond] (concatenated t and c)
-
-    # AdaLN
-    x_ln, st_adaln = m.adaln(x, cond, ps.adaln, st.adaln)
-
-    # Multi-head attention
-    attn_out, st_attn = m.multihead_attn(x_ln, x_ln, x_ln, ps.multihead_attn, st.multihead_attn)
-
-    # Residual connection
-    x = x + attn_out
-
-    # AdaLN again
-    x_ln2, st_adaln2 = m.adaln(x, cond, ps.adaln, st.adaln)
-
-    # MLP
-    mlp_out, st_mlp = m.mlp(x_ln2, ps.mlp, st.mlp)
-
-    # Residual connection
-    x_out = x + mlp_out
-
-    return x_out, (adaln=st_adaln2, multihead_attn=st_attn, mlp=st_mlp)
-end
-
-# Full DiT Model
-struct DiT{P, U, B}
-    patch_embed::P
-    unpatch::U
-    dit_blocks::B
-    num_blocks::Int
-    d_model::Int
-end
-
-function DiT(img_size, patch_size, in_channels, d_model, num_blocks, num_heads, cond_dim)
-    num_patches = (img_size ÷ patch_size)^2
-
-    patch_embed = Chain(
-        # Patchify: [B, H, W, C] → [B, N, P²C]
-        # Then project to d_model
-        Dense(patch_size^2 * in_channels => d_model)
-    )
-
-    # Position embedding (learnable)
-    # This would be a parameter, stored separately
-
-    # DiT blocks
-    dit_blocks = [DiTBlock(d_model, num_heads, cond_dim) for _ in 1:num_blocks]
-
-    # Unpatch: project back to patch space
-    unpatch = Dense(d_model => patch_size^2 * in_channels)
-
-    DiT(patch_embed, unpatch, dit_blocks, num_blocks, d_model)
-end
-
-# Helper: Patchify
-function patchify(x, patch_size)
-    # x: [B, H, W, C]
-    B, H, W, C = size(x)
-    P = patch_size
-    N_h, N_w = H ÷ P, W ÷ P
-
-    patches = zeros(Float32, B, N_h * N_w, P * P * C)
-    for i in 1:N_h
-        for j in 1:N_w
-            patch = x[:, (i-1)*P+1:i*P, (j-1)*P+1:j*P, :]
-            patch_flat = reshape(patch, B, :)
-            patches[:, (i-1)*N_w + j, :] = patch_flat
-        end
-    end
-    return patches
-end
-
-# Helper: Unpatchify
-function unpatchify(patches, patch_size, img_size)
-    # patches: [B, N, P²C]
-    B, N, _ = size(patches)
-    P = patch_size
-    H, W = img_size
-    N_h, N_w = H ÷ P, W ÷ P
-    C = size(patches, 3) ÷ (P^2)
-
-    x = zeros(Float32, B, H, W, C)
-    for i in 1:N_h
-        for j in 1:N_w
-            patch_flat = patches[:, (i-1)*N_w + j, :]
-            patch = reshape(patch_flat, B, P, P, C)
-            x[:, (i-1)*P+1:i*P, (j-1)*P+1:j*P, :] = patch
-        end
-    end
-    return x
-end
-
-# Forward pass
-function (m::DiT)(x, t, c, pos_embed, ps, st)
-    # x: [B, H, W, C]
-    # t: [B] (timesteps)
-    # c: [B, D_c] (conditions)
-    # pos_embed: [1, N, D] (positional embeddings)
-
-    B = size(x, 1)
-    P = Int(sqrt(size(ps.patch_embed.layers[1].weight, 2) ÷ size(x, 4)))
-
-    # Patchify
-    patches = patchify(x, P)  # [B, N, P²C]
-
-    # Patch embedding
-    z, st_patch = m.patch_embed(patches, ps.patch_embed, st.patch_embed)  # [B, N, D]
-
-    # Add positional embedding
-    z = z .+ pos_embed
-
-    # Timestep embedding
-    t_emb = timestep_embedding(t, m.d_model)  # [B, D]
-
-    # Concatenate t and c for conditioning
-    cond = hcat(t_emb, c)  # [B, D + D_c]
-
-    # DiT blocks
-    st_blocks = []
-    for (i, block) in enumerate(m.dit_blocks)
-        z, st_block = block(z, cond, ps.dit_blocks[i], st.dit_blocks[i])
-        push!(st_blocks, st_block)
-    end
-
-    # Unpatch
-    patches_out, st_unpatch = m.unpatch(z, ps.unpatch, st.unpatch)  # [B, N, P²C]
-
-    # Unpatchify
-    x_pred = unpatchify(patches_out, P, (size(x, 2), size(x, 3)))  # [B, H, W, C]
-
-    return x_pred, (patch_embed=st_patch, dit_blocks=st_blocks, unpatch=st_unpatch)
-end
-```
 
 ### 4.2 MM-DiT実装（SD3/FLUXスタイル）
 
-```julia
-# MM-DiT Block: Separate streams for image and text
-struct MMDiTBlock{A_img, A_txt, M_img, M_txt, CA}
-    adaln_img::A_img
-    adaln_txt::A_txt
-    self_attn_img::M_img
-    self_attn_txt::M_txt
-    cross_attn_img_to_txt::CA
-    cross_attn_txt_to_img::CA
-    mlp_img::M_img
-    mlp_txt::M_txt
-end
-
-function MMDiTBlock(d_img, d_txt, num_heads, cond_dim)
-    adaln_img = AdaLNZero(cond_dim, d_img)
-    adaln_txt = AdaLNZero(cond_dim, d_txt)
-    self_attn_img = MultiHeadAttention(d_img, num_heads)
-    self_attn_txt = MultiHeadAttention(d_txt, num_heads)
-    cross_attn_img_to_txt = MultiHeadAttention(d_img, num_heads)
-    cross_attn_txt_to_img = MultiHeadAttention(d_txt, num_heads)
-    mlp_img = Chain(Dense(d_img => 4 * d_img, gelu), Dense(4 * d_img => d_img))
-    mlp_txt = Chain(Dense(d_txt => 4 * d_txt, gelu), Dense(4 * d_txt => d_txt))
-
-    MMDiTBlock(adaln_img, adaln_txt, self_attn_img, self_attn_txt,
-               cross_attn_img_to_txt, cross_attn_txt_to_img, mlp_img, mlp_txt)
-end
-
-function (m::MMDiTBlock)(x_img, x_txt, cond, ps, st)
-    # x_img: [B, N_img, D_img]
-    # x_txt: [B, N_txt, D_txt]
-    # cond: [B, D_cond]
-
-    # Image stream
-    x_img_ln, st_adaln_img = m.adaln_img(x_img, cond, ps.adaln_img, st.adaln_img)
-    attn_img, st_attn_img = m.self_attn_img(x_img_ln, x_img_ln, x_img_ln, ps.self_attn_img, st.self_attn_img)
-    cross_img, st_cross_img = m.cross_attn_img_to_txt(x_img_ln, x_txt, x_txt, ps.cross_attn_img_to_txt, st.cross_attn_img_to_txt)
-    x_img = x_img + attn_img + cross_img
-
-    x_img_ln2, st_adaln_img2 = m.adaln_img(x_img, cond, ps.adaln_img, st.adaln_img)
-    mlp_img, st_mlp_img = m.mlp_img(x_img_ln2, ps.mlp_img, st.mlp_img)
-    x_img_out = x_img + mlp_img
-
-    # Text stream
-    x_txt_ln, st_adaln_txt = m.adaln_txt(x_txt, cond, ps.adaln_txt, st.adaln_txt)
-    attn_txt, st_attn_txt = m.self_attn_txt(x_txt_ln, x_txt_ln, x_txt_ln, ps.self_attn_txt, st.self_attn_txt)
-    cross_txt, st_cross_txt = m.cross_attn_txt_to_img(x_txt_ln, x_img, x_img, ps.cross_attn_txt_to_img, st.cross_attn_txt_to_img)
-    x_txt = x_txt + attn_txt + cross_txt
-
-    x_txt_ln2, st_adaln_txt2 = m.adaln_txt(x_txt, cond, ps.adaln_txt, st.adaln_txt)
-    mlp_txt, st_mlp_txt = m.mlp_txt(x_txt_ln2, ps.mlp_txt, st.mlp_txt)
-    x_txt_out = x_txt + mlp_txt
-
-    st_out = (adaln_img=st_adaln_img2, adaln_txt=st_adaln_txt2,
-              self_attn_img=st_attn_img, self_attn_txt=st_attn_txt,
-              cross_attn_img_to_txt=st_cross_img, cross_attn_txt_to_img=st_cross_txt,
-              mlp_img=st_mlp_img, mlp_txt=st_mlp_txt)
-
-    return x_img_out, x_txt_out, st_out
-end
-```
 
 ### 4.3 DPM-Solver++サンプラー完全実装
 
-```julia
-# Noise schedule (cosine schedule)
-function alpha_sigma_schedule(t; s=0.008)
-    # t ∈ [0, 1]
-    # Returns α_t and σ_t
-    f_t = cos((t + s) / (1 + s) * π / 2)^2
-    f_0 = cos(s / (1 + s) * π / 2)^2
-    α_bar_t = f_t / f_0
-    α_t = sqrt(α_bar_t)
-    σ_t = sqrt(1 - α_bar_t)
-    return α_t, σ_t
-end
-
-# Log-SNR
-function lambda_t(t)
-    α_t, σ_t = alpha_sigma_schedule(t)
-    return log(α_t / σ_t)
-end
-
-# Data prediction from noise prediction
-function data_pred_from_noise(x_t, ε_θ, α_t, σ_t)
-    return (x_t - σ_t * ε_θ) / α_t
-end
-
-# DPM-Solver++ (2nd order)
-struct DPMSolverPP
-    model  # ε_θ(x_t, t, c)
-    num_steps::Int
-end
-
-function (solver::DPMSolverPP)(x_T, c)
-    # x_T: [B, H, W, C] (初期ノイズ)
-    # c: [B, D_c] (条件)
-
-    t_steps = LinRange(1.0, 0.0, solver.num_steps + 1)
-    x = x_T
-    x_θ_prev = nothing
-
-    for i in 1:solver.num_steps
-        t_cur = t_steps[i]
-        t_next = t_steps[i+1]
-
-        α_t, σ_t = alpha_sigma_schedule(t_cur)
-        α_s, σ_s = alpha_sigma_schedule(t_next)
-
-        λ_t = log(α_t / σ_t)
-        λ_s = log(α_s / σ_s)
-        h = λ_s - λ_t
-
-        # Noise prediction
-        ε_θ = solver.model(x, [t_cur], c)
-
-        # Data prediction
-        x_θ = data_pred_from_noise(x, ε_θ, α_t, σ_t)
-
-        # First-order update
-        x_s = (α_s / α_t) * x - α_s * (exp(-λ_s) - exp(-λ_t)) * x_θ
-
-        # Second-order correction (if we have previous x_θ)
-        if !isnothing(x_θ_prev)
-            # Compute D1 (first-order derivative approximation)
-            D1 = (x_θ - x_θ_prev) / h
-            # Corrector step
-            x_s = x_s - (α_s * h^2 / 2) * D1
-        end
-
-        x = x_s
-        x_θ_prev = x_θ
-    end
-
-    return x
-end
-
-# Example usage
-rng = Random.default_rng()
-Random.seed!(rng, 42)
-
-# Model setup
-img_size = 32
-patch_size = 4
-in_channels = 3
-d_model = 256
-num_blocks = 6
-num_heads = 8
-cond_dim = 512
-
-model = DiT(img_size, patch_size, in_channels, d_model, num_blocks, num_heads, cond_dim)
-ps, st = Lux.setup(rng, model)
-
-# Positional embedding (learnable parameter)
-num_patches = (img_size ÷ patch_size)^2
-pos_embed = randn(Float32, 1, num_patches, d_model)
-
-# Wrap model for DPM-Solver
-ε_θ_wrapped(x, t, c) = model(x, t, c, pos_embed, ps, st)[1]
-
-# Sampling
-sampler = DPMSolverPP(ε_θ_wrapped, 20)
-x_T = randn(Float32, 4, img_size, img_size, in_channels)  # Initial noise
-c = randn(Float32, 4, cond_dim)  # Conditions
-x_0 = sampler(x_T, c)
-
-println("✅ DPM-Solver++ sampling complete!")
-println("Generated image shape: ", size(x_0))
-```
 
 ### 4.4 Scaling Laws実験フレームワーク
 
-```julia
-using Plots, Statistics
 
-# Scaling experiment
-function scaling_experiment(model_sizes, compute_budgets, dataset)
-    results = Dict()
-
-    for N in model_sizes
-        for C in compute_budgets
-            # Compute optimal data size
-            D_opt = compute_optimal_data_size(C, N)
-
-            # Train model
-            model = create_dit_model(N)
-            loss = train_model(model, dataset, D_opt, C)
-
-            # Evaluate FID
-            fid = evaluate_fid(model, dataset)
-
-            results[(N, C)] = (loss=loss, fid=fid)
-            @info "N=$N, C=$C: Loss=$loss, FID=$fid"
-        end
-    end
-
-    return results
-end
-
-# Fit power law
-function fit_scaling_law(compute_budgets, fids)
-    # FID(C) = A * C^(-β) + FID_∞
-    # Log-linear regression: log(FID - FID_∞) = log(A) - β * log(C)
-
-    # Estimate FID_∞ (minimum achievable FID)
-    FID_∞ = minimum(fids) * 0.9
-
-    log_C = log.(compute_budgets)
-    log_FID_adjusted = log.(fids .- FID_∞)
-
-    # Linear regression
-    X = hcat(ones(length(log_C)), log_C)
-    β_fit = X \ log_FID_adjusted
-
-    log_A = β_fit[1]
-    β = -β_fit[2]
-    A = exp(log_A)
-
-    @info "Fitted Scaling Law: FID(C) = $A * C^(-$β) + $FID_∞"
-
-    return A, β, FID_∞
-end
-
-# Predict optimal model size for given compute budget
-function predict_optimal_model_size(C_target, α_N, α_C)
-    # N*(C) = (α_N / α_C)^(1/(α_C - α_N)) * C^(α_C / (α_C - α_N))
-    exponent = α_C / (α_C - α_N)
-    N_opt = C_target^exponent
-    return N_opt
-end
-
-# Example experiment
-model_sizes = [50e6, 100e6, 200e6, 400e6]  # 50M to 400M params
-compute_budgets = [1e18, 5e18, 1e19, 5e19]  # FLOPs
-# dataset = load_imagenet()  # Placeholder
-
-# results = scaling_experiment(model_sizes, compute_budgets, dataset)
-# A, β, FID_∞ = fit_scaling_law(compute_budgets, [r.fid for r in values(results)])
-
-println("✅ Scaling Laws framework ready!")
-```
-
-:::message
-**進捗**: 全体の85%完了。Production-ReadyなDiT実装（AdaLN-Zero、MM-DiT、DPM-Solver++、Scaling Laws実験）を完全実装した。理論→実装のギャップを完全に埋めた。
-:::
+> **Note:** **進捗**: 全体の85%完了。Production-ReadyなDiT実装（AdaLN-Zero、MM-DiT、DPM-Solver++、Scaling Laws実験）を完全実装した。理論→実装のギャップを完全に埋めた。
 
 ---
 
@@ -1793,35 +1489,41 @@ println("✅ Scaling Laws framework ready!")
 ### 主要論文
 
 [^1]: Zhai, S., et al. (2024). Scaling Laws For Diffusion Transformers. arXiv:2410.08184.
-@[card](https://arxiv.org/abs/2410.08184)
+<https://arxiv.org/abs/2410.08184>
 
 [^2]: Xu, Y., et al. (2025). Scaling Diffusion Transformers Efficiently via μP. arXiv:2505.15270.
-@[card](https://arxiv.org/abs/2505.15270)
+<https://arxiv.org/abs/2505.15270>
 
 [^3]: Lu, C., et al. (2023). DPM-Solver++: Fast Solver for Guided Sampling of Diffusion Probabilistic Models. Machine Intelligence Research.
-@[card](https://arxiv.org/abs/2211.01095)
+<https://arxiv.org/abs/2211.01095>
 
 [^4]: Zheng, K., et al. (2023). DPM-Solver-v3: Improved Diffusion ODE Solver with Empirical Model Statistics. NeurIPS 2023.
-@[card](https://openreview.net/forum?id=9fWKExmKa0)
+<https://openreview.net/forum?id=9fWKExmKa0>
 
 [^5]: Esser, P., et al. (2024). Scaling Rectified Flow Transformers for High-Resolution Image Synthesis. Stability AI Technical Report.
-@[card](https://stability.ai/news/stable-diffusion-3-research-paper)
+<https://stability.ai/news/stable-diffusion-3-research-paper>
 
 [^6]: Beaumont, R., et al. (2024). FLUX.1: Advanced Image Generation. Black Forest Labs Technical Report.
-@[card](https://arxiv.org/html/2507.09595v1)
+<https://arxiv.org/html/2507.09595v1>
 
-[^7]: Zhao, Y., et al. (2025). Diffusion Transformers Learn Highly Interpretable Features. arXiv:2502.04320.
-@[card](https://arxiv.org/abs/2502.04320)
+[^7]: Helbling, A., et al. (2025). ConceptAttention: Diffusion Transformers Learn Highly Interpretable Features. arXiv:2502.04320.
+<https://arxiv.org/abs/2502.04320>
 
 ### 追加参考文献
 
 - Peebles, W., & Xie, S. (2023). Scalable Diffusion Models with Transformers. ICCV 2023. arXiv:2212.09748.
-@[card](https://arxiv.org/abs/2212.09748)
+<https://arxiv.org/abs/2212.09748>
 
 - Lu, C., et al. (2022). DPM-Solver: A Fast ODE Solver for Diffusion Probabilistic Model Sampling in Around 10 Steps. NeurIPS 2022 Oral.
-@[card](https://arxiv.org/abs/2206.00927)
+<https://arxiv.org/abs/2206.00927>
 
 ---
+
+
+> Progress: 50%
+> **理解度チェック**
+> 1. $N, C=$ の各記号の意味と、この式が表す操作を説明してください。
+> 2. このゾーンで学んだ手法の直感的な意味と、なぜこの定式化が必要なのかを説明してください。
 
 ## 🎯 5. まとめ — DiTが切り開く未来
 
@@ -1859,6 +1561,14 @@ DiTは画像生成だけでなく、**全モダリティ（動画・音声・3D�
 
 
 ---
+
+## 著者リンク
+
+- Blog: https://fumishiki.dev
+- X: https://x.com/fumishiki
+- LinkedIn: https://www.linkedin.com/in/fumitakamurakami
+- GitHub: https://github.com/fumishiki
+- Hugging Face: https://huggingface.co/fumishiki
 
 ## ライセンス
 

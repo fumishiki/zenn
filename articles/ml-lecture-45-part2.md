@@ -4,6 +4,11 @@ emoji: "🎬"
 type: "tech"
 topics: ["machinelearning","deeplearning","video","julia","rust","elixir"]
 published: true
+slug: "ml-lecture-45-part2"
+difficulty: "advanced"
+time_estimate: "90 minutes"
+languages: ["Julia", "Rust"]
+keywords: ["機械学習", "深層学習", "生成モデル"]
 ---
 ## 💻 4. 実装ゾーン（45分）— 3言語で動画生成を実装
 
@@ -460,73 +465,81 @@ end
 
 #### 5.1.1 SmolVLM2セットアップ
 
-```python
-# requirements.txt
-# transformers>=4.40.0
-# torch>=2.0.0
-# pillow
+```julia
+# requirements: PythonCall.jl + Python環境:
+# pip install transformers>=4.40.0 torch>=2.0.0 pillow opencv-python
 
-from transformers import AutoProcessor, AutoModelForVision2Seq
-import torch
-from PIL import Image
-import numpy as np
+using PythonCall
+
+transformers = pyimport("transformers")
+torch        = pyimport("torch")
+PIL_Image    = pyimport("PIL.Image")
+np           = pyimport("numpy")
 
 # モデルロード（Hugging Face）
-model_id = "HuggingFaceTB/SmolVLM2-256M-Video-Instruct"
-processor = AutoProcessor.from_pretrained(model_id)
-model = AutoModelForVision2Seq.from_pretrained(
+model_id  = "HuggingFaceTB/SmolVLM2-256M-Video-Instruct"
+processor = transformers.AutoProcessor.from_pretrained(model_id)
+model     = transformers.AutoModelForVision2Seq.from_pretrained(
     model_id,
     torch_dtype=torch.float16,
     device_map="auto"
 )
 
 # 動画読み込み（フレーム抽出）
-def load_video_frames(video_path, num_frames=8):
-    import cv2
+function load_video_frames(video_path, num_frames=8)
+    cv2 = pyimport("cv2")
     cap = cv2.VideoCapture(video_path)
-    total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-    step = total_frames // num_frames
+    total_frames = pyconvert(Int, cap.get(cv2.CAP_PROP_FRAME_COUNT))
+    step = total_frames ÷ num_frames
 
-    frames = []
-    for i in range(num_frames):
+    frames = Py[]
+    for i in 0:(num_frames - 1)
         cap.set(cv2.CAP_PROP_POS_FRAMES, i * step)
-        ret, frame = cap.read()
-        if ret:
+        ret_frame = cap.read()
+        ret   = pyconvert(Bool, ret_frame[0])
+        frame = ret_frame[1]
+        if ret
             frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-            frames.append(Image.fromarray(frame_rgb))
-
+            push!(frames, PIL_Image.fromarray(frame_rgb))
+        end
+    end
     cap.release()
     return frames
+end
 
 # 動画キャプション生成
 video_path = "sample_video.mp4"
-frames = load_video_frames(video_path, num_frames=8)
+frames = load_video_frames(video_path, 8)
 
 prompt = "Describe what is happening in this video."
 
 # プロセッサで入力準備
 inputs = processor(
     text=prompt,
-    images=frames,
+    images=pylist(frames),
     return_tensors="pt"
 ).to(model.device, dtype=torch.float16)
 
-# 推論
-with torch.no_grad():
-    outputs = model.generate(
-        **inputs,
-        max_new_tokens=100,
-        do_sample=False
-    )
+# 推論（torch.no_grad() コンテキスト）
+no_grad_ctx = torch.no_grad()
+no_grad_ctx.__enter__()
+outputs = model.generate(
+    inputs["input_ids"],
+    attention_mask=inputs["attention_mask"],
+    max_new_tokens=100,
+    do_sample=false
+)
+no_grad_ctx.__exit__(nothing, nothing, nothing)
 
 # デコード
-caption = processor.batch_decode(outputs, skip_special_tokens=True)[0]
-print(f"Video Caption: {caption}")
+caption = pyconvert(String, processor.batch_decode(outputs, skip_special_tokens=true)[0])
+println("Video Caption: $(caption)")
 
 # メモリ使用量確認
-if torch.cuda.is_available():
-    allocated = torch.cuda.memory_allocated() / 1024**3
-    print(f"GPU Memory Used: {allocated:.2f} GB")
+if pyconvert(Bool, torch.cuda.is_available())
+    allocated = pyconvert(Float64, torch.cuda.memory_allocated()) / 1024^3
+    println("GPU Memory Used: $(round(allocated, digits=2)) GB")
+end
 ```
 
 **出力例**:
@@ -537,7 +550,7 @@ GPU Memory Used: 1.42 GB
 
 #### 5.1.2 動画QAデモ
 
-```python
+```julia
 # 複数フレームでのVisual Question Answering
 questions = [
     "What is the person wearing?",
@@ -545,17 +558,22 @@ questions = [
     "What is the weather like?",
 ]
 
-for question in questions:
+for question in questions
     inputs = processor(
         text=question,
-        images=frames,
+        images=pylist(frames),
         return_tensors="pt"
     ).to(model.device, dtype=torch.float16)
 
-    outputs = model.generate(**inputs, max_new_tokens=50)
-    answer = processor.batch_decode(outputs, skip_special_tokens=True)[0]
-    print(f"Q: {question}")
-    print(f"A: {answer}\n")
+    outputs = model.generate(
+        inputs["input_ids"],
+        attention_mask=inputs["attention_mask"],
+        max_new_tokens=50
+    )
+    answer = pyconvert(String, processor.batch_decode(outputs, skip_special_tokens=true)[0])
+    println("Q: $(question)")
+    println("A: $(answer)\n")
+end
 ```
 
 **SmolVLM2の特徴**:
@@ -568,9 +586,7 @@ for question in questions:
 | 動画対応 | ✅ | ✅ | ❌ |
 | ローカル実行 | ✅ | ❌ | ✅ |
 
-:::message
-**Trojan Horse発動**: 256Mパラメータで動画理解が動く。Raspberry Pi 5（8GB RAM）でも推論可能 → **エッジデバイスでのビデオAI**が現実に。
-:::
+> **Note:** **Trojan Horse発動**: 256Mパラメータで動画理解が動く。Raspberry Pi 5（8GB RAM）でも推論可能 → **エッジデバイスでのビデオAI**が現実に。
 
 ### 5.2 🎯 LTX-Video動画生成デモ
 
@@ -578,13 +594,16 @@ for question in questions:
 
 #### 5.2.1 LTX-Videoセットアップ
 
-```python
+```julia
 # LTX-Video推論（Hugging Face Diffusers統合）
-from diffusers import LTXVideoPipeline
-import torch
+using PythonCall
+
+diffusers = pyimport("diffusers")
+torch     = pyimport("torch")
+imageio   = pyimport("imageio")
 
 # パイプラインロード
-pipe = LTXVideoPipeline.from_pretrained(
+pipe = diffusers.LTXVideoPipeline.from_pretrained(
     "Lightricks/LTX-Video",
     torch_dtype=torch.float16
 ).to("cuda")
@@ -603,19 +622,18 @@ video_frames = pipe(
 ).frames[0]
 
 # 動画保存
-import imageio
 imageio.mimsave("output_video.mp4", video_frames, fps=24)
 
-print(f"Generated {len(video_frames)} frames")
+println("Generated $(pyconvert(Int, pylen(video_frames))) frames")
 ```
 
 #### 5.2.2 Image-to-Video変換
 
-```python
-from PIL import Image
+```julia
+PIL_Image = pyimport("PIL.Image")
 
 # 開始フレーム指定
-start_image = Image.open("start_frame.png")
+start_image = PIL_Image.open("start_frame.png")
 
 video_frames = pipe(
     prompt="A bird taking flight from a tree branch",
@@ -685,7 +703,7 @@ imageio.mimsave("i2v_output.mp4", video_frames, fps=24)
 
 **実験設計**: 同じプロンプトでLTX-Videoが生成した動画を、SmolVLM2に理解させる。
 
-```python
+```julia
 # Step 1: LTX-Videoで動画生成
 prompt_generation = "A cat jumping from a table to a chair"
 generated_frames = pipe(
@@ -698,26 +716,32 @@ generated_frames = pipe(
 imageio.mimsave("generated_cat.mp4", generated_frames, fps=24)
 
 # Step 2: SmolVLM2で動画理解
-frames_for_vlm = generated_frames[::15]  # 8フレームをサンプリング
-frames_pil = [Image.fromarray(f) for f in frames_for_vlm]
+# generated_frames[::15] に相当（等間隔サンプリング）
+n_total = pyconvert(Int, pylen(generated_frames))
+frames_for_vlm = [generated_frames[i] for i in 0:15:(n_total - 1)]
+frames_pil = [PIL_Image.fromarray(f) for f in frames_for_vlm]
 
 inputs_vlm = processor(
     text="Describe what is happening in this video in detail.",
-    images=frames_pil,
+    images=pylist(frames_pil),
     return_tensors="pt"
 ).to("cuda", dtype=torch.float16)
 
-outputs_vlm = model.generate(**inputs_vlm, max_new_tokens=150)
-description = processor.batch_decode(outputs_vlm, skip_special_tokens=True)[0]
+outputs_vlm = model.generate(
+    inputs_vlm["input_ids"],
+    attention_mask=inputs_vlm["attention_mask"],
+    max_new_tokens=150
+)
+description = pyconvert(String, processor.batch_decode(outputs_vlm, skip_special_tokens=true)[0])
 
-print(f"Original Prompt: {prompt_generation}")
-print(f"SmolVLM2 Description: {description}")
+println("Original Prompt: $(prompt_generation)")
+println("SmolVLM2 Description: $(description)")
 
 # Step 3: 一致度評価（BERTScore）
-from bert_score import score
+bert_score_mod = pyimport("bert_score")
 
-P, R, F1 = score([description], [prompt_generation], lang="en")
-print(f"BERTScore F1: {F1.item():.3f}")
+P, R, F1 = bert_score_mod.score([description], [prompt_generation], lang="en")
+println("BERTScore F1: $(round(pyconvert(Float64, F1.item()), digits=3))")
 ```
 
 **結果例**:
@@ -735,9 +759,7 @@ BERTScore F1: 0.782
 | 細部の補完 | "wooden table"など生成側が指定しない詳細も推測 |
 | 一致度スコア | F1=0.782は高品質（>0.7で良好とされる） |
 
-:::message
-**統合デモの意義**: SmolVLM2（理解）とLTX-Video（生成）を組み合わせることで、**Video-to-Text-to-Video**のループが可能に。既存動画の編集指示や、動画要約→再生成などの応用が開ける。
-:::
+> **Note:** **統合デモの意義**: SmolVLM2（理解）とLTX-Video（生成）を組み合わせることで、**Video-to-Text-to-Video**のループが可能に。既存動画の編集指示や、動画要約→再生成などの応用が開ける。
 
 ### 5.4 自己診断テスト — Video生成の理解度確認
 
@@ -745,7 +767,7 @@ BERTScore F1: 0.782
 
 **問題**: 動画 $T=120$フレーム、$H=W=64$、埋め込み次元$D=512$について、Spatial AttentionとTemporal Attentionの計算量を求めよ。
 
-:::details 解答
+<details><summary>解答</summary>
 
 **Spatial Attention**（各フレーム内）:
 - 1フレームのToken数: $N_s = \frac{H}{16} \times \frac{W}{16} = 4 \times 4 = 16$
@@ -758,13 +780,14 @@ BERTScore F1: 0.782
 - 全位置: $O(7.37M \times 16) = O(118M)$
 
 **結論**: Temporal Attentionの方が計算量が大きい（約7.5倍）。
-:::
+
+</details>
 
 #### テスト② 3D VAE圧縮率の計算
 
 **問題**: 入力 $T=49$フレーム、$H=W=768$、$C=3$。出力 $T'=13$、$H'=W'=96$、$C'=16$。圧縮率は？
 
-:::details 解答
+<details><summary>解答</summary>
 
 入力サイズ: $49 \times 768 \times 768 \times 3 = 86.7M$ pixels
 出力サイズ: $13 \times 96 \times 96 \times 16 = 1.93M$ elements
@@ -772,20 +795,22 @@ BERTScore F1: 0.782
 圧縮率: $r = \frac{86.7M}{1.93M} \approx 45$
 
 ただし、論文では時空間合わせて**192倍**と記載 → Encoderが複数段階で圧縮していると推測。
-:::
+
+</details>
 
 #### テスト③ Optical Flow Lossの意味
 
 **問題**: Optical Flow Lossが小さい動画は、どのような性質を持つか？3つ答えよ。
 
-:::details 解答
+<details><summary>解答</summary>
 
 1. **物理的に一貫した動き**: ピクセルが滑らかに移動（瞬間移動しない）
 2. **時間的連続性**: フレーム間で大きな跳躍がない
 3. **予測可能な軌跡**: 次のフレームの位置が現在のフローから予測可能
 
 逆に、Lossが大きい = フレーム間でオブジェクトが跳躍（チラつき）。
-:::
+
+</details>
 
 ### 5.5 実装チャレンジ — Tiny Video Diffusion on Moving MNIST
 
@@ -798,24 +823,16 @@ using Images, Random
 
 function generate_moving_mnist(num_samples=100, num_frames=20, img_size=60)
     # MNIST数字を1つ選んでランダムに移動させる
-    dataset = []
-
-    for _ in 1:num_samples
-        # 簡易版: 白い正方形が移動
-        trajectory = []
-        start_x, start_y = rand(1:40), rand(1:40)
-        dx, dy = rand(-2:2), rand(-2:2)
-
-        for t in 1:num_frames
+    dataset = [let sx = rand(1:40), sy = rand(1:40), dx = rand(-2:2), dy = rand(-2:2)
+        frames = [begin
             frame = zeros(Float32, img_size, img_size)
-            x = clamp(start_x + t * dx, 1, img_size - 10)
-            y = clamp(start_y + t * dy, 1, img_size - 10)
-            frame[Int(x):Int(x)+9, Int(y):Int(y)+9] .= 1.0
-            push!(trajectory, frame)
-        end
-
-        push!(dataset, cat(trajectory..., dims=3))  # (H, W, T)
-    end
+            x = clamp(sx + t*dx, 1, img_size - 10)
+            y = clamp(sy + t*dy, 1, img_size - 10)
+            @views frame[Int(x):Int(x)+9, Int(y):Int(y)+9] .= 1.0f0
+            frame
+        end for t in 1:num_frames]
+        cat(frames..., dims=3)
+    end for _ in 1:num_samples]
 
     return dataset
 end
@@ -853,14 +870,7 @@ function (model::SimpleVideoDiffusion)(x)
     H, W, T, B = size(x)
 
     # 空間方向の処理（フレームごと）
-    x_spatial = []
-    for t in 1:T
-        frame = reshape(x[:, :, t, :], H, W, 1, B)  # (H, W, C=1, B)
-        frame_processed = model.spatial_conv(frame)  # (H, W, 32, B)
-        push!(x_spatial, frame_processed)
-    end
-
-    x_spatial = cat(x_spatial..., dims=4)  # (H, W, 32, T*B)
+    x_spatial = cat([model.spatial_conv(reshape(x[:, :, t, :], H, W, 1, B)) for t in 1:T]..., dims=4)  # (H, W, 32, T*B)
 
     # 時間方向の処理（ピクセルごと）
     # 簡略化: 全体に時間Convを適用
@@ -904,14 +914,18 @@ generated = ddim_sample(model, 20, 60, 60, β_schedule, num_steps=20)
 
 **期待される結果**: 白い正方形が滑らかに移動する20フレームの動画。
 
-:::message
-**学習のポイント**:
-- Temporal Coherenceの重要性を体感
-- 簡易3D Convでも時間的一貫性は学習可能
-- 実際のモデル（CogVideoX等）はこれを大規模化+Attention追加
-:::
+> **Note:** **学習のポイント**:
+> - Temporal Coherenceの重要性を体感
+> - 簡易3D Convでも時間的一貫性は学習可能
+> - 実際のモデル（CogVideoX等）はこれを大規模化+Attention追加
 
 ---
+
+
+> Progress: 85%
+> **理解度チェック**
+> 1. LTX-Videoが700MパラメータでFLUX等の商用モデルに近い品質を達成できる「Flexible Attention」の仕組みを説明せよ。
+> 2. SmolVLM2の256MパラメータでGPUメモリ1.38GBに収まる設計上の工夫を、attention計算の観点から述べよ。
 
 ## 🚀 6. 発展ゾーン（30分）— 2024-2025最前線の動画生成 + まとめ
 
@@ -1079,34 +1093,32 @@ $$
 
 **CLIP Temporal Consistency**:
 
-```python
-import torch
-from transformers import CLIPModel, CLIPProcessor
+```julia
+using LinearAlgebra, Statistics
 
-def compute_temporal_consistency(video_frames, model, processor):
-    # 連続フレーム間のCLIP埋め込み類似度
-    embeddings = []
-    for frame in video_frames:
-        inputs = processor(images=frame, return_tensors="pt")
-        with torch.no_grad():
-            emb = model.get_image_features(**inputs)
-        embeddings.append(emb)
+# CLIP temporal consistency: mean cosine similarity between consecutive frame embeddings
+# embeddings: Matrix{Float32} of shape (T, D), each row is a frame embedding
+function temporal_consistency(embeddings::Matrix{Float32})::Float64
+    # Normalize each row
+    norms = [norm(embeddings[i, :]) for i in axes(embeddings, 1)]
+    E_n = embeddings ./ max.(norms, eps(Float32))'
 
-    embeddings = torch.stack(embeddings)
-    embeddings = embeddings / embeddings.norm(dim=-1, keepdim=True)
+    # Consecutive cosine similarities
+    sims = [dot(E_n[i, :], E_n[i+1, :]) for i in 1:size(E_n, 1)-1]
+    return mean(sims)
+end
 
-    # 連続フレームのコサイン類似度
-    similarities = []
-    for i in range(len(embeddings) - 1):
-        sim = (embeddings[i] @ embeddings[i+1].T).item()
-        similarities.append(sim)
-
-    return sum(similarities) / len(similarities)
+# Numerical check: identical frames → similarity = 1.0
+let e = rand(Float32, 5, 512)
+    tc = temporal_consistency(vcat(e, e))  # duplicated frames
+    @assert tc ≈ 1.0f0 atol=1e-4 "identical frames should give TC=1"
+    println("temporal_consistency check: $(round(tc, digits=4))")  # → 1.0
+end
 ```
 
 **平均スコア**: 0.9以上が高品質（滑らかな動画）。
 
-#### 6.4.3 VBench — 16次元の包括的評価
+#### 6.4.3 VBench — 16次元評価
 
 **16指標**（一部抜粋）:
 
@@ -1124,7 +1136,7 @@ def compute_temporal_consistency(video_frames, model, processor):
 
 **総合スコア**: 16指標の平均。80点以上で商用級。
 
-:::details VBenchスコアの解釈例
+<details><summary>VBenchスコアの解釈例</summary>
 
 | モデル | Subject Cons. | Motion Smooth | Physical Law | Overall |
 |:-------|:--------------|:--------------|:-------------|:--------|
@@ -1136,7 +1148,8 @@ def compute_temporal_consistency(video_frames, model, processor):
 - HunyuanVideoは一貫性・滑らかさでトップ
 - Soraは物理法則の学習が最も進んでいる
 - 全体スコアでHunyuanがSoraに迫る（オープンソースで）
-:::
+
+</details>
 
 ### 6.5 長時間動画生成の3つの戦略
 
@@ -1196,13 +1209,12 @@ function autoregressive_video_generation(model, total_frames, chunk_size, overla
         else
             # Overlap領域でブレンド
             for i in 1:overlap
-                blend_weight = (i - 1) / overlap
-                blended_frame = blend_weight * chunk[i] + (1 - blend_weight) * all_frames[end - overlap + i]
-                all_frames[end - overlap + i] = blended_frame
+                w = (i - 1) / overlap
+                @. all_frames[end - overlap + i] = w * chunk[i] + (1 - w) * all_frames[end - overlap + i]
             end
 
             # 残りのフレームを追加
-            push!(all_frames, chunk[overlap+1:end]...)
+            append!(all_frames, chunk[overlap+1:end])
         end
 
         # 最後のフレームを次の開始点に
@@ -1288,20 +1300,13 @@ end
 
 function generate_with_interpolation(model, num_key_frames, key_frame_interval)
     # キーフレーム生成
-    key_frames = []
-    for i in 1:num_key_frames
-        key_frame = generate_single_frame(model)
-        push!(key_frames, key_frame)
-    end
+    key_frames = [generate_single_frame(model) for _ in 1:num_key_frames]
 
     # 補間
     all_frames = [key_frames[1]]
     for i in 1:num_key_frames-1
-        for j in 1:key_frame_interval-1
-            t = j / key_frame_interval
-            interp_frame = film_interpolation(key_frames[i], key_frames[i+1], t)
-            push!(all_frames, interp_frame)
-        end
+        append!(all_frames, [film_interpolation(key_frames[i], key_frames[i+1], j / key_frame_interval)
+                              for j in 1:key_frame_interval-1])
         push!(all_frames, key_frames[i+1])
     end
 
@@ -1357,22 +1362,15 @@ function hierarchical_generation(base_model, sr_model, interp_model, prompt)
     base_video = generate_base(base_model, prompt, size=(256, 256), fps=4, duration=12)
 
     # Stage 2: Super-resolution (256x256 → 720x480)
-    sr_video = []
-    for frame in base_video
-        sr_frame = super_resolve(sr_model, frame, target_size=(720, 480))
-        push!(sr_video, sr_frame)
-    end
+    sr_video = [super_resolve(sr_model, frame, target_size=(720, 480)) for frame in base_video]
 
     # Stage 3: Frame interpolation (4fps → 24fps, 6倍)
     final_video = []
     for i in 1:length(sr_video)-1
         push!(final_video, sr_video[i])
         # 5つの中間フレームを補間
-        for j in 1:5
-            t = j / 6
-            interp_frame = interpolate_frame(interp_model, sr_video[i], sr_video[i+1], t)
-            push!(final_video, interp_frame)
-        end
+        append!(final_video, [interpolate_frame(interp_model, sr_video[i], sr_video[i+1], j/6)
+                               for j in 1:5])
     end
     push!(final_video, sr_video[end])
 
@@ -1675,11 +1673,15 @@ graph TD
 
 **接続**: 動画（2D+時間） → 3D空間（3D+時間=4D）へ拡張。
 
-:::message
-**進捗**: 全体の90%完了。残り5回で卒業制作へ。第50回では3言語フルスタック生成AIシステムの完成が待っています。
-:::
+> **Note:** **進捗**: 全体の90%完了。残り5回で卒業制作へ。第50回では3言語フルスタック生成AIシステムの完成が待っています。
 
 ---
+
+
+> Progress: 95%
+> **理解度チェック**
+> 1. HunyuanVideoのCausal 3D VAEが時間方向にCausal設計にする理由を、自己回帰的フレーム生成との関係で説明せよ。
+> 2. MoEを動画生成DiTに適用した際に推論時Top-2 Expertのみ使う設計の計算量上の利点を、全Expert使用時との比較で示せ。
 
 ## 💀 パラダイム転換の問い
 
@@ -1733,7 +1735,7 @@ OpenAI Technical Report (2024)の記述:
 2. 「理解」と「模倣」の境界線はどこにあるか？
 3. 完全な世界シミュレータには何が足りないか？
 
-:::details 歴史的コンテクスト — AIの「理解」論争
+<details><summary>歴史的コンテクスト — AIの「理解」論争</summary>
 
 **Searleの中国語の部屋（1980）**:
 - 記号操作だけでは「理解」にならない
@@ -1746,7 +1748,8 @@ OpenAI Technical Report (2024)の記述:
 **現代の視点（LeCun, 2024）**:
 - 「理解」= 世界の因果モデルを持つこと
 - Soraは部分的な因果モデルを獲得している可能性
-:::
+
+</details>
 
 ---
 
@@ -1755,7 +1758,7 @@ OpenAI Technical Report (2024)の記述:
 ### 主要論文
 
 [^1]: Vaswani, A., et al. (2017). "Attention Is All You Need". *NeurIPS 2017*.
-@[card](https://arxiv.org/abs/1706.03762)
+<https://arxiv.org/abs/1706.03762>
 
 ### 教科書・サーベイ
 
@@ -1766,28 +1769,18 @@ OpenAI Technical Report (2024)の記述:
 
 ---
 
-## 記法規約
 
-| 記号 | 意味 | 使用例 |
-|:-----|:-----|:-------|
-| $\mathbf{X}$ | 動画（全フレーム） | $\mathbf{X} \in \mathbb{R}^{T \times H \times W \times 3}$ |
-| $\mathbf{x}_t^{(f)}$ | フレーム$f$のDiffusionステップ$t$ | $\mathbf{x}_t^{(1)}, \ldots, \mathbf{x}_t^{(T)}$ |
-| $T$ | フレーム数 | $T=120$フレーム（5秒@24fps） |
-| $H, W$ | 高さ、幅 | $H=W=768$ pixels |
-| $t$ | Diffusionタイムステップ | $t \in \{1, \ldots, 1000\}$ |
-| $\alpha_t, \beta_t$ | ノイズスケジュール | $\alpha_t = \prod_{s=1}^t (1-\beta_s)$ |
-| $p_t, p_s$ | 時空間パッチサイズ | $p_t=1$フレーム、$p_s=16$ピクセル |
-| $\mathbf{f}_{t \to t+1}$ | Optical Flow（フレーム$t$から$t+1$） | $\mathbf{f} \in \mathbb{R}^{H \times W \times 2}$ |
-| $\text{Warp}(\mathbf{x}, \mathbf{f})$ | Flow変形関数 | Bilinear補間を使用 |
-| $D$ | Transformer埋め込み次元 | $D=768$ or $1024$ |
-| $N_{\text{tokens}}$ | Token数 | $N = T \times H/p_s \times W/p_s$ |
-| $\mathcal{L}_{\text{flow}}$ | Optical Flow Loss | $\sum_{t} \|\mathbf{x}_{t+1} - \text{Warp}(\mathbf{x}_t, \mathbf{f}_{t \to t+1})\|^2$ |
-| FVD | Fréchet Video Distance | 低いほど高品質 |
-| VBench | 16次元動画評価指標 | 80点以上で商用級 |
+## 🔗 前編・後編リンク
 
-:::message
-**全50回の進捗**: 90%完了（第45回/全50回）。残り5回で卒業制作へ。次回は2D動画から3D空間へ — NeRF/3DGS/DreamFusionで空間の理解と生成を極めます。
----
+- **前編 (Part 1 — 理論編)**: [第45回: Video生成 (Part 1)](ml-lecture-45-part1)
+
+## 著者リンク
+
+- Blog: https://fumishiki.dev
+- X: https://x.com/fumishiki
+- LinkedIn: https://www.linkedin.com/in/fumitakamurakami
+- GitHub: https://github.com/fumishiki
+- Hugging Face: https://huggingface.co/fumishiki
 
 ## ライセンス
 

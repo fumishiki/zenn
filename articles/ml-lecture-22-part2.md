@@ -5,7 +5,13 @@ emoji: "👁️"
 type: "tech"
 topics: ["machinelearning", "deeplearning", "multimodal", "julia", "rust"]
 published: true
+difficulty: "advanced"
+time_estimate: "90 minutes"
+languages: ["Julia", "Rust", "Elixir"]
+keywords: ["機械学習", "深層学習", "生成モデル"]
 ---
+
+> 📌 **前編（理論）**: [第22回 前編](./ml-lecture-22-part1)
 
 ## 💻 4. 実装ゾーン（45分）— Julia CLIP + Rust SmolVLM2
 
@@ -87,26 +93,17 @@ function (vit::VisionTransformer)(x)
     # Patch Embedding: (H, W, C, B) → (d, N, B)
     patches = vit.patch_embed(x)  # (embed_dim, num_patches, B)
 
-    # CLS tokenを各バッチに追加
+    # CLS tokenを各バッチに追加し、Positional Encodingを一括加算
     cls_tokens = repeat(vit.cls_token, 1, B)  # (embed_dim, B)
-    tokens = cat(cls_tokens, patches, dims=2)  # (embed_dim, N+1, B)
-
-    # Positional Encoding
-    tokens = tokens .+ vit.pos_embed
+    tokens = cat(cls_tokens, patches, dims=2) .+ vit.pos_embed  # (embed_dim, N+1, B)
 
     # Transformer Blocks
     for block in vit.transformer_blocks
         tokens = block(tokens)
     end
 
-    # CLS tokenの出力を取得
-    cls_output = tokens[:, 1, :]  # (embed_dim, B)
-
-    # Layer Norm + Projection
-    cls_output = vit.norm(cls_output)
-    embeddings = vit.proj(cls_output)  # (out_dim, B)
-
-    return embeddings
+    # CLS tokenの出力を取得 → Layer Norm → Projection
+    return @views tokens[:, 1, :] |> vit.norm |> vit.proj  # (out_dim, B)
 end
 
 # Transformer Block
@@ -175,26 +172,17 @@ function (txt::TextTransformer)(tokens)
     # tokens: (L, B) — トークンID列
     L, B = size(tokens)
 
-    # Token Embedding
-    x = txt.token_embed(tokens)  # (embed_dim, L, B)
-
-    # Positional Encoding
-    x = x .+ txt.pos_embed[:, 1:L, :]
+    # Token Embedding + Positional Encoding（ゼロコピースライス）
+    x = txt.token_embed(tokens) .+ @views txt.pos_embed[:, 1:L, :]  # (embed_dim, L, B)
 
     # Transformer Blocks
     for block in txt.transformer_blocks
         x = block(x)
     end
 
-    # EOT (End of Text) tokenの出力を取得
+    # EOT (End of Text) tokenの出力を取得 → Layer Norm → Projection
     # 仮定: EOT tokenはシーケンスの最後
-    eot_output = x[:, end, :]  # (embed_dim, B)
-
-    # Layer Norm + Projection
-    eot_output = txt.norm(eot_output)
-    embeddings = txt.proj(eot_output)  # (out_dim, B)
-
-    return embeddings
+    return @views x[:, end, :] |> txt.norm |> txt.proj  # (out_dim, B)
 end
 ```
 
@@ -268,16 +256,14 @@ end
 
 ```julia
 function zero_shot_classify(clip, image, text_candidates)
-    # 画像埋め込み
-    img_batch = unsqueeze(image, 4)  # (H, W, C, 1)
-    v_embed = clip.vision(img_batch)[:, 1]  # (out_dim,)
+    # 画像埋め込み（ゼロコピースライス）
+    @views v_embed = clip.vision(unsqueeze(image, 4))[:, 1]  # (out_dim,)
 
     # テキスト埋め込み（各候補）
-    t_embeds = [clip.text(tokenize(t))[:, 1] for t in text_candidates]
+    t_embeds = [@views clip.text(tokenize(t))[:, 1] for t in text_candidates]
 
-    # 類似度計算
-    v_embed_norm = v_embed ./ norm(v_embed)
-    similarities = [dot(v_embed_norm, t ./ norm(t)) for t in t_embeds]
+    # 類似度計算（正規化ベクトルのdot積でコサイン類似度）
+    similarities = dot.(Ref(normalize(v_embed)), normalize.(t_embeds))
 
     # Softmax確率
     probs = softmax(similarities ./ clip.τ[])
@@ -476,7 +462,7 @@ pub fn preprocess_image(image: &DynamicImage, device: &Device) -> Result<Tensor>
             let b = (p[2] as f32 / 255.0 - 0.406) / 0.225;
             [r, g, b]
         })
-        .collect();
+        .collect::<Vec<_>>();
 
     let tensor = Tensor::from_vec(data, (3, 224, 224), device)?;
     Ok(tensor.unsqueeze(0)?) // (1, 3, 224, 224)
@@ -532,11 +518,7 @@ impl SmolVLM2Inference {
 
     /// バッチ推論
     pub fn infer_batch(&self, inputs: &[MultimodalInput]) -> Result<Vec<String>> {
-        let mut results = Vec::with_capacity(inputs.len());
-        for input in inputs {
-            results.push(self.infer(input)?);
-        }
-        Ok(results)
+        inputs.iter().map(|input| self.infer(input)).collect()
     }
 }
 ```
@@ -636,11 +618,14 @@ println("回答: $result")
 
 ---
 
-:::message
-**ここまでで全体の70%完了！** Zone 5では、実装したモデルを評価する。VQA、Captioning、Zero-shot分類、Retrievalの4つのタスクで性能を測定する。
-:::
+> **Note:** **ここまでで全体の70%完了！** Zone 5では、実装したモデルを評価する。VQA、Captioning、Zero-shot分類、Retrievalの4つのタスクで性能を測定する。
 
 ---
+
+> **Progress: 85%**
+> **理解度チェック**
+> 1. CLIPの対照損失行列 $\text{sim} = (I_{\text{emb}} \cdot T_{\text{emb}}^T) / \tau$ で、対角成分と非対角成分が表すものを説明せよ。
+> 2. SmolVLM2-256Mのような小型VLMが大型モデルと競争できる理由を、蒸留とアーキテクチャ効率化の観点から説明せよ。
 
 ## 🔬 5. 実験ゾーン（30分）— 評価実装
 
@@ -685,27 +670,17 @@ function load_vqav2(json_path::String)
     return VQADataset(images, questions, answers)
 end
 
-# VQA Accuracy計算
+# VQA Accuracy計算（broadcast でゼロ割り当て）
 function vqa_accuracy(predictions, ground_truths)
-    total = 0.0
-    for (pred, gts) in zip(predictions, ground_truths)
-        # 各ground truthとの一致数
-        matches = sum([lowercase(pred) == lowercase(gt) for gt in gts])
-        score = min(1.0, matches / 3)
-        total += score
-    end
-    return total / length(predictions)
+    scores = [min(1.0, sum(lowercase(pred) .== lowercase.(gts)) / 3)
+              for (pred, gts) in zip(predictions, ground_truths)]
+    return mean(scores)
 end
 
 # SmolVLM2でVQA評価
 function evaluate_vqa(smolvlm2, dataset::VQADataset)
-    predictions = String[]
-    for (img_path, question) in zip(dataset.images, dataset.questions)
-        input = MultimodalInput(load(img_path), question)
-        answer = smolvlm2.infer(input)
-        push!(predictions, answer)
-    end
-
+    predictions = [smolvlm2.infer(MultimodalInput(load(img_path), question))
+                   for (img_path, question) in zip(dataset.images, dataset.questions)]
     acc = vqa_accuracy(predictions, dataset.answers)
     println("VQAv2 Accuracy: $(acc * 100)%")
     return acc
@@ -816,8 +791,8 @@ end
 function extract_ngrams(text::String, n::Int=4)
     tokens = split(lowercase(text))
     ngrams = Dict{String, Int}()
-    for i in 1:(length(tokens) - n + 1)
-        ng = join(tokens[i:i+n-1], " ")
+    @inbounds for i in 1:(length(tokens) - n + 1)
+        ng = join(@views(tokens[i:i+n-1]), " ")
         ngrams[ng] = get(ngrams, ng, 0) + 1
     end
     return ngrams
@@ -825,16 +800,14 @@ end
 
 function compute_tfidf(ngrams::Dict{String, Int})
     # 簡易TF-IDF（実際はコーパス全体のIDFを使用）
-    tf = ngrams
-    idf = Dict(k => log(1.0 + 1.0 / v) for (k, v) in tf)
-    return Dict(k => tf[k] * idf[k] for k in keys(tf))
+    idf = Dict(k => log(1.0 + 1.0 / v) for (k, v) in ngrams)
+    return Dict(k => ngrams[k] * idf[k] for k in keys(ngrams))
 end
 
 function cosine_similarity(vec1::Dict, vec2::Dict)
-    keys_union = union(keys(vec1), keys(vec2))
-    dot_prod = sum([get(vec1, k, 0.0) * get(vec2, k, 0.0) for k in keys_union])
-    norm1 = sqrt(sum([v^2 for v in values(vec1)]))
-    norm2 = sqrt(sum([v^2 for v in values(vec2)]))
+    dot_prod = sum(get(vec1, k, 0.0) * get(vec2, k, 0.0) for k in union(keys(vec1), keys(vec2)))
+    norm1 = sqrt(sum(v^2 for v in values(vec1)))
+    norm2 = sqrt(sum(v^2 for v in values(vec2)))
     return dot_prod / (norm1 * norm2 + 1e-8)
 end
 ```
@@ -868,19 +841,8 @@ function evaluate_zero_shot_imagenet(clip, imagenet_val)
     # ImageNetクラス名（1000クラス）
     class_names = load_imagenet_class_names()
 
-    correct = 0
-    total = 0
-
-    for (image, label) in imagenet_val
-        # Zero-shot分類
-        probs, pred = zero_shot_classify(clip, image, class_names)
-        if pred == label
-            correct += 1
-        end
-        total += 1
-    end
-
-    acc = correct / total
+    acc = mean(zero_shot_classify(clip, img, class_names)[2] == label
+               for (img, label) in imagenet_val)
     println("ImageNet Zero-shot Accuracy: $(acc * 100)%")
     return acc
 end
@@ -903,22 +865,17 @@ function image_to_text_retrieval(clip, images, texts, K=5)
     recall_at_k = 0
 
     for (i, img) in enumerate(images)
-        # 画像埋め込み
-        img_emb = clip.vision(unsqueeze(img, 4))[:, 1]
+        # 画像埋め込み（ゼロコピースライス）
+        @views img_emb = clip.vision(unsqueeze(img, 4))[:, 1]
 
         # 全テキスト埋め込み
-        text_embs = [clip.text(tokenize(t))[:, 1] for t in texts]
+        text_embs = [@views clip.text(tokenize(t))[:, 1] for t in texts]
 
-        # 類似度計算
-        similarities = [dot(img_emb, t) / (norm(img_emb) * norm(t)) for t in text_embs]
+        # 類似度計算（broadcast）
+        similarities = dot.(Ref(normalize(img_emb)), normalize.(text_embs))
 
-        # Top-K取得
-        top_k_indices = sortperm(similarities, rev=true)[1:K]
-
-        # 正解が含まれているか
-        if i in top_k_indices
-            recall_at_k += 1
-        end
+        # Top-K取得し正解を含むか判定
+        recall_at_k += i ∈ @views sortperm(similarities, rev=true)[1:K]
     end
 
     return recall_at_k / length(images)
@@ -945,9 +902,7 @@ Text-to-Image Recall@5: 68.7%
 - [ ] Image-Text Retrievalで双方向（Image→Text, Text→Image）を評価している
 - [ ] Rust推論がJuliaから正しく呼び出せる（FFI経由）
 
-:::message
-**ここまでで全体の85%完了！** Zone 6では、最新研究と全モデルファミリーを俯瞰する。
-:::
+> **Note:** **ここまでで全体の85%完了！** Zone 6では、最新研究と全モデルファミリーを俯瞰する。
 
 ---
 
@@ -1002,7 +957,7 @@ graph TD
 
 ### 6.3 BLIP-2完全解剖
 
-BLIP-2[^4]は、**Q-Former**という革新的なアーキテクチャを導入した。Frozen Vision EncoderとFrozen LLMの間を橋渡しする、**情報ボトルネック**の役割を果たす。
+BLIP-2[^4]は、**Q-Former**という独自のアーキテクチャを導入した。Frozen Vision EncoderとFrozen LLMの間を橋渡しする、**情報ボトルネック**の役割を果たす。
 
 #### 6.3.1 Q-Formerの設計原理
 
@@ -1155,22 +1110,10 @@ function LLaVA()
 end
 
 function (llava::LLaVA)(image, text_prompt)
-    # 画像特徴抽出（Frozen）
-    img_feats = llava.clip_vit(image)  # (1024, 256, B)
-
-    # Projection
-    vis_tokens = llava.projection(img_feats)  # (4096, 32, B)
-
-    # テキストトークン化
-    text_tokens = tokenize(text_prompt)  # (4096, L, B)
-
-    # Concatenate
-    input_tokens = cat(vis_tokens, text_tokens, dims=2)  # (4096, 32+L, B)
-
-    # LLM推論
-    output = llava.llm(input_tokens)
-
-    return output
+    # 画像特徴抽出（Frozen）→ Projection → テキストと連結 → LLM
+    vis_tokens = llava.clip_vit(image) |> llava.projection  # (4096, 32, B)
+    text_tokens = tokenize(text_prompt)                      # (4096, L, B)
+    return cat(vis_tokens, text_tokens, dims=2) |> llava.llm
 end
 
 # 訓練（Stage 2: Instruction Tuning）
@@ -1251,18 +1194,11 @@ $\odot$ は要素ごとの積（Hadamard積）。
 #### 6.5.3 Qwen-VLの実装（Julia）
 
 ```julia
-# 2D RoPEの実装
+# 2D RoPEの実装（broadcast で簡潔に）
 function rope_2d(x::Int, y::Int, d::Int)
-    θ = [10000.0^(-2i/d) for i in 0:d÷4-1]
-
-    # x方向の回転
-    x_emb = vcat([cos(x*θ[i]) for i in 1:length(θ)],
-                 [sin(x*θ[i]) for i in 1:length(θ)])
-
-    # y方向の回転
-    y_emb = vcat([cos(y*θ[i]) for i in 1:length(θ)],
-                 [sin(y*θ[i]) for i in 1:length(θ)])
-
+    θ = @. 10000.0^(-2(0:d÷4-1) / d)
+    x_emb = vcat(cos.(x .* θ), sin.(x .* θ))  # x方向の回転
+    y_emb = vcat(cos.(y .* θ), sin.(y .* θ))  # y方向の回転
     return vcat(x_emb, y_emb)  # (d,)
 end
 
@@ -1274,12 +1210,12 @@ function dynamic_patch_embed(img::Array{Float32, 3}, patch_size::Int=14)
     num_patches_h = H ÷ patch_size
     num_patches_w = W ÷ patch_size
 
-    patches = []
-    positions = []
+    patches = Vector{Vector{Float32}}()
+    positions = NTuple{2,Int}[]
 
-    for i in 1:num_patches_h, j in 1:num_patches_w
-        # パッチ切り出し
-        patch = img[(i-1)*patch_size+1:i*patch_size,
+    @inbounds for i in 1:num_patches_h, j in 1:num_patches_w
+        # パッチ切り出し（ゼロコピー）
+        @views patch = img[(i-1)*patch_size+1:i*patch_size,
                     (j-1)*patch_size+1:j*patch_size, :]
         push!(patches, vec(patch))
         push!(positions, (i, j))
@@ -1290,23 +1226,17 @@ end
 
 # Attentionに2D RoPEを適用
 function attention_with_2d_rope(Q, K, V, positions, d_k)
-    N = size(Q, 2)
-
-    # 各トークンに2D RoPEを適用
     Q_rope = copy(Q)
     K_rope = copy(K)
-    for (i, (x, y)) in enumerate(positions)
+    @inbounds for (i, (x, y)) in enumerate(positions)
         rope_emb = rope_2d(x, y, size(Q, 1))
-        Q_rope[:, i] .= Q[:, i] .* rope_emb
-        K_rope[:, i] .= K[:, i] .* rope_emb
+        @views Q_rope[:, i] .= Q[:, i] .* rope_emb
+        @views K_rope[:, i] .= K[:, i] .* rope_emb
     end
 
     # Attention計算
-    scores = Q_rope' * K_rope ./ sqrt(d_k)
-    attn = softmax(scores, dims=2)
-
-    output = V * attn'
-    return output
+    attn = softmax(Q_rope' * K_rope ./ sqrt(d_k), dims=2)
+    return V * attn'
 end
 ```
 
@@ -1386,7 +1316,7 @@ EVA-CLIP（2023）は、**5B Vision Encoder**を使用。
 | **HuggingFace Transformers** | HuggingFace | VLM実装集 | [github.com/huggingface/transformers](https://github.com/huggingface/transformers) |
 | **Open-CLIP** | LAION | CLIPオープンソース実装 | [github.com/mlfoundations/open_clip](https://github.com/mlfoundations/open_clip) |
 
-:::details 用語集
+<details><summary>用語集</summary>
 
 | 用語 | 意味 |
 |:-----|:-----|
@@ -1405,7 +1335,8 @@ EVA-CLIP（2023）は、**5B Vision Encoder**を使用。
 | **VQA** | Visual Question Answering |
 | **CIDEr** | Consensus-based Image Description Evaluation |
 | **SPICE** | Semantic Propositional Image Caption Evaluation |
-:::
+
+</details>
 
 ### 6.10 知識マップ（mermaid）
 
@@ -1468,7 +1399,7 @@ graph TD
 
 ### 6.7 FAQ
 
-:::details Q1: CLIPとBLIP-2、どちらを使うべき？
+<details><summary>Q1: CLIPとBLIP-2、どちらを使うべき？</summary>
 
 **A**: タスク次第。
 
@@ -1480,9 +1411,10 @@ graph TD
 - CLIP: 訓練コスト低、推論速度速、性能中
 - BLIP-2: 訓練コスト中、推論速度中、性能高
 - CogVLM: 訓練コスト高、推論速度遅、性能最高
-:::
 
-:::details Q2: InfoNCE lossの温度 $\tau$ をどう決める？
+</details>
+
+<details><summary>Q2: InfoNCE lossの温度 $\tau$ をどう決める？</summary>
 
 **A**: 実験的に決定するのが一般的。
 
@@ -1492,9 +1424,10 @@ graph TD
 - $\tau$ が大きい（0.1〜0.5）: 分布がなだらか。データが少ない場合に過学習を防ぐ。
 
 **自動調整**: $\tau$ を学習可能パラメータにして、訓練中に最適化する手法もある（CLIP論文では固定）。
-:::
 
-:::details Q3: SmolVLM2-256Mは実用的？
+</details>
+
+<details><summary>Q3: SmolVLM2-256Mは実用的？</summary>
 
 **A**: 用途次第だが、**エッジデバイス**では非常に有効。
 
@@ -1508,9 +1441,10 @@ graph TD
 - Fine-tuningの余地が限定的（パラメータ数が少ない）
 
 **推奨用途**: モバイルアプリ、リアルタイム画像認識、IoTデバイス。
-:::
 
-:::details Q4: RustでVLM訓練はできない？
+</details>
+
+<details><summary>Q4: RustでVLM訓練はできない？</summary>
 
 **A**: 技術的には可能だが、**現時点では非推奨**。
 
@@ -1520,9 +1454,10 @@ graph TD
 3. **開発速度**: Rustは型安全だが、実験の反復速度はJuliaやPythonに劣る。
 
 **Rustの役割**: 訓練済みモデルの**推論**に特化。GGUF/Candleで高速推論を実現。
-:::
 
-:::details Q5: 第23回（Fine-tuning）で学ぶことは？
+</details>
+
+<details><summary>Q5: 第23回（Fine-tuning）で学ぶことは？</summary>
 
 **A**: LoRA、QLoRA、AdapterなどのPEFT技術。
 
@@ -1532,7 +1467,8 @@ graph TD
 - Adapterの挿入位置: どこにAdapter層を入れるか
 
 第23回では、これらを⚡Juliaで実装し、CLIPやLLaVAをFine-tuningする。
-:::
+
+</details>
 
 ### 6.8 学習スケジュール（1週間プラン）
 
@@ -1684,83 +1620,86 @@ track_progress()
 
 20世紀初頭、**ラジオ**が登場したとき、人々は「音声だけで十分」と考えた。しかし、**テレビ**が登場すると、映像と音声の組み合わせが**標準**になった。今、AIも同じ転換点にいる。
 
-:::message
-**進捗: 100% 完了** 🎉 第22回「ネイティブマルチモーダル完全版」完走！画像とテキストの統合を完全にマスターした。次はFine-tuningでモデルをタスクに適応させる。
-:::
+> **Note:** **進捗: 100% 完了** 🎉 第22回「ネイティブマルチモーダル完全版」完走！画像とテキストの統合を完全にマスターした。次はFine-tuningでモデルをタスクに適応させる。
 
 ---
+
+> **Progress: 95%**
+> **理解度チェック**
+> 1. SigLIPがCLIPの損失関数をSigmoid化した数学的な動機を説明せよ。
+> 2. Flamingoのgated cross-attentionが視覚情報をLLMに注入するとき、ゲート機構が重要な理由は何か？
 
 ## 参考文献
 
 ### 主要論文
 
 [^1]: Radford, A., Kim, J. W., Hallacy, C., Ramesh, A., Goh, G., Agarwal, S., Sastry, G., Askell, A., Mishkin, P., Clark, J., Krueger, G., & Sutskever, I. (2021). Learning Transferable Visual Models From Natural Language Supervision. *International Conference on Machine Learning (ICML)*.
-@[card](https://arxiv.org/abs/2103.00020)
+<https://arxiv.org/abs/2103.00020>
 
 [^2]: van den Oord, A., Li, Y., & Vinyals, O. (2018). Representation Learning with Contrastive Predictive Coding. *arXiv preprint*.
-@[card](https://arxiv.org/abs/1807.03748)
+<https://arxiv.org/abs/1807.03748>
 
 [^3]: Dosovitskiy, A., Beyer, L., Kolesnikov, A., Weissenborn, D., Zhai, X., Unterthiner, T., Dehghani, M., Minderer, M., Heigold, G., Gelly, S., Uszkoreit, J., & Houlsby, N. (2020). An Image is Worth 16x16 Words: Transformers for Image Recognition at Scale. *International Conference on Learning Representations (ICLR) 2021*.
-@[card](https://arxiv.org/abs/2010.11929)
+<https://arxiv.org/abs/2010.11929>
 
 [^4]: Li, J., Li, D., Savarese, S., & Hoi, S. (2023). BLIP-2: Bootstrapping Language-Image Pre-training with Frozen Image Encoders and Large Language Models. *International Conference on Machine Learning (ICML)*.
-@[card](https://arxiv.org/abs/2301.12597)
+<https://arxiv.org/abs/2301.12597>
 
 [^5]: Alayrac, J.-B., Donahue, J., Luc, P., Miech, A., Barr, I., Hasson, Y., Lenc, K., Mensch, A., Millican, K., Reynolds, M., Ring, R., Rutherford, E., Cabi, S., Han, T., Gong, Z., Samangooei, S., Monteiro, M., Menick, J., Borgeaud, S., Brock, A., Nematzadeh, A., Sharifzadeh, S., Binkowski, M., Barreira, R., Vinyals, O., Zisserman, A., & Simonyan, K. (2022). Flamingo: a Visual Language Model for Few-Shot Learning. *Advances in Neural Information Processing Systems (NeurIPS)*.
-@[card](https://arxiv.org/abs/2204.14198)
+<https://arxiv.org/abs/2204.14198>
 
 [^6]: Liu, H., Li, C., Wu, Q., & Lee, Y. J. (2023). Visual Instruction Tuning. *Advances in Neural Information Processing Systems (NeurIPS)*.
-@[card](https://arxiv.org/abs/2304.08485)
+<https://arxiv.org/abs/2304.08485>
 
 [^7]: Wang, P., Bai, S., Tan, S., Wang, S., Fan, Z., Bai, J., Chen, K., Liu, C., Wang, L., Ge, Y., Song, Y., Li, H., Dang, K., Ouyang, S., Ren, X., Yan, D., Zhang, X., Qin, Y., Lin, Z., Huang, F., Liu, J., & Zhou, J. (2024). Qwen2-VL: Enhancing Vision-Language Model's Perception of the World at Any Resolution. *arXiv preprint*.
-@[card](https://arxiv.org/abs/2409.12191)
+<https://arxiv.org/abs/2409.12191>
 
 [^8]: Wang, W., Lv, Q., Yu, W., Hong, W., Qi, J., Wang, Y., Ji, J., Yang, Z., Zhao, L., Song, X., Xu, J., Xu, B., Li, J., Dong, Y., Ding, M., & Tang, J. (2023). CogVLM: Visual Expert for Pretrained Language Models. *arXiv preprint*.
-@[card](https://arxiv.org/abs/2311.03079)
+<https://arxiv.org/abs/2311.03079>
 
 [^9]: HuggingFace (2024). SmolVLM2-256M-Instruct.
-@[card](https://huggingface.co/HuggingFaceTB/SmolVLM2-256M-Instruct)
+<https://huggingface.co/HuggingFaceTB/SmolVLM2-256M-Instruct>
 
 [^11]: Cherti, M., Beaumont, R., Wightman, R., Wortsman, M., Ilharco, G., Gordon, C., Schuhmann, C., Schmidt, L., & Jitsev, J. (2023). Reproducible scaling laws for contrastive language-image learning. *Computer Vision and Pattern Recognition (CVPR)*.
-@[card](https://arxiv.org/abs/2212.07143)
+<https://arxiv.org/abs/2212.07143>
 
 [^12]: Zhai, X., Mustafa, B., Kolesnikov, A., & Beyer, L. (2023). Sigmoid Loss for Language Image Pre-Training. *arXiv preprint*.
-@[card](https://arxiv.org/abs/2303.15343)
+<https://arxiv.org/abs/2303.15343>
 
 [^13]: Deitke, M., Clark, C., Lee, S., Tripathi, R., Yang, Y., Park, J. S., Salehi, M., Muennighoff, N., Lo, K., Soldaini, L., Lu, J., Anderson, T., Bransom, E., Ehsani, K., Ngo, H., Chen, Y. H., Patel, A., Yatskar, M., Callison-Burch, C., Head, A., Hendrix, R., Bastani, F., VanderBilt, E., Lambert, N., Kim, Y.-J., Choudhury, S., Chasins, S., & Farhadi, A. (2024). Molmo and PixMo: Open Weights and Open Data for State-of-the-Art Vision-Language Models. *arXiv preprint*.
-@[card](https://arxiv.org/abs/2409.17146)
+<https://arxiv.org/abs/2409.17146>
 
 [^14]: Goyal, Y., Khot, T., Summers-Stay, D., Batra, D., & Parikh, D. (2017). Making the V in VQA Matter: Elevating the Role of Image Understanding in Visual Question Answering. *Computer Vision and Pattern Recognition (CVPR)*.
 
 [^15]: Anderson, P., Fernando, B., Johnson, M., & Gould, S. (2016). SPICE: Semantic Propositional Image Caption Evaluation. *European Conference on Computer Vision (ECCV)*.
-@[card](https://panderson.me/spice/)
+<https://panderson.me/spice/>
 
-[^20]: Chen, Z., et al. (2024). "Vision Language Models: A Survey of 26K Papers (CVPR, ICLR, NeurIPS 2023-2025)". *arXiv preprint*.
-@[card](https://arxiv.org/abs/2510.09586)
+[^20]: Lin, F. (2025). "Vision Language Models: A Survey of 26K Papers". *arXiv preprint*.
+<https://arxiv.org/abs/2510.09586>
 
 [^21]: Li, J., Li, D., Savarese, S., & Hoi, S. (2023). "BLIP-2: Bootstrapping Language-Image Pre-training with Frozen Image Encoders and Large Language Models". *International Conference on Machine Learning (ICML)*.
-@[card](https://arxiv.org/abs/2301.12597)
+<https://arxiv.org/abs/2301.12597>
 
 [^22]: Liu, H., Li, C., Wu, Q., & Lee, Y. J. (2024). "Improved Baselines with Visual Instruction Tuning". *arXiv preprint*.
-@[card](https://arxiv.org/abs/2310.03744)
+<https://arxiv.org/abs/2310.03744>
 
 [^24]: Wang, Y., et al. (2022). "Multimodal Token Fusion for Vision Transformers". *Computer Vision and Pattern Recognition (CVPR)*.
-@[card](https://arxiv.org/abs/2204.08721)
+<https://arxiv.org/abs/2204.08721>
 
-[^25]: He, J., et al. (2024). "GeminiFusion: Efficient Pixel-wise Multimodal Fusion for Vision Transformer". *Computer Vision and Pattern Recognition (CVPR)*.
-@[card](https://arxiv.org/abs/2406.01210)
+[^25]: Jia, D., et al. (2024). "GeminiFusion: Efficient Pixel-wise Multimodal Fusion for Vision Transformer". *Computer Vision and Pattern Recognition (CVPR)*.
+<https://arxiv.org/abs/2406.01210>
 
 [^26]: Chen, X., et al. (2024). "Heterogeneous Contrastive Learning for Foundation Models and Beyond". *arXiv preprint*.
-@[card](https://arxiv.org/abs/2404.00225)
+<https://arxiv.org/abs/2404.00225>
 
-[^27]: Wang, S., et al. (2024). "Multimodal Foundation Models for Early Disease Detection". *arXiv preprint*.
-@[card](https://arxiv.org/abs/2510.01899)
+[^27]: Mohsin, M. T., et al. (2024). "Multimodal Foundation Models for Early Disease Detection". *arXiv preprint*.
+<https://arxiv.org/abs/2510.01899>
 
-[^28]: Rodriguez, A., et al. (2024). "Multimodal Fusion and Vision-Language Models: A Survey for Robot Vision". *arXiv preprint*.
-@[card](https://arxiv.org/abs/2504.02477)
+[^28]: Han, X., Chen, S., Fu, Z., Feng, Z., Fan, L., et al. (2025). "Multimodal Fusion and Vision-Language Models: A Survey for Robot Vision". *arXiv preprint*.
+<https://arxiv.org/abs/2504.02477>
 
-[^29]: Liu, Y., et al. (2024). "What to align in multimodal contrastive learning?" *European Conference on Computer Vision (ECCV)*.
-@[card](https://arxiv.org/abs/2409.07402)
+[^29]: Dufumier, B., et al. (2024). "What to align in multimodal contrastive learning?" *ICLR 2025*.
+<https://arxiv.org/abs/2409.07402>
 
 ### 教科書
 
@@ -1770,38 +1709,13 @@ track_progress()
 
 ---
 
-## 記法規約
+## 著者リンク
 
-本講義で使用した数学記号の統一規約。
-
-| 記号 | 意味 | 備考 |
-|:-----|:-----|:-----|
-| $\mathbf{x}^v$ | 画像入力 | $(H \times W \times C)$ |
-| $\mathbf{x}^t$ | テキスト入力 | トークン列 $(L \times d_{\text{tok}})$ |
-| $f_v$ | Vision Encoder | 画像 → 埋め込み |
-| $f_t$ | Text Encoder | テキスト → 埋め込み |
-| $\mathbf{v}$ | 画像埋め込み | $(d,)$ |
-| $\mathbf{t}$ | テキスト埋め込み | $(d,)$ |
-| $d$ | 埋め込み次元 | 通常512, 768, 1024 |
-| $N$ | バッチサイズ or パッチ数 | 文脈依存 |
-| $\tau$ | 温度パラメータ | InfoNCE lossのスケール |
-| $\mathbf{Q}, \mathbf{K}, \mathbf{V}$ | Query, Key, Value | Attention機構 |
-| $\mathbf{A}$ | Attention weights | Softmax後の確率分布 |
-| $P$ | パッチサイズ | ViTの入力分割単位（通常16 or 32） |
-| $\mathbf{z}_p$ | パッチ $p$ の埋め込み | Patch Embedding後 |
-| $\mathbf{e}_{\text{pos}}$ | Positional Encoding | 位置情報ベクトル |
-| $s_{ij}$ | 類似度 | $\cos(\mathbf{v}_i, \mathbf{t}_j)$ |
-| $\mathcal{L}$ | 損失関数 | InfoNCE loss |
-| $\mathbf{Z}^v$ | 画像特徴量列 | $(d \times N)$ |
-| $\mathbf{Z}^t$ | テキスト特徴量列 | $(d \times L)$ |
-
----
-
-**第22回完**
-
-次回、**第23回: Fine-tuning & PEFT** でまた会おう。LoRA、QLoRA、Adapterの世界へようこそ。
-
----
+- Blog: https://fumishiki.dev
+- X: https://x.com/fumishiki
+- LinkedIn: https://www.linkedin.com/in/fumitakamurakami
+- GitHub: https://github.com/fumishiki
+- Hugging Face: https://huggingface.co/fumishiki
 
 ## ライセンス
 

@@ -58,17 +58,13 @@ $$
 ```python
 import numpy as np
 
-def monte_carlo_integrate(f, sampler, n_samples: int, n_trials: int = 20):
+def monte_carlo_integrate(f, sampler, n_samples: int, n_trials: int = 20) -> tuple[float, float]:
     """Monte Carlo integration.
 
     E[f(X)] ≈ (1/N) Σ f(X_i)
     Variance: Var[estimate] = Var[f(X)] / N
     """
-    est = []
-    for _ in range(n_trials):
-        x = sampler(n_samples)
-        est.append(float(np.mean(f(x))))
-    est = np.array(est, dtype=np.float64)
+    est = np.array([float(np.mean(f(sampler(n_samples)))) for _ in range(n_trials)], dtype=np.float64)
     return float(est.mean()), float(est.std(ddof=1))
 
 # E[X^2] where X ~ N(0,1) should be 1
@@ -132,11 +128,13 @@ import numpy as np, time
 N = 1_000_000
 rng = np.random.default_rng(0)
 x = rng.standard_normal(N)
-def sum_loop(arr):
+def sum_loop(arr: np.ndarray) -> float:
     s = 0.0
-    for v in arr: s += v * v
+    for v in arr:
+        s += v * v
     return s / len(arr)
-def sum_vec(arr): return (arr * arr).mean()
+def sum_vec(arr: np.ndarray) -> float:
+    return (arr * arr).mean()
 t0=time.perf_counter(); r1=sum_loop(x); t1=time.perf_counter()
 t2=time.perf_counter(); r2=sum_vec(x);  t3=time.perf_counter()
 print(f"loop={1000*(t1-t0):.1f}ms  vec={1000*(t3-t2):.1f}ms  result={r2:.4f}")
@@ -161,14 +159,13 @@ $$
 ```python
 import numpy as np
 
-def stratified_mc(f, lo, hi, n_total=100_000, n_strata=100):
+def stratified_mc(f, lo: float, hi: float, n_total: int = 100_000, n_strata: int = 100) -> float:
     n_each = n_total // n_strata
-    total = 0.0
-    for k in range(n_strata):
-        a = lo + k*(hi-lo)/n_strata
-        b = a + (hi-lo)/n_strata
-        total += f(np.random.uniform(a, b, n_each)).mean() * (hi-lo)/n_strata
-    return total
+    width = (hi - lo) / n_strata
+    return sum(
+        f(np.random.uniform(lo + k * width, lo + (k + 1) * width, n_each)).mean() * width
+        for k in range(n_strata)
+    )
 
 f = lambda x: np.exp(-x**2)
 crude = f(np.random.uniform(0, 1, 100_000)).mean()
@@ -203,7 +200,7 @@ $\frac{p(x)}{q(x)}$ がまさに **Radon-Nikodym導関数** $\frac{dP}{dQ}(x)$ �
 import numpy as np
 from scipy.stats import norm
 
-def importance_sampling(f, p_logpdf, q_sampler, q_logpdf, n=50_000):
+def importance_sampling(f, p_logpdf, q_sampler, q_logpdf, n: int = 50_000) -> tuple[float, float]:
     x = q_sampler(n)
     log_w = p_logpdf(x) - q_logpdf(x)
     log_w -= log_w.max()
@@ -272,7 +269,7 @@ $$
 ```python
 import numpy as np
 
-def gaussian_kde(data, h=None):
+def gaussian_kde(data: np.ndarray, h: float | None = None) -> tuple:
     n = len(data)
     h = h or 1.06 * data.std(ddof=1) * n**(-0.2)
     def estimate(x_eval):
@@ -306,10 +303,13 @@ idx = np.argmin(np.abs(vals - 1)); pi = np.abs(vecs[:, idx]); pi /= pi.sum()
 print(f"exact   pi = {pi}")
 print(f"P^100 row0 = {np.linalg.matrix_power(P,100)[0]}")
 
-def simulate_markov(P, n_steps=100_000, x0=0):
-    n = len(P); x = x0; hist = np.zeros(n, int)
+def simulate_markov(P: np.ndarray, n_steps: int = 100_000, x0: int = 0) -> np.ndarray:
+    n = len(P)
+    x = x0
+    hist = np.zeros(n, dtype=int)
     for _ in range(n_steps):
-        x = np.random.choice(n, p=P[x]); hist[x] += 1
+        x = np.random.choice(n, p=P[x])
+        hist[x] += 1
     return hist / n_steps
 print(f"empiric pi = {simulate_markov(P)}")
 ```
@@ -326,7 +326,7 @@ $$
 ```python
 import numpy as np
 
-def metropolis_hastings(log_target, proposal_std, x0, n_samples, burnin=1000):
+def metropolis_hastings(log_target, proposal_std: float, x0: float, n_samples: int, burnin: int = 1000) -> tuple[np.ndarray, float]:
     """Metropolis-Hastings MCMC sampler.
 
     Detailed balance: π(x) P(x→x') = π(x') P(x'→x)
@@ -341,10 +341,8 @@ def metropolis_hastings(log_target, proposal_std, x0, n_samples, burnin=1000):
         # Symmetric proposal: q(x'|x) = N(x, σ²)
         x_proposed = x + proposal_std * np.random.randn()
 
-        # Log acceptance ratio (symmetric → simplifies)
-        log_alpha = log_target(x_proposed) - log_target(x)
-
-        if np.log(np.random.rand()) < log_alpha:
+        # Log acceptance ratio (symmetric → simplifies); walrus computes inline
+        if np.log(np.random.rand()) < (log_alpha := log_target(x_proposed) - log_target(x)):
             x = x_proposed
             if i >= burnin:
                 accepted += 1
@@ -513,12 +511,14 @@ $\epsilon \to 0$、$K \to \infty$ で $X_K \sim p$ に収束する[^2]。
 import numpy as np
 from scipy.stats import norm
 
-def ula(score_fn, x0=0.0, eps=0.005, n=100_000, burnin=10_000, seed=42):
+def ula(score_fn, x0: float = 0.0, eps: float = 0.005, n: int = 100_000, burnin: int = 10_000, seed: int = 42) -> np.ndarray:
     rng = np.random.default_rng(seed)
-    x = float(x0); samples = []
+    x = float(x0)
+    samples = []
     for i in range(n + burnin):
-        x += 0.5*eps*score_fn(x) + np.sqrt(eps)*rng.standard_normal()
-        if i >= burnin: samples.append(x)
+        x += 0.5 * eps * score_fn(x) + np.sqrt(eps) * rng.standard_normal()
+        if i >= burnin:
+            samples.append(x)
     return np.array(samples)
 
 def log_p(x):
@@ -560,7 +560,7 @@ $\sqrt{\Delta t} \, Z_n$ が Brown運動増分 $\Delta W_n = W_{t_{n+1}} - W_{t_
 ```python
 import numpy as np
 
-def euler_maruyama(f, g, x0, T=1.0, n_steps=1000, n_paths=2000, seed=0):
+def euler_maruyama(f, g, x0: float, T: float = 1.0, n_steps: int = 1000, n_paths: int = 2000, seed: int = 0) -> np.ndarray:
     rng = np.random.default_rng(seed)
     dt = T / n_steps
     sqrt_dt = np.sqrt(dt)
@@ -1525,6 +1525,10 @@ $$
 ---
 > Progress: 100%
 
+> **理解度チェック**
+> 1. ルベーグ測度と確率測度の違いを一言で述べよ。$\sigma$-加法族が必要な理由は何か。
+> 2. 連続確率変数の密度関数 $p(x)$ が $p(x) \geq 0$ かつ $\int p(x)dx = 1$ を満たすとき、$P(X \in A) = \int_A p(x)dx$ が定義できる理由を測度論の言葉で説明せよ。
+
 ---
 
 > **📖 前編もあわせてご覧ください**
@@ -1548,7 +1552,7 @@ $$
 
 [^9]: Anderson, B. D. O. (1982). *Reverse-time diffusion equation models*. Stochastic Processes and their Applications, 12(3), 313-326. — Reverse SDEの理論。Score SDEの基礎。
 
-[^10]: Tao, M. (2025). VP-SDE Discretization Error Analysis via Gronwall Inequality. arXiv:2506.08337 — Grönwall不等式によるEuler-Maruyama離散化誤差の上界。
+[^10]: Choi, J., & Fan, C. (2025). Diffusion Models under Alternative Noise: Simplified Analysis and Sensitivity. arXiv:2506.08337 — Grönwall不等式によるEuler-Maruyama離散化誤差の上界。
 
 [^11]: Austin, J., Johnson, D. D., Ho, J., Tarlow, D., & van den Berg, R. (2021). *Structured Denoising Diffusion Models in Discrete State-Spaces*. NeurIPS 2021. arXiv:2107.03006 — 離散状態空間拡散モデルの原論文。
 

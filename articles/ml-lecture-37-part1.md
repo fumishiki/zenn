@@ -4,6 +4,11 @@ emoji: "🎲"
 type: "tech"
 topics: ["machinelearning", "deeplearning", "sde", "julia", "stochasticprocesses"]
 published: true
+slug: "ml-lecture-37-part1"
+difficulty: "advanced"
+time_estimate: "90 minutes"
+languages: ["Julia", "Rust"]
+keywords: ["機械学習", "深層学習", "生成モデル"]
 ---
 
 ## 🚀 0. クイックスタート（30秒）— Cantor集合の測度0で確率過程の必要性を体感
@@ -17,9 +22,8 @@ using Random, Plots
 Random.seed!(42)
 T, dt = 1.0, 0.001
 t = 0:dt:T
-n = length(t)
-dW = √dt * randn(n)  # Brown運動の増分
-W = cumsum([0; dW[1:end-1]])  # Brown運動のパス
+dW = √dt .* randn(length(t))  # Brown運動の増分
+W = @views cumsum([0; dW[1:end-1]])  # Brown運動のパス
 
 # Brown運動は連続だが微分不可能（ほぼ確実に）
 plot(t, W, label="Brown運動 W(t)", xlabel="時刻 t", ylabel="W(t)",
@@ -37,10 +41,8 @@ $$
 
 Brown運動の微分が存在しない → 伊藤積分が必要 → SDEで拡散過程を定式化。
 
-:::message
-**進捗: 3%完了**
-Brown運動の非微分可能性を体感した。この章でVP-SDE/VE-SDE導出、Probability Flow ODE、Score SDE統一理論を完全習得し、拡散モデルの連続時間理論基盤を固める。
-:::
+> **Note:** **進捗: 3%完了**
+> Brown運動の非微分可能性を体感した。この章でVP-SDE/VE-SDE導出、Probability Flow ODE、Score SDE統一理論を完全習得し、拡散モデルの連続時間理論基盤を固める。
 
 ---
 
@@ -50,36 +52,6 @@ Brown運動の非微分可能性を体感した。この章でVP-SDE/VE-SDE導�
 
 VP-SDEは分散保存型のSDE。DDPMの連続時間極限に対応。
 
-```julia
-using DifferentialEquations, Plots
-
-# VP-SDE: dx = -0.5 * β(t) * x dt + √(β(t)) dW
-# β(t) = β_min + t * (β_max - β_min) (線形スケジュール)
-function vp_sde!(du, u, p, t)
-    β_min, β_max = p
-    β_t = β_min + t * (β_max - β_min)
-    du[1] = -0.5 * β_t * u[1]  # Drift項
-end
-
-function vp_noise!(du, u, p, t)
-    β_min, β_max = p
-    β_t = β_min + t * (β_max - β_min)
-    du[1] = √β_t  # Diffusion項
-end
-
-# SDEProblemを定義
-x0 = [1.0]  # 初期値
-tspan = (0.0, 1.0)
-β_min, β_max = 0.1, 20.0
-prob = SDEProblem(vp_sde!, vp_noise!, x0, tspan, (β_min, β_max))
-
-# 複数軌道をシミュレーション
-sol_ensemble = solve(EnsembleProblem(prob), EM(), dt=0.001, trajectories=5)
-
-# プロット
-plot(sol_ensemble, xlabel="時刻 t", ylabel="x(t)",
-     title="VP-SDE 軌道（分散保存）", legend=false, lw=1.5)
-```
 
 **数式との対応**:
 $$
@@ -92,27 +64,6 @@ $$
 
 VE-SDEは分散爆発型。NCSNの連続時間極限。
 
-```julia
-# VE-SDE: dx = 0 dt + √(dσ²(t)/dt) dW
-# σ(t) = σ_min * (σ_max / σ_min)^t (幾何スケジュール)
-function ve_noise!(du, u, p, t)
-    σ_min, σ_max = p
-    σ_t = σ_min * (σ_max / σ_min)^t
-    # dσ²/dt = 2 σ(t) * log(σ_max/σ_min) * σ(t)
-    dσ²_dt = 2 * σ_t * log(σ_max / σ_min) * σ_t
-    du[1] = √dσ²_dt
-end
-
-# VE-SDEはDrift項なし
-ve_drift!(du, u, p, t) = (du[1] = 0.0)
-
-σ_min, σ_max = 0.01, 50.0
-prob_ve = SDEProblem(ve_drift!, ve_noise!, x0, tspan, (σ_min, σ_max))
-sol_ve_ensemble = solve(EnsembleProblem(prob_ve), EM(), dt=0.001, trajectories=5)
-
-plot(sol_ve_ensemble, xlabel="時刻 t", ylabel="x(t)",
-     title="VE-SDE 軌道（分散爆発）", legend=false, lw=1.5)
-```
 
 **数式との対応**:
 $$
@@ -125,26 +76,6 @@ $$
 
 VP-SDEと**同じ周辺分布**を持つが、確率項のないODE。
 
-```julia
-# Probability Flow ODE for VP-SDE:
-# dx = [-0.5 * β(t) * x - 0.5 * β(t) * ∇log p_t(x)] dt
-# Score関数 ∇log p_t(x) をNeural Networkで近似したと仮定
-# ここでは簡易的に ∇log p_t(x) ≈ -x/σ²(t) のガウス近似
-
-function pf_ode!(du, u, p, t)
-    β_min, β_max = p
-    β_t = β_min + t * (β_max - β_min)
-    # 簡易Score近似（実際はNNで学習）
-    score_approx = -u[1]  # ガウス仮定
-    du[1] = -0.5 * β_t * u[1] - 0.5 * β_t * score_approx
-end
-
-prob_ode = ODEProblem(pf_ode!, x0, tspan, (β_min, β_max))
-sol_ode = solve(prob_ode, Tsit5())
-
-plot(sol_ode, xlabel="時刻 t", ylabel="x(t)",
-     title="Probability Flow ODE（決定論的）", lw=2, legend=:topright, label="ODE軌道")
-```
 
 **数式との対応**:
 $$
@@ -173,46 +104,6 @@ $$
 
 Reverse-time SDEで、ノイズ分布 $\mathcal{N}(0, 1)$ からデータ分布 $\mathcal{N}(\mu, \sigma^2)$ を生成。
 
-```julia
-using DifferentialEquations, Plots
-
-β_min, β_max = 0.1, 20.0
-μ_data, σ_data = 2.0, 0.5
-
-# Reverse-time VP-SDE
-# dx = [-0.5 * β(t) * x - β(t) * ∇log p_t(x)] dt + √β(t) dW̄
-function reverse_vp_drift!(du, u, p, t)
-    β_min, β_max, μ, σ = p
-    β_t = β_min + t * (β_max - β_min)
-    # Score近似（ガウス分布 N(μ, σ²) を仮定）
-    score_approx = -(u[1] - μ) / σ^2
-    du[1] = -0.5 * β_t * u[1] - β_t * score_approx
-end
-
-function reverse_vp_noise!(du, u, p, t)
-    β_min, β_max, _, _ = p
-    β_t = β_min + t * (β_max - β_min)
-    du[1] = √β_t
-end
-
-# 初期値: ノイズ分布 N(0, 1)
-x0_noise = randn(1)
-tspan_reverse = (1.0, 0.0)  # 逆時間（t: 1 → 0）
-
-prob_reverse = SDEProblem(reverse_vp_drift!, reverse_vp_noise!, x0_noise, tspan_reverse, (β_min, β_max, μ_data, σ_data))
-
-# 複数サンプル生成
-n_samples = 10
-solutions = [solve(SDEProblem(reverse_vp_drift!, reverse_vp_noise!, randn(1), tspan_reverse, (β_min, β_max, μ_data, σ_data)), EM(), dt=-0.001) for _ in 1:n_samples]
-
-# プロット
-p = plot(xlabel="時刻 t", ylabel="X(t)", title="Reverse-time SDE: ノイズ→データ", legend=false)
-for sol in solutions
-    plot!(p, sol, lw=1.5, alpha=0.7)
-end
-hline!([μ_data], linestyle=:dash, lw=2, label="データ平均 μ=$μ_data", color=:red)
-p
-```
 
 **観察**:
 - 初期値 $t=1$: ノイズ分布 $\mathcal{N}(0, 1)$（散らばる）
@@ -222,44 +113,6 @@ p
 
 同じ初期点から、Forward SDE（データ→ノイズ）とReverse SDE（ノイズ→データ）を実行。
 
-```julia
-β_min, β_max = 0.1, 20.0
-x0_data = [1.0]
-
-# Forward SDE: dx = -0.5 * β(t) * x dt + √β(t) dW
-function forward_drift!(du, u, p, t)
-    β_t = p[1] + t * (p[2] - p[1])
-    du[1] = -0.5 * β_t * u[1]
-end
-
-function forward_noise!(du, u, p, t)
-    β_t = p[1] + t * (p[2] - p[1])
-    du[1] = √β_t
-end
-
-# Reverse SDE（同じ初期点、逆時間）
-function reverse_drift!(du, u, p, t)
-    β_t = p[1] + t * (p[2] - p[1])
-    score_approx = -u[1]
-    du[1] = -0.5 * β_t * u[1] - β_t * score_approx
-end
-
-reverse_noise!(du, u, p, t) = forward_noise!(du, u, p, t)
-
-# Forward実行（t: 0 → 1）
-prob_fwd = SDEProblem(forward_drift!, forward_noise!, x0_data, (0.0, 1.0), (β_min, β_max))
-sol_fwd = solve(prob_fwd, EM(), dt=0.001, seed=123)
-
-# Reverse実行（t: 1 → 0）、同じ終端ノイズから
-x0_noise_rev = sol_fwd.u[end]
-prob_rev = SDEProblem(reverse_drift!, reverse_noise!, x0_noise_rev, (1.0, 0.0), (β_min, β_max))
-sol_rev = solve(prob_rev, EM(), dt=-0.001, seed=123)
-
-# プロット
-plot(sol_fwd, label="Forward (データ→ノイズ)", lw=2, xlabel="時刻 t", ylabel="X(t)", title="Forward vs Reverse SDE")
-plot!(sol_rev, label="Reverse (ノイズ→データ)", lw=2, linestyle=:dash)
-scatter!([0.0], [x0_data[1]], label="初期データ", markersize=8, color=:green)
-```
 
 **結果**: 理想的にはReverse軌道が元のデータ点に戻る（スコア関数が正確な場合）。
 
@@ -267,62 +120,6 @@ scatter!([0.0], [x0_data[1]], label="初期データ", markersize=8, color=:gree
 
 Reverse-time SDE（確率的）とProbability Flow ODE（決定論的）で100サンプル生成し、多様性を比較。
 
-```julia
-using Statistics
-
-β_min, β_max = 0.1, 20.0
-n_samples = 100
-
-# Reverse-time SDE
-function reverse_drift!(du, u, p, t)
-    β_t = p[1] + t * (p[2] - p[1])
-    score_approx = -u[1]
-    du[1] = -0.5 * β_t * u[1] - β_t * score_approx
-end
-
-function reverse_noise!(du, u, p, t)
-    β_t = p[1] + t * (p[2] - p[1])
-    du[1] = √β_t
-end
-
-# PF-ODE
-function pf_ode!(du, u, p, t)
-    β_t = p[1] + t * (p[2] - p[1])
-    score_approx = -u[1]
-    du[1] = -0.5 * β_t * u[1] - 0.5 * β_t * score_approx
-end
-
-# SDE サンプリング
-samples_sde = zeros(n_samples)
-for i in 1:n_samples
-    prob_sde = SDEProblem(reverse_drift!, reverse_noise!, randn(1), (1.0, 0.0), (β_min, β_max))
-    sol_sde = solve(prob_sde, EM(), dt=-0.001)
-    samples_sde[i] = sol_sde.u[end][1]
-end
-
-# ODE サンプリング
-samples_ode = zeros(n_samples)
-for i in 1:n_samples
-    prob_ode = ODEProblem(pf_ode!, randn(1), (1.0, 0.0), (β_min, β_max))
-    sol_ode = solve(prob_ode, Tsit5())
-    samples_ode[i] = sol_ode.u[end][1]
-end
-
-# 多様性指標（標準偏差）
-std_sde = std(samples_sde)
-std_ode = std(samples_ode)
-
-println("SDE 標準偏差: $std_sde")
-println("ODE 標準偏差: $std_ode")
-
-# ヒストグラム
-using StatsPlots
-histogram(samples_sde, bins=30, alpha=0.5, label="SDE", normalize=:pdf)
-histogram!(samples_ode, bins=30, alpha=0.5, label="ODE", normalize=:pdf)
-xlabel!("サンプル値")
-ylabel!("密度")
-title!("SDE vs ODE サンプル多様性")
-```
 
 **結果**:
 - **SDE**: 多様性が高い（std大）→ ランダム性
@@ -332,55 +129,6 @@ title!("SDE vs ODE サンプル多様性")
 
 Cosineノイズスケジュールでの滑らかな拡散過程を可視化。
 
-```julia
-# Cosineスケジュール
-s = 0.008
-function α_bar_cosine(t, s=0.008)
-    return cos((t + s) / (1 + s) * π/2)^2 / cos(s / (1 + s) * π/2)^2
-end
-
-function β_cosine(t, s=0.008)
-    dt_small = 1e-6
-    α_t = α_bar_cosine(t, s)
-    α_t_next = α_bar_cosine(t + dt_small, s)
-    return -(log(α_t_next) - log(α_t)) / dt_small
-end
-
-# Cosine VP-SDE
-function vp_cosine_drift!(du, u, p, t)
-    β_t = β_cosine(t)
-    du[1] = -0.5 * β_t * u[1]
-end
-
-function vp_cosine_noise!(du, u, p, t)
-    β_t = β_cosine(t)
-    du[1] = √β_t
-end
-
-# 線形スケジュールと比較
-β_min, β_max = 0.1, 20.0
-function vp_linear_drift!(du, u, p, t)
-    β_t = p[1] + t * (p[2] - p[1])
-    du[1] = -0.5 * β_t * u[1]
-end
-
-function vp_linear_noise!(du, u, p, t)
-    β_t = p[1] + t * (p[2] - p[1])
-    du[1] = √β_t
-end
-
-x0 = [1.0]
-tspan = (0.0, 1.0)
-
-prob_cosine = SDEProblem(vp_cosine_drift!, vp_cosine_noise!, x0, tspan, nothing)
-prob_linear = SDEProblem(vp_linear_drift!, vp_linear_noise!, x0, tspan, (β_min, β_max))
-
-sol_cosine = solve(prob_cosine, EM(), dt=0.001, seed=42)
-sol_linear = solve(prob_linear, EM(), dt=0.001, seed=42)
-
-plot(sol_linear, label="線形スケジュール", lw=2, xlabel="時刻 t", ylabel="X(t)", title="ノイズスケジュール比較")
-plot!(sol_cosine, label="Cosineスケジュール", lw=2, linestyle=:dash)
-```
 
 **観察**: Cosineスケジュールは終端での急激なノイズ増加を抑制 → 滑らかな軌道。
 
@@ -388,48 +136,19 @@ plot!(sol_cosine, label="Cosineスケジュール", lw=2, linestyle=:dash)
 
 2次元SDEで相関を持つBrown運動を注入。
 
-```julia
-using LinearAlgebra
-
-# 2次元VP-SDE with 相関ノイズ
-function vp_2d_drift!(du, u, p, t)
-    β_t = p[1] + t * (p[2] - p[1])
-    du[1] = -0.5 * β_t * u[1]
-    du[2] = -0.5 * β_t * u[2]
-end
-
-function vp_2d_noise!(du, u, p, t)
-    β_t = p[1] + t * (p[2] - p[1])
-    # 相関行列（共分散）
-    # Cov = [1.0  0.7]
-    #       [0.7  1.0]
-    # Cholesky分解: L = [1.0  0.0]
-    #                   [0.7  √0.51]
-    L = [1.0 0.0; 0.7 √0.51]
-    noise_matrix = √β_t * L
-    du[:] = noise_matrix
-end
-
-u0_2d = [1.0, 1.0]
-tspan = (0.0, 1.0)
-β_min, β_max = 0.1, 20.0
-
-prob_2d = SDEProblem(vp_2d_drift!, vp_2d_noise!, u0_2d, tspan, (β_min, β_max))
-sol_2d = solve(prob_2d, EM(), dt=0.001)
-
-# 軌道を2D平面にプロット
-plot(sol_2d, idxs=(1,2), xlabel="X₁(t)", ylabel="X₂(t)", title="2次元SDE 相関ノイズ", lw=2, label="軌道")
-scatter!([u0_2d[1]], [u0_2d[2]], markersize=8, label="初期点", color=:red)
-```
 
 **結果**: 2次元軌道が斜め方向に拡散（相関係数0.7）。
 
-:::message
-**進捗: 15%完了**
-VP-SDE/VE-SDE/PF-ODEの挙動を多角的に体験した。次にこれらの導出の数学的背景を学ぶ。
-:::
+> **Note:** **進捗: 15%完了**
+> VP-SDE/VE-SDE/PF-ODEの挙動を多角的に体験した。次にこれらの導出の数学的背景を学ぶ。
 
 ---
+
+
+> Progress: 10%
+> **理解度チェック**
+> 1. このゾーンの主要な概念・定義を自分の言葉で説明してください。
+> 2. この手法が他のアプローチより優れている点と、その限界を述べてください。
 
 ## 🧩 2. 直感ゾーン（15分）— なぜSDEで拡散を定式化するのか
 
@@ -558,12 +277,16 @@ Course IV「拡散モデル編」の構成:
 - Predictor-Corrector法
 - Julia DifferentialEquations.jl実装
 
-:::message
-**進捗: 20%完了**
-SDEの全体像を把握した。次は数式修行ゾーンで一つずつ完全導出する。
-:::
+> **Note:** **進捗: 20%完了**
+> SDEの全体像を把握した。次は数式修行ゾーンで一つずつ完全導出する。
 
 ---
+
+
+> Progress: 20%
+> **理解度チェック**
+> 1. $Z(\theta)$ の各記号の意味と、この式が表す操作を説明してください。
+> 2. このゾーンで学んだ手法の直感的な意味と、なぜこの定式化が必要なのかを説明してください。
 
 ## 📐 3. 数式修行ゾーン（60分）— VP-SDE/VE-SDE/Reverse-time SDE/PF-ODE完全導出
 
@@ -624,34 +347,7 @@ $$
 - Diffusion項のみ
 
 **数値検証（Julia）**:
-```julia
-using Random, LinearAlgebra
 
-# 伊藤等距離性の数値検証
-Random.seed!(42)
-T = 1.0
-dt = 0.001
-t = 0:dt:T
-n = length(t)
-
-# 100サンプルパスで検証
-n_samples = 100
-I_squared = zeros(n_samples)
-
-for i in 1:n_samples
-    dW = √dt * randn(n)
-    f = ones(n)  # f(t) = 1
-    I = sum(f .* dW)  # ∫ f dW の近似
-    I_squared[i] = I^2
-end
-
-# E[(∫ f dW)²] ≈ ∫ f² dt
-left_side = mean(I_squared)  # 経験平均
-right_side = sum(ones(n) .* dt)  # = T = 1.0
-
-println("E[(∫ f dW)²] = $(left_side) ≈ ∫ f² dt = $(right_side)")
-# 出力: E[(∫ f dW)²] = 0.998... ≈ ∫ f² dt = 1.0
-```
 
 ### 3.3 伊藤の補題の応用 — VP-SDE/VE-SDEの導出に直接適用
 
@@ -716,50 +412,94 @@ $$
 $\beta(t)$ が定数 $\beta$ のとき、$v(t) = \sigma_0^2 e^{-\beta t} + (1 - e^{-\beta t}) = 1 - (1 - \sigma_0^2) e^{-\beta t}$。$t \to \infty$ で $v(t) \to 1$（分散保存）。
 
 **数値検証（Julia）**:
-```julia
-using DifferentialEquations, Statistics, Plots
 
-# VP-SDE: dx = -0.5 * β * x dt + √β dW
-β = 1.0
-drift(u, p, t) = [-0.5 * β * u[1]]
-noise(u, p, t) = [√β]
-
-# 初期分布: X_0 ~ N(μ_0, σ_0²)
-μ_0, σ_0 = 1.0, 0.5
-x0_dist = μ_0 .+ σ_0 * randn(1000, 1)  # 1000サンプル
-
-tspan = (0.0, 2.0)
-dt = 0.01
-n_samples = 1000
-
-# 各サンプルパスをシミュレーション
-X_t_all = zeros(n_samples, Int(tspan[2]/dt) + 1)
-
-for i in 1:n_samples
-    prob = SDEProblem(drift, noise, [x0_dist[i]], tspan)
-    sol = solve(prob, EM(), dt=dt, save_everystep=true)
-    X_t_all[i, :] = [s[1] for s in sol.u]
-end
-
-# 理論値
-t_vals = 0:dt:tspan[2]
-α_t = exp.(-0.5 * β * t_vals)
-m_theory = μ_0 * α_t
-v_theory = σ_0^2 * exp.(-β * t_vals) .+ (1 .- exp.(-β * t_vals))
-
-# 経験値
-m_empirical = mean(X_t_all, dims=1)[:]
-v_empirical = var(X_t_all, dims=1)[:]
-
-# プロット
-plot(t_vals, m_theory, label="理論平均", lw=2, xlabel="時刻 t", ylabel="平均", title="VP-SDE 平均の時間発展")
-plot!(t_vals, m_empirical, label="経験平均", lw=1.5, linestyle=:dash)
-
-plot(t_vals, v_theory, label="理論分散", lw=2, xlabel="時刻 t", ylabel="分散", title="VP-SDE 分散の時間発展")
-plot!(t_vals, v_empirical, label="経験分散", lw=1.5, linestyle=:dash)
-```
 
 **出力**: 理論値と経験値がほぼ一致。伊藤の補題による導出が正確であることを確認。
+
+#### 3.3.4 伊藤の補題 — VP-SDEへの直接適用
+
+VP-SDE $dX_t = -\frac{1}{2}\beta(t) X_t\, dt + \sqrt{\beta(t)}\, dW_t$ のもとで、対数密度 $\log p_t(X_t)$ の確率微分を計算する。スコア関数 $s_t(x) := \nabla_x \log p_t(x)$ が満たすPDEが自然に導出され、DDPMの$\epsilon$-予測との等価性も明らかになる。
+
+**多次元伊藤の補題（$d$次元）**:
+$X_t \in \mathbb{R}^d$ が $dX_t = f(X_t, t)\, dt + g(t)\, dW_t$（$g(t)$ はスカラー）に従い、$h: \mathbb{R}^d \times [0,T] \to \mathbb{R}$ が $C^{2,1}$ のとき:
+
+$$
+dh(X_t, t) = \left(\frac{\partial h}{\partial t} + \nabla_x h \cdot f + \frac{1}{2}g(t)^2 \Delta_x h\right) dt + g(t)\, \nabla_x h \cdot dW_t
+$$
+
+ここで $\Delta_x h = \sum_{i=1}^d \frac{\partial^2 h}{\partial x_i^2}$ はラプラシアン。二次変分 $dW_i dW_j = \delta_{ij} dt$ を多次元に拡張した結果である。
+
+**$h = \log p_t$ への適用**:
+$\nabla_x h = s_t(x)$（スコア関数）、$\Delta_x h = \Delta_x \log p_t$ を代入し、VP-SDEの drift $f(x,t) = -\frac{1}{2}\beta(t) x$ を使う:
+
+$$
+d \log p_t(X_t) = \left(\frac{\partial \log p_t}{\partial t} - \frac{1}{2}\beta(t) X_t \cdot s_t(X_t) + \frac{1}{2}\beta(t)\, \Delta_x \log p_t\right) dt + \sqrt{\beta(t)}\, s_t(X_t) \cdot dW_t
+$$
+
+この式は確率過程 $\log p_t(X_t)$ の時間発展を与える。確率的な揺らぎは $\sqrt{\beta(t)} s_t(X_t) \cdot dW_t$ から来る。
+
+**スコアPDEの導出**:
+Fokker-Planck方程式（3.6節）をVP-SDEに適用すると:
+
+$$
+\frac{\partial p_t}{\partial t} = \frac{1}{2}\beta(t)\,\nabla \cdot (x p_t) + \frac{1}{2}\beta(t)\,\Delta p_t
+$$
+
+両辺を $p_t$ で割って $\frac{\partial \log p_t}{\partial t}$ を展開する。発散の分解 $\nabla \cdot (x p_t) = p_t \nabla \cdot x + x \cdot \nabla p_t = d\, p_t + p_t\, x \cdot s_t$ より:
+
+$$
+\frac{\nabla \cdot (x p_t)}{p_t} = d + x \cdot s_t
+$$
+
+またラプラシアンの分解 $\Delta p_t = p_t(\Delta_x \log p_t + \|\nabla_x \log p_t\|^2) = p_t(\nabla \cdot s_t + \|s_t\|^2)$ より:
+
+$$
+\frac{\Delta p_t}{p_t} = \nabla \cdot s_t + \|s_t\|^2
+$$
+
+合わせると:
+
+$$
+\frac{\partial \log p_t}{\partial t} = \frac{1}{2}\beta(t)\!\left(d + x \cdot s_t + \nabla \cdot s_t + \|s_t\|^2\right)
+$$
+
+両辺を $x$ で微分し $s_t = \nabla_x \log p_t$ を使うと、スコア関数の時間発展方程式（スコアPDE）が得られる:
+
+$$
+\frac{\partial s_t}{\partial t} = \frac{1}{2}\beta(t)\!\left(s_t + J_{s_t} x + \nabla_x(\nabla \cdot s_t) + 2 J_{s_t}^\top s_t\right)
+$$
+
+ここで $J_{s_t} \in \mathbb{R}^{d \times d}$ はスコア関数のヤコビアン $(J_{s_t})_{ij} = \frac{\partial (s_t)_i}{\partial x_j}$。このPDEは神経ネットワーク $s_\theta(x,t)$ が満たすべき力学方程式を記述しており、一致性（consistency）の理論的保証に使われる。
+
+**Gaussian解析 — 閉形式スコア**:
+$X_t = \sqrt{\bar\alpha(t)}\, X_0 + \sqrt{1 - \bar\alpha(t)}\, Z$（$Z \sim \mathcal{N}(0, I)$）において $\bar\alpha(t) := e^{-\int_0^t \beta(s)\, ds}$ とおく。$X_0 = x_0$ を条件付けすると:
+
+$$
+p_t(x \mid x_0) = \mathcal{N}\!\left(x;\; \sqrt{\bar\alpha(t)}\, x_0,\; (1 - \bar\alpha(t))\, I\right)
+$$
+
+対数密度は定数項を除いて:
+
+$$
+\log p_t(x \mid x_0) = -\frac{\|x - \sqrt{\bar\alpha(t)}\, x_0\|^2}{2(1 - \bar\alpha(t))} + C(t)
+$$
+
+$x$ で微分すると条件付きスコア:
+
+$$
+\nabla_x \log p_t(x \mid x_0) = -\frac{x - \sqrt{\bar\alpha(t)}\, x_0}{1 - \bar\alpha(t)}
+$$
+
+$x = \sqrt{\bar\alpha(t)}\, x_0 + \sqrt{1 - \bar\alpha(t)}\,\epsilon$（$\epsilon \sim \mathcal{N}(0, I)$）と書き直すと分子は $\sqrt{1-\bar\alpha(t)}\,\epsilon$ となり:
+
+$$
+\nabla_x \log p_t(x \mid x_0) = -\frac{\epsilon}{\sqrt{1 - \bar\alpha(t)}}
+$$
+
+これがDDPMの$\epsilon$-予測と等価であることの証明である。スコアマッチング損失でニューラルネット $s_\theta(x, t)$ を学習するとき、モデルは実質的に$-\epsilon / \sqrt{1-\bar\alpha(t)}$を予測している。$\|s_\theta - \nabla_x \log p_t\|^2$ の最小化は $\|s_\theta \sqrt{1-\bar\alpha} + \epsilon\|^2$ の最小化と同値であり、これがDDPMの損失関数の理論的根拠となる。
+
+**スコアの時刻依存性**:
+$\bar\alpha(t) \to 1$（$t \to 0$、ほぼノイズなし）ではスコアは $-(x - x_0)/\epsilon_{\text{small}} \to -\infty$ と発散し、方向は明確でも大きさが爆発する。一方 $\bar\alpha(t) \to 0$（$t \to T$、ほぼ純粋ノイズ）では $\nabla_x \log p_t \approx -x$（標準正規分布のスコア）に収束する。この挙動がスコアネットワーク学習時の数値安定性問題の根本原因であり、time conditioning と noise conditioning（$\sigma(t)$-スケーリング）が必要な理由である。
 
 ### 3.4 Stratonovich積分との関係 — Itô↔Stratonovich変換
 
@@ -913,43 +653,69 @@ $$
 （純粋な拡散方程式、Drift項なし）
 
 **数値検証（Julia）**:
-```julia
-using DifferentialEquations, Plots, KernelDensity
 
-# VP-SDE Monte Carloシミュレーション + 密度推定
-β = 1.0
-drift(u, p, t) = [-0.5 * β * u[1]]
-noise(u, p, t) = [√β]
-
-x0 = randn(10000) .* 0.5 .+ 1.0  # 初期分布: N(1, 0.25)
-tspan = (0.0, 1.0)
-dt = 0.01
-
-# 各サンプルを時刻 t = 1.0 までシミュレーション
-X_final = zeros(10000)
-for i in 1:10000
-    prob = SDEProblem(drift, noise, [x0[i]], tspan)
-    sol = solve(prob, EM(), dt=dt)
-    X_final[i] = sol.u[end][1]
-end
-
-# カーネル密度推定
-kde_result = kde(X_final)
-
-# 理論的密度（ガウス近似）
-# t=1での理論平均: m(1) = 1.0 * exp(-0.5*β*1) ≈ 0.606
-# t=1での理論分散: v(1) ≈ 1.0
-m_theory = 1.0 * exp(-0.5 * β * 1.0)
-v_theory = 0.25 * exp(-β * 1.0) + (1 - exp(-β * 1.0))
-
-x_range = -3:0.01:3
-p_theory = @. exp(-(x_range - m_theory)^2 / (2 * v_theory)) / √(2π * v_theory)
-
-plot(kde_result.x, kde_result.density, label="Monte Carlo密度", lw=2, xlabel="x", ylabel="密度")
-plot!(x_range, p_theory, label="理論密度（ガウス）", lw=2, linestyle=:dash)
-```
 
 **出力**: Monte Carlo密度と理論密度（Fokker-Planck方程式の解）がほぼ一致。
+
+#### 3.6.4 Fokker-Planck方程式のVP-SDE/VE-SDEへの適用 — 定常分布の確認
+
+VP-SDEとVE-SDEそれぞれのFokker-Planck方程式を具体的に書き下し、定常分布が $\mathcal{N}(0,I)$（VP-SDE）または $\mathcal{N}(0, \sigma(T)^2 I)$（VE-SDE）であることを代入によって直接確認する。この計算がSDE設計の妥当性の根拠となる。
+
+**VP-SDEのFokker-Planck方程式**:
+$f(x,t) = -\frac{1}{2}\beta(t)x$、$g(t) = \sqrt{\beta(t)}$（スカラー）を一般形
+
+$$
+\frac{\partial p_t}{\partial t} = -\nabla \cdot (f\, p_t) + \frac{1}{2}g^2 \Delta p_t
+$$
+
+に代入すると:
+
+$$
+\frac{\partial p_t}{\partial t} = \frac{1}{2}\beta(t)\,\nabla \cdot (x\, p_t) + \frac{1}{2}\beta(t)\,\Delta p_t
+$$
+
+右辺の二項はそれぞれ drift 寄与（収縮）と diffusion 寄与（拡散）である。$\beta(t) > 0$ の限り収縮と拡散が常に共存し、分布が $\mathcal{N}(0, I)$ に引き寄せられることが直感的に分かる。
+
+**VP-SDEの定常分布 $p_\infty = \mathcal{N}(0, I)$ の検証**:
+$p(x) = (2\pi)^{-d/2} e^{-\|x\|^2/2}$ を代入し $\partial p / \partial t = 0$ を確認する。
+
+まず $\nabla \cdot (x\, p)$ を計算する。$\nabla_i(x_i\, p) = p + x_i \partial_i p = p + x_i \cdot (-x_i) p = p(1 - x_i^2)$ より和を取ると:
+
+$$
+\nabla \cdot (x\, p) = \sum_{i=1}^d (1 - x_i^2)\, p = (d - \|x\|^2)\, p
+$$
+
+次に $\Delta p$ を計算する。$\partial_i p = -x_i p$ より $\partial_i^2 p = -p - x_i(-x_i p) = (-1 + x_i^2) p$ となり:
+
+$$
+\Delta p = \sum_{i=1}^d (-1 + x_i^2)\, p = (\|x\|^2 - d)\, p
+$$
+
+二つを合わせると:
+
+$$
+\frac{1}{2}\beta(t)\!\left[(d - \|x\|^2)\, p + (\|x\|^2 - d)\, p\right] = \frac{1}{2}\beta(t) \cdot 0 = 0
+$$
+
+したがって $\partial p_\infty / \partial t = 0$ が成立し、$\mathcal{N}(0, I)$ はVP-SDEのFokker-Planck方程式の厳密な定常解である。$\beta(t) > 0$ の大きさによらず定常性が保たれる点が重要であり、スケジュール $\beta(t)$ の選択は収束速度のみを制御することが分かる。
+
+**VE-SDEのFokker-Planck方程式と定常分布**:
+$f = 0$（drift なし）、$g(t) = \sqrt{d\sigma^2(t)/dt}$ のとき:
+
+$$
+\frac{\partial p_t}{\partial t} = \frac{1}{2}\frac{d\sigma^2(t)}{dt}\,\Delta p_t
+$$
+
+これは純粋な拡散方程式（熱方程式）である。$\sigma^2(t) = \int_0^t g(s)^2 ds$ を累積分散として、初期条件 $p_0 = p_{\text{data}}$ から出発すると $p_t = p_{\text{data}} * \mathcal{N}(0, \sigma^2(t) I)$（畳み込み）がFokker-Planck方程式の解である。
+
+$t \to T$（大時刻極限）では $p_T \approx \mathcal{N}(0, \sigma(T)^2 I)$ に収束する。VP-SDEの $\mathcal{N}(0, I)$ とは異なり、VE-SDEの定常分布は $\sigma(T)$ に依存する。したがって逆拡散の出発点も $\mathcal{N}(0, \sigma(T)^2 I)$ からサンプリングする必要がある。
+
+**VP-SDE vs VE-SDE の設計上の差異**:
+VP-SDEは drift $f = -\frac{1}{2}\beta x$ が分散を $1$ に向けて収縮させる。このため $\sigma(T) \approx 1$（単位分散）が自動的に達成され、逆拡散の初期分布を $\mathcal{N}(0, I)$ と固定できる。
+
+VE-SDEは drift がないため分散が単調増加し $\sigma(T)$ は $T$ や $g(t)$ の選び方に依存する。NCSNでは $\sigma_1 \ll \sigma_2 \ll \cdots \ll \sigma_L$（対数スケール等差数列）として $\sigma_L$ を十分大きく取ることで「事実上の先験分布」を近似するが、理論的な定常分布は存在しない（分散が発散する場合がある）。
+
+この差異が両者の signal-to-noise ratio（SNR）定義の違いを生む。VP-SDEでは $\text{SNR}(t) = \bar\alpha(t)/(1-\bar\alpha(t))$（$\bar\alpha \to 0$ で SNR $\to 0$）、VE-SDEでは $\text{SNR}(t) = 1/\sigma^2(t)$（$\sigma \to \infty$ で SNR $\to 0$）と定義される。両SDE族は同じ SNR 曲線をたどるように再パラメータ化が可能であり、これが Song et al. 2021 の統一理論の核心の一つとなっている。
 
 ### 3.7 VP-SDE / VE-SDE / Sub-VP SDE — DDPMとNCSNのSDE統一
 
@@ -1041,6 +807,64 @@ Reverse: $dX_t = -\frac{d\sigma^2(t)}{dt} \nabla \log p_t(X_t) dt + \sqrt{d\sigm
 - スコア関数がノイズ除去の"方向"を指示
 
 **学習**: Neural Network $s_\theta(x, t)$ でスコア関数 $\nabla \log p_t(x)$ を近似（Score Matching, 第35回）
+
+#### 3.8.3 Anderson 1982 逆時間SDE — 証明の核心
+
+Anderson（1982）が確立した逆時間SDEの存在定理は、Diffusionモデル全体の理論的礎である。「ノイズを逆に取り除く過程」が厳密なSDEとして書けることを、Fokker-Planck方程式の随伴演算子を通じて示す。
+
+**Andersonの定理（一般形）**:
+$X_t$ が forward SDE
+
+$$
+dX_t = f(X_t, t)\, dt + g(t)\, dW_t, \quad X_0 \sim p_0
+$$
+
+に従うとする（$f: \mathbb{R}^d \times [0,T] \to \mathbb{R}^d$, $g: [0,T] \to \mathbb{R}$）。$p_t$ を $X_t$ の周辺分布密度とし、十分な正則性条件が満たされるとき、時間反転過程 $\bar X_t := X_{T-t}$ は以下のSDEに従う:
+
+$$
+d\bar X_t = \left[-f(\bar X_t, T-t) + g(T-t)^2\,\nabla_x \log p_{T-t}(\bar X_t)\right] dt + g(T-t)\, d\bar W_t
+$$
+
+ここで $\bar W_t$ は独立なBrown運動である。注目すべきは、逆ドリフトが元の drift $f$ の符号反転に加えて score function $g^2 \nabla \log p$ の補正項を持つことである。
+
+**証明の核心 — 時間反転Brown運動**:
+$W_t$ が $[0,T]$ 上のBrown運動のとき、$\bar W_t := W_T - W_{T-t}$ もBrown運動である。これは $\bar W_t$ の増分分布と独立増分性を確認することで示される:
+$\bar W_{t_2} - \bar W_{t_1} = W_{T-t_1} - W_{T-t_2} \sim \mathcal{N}(0, t_2 - t_1)$（$t_1 < t_2$ のとき $T-t_2 < T-t_1$ だから）。
+
+$X_{T-t}$ の確率微分を形式的に計算するには、変数変換 $s = T - t$（$ds = -dt$）を使う。Forward SDEの積分表現で $[T-t-\epsilon, T-t]$ における増分を逆向きに評価すると、確率積分の非予見性（適応性）の方向が逆転する。Itô積分の非予見性は「過去の情報を使う」という意味だが、時間を逆転させると「未来の情報」に依存する形になるため、追加補正項が必要となる。この補正項こそが score function の寄与である。
+
+**Fokker-Planck随伴演算子による導出**:
+Forward SDEの生成作用素（Fokker-Planck演算子の形式的随伴）は:
+
+$$
+\mathcal{L}^\dagger p = -\nabla \cdot (f\, p) + \frac{1}{2}g^2 \Delta p
+$$
+
+時間反転では $t \mapsto T-t$ の置き換えにより $\partial_t p$ の符号が変わる。$\partial_t p_{T-t}(x) = -(\partial_s p_s)(x)|_{s=T-t}$ となり、これがFokker-Planck方程式と整合するためには逆ドリフトが:
+
+$$
+\bar f(x, t) = -f(x, T-t) + g(T-t)^2\,\nabla_x \log p_{T-t}(x)
+$$
+
+でなければならない。$g^2 \nabla \log p = g^2 \nabla p / p$ の項は、密度が高い方向へ引き寄せる「データへの引力」として機能する。
+
+**VP-SDEへの適用**:
+$f(x,t) = -\frac{1}{2}\beta(t) x$, $g(t) = \sqrt{\beta(t)}$ を代入すると逆ドリフトは:
+
+$$
+\bar f(x, t) = \frac{1}{2}\beta(T-t)\, x + \beta(T-t)\,\nabla_x \log p_{T-t}(x)
+$$
+
+したがって逆拡散SDEは:
+
+$$
+d\bar X_t = \left[\frac{1}{2}\beta(T-t)\,\bar X_t + \beta(T-t)\,\nabla_x \log p_{T-t}(\bar X_t)\right] dt + \sqrt{\beta(T-t)}\, d\bar W_t
+$$
+
+符号に注意: $+\frac{1}{2}\beta \bar X_t$ は「原点から離れる」方向（forward の収縮と逆）、$+\beta \nabla \log p$ は「高密度領域へ」の項。両者が競合しながら $p_0$（データ分布）に向かって収束していく。
+
+**なぜ逆転が正確か**:
+Andersonの定理の最も重要な帰結は、逆過程が**近似ではなく厳密**であることだ。すなわち $\bar X_0 \sim p_T$（ノイズ分布）から出発して逆SDEを $[0,T]$ 上で解けば、終端 $\bar X_T$ の分布は正確に $p_0$（データ分布）となる。近似誤差は score function $\nabla \log p_t$ の推定誤差のみから来る。これがスコアマッチング（第35回）の精度改善が生成品質に直結する理由である。
 
 ### 3.9 Probability Flow ODE — 同一周辺分布を持つ決定論的過程
 
@@ -1192,6 +1016,62 @@ $$
 - $T = 50$ に減らすと: $O(1/\sqrt{50}) \approx 0.14$（~5倍悪化）
 - Predictor-Corrector法、高次ソルバー（DPM-Solver++）で改善可能
 
+#### 3.11.3 離散化スキームの誤差解析 — Euler-Maruyama精度
+
+Euler-Maruyama（EM）法の誤差理論を厳密に述べ、スコアベース生成モデルでの実践的含意を整理する。「ステップ数をいくつ取れば十分か」という問いに理論的な答えを与える。
+
+**強収束と弱収束の定義**:
+SDE $dX_t = f(X_t, t)\, dt + g(X_t, t)\, dW_t$（$X_0 = x_0$）のEM近似 $\hat X_{t_k}$（$t_k = kh$, $h = T/N$）に対し:
+
+- **強収束オーダー $\gamma$**: $\mathbb{E}\!\left[\|X_T - \hat X_T\|\right] = O(h^\gamma)$（パスごとの精度）
+- **弱収束オーダー $\beta$**: $\left|\mathbb{E}[f(X_T)] - \mathbb{E}[f(\hat X_T)]\right| = O(h^\beta)$（期待値の精度、$f$ は滑らか）
+
+生成モデルで重要なのは弱収束（分布の近さ）だが、強収束の理解が基礎となる。
+
+**EM法の収束定理（Lipschitz条件下）**:
+$f$, $g$ が $x$ に関して大域Lipschitz連続かつ線形増大条件を満たすとき:
+
+- 強収束オーダー $\gamma = 1/2$: 
+$$
+\mathbb{E}\!\left[\|X_T - \hat X_T\|^2\right]^{1/2} = O(h^{1/2})
+$$
+
+- 弱収束オーダー $\beta = 1$: 
+$$
+\left|\mathbb{E}[f(X_T)] - \mathbb{E}[f(\hat X_T)]\right| = O(h)
+$$
+
+強収束が $O(h^{1/2})$ に留まる理由は、各ステップでBrown運動増分 $\Delta W_k \sim \mathcal{N}(0, h)$ の二乗が $O(h)$ であり、これが $N$ ステップ積み重なると $O(Nh) = O(T)$ の一定誤差が残るためである。弱収束が一オーダー高い（$O(h)$）のは、期待値では確率的揺らぎがキャンセルするからである。
+
+**生成モデルへの含意**:
+$N = 1000$（DDPM標準）のとき $h = T/1000$ として弱収束誤差は $O(h) = O(T/1000) = O(10^{-3})$（$T=1$ 正規化時）。$N = 50$ に減らすと弱誤差は $O(1/50)$、すなわち20倍に増大する。これがDDIMや高次ソルバーなしで単純にステップ数を削減できない理由の一つである。
+
+**Milstein法 — 強収束を $O(h)$ に改善**:
+EM法の強収束オーダーを $1/2$ から $1$ に上げるため、Milstein法では伊藤の補題を使って追加項を加える。SDE $dX_t = f(X_t,t)\,dt + g(X_t,t)\,dW_t$ に対し:
+
+$$
+\hat X_{t_{k+1}} = \hat X_{t_k} + f\, h + g\, \Delta W_k + \frac{1}{2} g\,\frac{\partial g}{\partial x}\!\left((\Delta W_k)^2 - h\right)
+$$
+
+追加項 $\frac{1}{2}g\partial_x g((\Delta W)^2 - h)$ は伊藤の補題の二次変分（$dW^2 = dt$）を1ステップ先まで厳密に取り込む。
+
+**VP-SDEでのMilstein法の自明性**:
+VP-SDEでは $g(X_t, t) = \sqrt{\beta(t)}$（$x$ に依存しない）。よって $\partial_x g = 0$ となり Milstein の追加項はゼロになる:
+
+$$
+\frac{1}{2} g\,\frac{\partial g}{\partial x}((\Delta W)^2 - h) = \frac{1}{2}\sqrt{\beta(t)} \cdot 0 \cdot ((\Delta W)^2 - h) = 0
+$$
+
+VP-SDEのEMは既に Milstein と同等である。したがって拡散係数が状態非依存の場合、Milsteinへの切り替えによる計算コスト増加は一切の恩恵をもたらさない。
+
+**一般SDEでのMilstein効果**:
+拡散係数が $g(X_t)$（状態依存）の場合、例えば $g(x) = \sigma\, x$（幾何Brown運動）では $\partial_x g = \sigma \neq 0$ となり Milstein の補正が非自明に働く。同じ精度（弱誤差 $\epsilon$）を達成するのに必要なステップ数は:
+
+- EM: $N = O(\epsilon^{-2})$（強収束 $1/2$ から）
+- Milstein: $N = O(\epsilon^{-1})$（強収束 $1$ から）
+
+Milsteinを使うことで、同じ誤差に対してステップ数をおよそ半分に削減できる。特に Flow Matching や潜在空間SDEのように拡散係数が状態依存の場合、Milstein法は計算効率の面で有意義な改善をもたらす。
+
 ### 3.12 Manifold仮説下の改善された収束レート — 固有次元依存
 
 Manifold仮説: 高次元データは低次元マニフォールドに集中。
@@ -1268,10 +1148,68 @@ Song et al. 2021で提案。Reverse-time SDEサンプリングの精度向上。
 - 高次ソルバー: $O(T^{-2})$ 〜 $O(T^{-3})$ 収束
 - 同じ精度で$T$を大幅削減可能（1000 → 50ステップ）
 
-:::message
-**進捗: 50%完了 — ボス戦クリア！**
-Brown運動・伊藤積分・伊藤の補題・SDE・Fokker-Planck・VP-SDE/VE-SDE・Reverse-time SDE・Probability Flow ODE・Score SDE統一理論・収束性解析・Manifold仮説・SDE数値解法を完全導出した。残りは実装と演習。
-:::
+#### 3.13.3 Predictor-Corrector法の収束理論
+
+PCサンプラーの精度保証を対数ソボレフ不等式（LSI）の枠組みで定式化する。「なぜ1ステップのCorrector追加で品質が大幅に改善するのか」という経験的事実に、定量的な理論的根拠を与える。
+
+**PCサンプラーの構造**:
+時刻 $t$ から $t - \Delta t$ への一遷移は以下の2段階からなる:
+
+1. **Predictor（予測ステップ）**: Reverse-time SDEまたはPF-ODEで1ステップ更新し、目標分布 $p_{t-\Delta t}$ の粗い近似 $p_{t-\Delta t}^{\text{pred}}$ を得る
+2. **Corrector（補正ステップ）**: 過小評価Langevin（overdamped Langevin）MCMCを $K$ ステップ実行し、$p_{t-\Delta t}^{\text{pred}}$ を $p_{t-\Delta t}$ に近づける
+
+各Correctorステップ（ステップサイズ $r > 0$）は:
+
+$$
+x \leftarrow x + r\, s_\theta(x, t - \Delta t) + \sqrt{2r}\, z, \quad z \sim \mathcal{N}(0, I)
+$$
+
+$s_\theta$ を真のスコア $\nabla \log p_{t-\Delta t}$ に置き換えると、これは $p_{t-\Delta t}$ を定常分布とする正確なMCMCである。
+
+**対数ソボレフ不等式（LSI）と収束率**:
+分布 $p_{t-\Delta t}$ がLSI定数 $\rho > 0$ を満たすとは、任意の確率分布 $q$ に対して:
+
+$$
+\text{KL}(q \| p_{t-\Delta t}) \leq \frac{1}{2\rho}\, \mathbb{E}_q\!\left[\|\nabla \log q - \nabla \log p_{t-\Delta t}\|^2\right]
+$$
+
+が成立することである（Fisher情報との関係）。Gaussian分布 $\mathcal{N}(\mu, \Sigma)$ は LSI 定数 $\rho = \lambda_{\min}(\Sigma^{-1})$（最小固有値）を持つ。
+
+LSI が成立するとき、Langevin MCMCの $K$ ステップ後の分布 $\hat p$ は:
+
+$$
+\text{KL}(\hat p \| p_{t-\Delta t}) \leq (1 - 2\rho r)^K\, \text{KL}(p_{t-\Delta t}^{\text{pred}} \| p_{t-\Delta t})
+$$
+
+となる（ステップサイズ $r < 1/\rho$ のとき）。これをWasserstein距離で表すと:
+
+$$
+W_2(\hat p, p_{t-\Delta t})^2 \leq \frac{1}{\rho}(1 - 2\rho r)^K\, W_2(p_{t-\Delta t}^{\text{pred}}, p_{t-\Delta t})^2
+$$
+
+**最適ステップサイズとパラメータ選択**:
+収縮率 $(1 - 2\rho r)$ を最大化するには $r$ を大きく取りたいが、$r$ が大きすぎるとLangevinの離散化誤差が大きくなる。最適ステップサイズはスコアノルムのスケール $\|s_\theta\|^2$ とのバランスから:
+
+$$
+r_{\text{opt}} = O\!\left(\frac{\rho}{\|s_\theta\|^2}\right)
+$$
+
+と選ぶ。このとき1ステップの収縮率は $1 - 2\rho r_{\text{opt}} = O(1 - 2\rho^2/\|s_\theta\|^2)$ となり、$K$ ステップ後の誤差は指数的に減衰する。
+
+**PCサンプラーの誤差バジェット**:
+全体のサンプリング誤差は以下の三項の和として分解できる:
+
+$$
+W_2(p_{\text{gen}}, p_{\text{data}})^2 \leq \underbrace{W_2^2(\text{初期化誤差})}_{\text{(i) } p_T \neq \mathcal{N}(0,I)} + \underbrace{\sum_t W_2^2(\text{Predictor誤差})}_{\text{(ii) EMの離散化}} + \underbrace{\sum_t W_2^2(\text{Corrector残差})}_{\text{(iii) 有限K}}
+$$
+
+(i) は $T$ を大きく取ることで制御、(ii) はステップ数 $N$ の増大または高次ソルバーで制御、(iii) は $K$（Correctorステップ数）の増大で指数的に制御できる。
+
+**経験的知見との整合**:
+Song et al.（2021, arXiv:2011.13456）の実験では「1 Predictor + 1 Corrector」で FID スコアが大幅改善し、それ以上 Corrector を増やしても改善が小さいことが報告されている。これは上記の指数収束理論と整合する: $K=1$ で残差が $(1-2\rho r)^1$ になり、$K=2$ では $(1-2\rho r)^2$ だが、すでに $K=1$ で十分小さければ追加コストに見合う改善が得られないことが多い。時刻 $t$ が小さい（$p_t$ がデータに近い）ほど LSI 定数 $\rho$ が小さくなりやすく、より多くの Corrector ステップが有効になる場合がある。
+
+> **Note:** **進捗: 50%完了 — ボス戦クリア！**
+> Brown運動・伊藤積分・伊藤の補題・SDE・Fokker-Planck・VP-SDE/VE-SDE・Reverse-time SDE・Probability Flow ODE・Score SDE統一理論・収束性解析・Manifold仮説・SDE数値解法を完全導出した。残りは実装と演習。
 
 ---
 
@@ -1399,24 +1337,6 @@ $$
 
 Iterative Proportional Fitting (IPF) で解く:
 
-```julia
-# DSBM training (conceptual)
-function dsbm_ipf(p_0, p_1; iterations=10)
-    # Initialize with Brownian bridge
-    b_f = init_brownian_bridge()
-    b_b = init_brownian_bridge()
-
-    for k in 1:iterations
-        # Forward step: fit b_f given b_b
-        b_f = train_drift(p_0, b_b, direction=:forward)
-
-        # Backward step: fit b_b given b_f
-        b_b = train_drift(p_1, b_f, direction=:backward)
-    end
-
-    return b_f, b_b
-end
-```
 
 **利点**:
 - **Path efficiency**: Optimal Transport経路 (最短)
@@ -1437,31 +1357,6 @@ $$
 
 **Julia実装**:
 
-```julia
-function euler_maruyama(f, g, X0, t_span, dt)
-    t_start, t_end = t_span
-    t = t_start:dt:t_end
-    n = length(t)
-
-    X = zeros(size(X0, 1), n)
-    X[:, 1] = X0
-
-    for i in 1:n-1
-        dW = sqrt(dt) * randn(size(X0))
-        X[:, i+1] = X[:, i] + f(X[:, i], t[i]) * dt + g(X[:, i], t[i]) * dW
-    end
-
-    return t, X
-end
-
-# Example: VP-SDE
-β(t) = 0.1 + 0.9 * t  # Linear schedule
-f_vp(x, t) = -0.5 * β(t) * x
-g_vp(x, t) = sqrt(β(t)) * ones(size(x))
-
-X0 = randn(2)
-t, X = euler_maruyama(f_vp, g_vp, X0, (0.0, 1.0), 0.001)
-```
 
 **問題**: 確率的項で $\sqrt{\Delta t}$ → 収束遅い。
 
@@ -1477,34 +1372,6 @@ $$
 
 **Julia実装**:
 
-```julia
-function milstein(f, g, dg_dx, X0, t_span, dt)
-    t_start, t_end = t_span
-    t = t_start:dt:t_end
-    n = length(t)
-
-    X = zeros(size(X0, 1), n)
-    X[:, 1] = X0
-
-    for i in 1:n-1
-        Z = randn(size(X0))
-        dW = sqrt(dt) * Z
-
-        # Drift term
-        drift = f(X[:, i], t[i]) * dt
-
-        # Diffusion term
-        diffusion = g(X[:, i], t[i]) .* dW
-
-        # Correction term (Milstein)
-        correction = 0.5 * g(X[:, i], t[i]) .* dg_dx(X[:, i], t[i]) .* (Z.^2 .- 1) * dt
-
-        X[:, i+1] = X[:, i] + drift + diffusion + correction
-    end
-
-    return t, X
-end
-```
 
 **効果** (精度 vs ステップ数):
 
@@ -1562,9 +1429,7 @@ $$
 - Score SDE → Probability Flow ODE → Flow Matching
 - 全て同じ分布を学習、異なるパラメータ化
 
-:::message
-**進捗: 85%完了！** Advanced SDE formulations、Critically-damped Langevin、Rectified Flow、Schrödinger Bridge、Numerical solvers (Euler-Maruyama, Milstein, RK)、Flow Matching connection まで完全習得。数式修行ゾーン完全制覇目前！
-:::
+> **Note:** **進捗: 85%完了！** Advanced SDE formulations、Critically-damped Langevin、Rectified Flow、Schrödinger Bridge、Numerical solvers (Euler-Maruyama, Milstein, RK)、Flow Matching connection まで完全習得。数式修行ゾーン完全制覇目前！
 
 ---
 
@@ -1574,95 +1439,9 @@ $$
 
 **Probability Flow ODE Solver** (DifferentialEquations.jl):
 
-```julia
-using DifferentialEquations, Lux, Zygote
-
-# Score model (pre-trained)
-struct ScoreModel{M}
-    backbone::M
-end
-
-function (sm::ScoreModel)(x, t, ps, st)
-    # Returns ∇log p_t(x)
-    score, st = sm.backbone(vcat(x, [t]), ps, st)
-    return score, st
-end
-
-# Probability Flow ODE for VP-SDE
-function probability_flow_ode!(du, u, p, t)
-    x, ps, st, score_model, β_schedule = u[1:end-2], p[1], p[2], p[3], p[4]
-
-    # VP-SDE parameters
-    β_t = β_schedule(t)
-    f = -0.5 * β_t * x
-    g = sqrt(β_t)
-
-    # Score function
-    score, _ = score_model(x, t, ps, st)
-
-    # PF-ODE: dx/dt = f - (1/2) g² ∇log p_t
-    du .= f .- 0.5 * g^2 * score
-end
-
-# Sampling function
-function sample_pf_ode(score_model, ps, st, x_T; t_span=(1.0, 0.0), solver=Tsit5())
-    # Setup ODE problem
-    prob = ODEProblem(probability_flow_ode!, x_T, t_span, (ps, st, score_model, β_schedule))
-
-    # Solve
-    sol = solve(prob, solver, saveat=0.01)
-
-    # Return x_0
-    return sol.u[end]
-end
-
-# Example usage
-x_T = randn(Float32, 32, 32, 3, 1)  # CIFAR-10 latent
-x_0 = sample_pf_ode(score_model, ps, st, x_T)
-```
 
 **SDE Sampler with Predictor-Corrector**:
 
-```julia
-function sde_pc_sampler(
-    score_model, ps, st, x_T;
-    T_steps=1000,
-    corrector_steps=5,
-    snr=0.16  # Signal-to-noise ratio
-)
-    x = copy(x_T)
-    dt = 1.0 / T_steps
-
-    for i in T_steps:-1:1
-        t = i / T_steps
-
-        # --- Predictor (Reverse-time SDE) ---
-        β_t = β_schedule(t)
-        f = -0.5 * β_t * x
-        g = sqrt(β_t)
-
-        score, _ = score_model(x, t, ps, st)
-        drift = (f .- g^2 * score) * dt
-        diffusion = g * sqrt(dt) * randn(size(x))
-
-        x_pred = x .+ drift .+ diffusion
-
-        # --- Corrector (Langevin MCMC) ---
-        x = x_pred
-        for _ in 1:corrector_steps
-            score, _ = score_model(x, t, ps, st)
-            grad_norm = norm(score)
-
-            # Adaptive step size
-            ε = 2 * (snr * g / grad_norm)^2
-
-            x .+= ε * score .+ sqrt(2 * ε) * randn(size(x))
-        end
-    end
-
-    return x
-end
-```
 
 **Benchmark** (CIFAR-10, M1 Max, Julia 1.11):
 
@@ -1678,98 +1457,6 @@ Predictor-Corrector が品質向上 (FID 3.17 → 2.95)。
 
 **Euler-Maruyama Sampler** (ndarray + rand):
 
-```rust
-use ndarray::{Array1, Array4};
-use rand::distributions::{Distribution, StandardNormal};
-use rand::thread_rng;
-
-pub struct SDESampler {
-    score_model: ScoreModel,  // ONNX session
-    beta_schedule: Box<dyn Fn(f32) -> f32>,
-    steps: usize,
-}
-
-impl SDESampler {
-    pub fn sample_vp_sde(&self, x_t: Array4<f32>) -> Result<Array4<f32>, Box<dyn std::error::Error>> {
-        let mut x = x_t.clone();
-        let dt = 1.0 / self.steps as f32;
-        let mut rng = thread_rng();
-
-        for i in (1..=self.steps).rev() {
-            let t = i as f32 / self.steps as f32;
-            let beta_t = (self.beta_schedule)(t);
-
-            // Get score ∇log p_t(x)
-            let score = self.score_model.forward(&x, t)?;
-
-            // VP-SDE reverse-time drift
-            let f = -0.5 * beta_t * &x;
-            let g = beta_t.sqrt();
-            let drift = f - g.powi(2) * &score;
-
-            // Diffusion term
-            let noise: Array4<f32> = Array4::from_shape_fn(x.dim(), |_| {
-                StandardNormal.sample(&mut rng)
-            });
-            let diffusion = g * dt.sqrt() * noise;
-
-            // Update
-            x = x + drift * dt + diffusion;
-        }
-
-        Ok(x)
-    }
-
-    pub fn sample_pf_ode(&self, x_t: Array4<f32>) -> Result<Array4<f32>, Box<dyn std::error::Error>> {
-        // Probability Flow ODE (deterministic)
-        let mut x = x_t.clone();
-        let dt = 1.0 / self.steps as f32;
-
-        for i in (1..=self.steps).rev() {
-            let t = i as f32 / self.steps as f32;
-            let beta_t = (self.beta_schedule)(t);
-
-            let score = self.score_model.forward(&x, t)?;
-
-            // PF-ODE: dx/dt = f - (1/2)g²∇log p
-            let f = -0.5 * beta_t * &x;
-            let g = beta_t.sqrt();
-            let velocity = f - 0.5 * g.powi(2) * &score;
-
-            x = x + velocity * dt;
-        }
-
-        Ok(x)
-    }
-}
-
-// Beta schedule (linear)
-fn linear_beta_schedule(t: f32) -> f32 {
-    let beta_start = 0.0001;
-    let beta_end = 0.02;
-    beta_start + t * (beta_end - beta_start)
-}
-
-// Example usage
-fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let sampler = SDESampler {
-        score_model: ScoreModel::load("score_model.onnx")?,
-        beta_schedule: Box::new(linear_beta_schedule),
-        steps: 1000,
-    };
-
-    // Start from noise
-    let x_T = Array4::random((1, 32, 32, 3), rand::distributions::Standard);
-
-    // Sample
-    let x_0_sde = sampler.sample_vp_sde(x_T.clone())?;
-    let x_0_ode = sampler.sample_pf_ode(x_T.clone())?;
-
-    println!("✅ SDE & ODE sampling complete");
-
-    Ok(())
-}
-```
 
 **Performance** (CIFAR-10, Intel Xeon, Rust vs Julia vs PyTorch):
 
@@ -1807,17 +1494,6 @@ $$
 
 **Julia with Adaptive Solver**:
 
-```julia
-using DifferentialEquations
-
-prob = ODEProblem(probability_flow_ode!, x_T, (1.0, 0.0), params)
-
-# Adaptive step size with error tolerance
-sol = solve(prob, Tsit5(), abstol=1e-6, reltol=1e-4)
-
-# Check number of function evaluations
-println("NFE (function evals): $(sol.destats.nf)")
-```
 
 **Result**:
 - Fixed 1000 steps: NFE = 1000
@@ -1863,35 +1539,46 @@ $$
 
 **Uncertainty quantification**: SDE samplingで予測分布を推定。
 
-:::message
-**進捗: 100%完了！** Production SDE sampling (Julia + Rust), Adaptive solvers, Real-world applications まで完全網羅。SDE/ODE理論の全てを習得した！
-:::
+> **Note:** **進捗: 100%完了！** Production SDE sampling (Julia + Rust), Adaptive solvers, Real-world applications まで完全網羅。SDE/ODE理論の全てを習得した！
 
 ---
 
-### 主要論文
+## 参考文献
 
 [^1]: Dockhorn, T. et al. (2021). Score-Based Generative Modeling with Critically-Damped Langevin Diffusion. ICLR 2022. arXiv:2112.07068.
-@[card](https://arxiv.org/abs/2112.07068)
+<https://arxiv.org/abs/2112.07068>
 
 [^2]: Liu, X. et al. (2022). Flow Straight and Fast: Learning to Generate and Transfer Data with Rectified Flow. ICLR 2023. arXiv:2209.03003.
-@[card](https://arxiv.org/abs/2209.03003)
+<https://arxiv.org/abs/2209.03003>
 
 [^3]: De Bortoli, V. et al. (2021). Diffusion Schrödinger Bridge with Applications to Score-Based Generative Modeling. NeurIPS 2021. arXiv:2106.01357.
-@[card](https://arxiv.org/abs/2106.01357)
+<https://arxiv.org/abs/2106.01357>
 
 [^4]: Song, Y. et al. (2021). Score-Based Generative Modeling through Stochastic Differential Equations. ICLR 2021. arXiv:2011.13456.
-@[card](https://arxiv.org/abs/2011.13456)
+<https://arxiv.org/abs/2011.13456>
 
 [^5]: Chen, R. T. Q. et al. (2018). Neural Ordinary Differential Equations. NeurIPS 2018. arXiv:1806.07366.
-@[card](https://arxiv.org/abs/1806.07366)
+<https://arxiv.org/abs/1806.07366>
 
 [^6]: Karras, T. et al. (2022). Elucidating the Design Space of Diffusion-Based Generative Models. NeurIPS 2022. arXiv:2206.00364.
-@[card](https://arxiv.org/abs/2206.00364)
+<https://arxiv.org/abs/2206.00364>
 
 ---
 
 ---
+
+> Progress: 50%
+> **理解度チェック**
+> 1. Predictor-Corrector法においてEuler-Maruyamaの離散化誤差を Langevin Corrector が補正する仕組みを述べ、収束保証に必要なLipschitz定数 $L$ との関係を示せ。
+> 2. Sub-VP SDE のdiffusion係数がVP-SDEより小さい理由を分散の計算から導け。
+
+## 著者リンク
+
+- Blog: https://fumishiki.dev
+- X: https://x.com/fumishiki
+- LinkedIn: https://www.linkedin.com/in/fumitakamurakami
+- GitHub: https://github.com/fumishiki
+- Hugging Face: https://huggingface.co/fumishiki
 
 ## ライセンス
 

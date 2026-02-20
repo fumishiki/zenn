@@ -4,9 +4,16 @@ emoji: "🎨"
 type: "tech"
 topics: ["machinelearning", "deeplearning", "vae", "julia"]
 published: true
+slug: "ml-lecture-10-part2"
+difficulty: "advanced"
+time_estimate: "90 minutes"
+languages: ["Julia", "Rust"]
+keywords: ["機械学習", "深層学習", "生成モデル"]
 ---
 
 ## 💻 4. 実装ゾーン（45分）— Julia登場、そしてPythonに戻れない
+
+> **📖 この記事は後編（実装編）です** 理論編は [【前編】第10回](/articles/ml-lecture-10-part1) をご覧ください。
 
 ### 4.1 Python地獄の再現 — 訓練ループの遅さ
 
@@ -48,10 +55,10 @@ class VAE(nn.Module):
         z = self.reparameterize(mu, logvar)
         return self.decode(z), mu, logvar
 
-def loss_function(recon_x, x, mu, logvar):
-    BCE = F.binary_cross_entropy(recon_x, x.view(-1, 784), reduction='sum')
-    KLD = -0.5 * torch.sum(1 + logvar - mu.pow(2) - logvar.exp())
-    return BCE + KLD
+def loss_function(recon_x, x, mu, logvar) -> torch.Tensor:
+    bce = F.binary_cross_entropy(recon_x, x.view(-1, 784), reduction='sum')
+    kld = -0.5 * torch.sum(1 + logvar - mu.pow(2) - logvar.exp())
+    return bce + kld
 
 # Training benchmark
 model = VAE()
@@ -196,9 +203,8 @@ end
 
 # Reparameterization
 function reparameterize(μ, logσ²)
-    σ = exp.(0.5 .* logσ²)
     ε = randn(Float32, size(μ)...)
-    return μ .+ σ .* ε
+    return @. μ + exp(0.5 * logσ²) * ε
 end
 
 # VAE forward
@@ -216,9 +222,9 @@ end
 # Loss function
 function vae_loss(x_recon, x, μ, logσ²)
     # Reconstruction: binary cross-entropy
-    bce = -sum(x .* log.(x_recon .+ 1f-8) .+ (1 .- x) .* log.(1 .- x_recon .+ 1f-8))
+    bce = -sum(@. x * log(x_recon + 1f-8) + (1 - x) * log(1 - x_recon + 1f-8))
     # KL divergence
-    kld = -0.5f0 * sum(1 .+ logσ² .- μ.^2 .- exp.(logσ²))
+    kld = -0.5f0 * sum(@. 1 + logσ² - μ^2 - exp(logσ²))
     return bce + kld
 end
 ```
@@ -256,7 +262,7 @@ opt_state_dec = Optimisers.setup(Optimisers.Adam(lr), ps_dec)
 
 # Load MNIST
 train_data = MLDatasets.MNIST(split=:train)
-train_x = reshape(train_data.features, 784, :) |> x -> Float32.(x)
+train_x = Float32.(reshape(train_data.features, 784, :))
 
 # Training loop
 using ProgressMeter
@@ -266,7 +272,7 @@ using ProgressMeter
     num_batches = 0
 
     for i in 1:batch_size:size(train_x, 2)-batch_size
-        x_batch = train_x[:, i:i+batch_size-1]
+        x_batch = @view train_x[:, i:i+batch_size-1]
 
         # Compute loss and gradients
         (loss, (st_enc, st_dec)), grads = Zygote.withgradient(ps_enc, ps_dec) do p_enc, p_dec
@@ -312,9 +318,7 @@ Juliaの高速性の秘密は、**型安定性**だ。関数の出力の型が�
 
 ```julia
 # Type-stable (good)
-function f_stable(x::Float64)
-    return x^2  # always returns Float64
-end
+f_stable(x::Float64) = x^2  # always returns Float64
 
 # Type-unstable (bad)
 function f_unstable(x)
@@ -358,7 +362,7 @@ y = np.sin(x) + np.cos(x)**2  # 3 loops: sin, cos, **2, +
 VAEの損失関数で:
 
 ```julia
-kld = -0.5f0 * sum(1 .+ logσ² .- μ.^2 .- exp.(logσ²))
+kld = -0.5f0 * sum(@. 1 + logσ² - μ^2 - exp(logσ²))
 # ↑ この1行が、1回のメモリアクセスで完了（fusion）
 ```
 
@@ -421,7 +425,7 @@ julia> train_vae(epochs=1)
 
 **開発速度が劇的に向上する。**
 
-:::details Revise.jl のインストールと設定
+<details><summary>Revise.jl のインストールと設定</summary>
 
 ```julia
 # Revise.jl をインストール（初回のみ）
@@ -438,7 +442,8 @@ end
 ```
 
 これで、Julia起動時に常にRevise.jlが有効になる。
-:::
+
+</details>
 
 ### 4.6 Julia型システムの深掘り — なぜ速いのか
 
@@ -448,9 +453,7 @@ Juliaの速度の秘密は**型安定性**だと述べた。実際に診断し�
 
 ```julia
 # Type-stable function
-function stable_forward(W, x, b)
-    return W * x .+ b
-end
+stable_forward(W, x, b) = W * x .+ b
 
 # Type-unstable function
 function unstable_forward(W, x, b, use_bias)
@@ -532,12 +535,7 @@ enc(x_gpu)  # → "GPU encoder called"
 ```python
 # PyTorch requires manual device check
 def forward(self, x):
-    if x.is_cuda:
-        # GPU path
-        return self.net_gpu(x)
-    else:
-        # CPU path
-        return self.net_cpu(x)
+    return self.net_gpu(x) if x.is_cuda else self.net_cpu(x)
 ```
 
 Juliaでは、型（`Matrix` vs `CuMatrix`）が異なれば、自動で別の関数が呼ばれる。**条件分岐がゼロ。**
@@ -554,9 +552,7 @@ function no_fusion(x)
 end
 
 # With fusion (1 loop)
-function with_fusion(x)
-    return @. (cos(sin(x)))^2
-end
+with_fusion(x) = @. (cos(sin(x)))^2
 
 # Benchmark
 using BenchmarkTools
@@ -688,9 +684,7 @@ const ∇ = gradient  # Type: \nabla<TAB>
 
 これで、Julia起動時に自動でRevise.jlが有効になる。
 
-:::message
-**進捗: 70% 完了** Juliaが訓練ループで8.2倍速を達成する様を目撃した。Pythonに戻れない理由が明確になった。Zone 5で実験に進む。
-:::
+> **Note:** **進捗: 70% 完了** Juliaが訓練ループで8.2倍速を達成する様を目撃した。Pythonに戻れない理由が明確になった。Zone 5で実験に進む。
 
 ---
 
@@ -700,7 +694,7 @@ const ∇ = gradient  # Type: \nabla<TAB>
 
 VAE論文に頻出する記号を正確に読めるか、自己診断しよう。
 
-:::details Q1: $\mathbb{E}_{q_\phi(z \mid x)}[\log p_\theta(x \mid z)]$ の読み方と意味
+<details><summary>Q1: $\mathbb{E}_{q_\phi(z \mid x)}[\log p_\theta(x \mid z)]$ の読み方と意味</summary>
 
 **読み方**: 「イー サブ キューファイ（ゼット ギブン エックス）オブ ログ ピーシータ（エックス ギブン ゼット）」
 
@@ -709,9 +703,10 @@ VAE論文に頻出する記号を正確に読めるか、自己診断しよう�
 **日本語訳**: 「エンコーダが出力する潜在変数 $z$ の分布で平均を取ったときの、デコーダが $x$ を復元する確率の対数」
 
 [^1] Kingma & Welling (2013), Equation 2
-:::
 
-:::details Q2: $D_\text{KL}(q_\phi(z \mid x) \| p(z))$ の非対称性
+</details>
+
+<details><summary>Q2: $D_\text{KL}(q_\phi(z \mid x) \| p(z))$ の非対称性</summary>
 
 **問**: なぜ $D_\text{KL}(p \| q) \neq D_\text{KL}(q \| p)$ なのか？
 
@@ -720,9 +715,10 @@ VAE論文に頻出する記号を正確に読めるか、自己診断しよう�
 VAEでは $D_\text{KL}(q \| p)$ を使う理由: 事前分布 $p(z) = \mathcal{N}(0, I)$ に近づけたいのは、エンコーダの出力 $q_\phi(z \mid x)$ だから。
 
 参考: [第6回で導出](./ml-lecture-06.md)
-:::
 
-:::details Q3: $z = \mu + \sigma \odot \epsilon$ の $\odot$ は何か？
+</details>
+
+<details><summary>Q3: $z = \mu + \sigma \odot \epsilon$ の $\odot$ は何か？</summary>
 
 **記号**: $\odot$ は要素ごとの積 (element-wise product, Hadamard product)
 
@@ -735,9 +731,10 @@ z = mu + sigma * eps  # PyTorch (broadcast is implicit)
 ```
 
 Reparameterization Trick の核心部分。[^1]
-:::
 
-:::details Q4: $\sigma = \exp(0.5 \log \sigma^2)$ の意図
+</details>
+
+<details><summary>Q4: $\sigma = \exp(0.5 \log \sigma^2)$ の意図</summary>
 
 **問**: なぜ直接 $\sigma$ を出力せず、$\log \sigma^2$ を出力するのか？
 
@@ -751,9 +748,10 @@ $$
 D_\text{KL} = \frac{1}{2} \sum (\mu^2 + \sigma^2 - \log \sigma^2 - 1)
 $$
 $\log \sigma^2$ を直接使えば、`exp` と `log` が相殺される。
-:::
 
-:::details Q5: $p_\theta(x \mid z)$ がBernoulli分布のとき、再構成項は何か？
+</details>
+
+<details><summary>Q5: $p_\theta(x \mid z)$ がBernoulli分布のとき、再構成項は何か？</summary>
 
 **答**: Binary Cross-Entropy (BCE)
 
@@ -768,11 +766,12 @@ $$
 -\log p_\theta(x \mid z) = \frac{1}{2\sigma^2} \|x - \hat{x}\|^2 + \text{const}
 $$
 これはMSE (Mean Squared Error) に対応。
-:::
+
+</details>
 
 ### 5.2 コード翻訳テスト — 数式からコードへ
 
-:::details Q6: 以下の数式をJuliaで実装せよ
+<details><summary>Q6: 以下の数式をJuliaで実装せよ</summary>
 
 数式:
 $$
@@ -790,18 +789,17 @@ function vae_elbo(encoder, decoder, ps_enc, ps_dec, st_enc, st_dec, x)
     (μ, logσ²), st_enc = encoder(x, ps_enc, st_enc)
 
     # Reparameterize: z = μ + σ·ε
-    σ = exp.(0.5 .* logσ²)
     ε = randn(Float32, size(μ)...)
-    z = μ .+ σ .* ε
+    z = @. μ + exp(0.5 * logσ²) * ε
 
     # Decode: p_θ(x|z)
     x_recon, st_dec = decoder(z, ps_dec, st_dec)
 
     # Reconstruction term: E_q[log p(x|z)] ≈ -MSE (Gaussian assumption)
-    recon_term = -0.5f0 * sum((x .- x_recon).^2)
+    recon_term = -0.5f0 * sum(@. (x - x_recon)^2)
 
     # KL term: D_KL(q||p) (closed-form for Gaussian)
-    kl_term = -0.5f0 * sum(1 .+ logσ² .- μ.^2 .- exp.(logσ²))
+    kl_term = -0.5f0 * sum(@. 1 + logσ² - μ^2 - exp(logσ²))
 
     elbo = recon_term - kl_term  # ELBO (to maximize)
     loss = -elbo                  # Loss (to minimize)
@@ -813,9 +811,10 @@ end
 ポイント:
 - `sum()` が期待値の Monte Carlo 近似（1サンプル）
 - ELBO は最大化したいが、損失関数は最小化するので符号反転
-:::
 
-:::details Q7: Straight-Through Estimator (STE) をJuliaで実装
+</details>
+
+<details><summary>Q7: Straight-Through Estimator (STE) をJuliaで実装</summary>
 
 数式:
 $$
@@ -829,12 +828,12 @@ using ChainRulesCore
 
 function straight_through_quantize(z_e, codebook)
     # Forward: find nearest codebook entry
-    distances = sum((z_e .- codebook).^2, dims=1)
+    distances = sum(@. (z_e - codebook)^2, dims=1)
     indices = argmin(distances, dims=1)
     z_q = codebook[:, indices]
 
     # Straight-through: gradient flows as if z_q = z_e
-    return z_e + (z_q - z_e)  # This is a no-op in forward, but gradient flows through z_e
+    return z_e .+ (z_q .- z_e)  # no-op in forward; gradient flows through z_e
 end
 
 # Custom gradient rule (Zygote.jl)
@@ -851,7 +850,8 @@ end
 ```
 
 VQ-VAE [^3] で使われる、離散化の勾配近似。
-:::
+
+</details>
 
 ### 5.3 潜在空間の可視化 — 2次元潜在空間の構造
 
@@ -866,7 +866,7 @@ decoder = create_decoder(latent_dim, 400, 784)
 
 # Encode test data
 test_data = MLDatasets.MNIST(split=:test)
-test_x = reshape(test_data.features, 784, :) |> x -> Float32.(x)
+test_x = Float32.(reshape(test_data.features, 784, :))
 test_y = test_data.targets
 
 # Get latent codes
@@ -897,7 +897,7 @@ z_9 = μ[:, idx_9]
 # Linear interpolation
 n_steps = 10
 alphas = range(0, 1, length=n_steps)
-z_interp = hcat([α * z_9 + (1 - α) * z_0 for α in alphas]...)
+z_interp = hcat([@. α * z_9 + (1 - α) * z_0 for α in alphas]...)
 
 # Decode
 x_interp, _ = decoder(z_interp, ps_dec, st_dec)
@@ -923,11 +923,11 @@ z_smiling = mean(encode(x_smiling), dims=2)
 z_neutral = mean(encode(x_neutral), dims=2)
 
 # 2. Compute "smile vector"
-v_smile = z_smiling - z_neutral
+v_smile = z_smiling .- z_neutral
 
 # 3. Apply to any face
 z_input = encode(x_input)
-z_more_smile = z_input + 0.5 * v_smile  # increase smile
+z_more_smile = z_input .+ 0.5 .* v_smile  # increase smile
 x_output = decode(z_more_smile)
 ```
 
@@ -940,42 +940,34 @@ x_output = decode(z_more_smile)
 #### 5.6.1 Collapseの検出方法
 
 ```python
-def detect_posterior_collapse(model, train_loader):
-    """Detect posterior collapse by monitoring KL divergence per dimension."""
-    total_kl_per_dim = 0
-    num_batches = 0
+def detect_posterior_collapse(model, train_loader) -> torch.Tensor:
+    """KL per latent dimension — collapsed if KL < 0.01."""
+    total_kl, n = 0, 0
+    with torch.no_grad():
+        for x_batch, _ in train_loader:
+            mu, logvar = model.encode(x_batch)
+            kl_per_dim = 0.5 * (mu.pow(2) + logvar.exp() - logvar - 1)
+            total_kl += kl_per_dim.mean(dim=0)
+            n += 1
 
-    for x_batch, _ in train_loader:
-        mu, logvar = model.encode(x_batch)
-        # KL per dimension: 0.5 * (μ² + σ² - log(σ²) - 1)
-        kl_per_dim = 0.5 * (mu.pow(2) + logvar.exp() - logvar - 1)
-        total_kl_per_dim += kl_per_dim.mean(dim=0).detach()
-        num_batches += 1
+    avg_kl = total_kl / n
+    collapsed = (avg_kl < 0.01).sum().item()
+    active    = (avg_kl >= 0.01).sum().item()
 
-    avg_kl_per_dim = total_kl_per_dim / num_batches
-
-    # Collapse判定: KL < 0.01 の次元が多い
-    collapsed_dims = (avg_kl_per_dim < 0.01).sum().item()
-    active_dims = (avg_kl_per_dim >= 0.01).sum().item()
-
-    print(f"Active dimensions: {active_dims} / {len(avg_kl_per_dim)}")
-    print(f"Collapsed dimensions: {collapsed_dims}")
-    print(f"KL per dimension: {avg_kl_per_dim[:10]}")  # first 10
-
-    return avg_kl_per_dim
+    print(f"Active: {active}/{len(avg_kl)} | Collapsed: {collapsed}")
+    print(f"KL[:10] = {avg_kl[:10]}")
+    return avg_kl
 
 # Run detection
 kl_per_dim = detect_posterior_collapse(model, train_loader)
 
 # Visualize
 import matplotlib.pyplot as plt
-plt.bar(range(len(kl_per_dim)), kl_per_dim.cpu().numpy())
-plt.xlabel("Latent Dimension")
-plt.ylabel("KL Divergence")
-plt.title("Posterior Collapse Detection")
-plt.axhline(y=0.01, color='r', linestyle='--', label='Collapse threshold')
-plt.legend()
-plt.savefig("posterior_collapse.png")
+arr = kl_per_dim.cpu().numpy()
+plt.bar(range(len(arr)), arr)
+plt.axhline(0.01, color='r', linestyle='--', label='Collapse threshold')
+plt.xlabel("Latent Dimension"); plt.ylabel("KL Divergence")
+plt.legend(); plt.savefig("posterior_collapse.png")
 ```
 
 期待される結果:
@@ -987,39 +979,34 @@ plt.savefig("posterior_collapse.png")
 KL項の重みを、訓練初期は小さく、徐々に増やす。
 
 ```python
-def kl_annealing_schedule(epoch, total_epochs, strategy='linear'):
-    """KL annealing schedule to prevent posterior collapse."""
-    if strategy == 'linear':
-        return min(1.0, epoch / (total_epochs * 0.5))
-    elif strategy == 'sigmoid':
-        k = 0.1  # steepness
-        x0 = total_epochs * 0.5  # midpoint
-        return 1 / (1 + np.exp(-k * (epoch - x0)))
-    elif strategy == 'cyclical':
-        # Cyclical annealing (4 cycles)
-        period = total_epochs / 4
-        return (epoch % period) / period
-    else:
-        return 1.0
+def kl_annealing_schedule(epoch: int, total_epochs: int, strategy: str = 'linear') -> float:
+    """β(t) ∈ [0, 1] — ramp up KL weight to prevent posterior collapse."""
+    match strategy:
+        case 'linear':
+            return min(1.0, epoch / (total_epochs * 0.5))
+        case 'sigmoid':
+            k, x0 = 0.1, total_epochs * 0.5
+            return 1 / (1 + np.exp(-k * (epoch - x0)))
+        case 'cyclical':
+            period = total_epochs / 4
+            return (epoch % period) / period
+        case _:
+            return 1.0
 
-def train_with_annealing(model, train_loader, optimizer, epochs):
+def train_with_annealing(model, train_loader, optimizer, epochs: int) -> None:
     for epoch in range(epochs):
-        beta = kl_annealing_schedule(epoch, epochs, strategy='linear')
+        β = kl_annealing_schedule(epoch, epochs, strategy='linear')
 
         for x_batch, _ in train_loader:
             optimizer.zero_grad()
             recon, mu, logvar = model(x_batch)
-
-            # Annealed loss
             recon_loss = F.binary_cross_entropy(recon, x_batch.view(-1, 784), reduction='sum')
-            kl_loss = -0.5 * torch.sum(1 + logvar - mu.pow(2) - logvar.exp())
-            loss = recon_loss + beta * kl_loss  # β starts from 0, increases to 1
-
-            loss.backward()
+            kl_loss    = -0.5 * torch.sum(1 + logvar - mu.pow(2) - logvar.exp())
+            (recon_loss + β * kl_loss).backward()
             optimizer.step()
 
         if epoch % 10 == 0:
-            print(f"Epoch {epoch}: β={beta:.3f}, Loss={loss.item():.2f}")
+            print(f"Epoch {epoch}: β={β:.3f}")
 ```
 
 **戦略の比較**:
@@ -1035,22 +1022,11 @@ def train_with_annealing(model, train_loader, optimizer, epochs):
 各潜在次元に、最小KL値を保証する [^7]。
 
 ```python
-def free_bits_loss(recon_x, x, mu, logvar, free_bits=0.5):
-    """VAE loss with free bits constraint.
-
-    Ensures each latent dimension has KL ≥ free_bits (e.g., 0.5 nats).
-    """
+def free_bits_loss(recon_x, x, mu, logvar, free_bits: float = 0.5) -> torch.Tensor:
+    """BCE + KL with per-dim free bits — ensures KL_i ≥ free_bits nats."""
     recon_loss = F.binary_cross_entropy(recon_x, x.view(-1, 784), reduction='sum')
-
-    # KL per dimension (batch averaged)
-    kl_per_dim = -0.5 * torch.sum(1 + logvar - mu.pow(2) - logvar.exp(), dim=0)  # (latent_dim,)
-
-    # Apply free bits: max(KL_i, free_bits)
-    kl_per_dim_clamped = torch.clamp(kl_per_dim, min=free_bits)
-
-    total_kl = kl_per_dim_clamped.sum()
-
-    return recon_loss + total_kl
+    kl_per_dim = -0.5 * torch.sum(1 + logvar - mu.pow(2) - logvar.exp(), dim=0)
+    return recon_loss + kl_per_dim.clamp(min=free_bits).sum()
 
 # Training with free bits
 optimizer = optim.Adam(model.parameters(), lr=1e-3)
@@ -1058,8 +1034,7 @@ for epoch in range(10):
     for x_batch, _ in train_loader:
         optimizer.zero_grad()
         recon, mu, logvar = model(x_batch)
-        loss = free_bits_loss(recon, x_batch, mu, logvar, free_bits=0.5)
-        loss.backward()
+        free_bits_loss(recon, x_batch, mu, logvar).backward()
         optimizer.step()
 ```
 
@@ -1120,7 +1095,7 @@ function train_tiny_vae(; epochs=10, batch_size=128, lr=1e-3)
         num_batches = 0
 
         for i in 1:batch_size:size(train_x, 2)-batch_size
-            x_batch = train_x[:, i:i+batch_size-1]
+            x_batch = @view train_x[:, i:i+batch_size-1]
 
             # Compute gradients
             (loss, (st_enc, st_dec)), grads = Zygote.withgradient(ps_enc, ps_dec) do p_enc, p_dec
@@ -1128,16 +1103,15 @@ function train_tiny_vae(; epochs=10, batch_size=128, lr=1e-3)
                 (μ, logσ²), st_enc_new = encoder(x_batch, p_enc, st_enc)
 
                 # Reparameterize
-                σ = exp.(0.5f0 .* logσ²)
                 ε = randn(Float32, size(μ)...)
-                z = μ .+ σ .* ε
+                z = @. μ + exp(0.5f0 * logσ²) * ε
 
                 # Decode
                 x_recon, st_dec_new = decoder(z, p_dec, st_dec)
 
                 # Loss
-                bce = -sum(x_batch .* log.(x_recon .+ 1f-8) .+ (1 .- x_batch) .* log.(1 .- x_recon .+ 1f-8))
-                kld = -0.5f0 * sum(1 .+ logσ² .- μ.^2 .- exp.(logσ²))
+                bce = -sum(@. x_batch * log(x_recon + 1f-8) + (1 - x_batch) * log(1 - x_recon + 1f-8))
+                kld = -0.5f0 * sum(@. 1 + logσ² - μ^2 - exp(logσ²))
                 loss = bce + kld
 
                 return loss, (st_enc_new, st_dec_new)
@@ -1181,7 +1155,7 @@ Epoch 10: Loss = 104.23
 
 Kingma & Welling (2013) [^1] の Figure 1 を完全に理解しているか確認しよう。
 
-:::details Q8: Figure 1 の Graphical Model を説明せよ
+<details><summary>Q8: Figure 1 の Graphical Model を説明せよ</summary>
 
 **問**: 論文のFigure 1に描かれているGraphical Modelの意味を、確率的依存関係とともに説明せよ。
 
@@ -1206,13 +1180,17 @@ Kingma & Welling (2013) [^1] の Figure 1 を完全に理解しているか確�
 VAEは、このgraphical modelのパラメータ $\theta$ を最尤推定し、同時に近似事後分布 $q_\phi(z \mid x)$ を学習する。
 
 Plate notation で $N$ 個のデータ点が独立に生成されることを示している。
-:::
 
-:::message
-**進捗: 85% 完了** シンボル読解、コード翻訳、潜在空間の可視化・補間・属性操作、Posterior Collapse実験、ミニプロジェクト、論文図読解を完走した。Zone 6で最新研究の全体像を把握する。
-:::
+</details>
+
+> **Note:** **進捗: 85% 完了** シンボル読解、コード翻訳、潜在空間の可視化・補間・属性操作、Posterior Collapse実験、ミニプロジェクト、論文図読解を完走した。Zone 6で最新研究の全体像を把握する。
 
 ---
+
+> Progress: 85%
+> **理解度チェック**
+> 1. Julia実装における `z .= μ .+ σ .* ε` （Reparameterization Trick）の `.=` ブロードキャスト代入が、Pythonの `z = mu + sigma * eps` と比べてメモリ効率で優れる理由を述べよ。
+> 2. VQ-VAEのCommitment Loss $\beta_c \|\text{sg}[\mathbf{z}_e] - e\|^2 + \|\mathbf{z}_e - \text{sg}[e]\|^2$ において、`sg`（stop-gradient）が2箇所に入る理由と、それぞれが何を学習させるかを説明せよ。
 
 ## 🚀 6. 振り返りゾーン（30分）— まとめと次回予告
 
@@ -1233,24 +1211,21 @@ $$
 例: $d=8$ 次元、各次元が $\{-1, 0, 1\}$ → コードブック サイズ = $3^8 = 6561$
 
 ```julia
+"""
+Finite Scalar Quantization (FSQ).
+- `z`: continuous latent codes (d, N)
+- `levels`: quantization levels per dim (e.g., fill(3, 8) → 3⁸ = 6561 codes)
+"""
 function fsq_quantize(z::AbstractArray, levels::Vector{Int})
-    """Finite Scalar Quantization.
-
-    z: continuous latent codes (d, N)
-    levels: quantization levels per dimension (e.g., [3, 3, 3, 3, 3, 3, 3, 3])
-    """
     d, N = size(z)
     z_q = similar(z)
 
     for i in 1:d
-        # Map continuous values to discrete grid
-        L = levels[i]
-        grid = range(-1, 1, length=L)
-        z_q[i, :] = [grid[argmin(abs.(z[i, j] .- grid))] for j in 1:N]
+        grid = range(-1, 1, length=levels[i])
+        @views z_q[i, :] .= [grid[argmin(abs.(v .- grid))] for v in z[i, :]]
     end
 
-    # Straight-through estimator
-    return z + (z_q - z)  # gradient flows through z
+    return z .+ (z_q .- z)  # straight-through estimator
 end
 ```
 
@@ -1316,23 +1291,16 @@ $\sigma$を固定することで:
 訓練初期は両方を使い、後期は経路Aのみ。これで、エンコーダが早期にCollapseするのを防ぐ。
 
 ```python
-def dual_path_encoder(x, training=True):
-    # Path A: direct encoding
+def dual_path_encoder(x: torch.Tensor, training: bool = True) -> tuple[torch.Tensor, torch.Tensor]:
     mu_a, logvar_a = encoder_a(x)
+    if not training:
+        return mu_a, logvar_a
 
-    if training:
-        # Path B: masked encoding
-        x_masked = x * (torch.rand_like(x) > 0.3).float()  # 30% mask
-        mu_b, logvar_b = encoder_b(x_masked)
-
-        # Combine: weighted average
-        alpha = min(1.0, epoch / 50)  # gradually shift to Path A
-        mu = alpha * mu_a + (1 - alpha) * mu_b
-        logvar = alpha * logvar_a + (1 - alpha) * logvar_b
-    else:
-        mu, logvar = mu_a, logvar_a
-
-    return mu, logvar
+    # Path B: masked encoding
+    x_masked = x * (torch.rand_like(x) > 0.3)
+    mu_b, logvar_b = encoder_b(x_masked)
+    α = min(1.0, epoch / 50)
+    return α * mu_a + (1 - α) * mu_b, α * logvar_a + (1 - α) * logvar_b
 ```
 
 #### 6.4.3 GQ-VAE — 可変長離散トークン（BPE圧縮率に接近）
@@ -1397,7 +1365,7 @@ Image (256×256) → Encoder → 1D sequence (1024 tokens) → Decoder → Image
 - **本番・大規模訓練**: JAX（TPU最適化）
 - **数値計算・科学計算**: Lux.jl（数式1:1、最速CPU）
 
-:::details 用語集 (Glossary)
+<details><summary>用語集 (Glossary)</summary>
 
 | 用語 | 英語 | 定義 |
 |:-----|:-----|:-----|
@@ -1412,23 +1380,21 @@ Image (256×256) → Encoder → 1D sequence (1024 tokens) → Decoder → Image
 | Posterior Collapse | - | エンコーダが潜在変数を無視する現象。 |
 | Disentanglement | - | 潜在空間の各次元が独立した意味を持つ性質。 |
 
-:::
+</details>
 
-:::message
-**進捗: 95% 完了** VAE系列の系譜、FSQ/Cosmos最前線、推薦書籍を把握した。Zone 7で全体を振り返る。
-:::
+> **Note:** **進捗: 95% 完了** VAE系列の系譜、FSQ/Cosmos最前線、推薦書籍を把握した。Zone 7で全体を振り返る。
 
 ### 6.5 この講義の3つの核心
 
 1. **VAEは変分推論の自動化である** — 手動設計の近似分布 $q(z)$ を、NN $q_\phi(z \mid x)$ に置き換えた。Reparameterization Trickで微分可能に。
 
-2. **連続潜在空間から離散表現へ** — VAEの「ぼやけた画像」問題を、VQ-VAEが離散コードブックで解決。FSQがさらに簡素化。2026年の画像・動画トークナイザーの基盤。
+2. **連続潜在空間から離散表現へ** — VAEの「ぼやけた画像」問題を、VQ-VAEが離散コードブックで解決。FSQが一段と簡素化。2026年の画像・動画トークナイザーの基盤。
 
 3. **Juliaが訓練ループを8倍高速化** — 多重ディスパッチ + JIT + 型安定性。数式がそのままコードになる。**Pythonに戻れない。**
 
 ### 6.6 よくある質問 (FAQ)
 
-:::details Q: VAEの画像がぼやけるのはなぜ？
+<details><summary>Q: VAEの画像がぼやけるのはなぜ？</summary>
 
 **答**: 2つの理由がある:
 
@@ -1440,18 +1406,20 @@ Image (256×256) → Encoder → 1D sequence (1024 tokens) → Decoder → Image
 - β-VAE で β を小さくする（再構成重視）
 - Perceptual Loss を使う（VQ-GAN）
 - GANと組み合わせる（第12回）
-:::
 
-:::details Q: VQ-VAEのStraight-Through Estimatorは理論的に正しいのか？
+</details>
+
+<details><summary>Q: VQ-VAEのStraight-Through Estimatorは理論的に正しいのか？</summary>
 
 **答**: **正しくない**。勾配の不偏推定量ではない。しかし実用上は動作する。
 
 理論的には、Gumbel-Softmax（連続緩和）の方が厳密だが、VQ-VAEのSTEの方が実装が簡単で、性能も良い（経験的）。
 
 [^6] Bengio et al. (2013) "Estimating or Propagating Gradients Through Stochastic Neurons for Conditional Computation" — STEの最初の提案
-:::
 
-:::details Q: Juliaは本当にPythonより速いのか？全てのケースで？
+</details>
+
+<details><summary>Q: Juliaは本当にPythonより速いのか？全てのケースで？</summary>
 
 **答**: **No**。JITコンパイルのオーバーヘッドがあるため、短いスクリプト（1回だけ実行）ではPythonの方が速い場合もある。
 
@@ -1466,9 +1434,10 @@ Image (256×256) → Encoder → 1D sequence (1024 tokens) → Decoder → Image
 - 既存のC/C++ライブラリを呼ぶだけ（NumPy, Pandas）
 
 **使い分け**: プロトタイプ→Python、訓練→Julia、推論→Rust
-:::
 
-:::details Q: VAEとDiffusion Modelの関係は？
+</details>
+
+<details><summary>Q: VAEとDiffusion Modelの関係は？</summary>
 
 **答**: VAEは **Latent Diffusion Model (LDM)** の基盤だ。
 
@@ -1478,9 +1447,10 @@ Stable Diffusionの構造:
 3. VAE Decoder: 潜在空間 → 画像 (512×512)
 
 VAEが高次元画像を低次元潜在空間に圧縮することで、Diffusion Modelの計算量を劇的に削減。Course IVで詳述。
-:::
 
-:::details Q: 本講義で扱わなかったVAE発展トピックは？
+</details>
+
+<details><summary>Q: 本講義で扱わなかったVAE発展トピックは？</summary>
 
 本講義は基礎と離散表現に集中したため、以下は省略した:
 
@@ -1491,7 +1461,8 @@ VAEが高次元画像を低次元潜在空間に圧縮することで、Diffusio
 - **Variational Lossy Autoencoder (VLAE)** — 情報理論的解釈
 
 興味があれば、Zone 6の推奨書籍を参照。
-:::
+
+</details>
 
 ### 6.7 1週間の学習スケジュール
 
@@ -1555,9 +1526,7 @@ graph LR
     style L11 fill:#fff3e0
 ```
 
-:::message
-**進捗: 100% 完了！** VAEの基礎から離散表現、Julia実装まで完走した。次回は最適輸送理論で、確率分布間の「真の距離」を学ぶ。
-:::
+> **Note:** **進捗: 100% 完了！** VAEの基礎から離散表現、Julia実装まで完走した。次回は最適輸送理論で、確率分布間の「真の距離」を学ぶ。
 
 ### 6.10 💀 パラダイム転換の問い
 
@@ -1567,10 +1536,11 @@ Pythonでは、関数の振る舞いは引数の**型**ではなく、**値**で
 
 ```python
 def f(x):
-    if isinstance(x, int):
-        return x + 1
-    elif isinstance(x, list):
-        return [i + 1 for i in x]
+    match x:
+        case int():
+            return x + 1
+        case list():
+            return [i + 1 for i in x]
 ```
 
 Juliaでは、関数の振る舞いは**型**で制御される:
@@ -1585,7 +1555,7 @@ f(x::Vector{Int}) = x .+ 1
 2. 多重ディスパッチは「if文を書かなくて済む糖衣構文」なのか、それとも「型システムとランタイムの統合」なのか？
 3. **VAEの訓練ループが8倍速くなった理由は、多重ディスパッチなのか、JITなのか、型安定性なのか？それとも全ての相乗効果なのか？**
 
-:::details ヒント: Juliaの設計哲学
+<details><summary>ヒント: Juliaの設計哲学</summary>
 
 Juliaの創始者の言葉:
 
@@ -1593,53 +1563,56 @@ Juliaの創始者の言葉:
 > — Jeff Bezanson, Stefan Karpinski, Viral Shah, Alan Edelman (2012)
 
 多重ディスパッチは、この「全てを実現する」ための核心技術だった。型による最適化と、動的言語の柔軟性を両立させる唯一の方法。
-:::
+
+</details>
 
 このパラダイムを受け入れると、**Pythonの `if isinstance(x, type):` を書くたびに違和感を覚えるようになる。** それが、第10回の目標だ。
 
 ---
+
+> Progress: 95%
+> **理解度チェック**
+> 1. FSQ（Finite Scalar Quantization）がLFQ・RQ-VAEと比べて「実装の単純さ」を実現する仕組みを、量子化後のコードブック利用率の観点から説明せよ。
+> 2. SoftVQ-VAEが「完全微分可能」を実現するために、通常のVQ（argmin）操作をどのように置き換えるか述べよ。
 
 ## 参考文献
 
 ### 主要論文
 
 [^1]: Kingma, D. P., & Welling, M. (2013). Auto-Encoding Variational Bayes. *arXiv preprint arXiv:1312.6114*.
-@[card](https://arxiv.org/abs/1312.6114)
+<https://arxiv.org/abs/1312.6114>
 
 [^2]: Higgins, I., Matthey, L., Pal, A., Burgess, C., Glorot, X., Botvinick, M., ... & Lerchner, A. (2017). β-VAE: Learning Basic Visual Concepts with a Constrained Variational Framework. *International Conference on Learning Representations (ICLR)*.
-@[card](https://openreview.net/forum?id=Sy2fzU9gl)
+<https://openreview.net/forum?id=Sy2fzU9gl>
 
 [^3]: van den Oord, A., Vinyals, O., & Kavukcuoglu, K. (2017). Neural Discrete Representation Learning. *Advances in Neural Information Processing Systems (NeurIPS)*. arXiv:1711.00937.
-@[card](https://arxiv.org/abs/1711.00937)
+<https://arxiv.org/abs/1711.00937>
 
 [^4]: Mentzer, F., Minnen, D., Agustsson, E., & Tschannen, M. (2023). Finite Scalar Quantization: VQ-VAE Made Simple. *International Conference on Learning Representations (ICLR) 2024*. arXiv:2309.15505.
-@[card](https://arxiv.org/abs/2309.15505)
+<https://arxiv.org/abs/2309.15505>
 
 [^5]: NVIDIA. (2024). Cosmos Tokenizer. *GitHub Repository*.
-@[card](https://github.com/NVIDIA/Cosmos-Tokenizer)
+<https://github.com/NVIDIA/Cosmos-Tokenizer>
 
 [^6]: Bengio, Y., Léonard, N., & Courville, A. (2013). Estimating or Propagating Gradients Through Stochastic Neurons for Conditional Computation. arXiv:1308.3432.
-@[card](https://arxiv.org/abs/1308.3432)
+<https://arxiv.org/abs/1308.3432>
 
 [^7]: Kingma, D. P., Salimans, T., Jozefowicz, R., Chen, X., Sutskever, I., & Welling, M. (2016). Improved Variational Inference with Inverse Autoregressive Flow. *NeurIPS 2016*.
-@[card](https://arxiv.org/abs/1606.04934)
-
-[^30]: Zhao, S., Song, J., & Ermon, S. (2020). A Batch Normalized Inference Network Keeps the KL Vanishing Away.
-@[card](https://arxiv.org/abs/2004.12585)
+<https://arxiv.org/abs/1606.04934>
 
 ### 関連論文
 
 - Burgess, C. P., Higgins, I., Pal, A., Matthey, L., Watters, N., Desjardins, G., & Lerchner, A. (2018). Understanding disentangling in β-VAE. arXiv:1804.03599.
-@[card](https://arxiv.org/abs/1804.03599)
+<https://arxiv.org/abs/1804.03599>
 
 - Kingma, D. P., Salimans, T., & Welling, M. (2015). Variational Dropout and the Local Reparameterization Trick. *NeurIPS*. arXiv:1506.02557.
-@[card](https://arxiv.org/abs/1506.02557)
+<https://arxiv.org/abs/1506.02557>
 
 - Esser, P., Rombach, R., & Ommer, B. (2021). Taming Transformers for High-Resolution Image Synthesis. *CVPR*. arXiv:2012.09841.
-@[card](https://arxiv.org/abs/2012.09841)
+<https://arxiv.org/abs/2012.09841>
 
 - Yu, L., Poirson, P., Yang, S., Berg, A. C., & Berg, T. L. (2023). MAGVIT-v2: Language Model Beats Diffusion - Tokenizer is Key to Visual Generation. arXiv:2310.05737.
-@[card](https://arxiv.org/abs/2310.05737)
+<https://arxiv.org/abs/2310.05737>
 
 ### 教科書
 
@@ -1648,295 +1621,18 @@ Juliaの創始者の言葉:
 - Murphy, K. P. (2022). *Probabilistic Machine Learning: Advanced Topics*. MIT Press. Chapter 21: Variational Inference.
 
 - Goodfellow, I., Bengio, Y., & Courville, A. (2016). *Deep Learning*. MIT Press. Chapter 20: Deep Generative Models.
-@[card](https://www.deeplearningbook.org/)
+<https://www.deeplearningbook.org/>
 
 ---
 
-## 記法規約
 
-本講義シリーズで使用する数学記法の統一ルール:
+## 著者リンク
 
-| 記号 | 意味 | 読み方 | 例 |
-|:-----|:-----|:------|:---|
-| $x$ | データ（観測変数） | エックス | $x \in \mathbb{R}^{784}$ |
-| $z$ | 潜在変数 | ゼット | $z \in \mathbb{R}^{20}$ |
-| $\theta$ | 生成モデルのパラメータ（Decoder） | シータ | $p_\theta(x \mid z)$ |
-| $\phi$ | 変分分布のパラメータ（Encoder） | ファイ | $q_\phi(z \mid x)$ |
-| $\mu, \sigma$ | 平均、標準偏差 | ミュー、シグマ | $\mathcal{N}(\mu, \sigma^2)$ |
-| $\epsilon$ | ノイズ変数 | イプシロン | $\epsilon \sim \mathcal{N}(0, I)$ |
-| $p(x)$ | 真の分布 | ピー | $p(x) = \int p(x, z) dz$ |
-| $q(z \mid x)$ | 変分分布（近似事後分布） | キュー | $q_\phi(z \mid x)$ |
-| $\mathbb{E}_{q}[\cdot]$ | $q$ の下での期待値 | イー サブ キュー | $\mathbb{E}_{q(z)}[f(z)]$ |
-| $D_\text{KL}(q \| p)$ | KL発散 | ディー ケーエル | $D_\text{KL}(q \| p) = \mathbb{E}_q[\log q - \log p]$ |
-| $\mathcal{L}(\theta, \phi)$ | ELBO（損失関数） | エル シータ ファイ | $\mathcal{L} = \mathbb{E}_q[\log p] - D_\text{KL}(q \| p)$ |
-| $\nabla_\theta$ | $\theta$ に関する勾配 | ナブラ シータ | $\nabla_\theta \mathcal{L}$ |
-| $\odot$ | 要素ごとの積（Hadamard積） | Hadamard product | $z = \mu + \sigma \odot \epsilon$ |
-| $\|x\|$ | ユークリッドノルム | ノルム | $\|x\|^2 = \sum x_i^2$ |
-
-**Julia記法との対応**:
-- `μ` (U+03BC), `σ` (U+03C3), `θ` (U+03B8), `φ` (U+03C6), `ε` (U+03B5) — Juliaでは変数名にギリシャ文字を使える
-- `.` — broadcast演算子（要素ごと適用）
-- `.*` — 要素ごとの積（$\odot$ に対応）
-
----
-
-## 補遺 — VAE 実装の実践的テクニック
-
-:::message
-**実装の罠**: 理論的に正しいVAEも、実装の細部（正規化、初期化、学習率）で性能が大きく変わる[^30]。本節では実証済みのベストプラクティスを紹介。
-:::
-
-### テクニック1: Batch Normalization の正しい使い方
-
-**原則**[^30]: エンコーダには BN を使い、デコーダには使わない。
-
-```python
-class VAEEncoder(nn.Module):
-    def __init__(self, input_dim=784, hidden_dim=400, latent_dim=20):
-        super().__init__()
-        self.fc1 = nn.Linear(input_dim, hidden_dim)
-        self.bn1 = nn.BatchNorm1d(hidden_dim)  # ✅ エンコーダにBN
-        self.fc_mu = nn.Linear(hidden_dim, latent_dim)
-        self.fc_logvar = nn.Linear(hidden_dim, latent_dim)
-
-    def forward(self, x):
-        h = F.relu(self.bn1(self.fc1(x)))  # BN → ReLU
-        return self.fc_mu(h), self.fc_logvar(h)
-
-class VAEDecoder(nn.Module):
-    def __init__(self, latent_dim=20, hidden_dim=400, output_dim=784):
-        super().__init__()
-        self.fc1 = nn.Linear(latent_dim, hidden_dim)
-        # ❌ デコーダにはBNを使わない（サンプリング時に不安定）
-        self.fc2 = nn.Linear(hidden_dim, output_dim)
-
-    def forward(self, z):
-        h = F.relu(self.fc1(z))
-        return torch.sigmoid(self.fc2(h))
-```
-
-**理由**: デコーダに BN を使うと、テスト時のバッチサイズや統計量の違いで出力が変動。
-
-### テクニック2: Weight Initialization の最適化
-
-```python
-def init_weights(m):
-    """Xavier初期化でVAEの重みを初期化"""
-    if isinstance(m, nn.Linear):
-        nn.init.xavier_normal_(m.weight)
-        if m.bias is not None:
-            nn.init.constant_(m.bias, 0)
-
-# 適用
-encoder.apply(init_weights)
-decoder.apply(init_weights)
-
-# logvar の初期値を -1 に設定（σ = exp(-0.5) ≈ 0.6）
-nn.init.constant_(encoder.fc_logvar.bias, -1)
-```
-
-**効果**: 初期の KL 項を小さく保ち、posterior collapse を防ぐ。
-
-### テクニック3: Learning Rate Scheduling
-
-```python
-optimizer = torch.optim.Adam(
-    list(encoder.parameters()) + list(decoder.parameters()),
-    lr=1e-3
-)
-
-# Cosine Annealing with Warm Restarts
-scheduler = torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(
-    optimizer,
-    T_0=10,    # 最初のサイクル長（epochs）
-    T_mult=2,  # 次のサイクルは2倍長く
-    eta_min=1e-5
-)
-
-for epoch in range(100):
-    train_one_epoch(...)
-    scheduler.step()
-```
-
-**効果**: 周期的に学習率をリセットし、局所最適解から脱出。
-
-### テクニック4: Gradient Clipping（勾配爆発の防止）
-
-```python
-# 訓練ループ内
-loss.backward()
-torch.nn.utils.clip_grad_norm_(
-    list(encoder.parameters()) + list(decoder.parameters()),
-    max_norm=5.0  # 勾配ノルムの上限
-)
-optimizer.step()
-```
-
-**適用場面**: 深い階層VAE、RNN-based VAE で必須。
-
-### テクニック5: Reconstruction Loss の正規化
-
-```python
-def vae_loss(x, x_recon, mu, logvar, reduction='sum'):
-    """
-    正規化されたVAE損失
-
-    Parameters
-    ----------
-    reduction : str
-        'sum' — バッチ全体で合計（KL項と整合）
-        'mean' — バッチ平均（スケール不変）
-    """
-    batch_size = x.size(0)
-
-    # 再構成誤差（Binary Cross-Entropy）
-    recon_loss = F.binary_cross_entropy(
-        x_recon, x,
-        reduction='sum' if reduction == 'sum' else 'mean'
-    )
-
-    # KL発散
-    kl_loss = -0.5 * torch.sum(1 + logvar - mu.pow(2) - logvar.exp())
-
-    if reduction == 'mean':
-        kl_loss /= batch_size
-
-    return recon_loss + kl_loss
-
-# 推奨: reduction='mean' でバッチサイズ不変
-```
-
-### テクニック6: Test-Time Sampling の注意点
-
-```python
-@torch.no_grad()
-def generate_samples(decoder, n_samples=64, latent_dim=20, device='cuda'):
-    """VAEからサンプル生成"""
-    decoder.eval()  # ⚠️ 必須
-
-    # 事前分布からサンプリング
-    z = torch.randn(n_samples, latent_dim, device=device)
-
-    # 生成
-    samples = decoder(z)
-
-    return samples
-
-# ❌ 間違い: decoder.train() のままサンプリング
-#    → BatchNorm の running stats が壊れる
-
-# ✅ 正しい: decoder.eval() でサンプリング
-```
-
-### テクニック7: Hierarchical VAE のスキップ接続
-
-```python
-class HierarchicalVAE(nn.Module):
-    def __init__(self):
-        super().__init__()
-        self.enc_z1 = Encoder(input_dim, z1_dim)
-        self.enc_z2 = Encoder(z1_dim, z2_dim)
-        self.dec_z1 = Decoder(z2_dim, z1_dim)
-        self.dec_x = Decoder(z1_dim + z2_dim, input_dim)  # ✅ z2も直接使用
-
-    def forward(self, x):
-        # Encode
-        mu1, logvar1 = self.enc_z1(x)
-        z1 = reparameterize(mu1, logvar1)
-        mu2, logvar2 = self.enc_z2(z1)
-        z2 = reparameterize(mu2, logvar2)
-
-        # Decode with skip connection
-        mu1_prior, logvar1_prior = self.dec_z1(z2)
-        z_concat = torch.cat([z1, z2], dim=-1)  # スキップ接続
-        x_recon = self.dec_x(z_concat)
-
-        return x_recon, mu1, logvar1, mu2, logvar2, mu1_prior, logvar1_prior
-```
-
-**効果**: 上位層の情報を直接デコーダに渡し、表現力向上。
-
-### テクニック8: Debugging Checklist
-
-| 症状 | 原因 | 対策 |
-|:---|:---|:---|
-| KL ≈ 0 (posterior collapse) | KL項が大きすぎる | Free-bits / β-warmup |
-| Reconstruction 改善せず | 学習率が高すぎる | lr=1e-4 に下げる |
-| NaN 発生 | logvar が発散 | Gradient clipping / logvar を [-10, 10] にclamp |
-| 生成画像がぼやける | MSE損失使用 | BCE または Perceptual Loss に変更 |
-| バッチサイズで性能変動 | Decoder に BN | BN を削除 |
-
-```python
-# logvar の clamp
-logvar = torch.clamp(logvar, min=-10, max=10)
-sigma = torch.exp(0.5 * logvar)
-
-# NaN チェック
-assert not torch.isnan(loss).any(), "NaN detected in loss!"
-```
-
-### 実装例: 完全なVAE訓練ループ
-
-```python
-def train_vae(
-    encoder,
-    decoder,
-    train_loader,
-    epochs=100,
-    latent_dim=20,
-    beta_schedule='linear',
-    device='cuda'
-):
-    """Production-ready VAE training"""
-    encoder.train()
-    decoder.train()
-
-    optimizer = torch.optim.Adam(
-        list(encoder.parameters()) + list(decoder.parameters()),
-        lr=1e-3, betas=(0.9, 0.999)
-    )
-
-    for epoch in range(epochs):
-        # β-annealing
-        if beta_schedule == 'linear':
-            beta = min(1.0, epoch / 10)  # 10 epochs で β=1
-        else:
-            beta = 1.0
-
-        epoch_loss = 0
-        for x, _ in train_loader:
-            x = x.to(device)
-
-            # Forward
-            mu, logvar = encoder(x)
-            logvar = torch.clamp(logvar, -10, 10)  # 安定化
-            z = reparameterize(mu, logvar)
-            x_recon = decoder(z)
-
-            # Loss
-            recon_loss = F.binary_cross_entropy(x_recon, x, reduction='sum')
-            kl_loss = -0.5 * torch.sum(1 + logvar - mu.pow(2) - logvar.exp())
-            loss = recon_loss + beta * kl_loss
-
-            # Backward
-            optimizer.zero_grad()
-            loss.backward()
-            torch.nn.utils.clip_grad_norm_(
-                list(encoder.parameters()) + list(decoder.parameters()),
-                max_norm=5.0
-            )
-            optimizer.step()
-
-            epoch_loss += loss.item()
-
-        print(f"Epoch {epoch}: Loss={epoch_loss / len(train_loader.dataset):.4f}")
-```
-
----
-
-**EOF**
-
----
+- Blog: https://fumishiki.dev
+- X: https://x.com/fumishiki
+- LinkedIn: https://www.linkedin.com/in/fumitakamurakami
+- GitHub: https://github.com/fumishiki
+- Hugging Face: https://huggingface.co/fumishiki
 
 ## ライセンス
 

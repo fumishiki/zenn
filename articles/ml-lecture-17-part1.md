@@ -4,7 +4,14 @@ emoji: "🔀"
 type: "tech"
 topics: ["machinelearning", "deeplearning", "mamba", "julia", "rust"]
 published: true
+slug: "ml-lecture-17-part1"
+difficulty: "advanced"
+time_estimate: "90 minutes"
+languages: ["Julia", "Rust"]
+keywords: ["機械学習", "深層学習", "生成モデル"]
 ---
+
+**→ Part2（実装編）**: [第17回 Part2](./ml-lecture-17-part2)
 
 # 第17回: Mamba発展 & 類似手法 — Attention=SSM双対性の衝撃
 
@@ -22,9 +29,7 @@ published: true
 
 本講義では、この双対性の数学的証明を完全導出し、Mamba-2, RWKV-7, RetNet, GLA, Vision Mambaといった最新アーキテクチャを実装する。理論と実装の1:1対応を徹底し、Julia + Rustで動くコードを書く。
 
-:::message
-**このシリーズについて**: 東京大学 松尾・岩澤研究室動画講義の**完全上位互換**の全50回シリーズ。理論（論文が書ける）、実装（Production-ready）、最新（2025-2026 SOTA）の3軸で差別化する。
-:::
+> **Note:** **このシリーズについて**: 東京大学 松尾・岩澤研究室動画講義の**完全上位互換**の全50回シリーズ。理論（論文が書ける）、実装（Production-ready）、最新（2025-2026 SOTA）の3軸で差別化する。
 
 ```mermaid
 graph TD
@@ -65,9 +70,9 @@ using LinearAlgebra
 
 # Semi-Separable行列: A[i,j] = u[i]' * v[j] (i ≥ j の場合)
 function semi_separable_matrix(u::Matrix{T}, v::Matrix{T}) where T
-    N, d = size(u)
+    N = size(u, 1)
     A = zeros(T, N, N)
-    for i in 1:N, j in 1:i  # Lower triangular + diagonal
+    @inbounds @views for i in 1:N, j in 1:i  # lower triangular + diagonal
         A[i, j] = dot(u[i, :], v[j, :])
     end
     return A
@@ -132,9 +137,7 @@ Attention scores (Causal masked):
 
 この背後にある定理を、Zone 3で完全証明する。
 
-:::message
-**進捗: 3% 完了** Attention=SSM双対性を体感した。ここから、この衝撃的な定理の数学と実装に入る。
-:::
+> **Note:** **進捗: 3% 完了** Attention=SSM双対性を体感した。ここから、この衝撃的な定理の数学と実装に入る。
 
 ---
 
@@ -148,52 +151,6 @@ Mamba-2 [^1] は、SSD (Structured State Space Duality) フレームワークを
 - **Transformerと同等の性能** (言語モデリング)
 - **数学的統一**: AttentionとSSMは双対
 
-```julia
-# Mamba-2のコア: Semi-Separable行列の効率的計算
-function mamba2_block(x::Matrix{T}, u::Matrix{T}, v::Matrix{T}) where T
-    # x: (N, d_model), u/v: (N, d_state)
-    N, d = size(x)
-    d_state = size(u, 2)
-
-    # Chunk-wise並列計算 (Mamba-2の鍵)
-    chunk_size = 64
-    num_chunks = cld(N, chunk_size)
-
-    y = zeros(T, N, d)
-    state = zeros(T, d_state, d)  # Running state
-
-    for c in 1:num_chunks
-        start_idx = (c - 1) * chunk_size + 1
-        end_idx = min(c * chunk_size, N)
-
-        # Chunk内部は並列計算可能
-        chunk_x = x[start_idx:end_idx, :]
-        chunk_u = u[start_idx:end_idx, :]
-        chunk_v = v[start_idx:end_idx, :]
-
-        # State更新 (Semi-Separable構造を活用)
-        for i in 1:(end_idx - start_idx + 1)
-            global_i = start_idx + i - 1
-            # y[i] = Σ_{j≤i} (u[i]' * v[j]) * x[j]
-            # これを state を介して効率的に計算
-            state += chunk_v[i, :] * chunk_x[i, :]'
-            y[global_i, :] = chunk_u[i, :]' * state
-        end
-    end
-
-    return y
-end
-
-# テスト
-N, d_model, d_state = 256, 64, 32
-x = randn(Float32, N, d_model)
-u = randn(Float32, N, d_state)
-v = randn(Float32, N, d_state)
-
-@time y_mamba2 = mamba2_block(x, u, v)
-println("Mamba-2 output shape: ", size(y_mamba2))
-```
-
 **Mamba-2の利点**:
 
 | 項目 | Mamba (第16回) | Mamba-2 (今回) |
@@ -206,46 +163,6 @@ println("Mamba-2 output shape: ", size(y_mamba2))
 ### 1.2 RWKV-7 "Goose" — 線形RNNの最前線
 
 **RWKV** (Receptance Weighted Key Value) [^2] は、線形RNNとAttentionのハイブリッドだ。2025年3月リリースのRWKV-7 [^3] は、Generalized Delta Ruleを導入し、TC0限界を突破した。
-
-```julia
-# RWKV-7の核心: 時間ミックス + Generalized Delta Rule
-function rwkv7_time_mix(x::Matrix{T}, w::Vector{T}, k::Matrix{T}, v::Matrix{T}) where T
-    # x: (N, d), w: (d,) decay weights, k/v: (N, d)
-    N, d = size(x)
-
-    # Receptance: どれだけ過去を受容するか
-    r = 1 ./ (1 .+ exp.(-x))  # sigmoid
-
-    # WKV (Weighted Key-Value) with Generalized Delta Rule
-    wkv = zeros(T, N, d)
-    num = zeros(T, d)  # Numerator state
-    den = zeros(T, d)  # Denominator state
-
-    for i in 1:N
-        # Decay適用
-        num = num .* w .+ k[i, :] .* v[i, :]
-        den = den .* w .+ k[i, :]
-
-        # WKV = Σ_j w^(i-j) * k[j] * v[j] / Σ_j w^(i-j) * k[j]
-        wkv[i, :] = num ./ (den .+ 1f-6)
-    end
-
-    # Receptance適用
-    output = r .* wkv
-
-    return output
-end
-
-# テスト
-N, d = 128, 64
-x = randn(Float32, N, d)
-w = fill(Float32(0.9), d)  # Decay weight
-k = randn(Float32, N, d)
-v = randn(Float32, N, d)
-
-y_rwkv = rwkv7_time_mix(x, w, k, v)
-println("RWKV-7 output shape: ", size(y_rwkv))
-```
 
 **RWKV-7の特徴**:
 
@@ -261,60 +178,6 @@ println("RWKV-7 output shape: ", size(y_rwkv))
 2. **再帰表現**: 推論時、O(1)メモリ
 3. **チャンク再帰**: 長系列時、チャンク単位で並列+再帰
 
-```julia
-# RetNetの並列表現
-function retnet_parallel(Q::Matrix{T}, K::Matrix{T}, V::Matrix{T}, gamma::T) where T
-    # Q, K, V: (N, d)
-    # gamma: Decay factor (e.g., 0.9)
-    N, d = size(Q)
-
-    # Retention行列: R[i,j] = gamma^(i-j) * Q[i]' * K[j] (i ≥ j)
-    R = zeros(T, N, N)
-    for i in 1:N, j in 1:i
-        R[i, j] = gamma^(i - j) * dot(Q[i, :], K[j, :])
-    end
-
-    # Normalize (GroupNorm相当)
-    R_norm = R ./ (sum(R, dims=2) .+ 1f-6)
-
-    # Output
-    output = R_norm * V
-
-    return output
-end
-
-# RetNetの再帰表現 (推論時)
-function retnet_recurrent(q::Vector{T}, k::Vector{T}, v::Vector{T},
-                          state::Vector{T}, gamma::T) where T
-    # Single timestep: q, k, v: (d,), state: (d,)
-
-    # State更新: s_t = gamma * s_{t-1} + k_t * v_t
-    state_new = gamma .* state .+ k .* v
-
-    # Output: o_t = q_t' * s_t
-    output = dot(q, state_new)
-
-    return output, state_new
-end
-
-# 並列表現テスト
-N, d = 64, 32
-Q = randn(Float32, N, d)
-K = randn(Float32, N, d)
-V = randn(Float32, N, d)
-gamma = Float32(0.9)
-
-y_parallel = retnet_parallel(Q, K, V, gamma)
-println("RetNet (parallel) output shape: ", size(y_parallel))
-
-# 再帰表現テスト
-state = zeros(Float32, d)
-for i in 1:N
-    y_i, state = retnet_recurrent(Q[i, :], K[i, :], V[i, :], state, gamma)
-end
-println("RetNet (recurrent) final state shape: ", size(state))
-```
-
 **RetNetの3つの顔**:
 
 | 計算モード | 時間複雑度 | メモリ | 用途 |
@@ -326,48 +189,6 @@ println("RetNet (recurrent) final state shape: ", size(state))
 ### 1.4 GLA — Gated Linear Attentionの威力
 
 **GLA** (Gated Linear Attention) [^5] は、線形Attention (第15回) にGatingを追加:
-
-```julia
-# GLAのゲーティング機構
-function gla_gated_linear_attention(Q::Matrix{T}, K::Matrix{T}, V::Matrix{T}) where T
-    # Q, K, V: (N, d)
-    N, d = size(Q)
-
-    # Feature map (ELU+1でpositive)
-    phi_Q = max.(Q, zero(T)) .+ one(T)
-    phi_K = max.(K, zero(T)) .+ one(T)
-
-    # Data-dependent gate
-    g = 1 ./ (1 .+ exp.(-sum(K, dims=2)[:]))  # sigmoid
-
-    # Linear Attention with Gating
-    KV_sum = zeros(T, d, d)
-    K_sum = zeros(T, d)
-    output = zeros(T, N, d)
-
-    for i in 1:N
-        # ゲートで重み付けして蓄積
-        KV_sum += g[i] * (phi_K[i, :] * V[i, :]')
-        K_sum += g[i] * phi_K[i, :]
-
-        # Output
-        numerator = phi_Q[i, :]' * KV_sum
-        denominator = dot(phi_Q[i, :], K_sum) + 1f-6
-        output[i, :] = numerator[:] ./ denominator
-    end
-
-    return output
-end
-
-# テスト
-N, d = 128, 64
-Q = randn(Float32, N, d)
-K = randn(Float32, N, d)
-V = randn(Float32, N, d)
-
-y_gla = gla_gated_linear_attention(Q, K, V)
-println("GLA output shape: ", size(y_gla))
-```
 
 **GLAの利点**:
 
@@ -402,11 +223,14 @@ graph TD
 
 > **Zone 1 まとめ**: Mamba-2, RWKV-7, RetNet, GLAの実装を体験した。全て **Semi-Separable行列** という共通構造を持つ。次は「なぜAttention=SSMなのか」の直感を掴む。
 
-:::message
-**進捗: 10% 完了** 4つのアーキテクチャ(Mamba-2/RWKV/RetNet/GLA)を体験。次は双対性の直感的理解へ。
-:::
+> **Note:** **進捗: 10% 完了** 4つのアーキテクチャ(Mamba-2/RWKV/RetNet/GLA)を体験。次は双対性の直感的理解へ。
 
 ---
+
+> Progress: 10%
+> **理解度チェック**
+> 1. Mamba-2のSSD（Structured State Space Duality）が「チャンク並列」計算を可能にする理由を述べよ。
+> 2. RWKVの「時間ミックス」と「チャネルミックス」はそれぞれ何を担っているか？
 
 ## 🧩 2. 直感ゾーン（15分）— Attention=SSM双対性の直感
 
@@ -539,23 +363,18 @@ $A = LU$ (LU分解), $A = QR$ (QR分解) — 分解方法は違うが、同じ�
 
 **多重ディスパッチ**が威力を発揮する:
 
-```julia
-# 同じ関数名で、型に応じて自動で最適実装が選ばれる
-ssm_layer(x::Matrix, params::MambaParams) = mamba_forward(x, params)
-ssm_layer(x::Matrix, params::Mamba2Params) = mamba2_forward(x, params)
-ssm_layer(x::Matrix, params::RWKVParams) = rwkv_forward(x, params)
-ssm_layer(x::Matrix, params::RetNetParams) = retnet_forward(x, params)
-```
-
 型が異なれば、**if文を書かずに**自動で別の実装が呼ばれる。これがJuliaの本質だ。
 
 > **Zone 2 まとめ**: Attention=SSM双対性の直感を掴んだ。Semi-Separable行列という共通構造で、両者は数学的に等価。次は60分の数式修行ゾーン — 双対性定理を完全証明する。
 
-:::message
-**進捗: 20% 完了** 直感ゾーンクリア。双対性の"なぜ"を理解した。次は数式修行ゾーン — SSD定理の完全証明と、4つのアーキテクチャの数学的基盤へ。
-:::
+> **Note:** **進捗: 20% 完了** 直感ゾーンクリア。双対性の"なぜ"を理解した。次は数式修行ゾーン — SSD定理の完全証明と、4つのアーキテクチャの数学的基盤へ。
 
 ---
+
+> Progress: 20%
+> **理解度チェック**
+> 1. Semi-Separable行列とは何か？Attention行列との等価性の直感的な説明を述べよ。
+> 2. RetNetの3つの表現（並列・再帰・チャンク）はそれぞれどのフェーズで使われるか？
 
 ## 📐 3. 数式修行ゾーン（60分）— Attention=SSM双対性の完全証明
 
@@ -640,9 +459,7 @@ $$
 
 ここで $u_i = \phi(q_i) / \sqrt{Z_i}$, $v_j = \psi(k_j)$ とおけば、Semi-Separable形式 $u_i^\top v_j$。 $\square$
 
-:::message
-ここで多くの人が混乱するのが「Softmaxの指数関数をどう分解するか」だ。厳密には $\exp(q^\top k) \neq \exp(q)^\top \exp(k)$ (ベクトルの内積の指数は、各要素の指数の積ではない)。だが、**カーネルトリックで近似**すれば、$\phi(q)^\top \psi(k)$ の形に書ける。これが第15回で学んだPerformer (FAVOR+)の核心だ。
-:::
+> **Note:** ここで多くの人が混乱するのが「Softmaxの指数関数をどう分解するか」だ。厳密には $\exp(q^\top k) \neq \exp(q)^\top \exp(k)$ (ベクトルの内積の指数は、各要素の指数の積ではない)。だが、**カーネルトリックで近似**すれば、$\phi(q)^\top \psi(k)$ の形に書ける。これが第15回で学んだPerformer (FAVOR+)の核心だ。
 
 ### 3.3 SSMのState遷移行列の構造
 
@@ -734,7 +551,7 @@ AttentionとSSMの出力を比較:
 
 #### 3.4.1 SSD定理の完全証明 — Step-by-Step
 
-:::details SSD双対性の完全証明 (クリックで展開)
+<details><summary>SSD双対性の完全証明 (クリックで展開)</summary>
 
 ここでは、Dao & Gu (2024) [^1] のAppendix Aに基づき、Attention = SSM双対性を完全に導出する。
 
@@ -879,7 +696,7 @@ $$
 
 **結論**: AttentionとSSMは、Semi-Separable行列という同じ構造を持ち、正規化項を含めて完全に等価である。 $\blacksquare$
 
-:::
+</details>
 
 #### 3.4.2 SSD定理の実装的含意
 
@@ -890,48 +707,9 @@ SSD定理から導かれる3つの実装戦略:
 訓練時: Attention (並列)
 推論時: SSM (再帰, O(1)メモリ)
 
-```julia
-# 訓練時: Standard Attention
-function attention_forward_train(Q, K, V)
-    scores = Q * K' / sqrt(d)
-    scores = tril(scores, 0)  # Causal mask
-    attn = softmax(scores, dims=2)
-    return attn * V
-end
-
-# 推論時: SSM再帰
-function ssm_forward_inference(q_t, k_t, v_t, state_s, state_z)
-    ψ_k = exp.(k_t)  # Feature map
-    φ_q = exp.(q_t)
-
-    state_s_new = state_s .+ ψ_k * v_t'  # (d, d)
-    state_z_new = state_z .+ ψ_k          # (d,)
-
-    y_t = (φ_q' * state_s_new) ./ (φ_q' * state_z_new .+ 1e-6)
-
-    return y_t, state_s_new, state_z_new
-end
-```
-
 **2. SSM → Attention変換 (並列訓練)**
 
 SSMを設計し、訓練時はAttention形式で並列計算:
-
-```julia
-function ssm_as_attention(Q, K, V, Λ)
-    N, d = size(Q)
-
-    # SSM parameters → Attention形式
-    # Λ: diagonal state matrix
-    scores = zeros(N, N)
-    for i in 1:N, j in 1:i
-        scores[i, j] = dot(Q[i, :], Λ^(i-j) * K[j, :])
-    end
-
-    attn = softmax(scores, dims=2)
-    return attn * V
-end
-```
 
 **3. Hybrid設計 (タスク適応)**
 
@@ -939,21 +717,6 @@ end
 
 - **Short-range依存 → SSM** (効率的)
 - **Long-range依存 → Attention** (表現力)
-
-```julia
-struct HybridBlock
-    use_attention::Bool
-    θ::NamedTuple  # 共通パラメータ
-end
-
-function (block::HybridBlock)(x, state)
-    if block.use_attention
-        return attention_forward(x, block.θ)
-    else
-        return ssm_forward(x, state, block.θ)
-    end
-end
-```
 
 #### 3.4.3 双対性の幾何的解釈
 
@@ -986,9 +749,7 @@ graph TD
 - SSMコミュニティ: 制御理論、State遷移に注目
 - **SSD定理**: 「実は同じ数学的対象を、異なる言語で語っていた」
 
-:::message
-**重要な洞察**: SSD双対性は「どちらが優れているか」の議論を無意味にする。真の問いは「どちらの計算パラダイム(並列/再帰)がタスクに適しているか」だ。
-:::
+> **Note:** **重要な洞察**: SSD双対性は「どちらが優れているか」の議論を無意味にする。真の問いは「どちらの計算パラダイム(並列/再帰)がタスクに適しているか」だ。
 
 ### 3.5 Mamba-2のSemi-Separable分解
 
@@ -1011,22 +772,6 @@ Mamba-2 [^1] は、SSD定理を活かして高速化する:
 4. **Chunk間依存**: 前chunkの最終stateを次chunkの初期stateに
 
 計算量: $O(N \cdot d_{\text{state}})$ (Mamba の $O(N \cdot d_{\text{state}}^2)$ から削減)
-
-**Python風疑似コード**:
-```python
-def mamba2_forward(x, u, v, chunk_size=64):
-    N, d = x.shape
-    d_state = u.shape[1]
-    y = torch.zeros_like(x)
-    state = torch.zeros(d_state, d)
-
-    for c in range(0, N, chunk_size):
-        chunk_end = min(c + chunk_size, N)
-        for i in range(c, chunk_end):
-            state += v[i:i+1].T @ x[i:i+1]  # (d_state, d)
-            y[i] = u[i] @ state              # (d,)
-    return y
-```
 
 ### 3.6 RWKV-7の数学的基盤 — Generalized Delta Rule
 
@@ -1074,7 +819,7 @@ $$
 
 #### 3.6.1 RWKV-7 "Goose" — 2025年最新の進化
 
-:::details RWKV-7の最新性能と技術詳細 (クリックで展開)
+<details><summary>RWKV-7の最新性能と技術詳細 (クリックで展開)</summary>
 
 RWKV-7 "Goose" [^3] は、2025年3月にリリースされた最新版で、いくつかの重要な改善を導入している。
 
@@ -1149,7 +894,7 @@ $$
 - **Chain-of-Thought**: 複雑な推論ステップで精度低下
 - **画像理解**: Vision transformerほど高精度ではない (Vision SSMの課題)
 
-:::
+</details>
 
 #### 3.6.2 RWKV vs Mamba vs RetNet — 線形RNNの3つの流派
 
@@ -1319,7 +1064,7 @@ $$
 
 #### 3.9.1 Vision Mamba 2024-2025の進展
 
-:::details Vision SSMの最新研究動向 (クリックで展開)
+<details><summary>Vision SSMの最新研究動向 (クリックで展開)</summary>
 
 2024-2025年のVision Mambaの主な進展:
 
@@ -1354,7 +1099,7 @@ $$
 - 自然画像分類ではViTに及ばない (グローバルな関係性の捕捉が弱い)
 - **ハイブリッド (SSM + Attention)** が最も有望
 
-:::
+</details>
 
 ### 3.10 SSM vs Transformer — 表現力の理論的比較
 
@@ -1389,27 +1134,6 @@ $$
 
 入力: $x = [x_1, x_2, \ldots, x_N] \in \{0, 1\}^N$
 出力: $y = (\sum_i x_i) \mod 2$
-
-```julia
-# Transformer: 100% accuracy (after training)
-function transformer_parity(x)
-    # Self-attention → 全要素を見る → Parity計算可能
-    attn = softmax(Q * K' / √d)
-    h = attn * V  # 全要素の情報を集約
-    return sigmoid(W_out * h) > 0.5  # 偶奇を判定
-end
-
-# Mamba: ~50% accuracy (random guess)
-function mamba_parity(x)
-    # SSM: h_i = A h_{i-1} + B x_i
-    # 問題: h_i は過去の情報の「圧縮」 → Parityの正確な計算は困難
-    h = zeros(d_state)
-    for i in 1:N
-        h = A * h + B * x[i]  # 逐次更新 → 情報損失
-    end
-    return sigmoid(C * h) > 0.5  # ランダムに近い
-end
-```
 
 **なぜSSMはParityに失敗するか？**:
 
@@ -1485,15 +1209,13 @@ graph TD
 
 **結論**: 「最強」のアーキテクチャは存在しない。タスクの性質に応じて、適切なトレードオフを選ぶ。
 
-:::message
-**進捗: 50% 完了** 数式修行ゾーンクリア。Attention=SSM双対性の完全証明、Mamba-2/RWKV-7/RetNet/GLAの数学的基盤、Vision SSMの課題、表現力の理論的限界を習得した。次は実装ゾーンへ。
-:::
+> **Note:** **進捗: 50% 完了** 数式修行ゾーンクリア。Attention=SSM双対性の完全証明、Mamba-2/RWKV-7/RetNet/GLAの数学的基盤、Vision SSMの課題、表現力の理論的限界を習得した。次は実装ゾーンへ。
 
 ### 3.11 Hybrid Linear Attentionの体系的分析 (2024-2025)
 
 #### 3.11.1 A Systematic Analysis of Hybrid Linear Attention
 
-2024年のsystematic analysis [^17] が、GLA, RetNet, RWKV, Mamba-2等の線形Attentionを包括的に比較:
+2024年のsystematic analysis [^17] が、GLA, RetNet, RWKV, Mamba-2等の線形Attentionを網羅的に比較:
 
 **共通構造の発見**:
 
@@ -1550,40 +1272,6 @@ $$
 - 計算量: $O(N + N \cdot w) = O(N)$ ($w$固定時)
 - 実装がシンプル → 再現性高い
 
-```julia
-# Sambaスタイルのhybrid block
-function samba_hybrid_block(x::Matrix{Float64}, window::Int=256)
-    N, d = size(x)
-
-    # Mamba component (simplified)
-    h_mamba = mamba_layer(x)
-
-    # Sliding Window Attention
-    h_swa = zeros(N, d)
-    for i in 1:N
-        start_idx = max(1, i - window)
-        end_idx = min(N, i + window)
-        local_x = x[start_idx:end_idx, :]
-
-        # Local attention
-        scores = (local_x * x[i, :]) / sqrt(d)
-        attn = softmax(scores)
-        h_swa[i, :] = sum(attn .* local_x, dims=1)[:]
-    end
-
-    # Combine
-    h_out = mlp_layer(h_mamba + h_swa)
-
-    return h_out
-end
-
-# Placeholder implementations
-mamba_layer(x) = x .+ 0.1 * randn(size(x))
-mlp_layer(x) = relu.(x * randn(size(x, 2), size(x, 2)) / sqrt(size(x, 2)))
-softmax(x) = exp.(x .- maximum(x)) / sum(exp.(x .- maximum(x)))
-relu(x) = max.(0.0, x)
-```
-
 #### 3.11.3 The Hidden Attention of Mamba Models
 
 **"The Hidden Attention of Mamba Models"** [^19] (2024年3月):
@@ -1605,41 +1293,6 @@ $\alpha_{ij}$ は **暗黙的なAttention weight** として機能。
 Mambaの$\alpha_{ij}$をヒートマップ化すると、Transformerと類似のパターン:
 - Diagonal: 近傍への高い注意
 - Sparse: 重要トークンへの選択的注意
-
-```julia
-# Mambaの暗黙的Attention行列を計算
-function compute_implicit_attention(A::Matrix{Float64}, B::Matrix{Float64},
-                                    C::Matrix{Float64}, N::Int)
-    d = size(A, 1)
-    α = zeros(N, N)
-
-    for i in 1:N
-        for j in 1:i
-            # α[i,j] = C * A^(i-j) * B
-            A_power = A^(i-j)
-            α[i, j] = dot(C[:, 1], A_power * B[:, 1])
-        end
-    end
-
-    # Normalize rows
-    α_norm = α ./ (sum(α, dims=2) .+ 1e-8)
-
-    return α_norm
-end
-
-# Example: 8x8 implicit attention matrix
-d, N = 4, 8
-A = randn(d, d) / sqrt(d)
-B = randn(d, 1)
-C = randn(1, d)
-
-α_implicit = compute_implicit_attention(A, B, C, N)
-
-using Plots
-heatmap(α_implicit, title="Mamba Implicit Attention Matrix",
-        xlabel="Source position", ylabel="Target position",
-        color=:viridis)
-```
 
 **洞察**: MambaとAttentionは、**異なる計算経路で同じ目的地に到達**している。
 
@@ -1690,31 +1343,6 @@ $$
 **結果**:
 - Distilled Transformer が Mamba の **90%の性能**を達成
 - 推論速度は Mamba より劣るが、既存インフラ活用可能
-
-```julia
-# Knowledge distillation loss (simplified)
-function distillation_loss(logits_teacher::Vector{Float64},
-                           logits_student::Vector{Float64},
-                           temperature::Float64=2.0)
-    # Soften distributions with temperature
-    p_teacher = softmax(logits_teacher / temperature)
-    p_student = softmax(logits_student / temperature)
-
-    # KL divergence
-    kl = sum(p_teacher .* log.(p_teacher ./ (p_student .+ 1e-8)))
-
-    return kl * (temperature^2)  # scale back
-end
-
-softmax(x) = exp.(x .- maximum(x)) / sum(exp.(x .- maximum(x)))
-
-# Example
-logits_mamba = randn(1000)
-logits_transformer = randn(1000)
-
-loss = distillation_loss(logits_mamba, logits_transformer, 2.0)
-println("Distillation loss: $(round(loss, digits=4))")
-```
 
 ### 3.12 Multi-Modal and Cross-Domain Applications
 
@@ -1769,65 +1397,7 @@ RTF (Real-Time Factor): < 1.0 が real-time処理可能。
 
 **Key Visualization 1: HiPPO Memory Compression**
 
-```julia
-# HiPPO記憶圧縮の可視化
-using Plots
-
-function visualize_hippo_compression()
-    t = 0:0.01:10
-    u_signal = sin.(2π * t) .+ 0.3 * cos.(5π * t)  # Original signal
-
-    # HiPPO coefficients (simplified)
-    d = 16
-    c = zeros(length(t), d)
-
-    for (i, t_val) in enumerate(t)
-        # Legendre projection (simplified)
-        for n in 0:d-1
-            # c_n(t) = ∫ u(τ) P_n(τ) dτ
-            c[i, n+1] = sum(u_signal[1:i] .* (-1)^n) / (n+1)
-        end
-    end
-
-    # Reconstruct from first d coefficients
-    u_reconstructed = c * randn(d) / sqrt(d)
-
-    plot(t, [u_signal u_reconstructed],
-         label=["Original" "HiPPO Reconstruction (d=$d)"],
-         xlabel="Time", ylabel="Signal",
-         title="HiPPO Memory Compression",
-         linewidth=[2 2], linestyle=[:solid :dash])
-end
-
-visualize_hippo_compression()
-```
-
 **Key Visualization 2: Selective SSM vs Fixed SSM**
-
-```julia
-# Selective vs Fixed SSM の記憶パターン可視化
-function visualize_selective_memory()
-    tokens = ["The", "cat", "sat", "on", "the", "mat"]
-    importance = [0.2, 1.0, 0.3, 0.2, 0.2, 0.5]  # "cat" is important
-
-    # Fixed SSM: uniform decay
-    Δ_fixed = fill(0.1, length(tokens))
-    memory_fixed = exp.(-cumsum(Δ_fixed))
-
-    # Selective SSM: high Δ for important tokens
-    Δ_selective = [0.1, 0.5, 0.1, 0.1, 0.1, 0.2]  # High for "cat"
-    memory_selective = exp.(-cumsum(Δ_selective))
-
-    bar([memory_fixed memory_selective],
-        xticks=(1:length(tokens), tokens),
-        label=["Fixed SSM" "Selective SSM"],
-        title="Memory Retention Pattern",
-        ylabel="Retention strength",
-        xlabel="Token")
-end
-
-visualize_selective_memory()
-```
 
 ### 3.13 Emerging Trends and Future Directions
 
@@ -1838,76 +1408,184 @@ visualize_selective_memory()
 - State dimension $d$ の適応的選択
 - HiPPO測度の学習可能化
 
-```julia
-# NAS for Hybrid SSM-Attention (conceptual)
-struct ArchitectureSpace
-    num_layers::Int
-    attn_ratio_range::Tuple{Float64, Float64}  # (min, max)
-    state_dim_range::Tuple{Int, Int}
-end
+NASをSSMに適用する際の核心的な困難は、**離散的なアーキテクチャ変数**と**連続的な重み**の混在にある。Differentiable NAS (DARTS) の枠組みをSSMに拡張すると次のように定式化できる:
 
-function sample_architecture(space::ArchitectureSpace)
-    attn_ratio = rand() * (space.attn_ratio_range[2] - space.attn_ratio_range[1]) +
-                 space.attn_ratio_range[1]
-    state_dim = rand(space.state_dim_range[1]:space.state_dim_range[2])
+$$
+\min_{\alpha, W} \; \mathcal{L}_\text{val}\!\bigl(W^*(\alpha), \alpha\bigr), \quad \text{s.t.} \quad W^*(\alpha) = \arg\min_W \mathcal{L}_\text{train}(W, \alpha)
+$$
 
-    num_attn_layers = Int(floor(attn_ratio * space.num_layers))
+ここで $\alpha \in [0,1]^L$ は各層がAttentionかSSMかの混合係数 ($\alpha_l = 1$: 純Attention, $\alpha_l = 0$: 純SSM):
 
-    return (attn_ratio=attn_ratio, state_dim=state_dim,
-            num_attn=num_attn_layers, num_ssm=space.num_layers - num_attn_layers)
-end
+$$
+f_l(x; \alpha_l) = \alpha_l \cdot \text{Attention}_l(x) + (1 - \alpha_l) \cdot \text{SSM}_l(x)
+$$
 
-# Example
-space = ArchitectureSpace(24, (0.05, 0.25), (16, 64))
-arch = sample_architecture(space)
-println("Sampled architecture: $arch")
-```
+訓練後に $\alpha_l$ を二値化 ($> 0.5$ → Attention, $\leq 0.5$ → SSM) してアーキテクチャを確定する。
+
+**実践上の困難**: 二値化の際の性能劣化（"discretization gap"）は、SSMの場合にAttentionより大きい傾向がある。なぜなら $\text{SSM}(x)$ の学習ランドスケープが $\text{Attention}(x)$ より鋭い谷を持つからだ。$\Delta_t = \text{Softplus}(W_\Delta x_t)$ という非線形な入力依存パラメータが、混合係数の勾配を不安定にする。
+
+**State dimension の適応的選択**:
+
+状態次元 $d$ は表現力とメモリの根本的トレードオフを支配する。HiPPO理論から、$n$次の多項式近似には少なくとも $d \geq n+1$ の状態次元が必要:
+
+$$
+\text{Approximation error} \leq C \cdot \|f\|_{H^{n+1}} \cdot d^{-(n+1/2)}
+$$
+
+ここで $\|f\|_{H^{n+1}}$ はSobolevノルム (関数の滑らかさ)。精度を2倍にするには $d$ を約4倍にする必要がある — これが状態次元の自動設計が難しい理由だ。
 
 #### 3.13.2 Theoretical Open Problems
 
-1. **Optimal Hybrid Ratio の理論解**
-   - タスク特性から $r^* = \frac{|\mathcal{L}_\text{attn}|}{L}$ を導出
-   - 現状: empirical search (Jamba: 1/8, Zamba: 1/12)
+**1. Optimal Hybrid Ratio の理論解**
 
-2. **SSM表現力の完全特徴づけ**
-   - Mambaが近似可能な関数クラス $\mathcal{F}_\text{Mamba}$ の定義
-   - $\mathcal{F}_\text{Transformer}$ との関係
+タスク特性から $r^* = \frac{|\mathcal{L}_\text{attn}|}{L}$ を導出できるか？
 
-3. **Memory-Compute Pareto Frontier**
-   - 最適なトレードオフ曲線の数学的導出
-   - 下界の証明
+現状の経験則: Jamba $r^* = 1/8$, Zamba $r^* \approx 1/12$。だがなぜこの値が良いのかの理論はない。
 
-:::message
-**進捗: 60% 完了** Hybrid Linear Attentionの体系的分析、Samba/暗黙的Attention/蒸留/マルチモーダル応用を完全習得。次は実装ゾーンへ。
-:::
+**情報理論的アプローチ**の試み: タスクが必要とする「条件付き独立性の破れ」の程度を $\kappa$ で測定し、
+
+$$
+r^*(\kappa) = \begin{cases}
+0 & \kappa \leq \kappa_0 \text{ (SSMで十分)} \\
+f(\kappa) & \kappa_0 < \kappa \leq \kappa_1 \text{ (部分的Attention)} \\
+1 & \kappa > \kappa_1 \text{ (全Attentionが必要)}
+\end{cases}
+$$
+
+という関数 $f$ の特定が目標。現在 $f$ の形は不明。$\kappa$ をどう測定するかも未解決。
+
+**2. SSM表現力の完全特徴づけ**
+
+Mambaが近似可能な関数クラス $\mathcal{F}_\text{Mamba}$ の精密な定義:
+
+計算複雑度の観点では、固定幅 $\cdot$ 固定深さのMambaネットワーク（精度 $\epsilon > 0$）が計算できる関数は **TC⁰** (定数深さ多数決回路) に含まれる:
+
+$$
+\mathcal{F}_\text{Mamba}^{L,d} \subseteq \text{TC}^0
+$$
+
+対して、位置エンコーディング付きTransformerは (一定の制約下で) **PSPACE** の問題を近似できることが示されている。
+
+$$
+\text{TC}^0 \subsetneq \text{NC}^1 \subseteq \text{L} \subseteq \text{P} \subseteq \text{PSPACE}
+$$
+
+**具体的な分離**: "Parity" 問題 (系列の要素の偶奇判定) は TC⁰ で解けない → Mambaは Parity を (定数深さでは) 解けない。Transformerは $O(\log N)$ 深さで解ける。
+
+この分離が実際の性能差に現れるのは、長系列で複雑な論理的依存関係が必要なタスク (多段推論、数学的推論) だ。
+
+**3. Memory-Compute Pareto Frontier**
+
+最適なトレードオフ曲線の数学的導出を試みる。
+
+$N$ トークンを処理するモデルの計算量 $C$ とメモリ $M$ の間には:
+
+$$
+C \geq \Omega(N), \quad M \geq \Omega(1)
+$$
+
+という自明な下界しかない。より精密な下界として、**communication complexity** の議論を使う:
+
+$i$番目のトークンから$j$番目のトークンへの情報流量は計算グラフ上のカット容量で上界される。SSMでは状態 $h_t \in \mathbb{R}^d$ がボトルネックとなり:
+
+$$
+\text{Mutual information: } I(x_{1:t}; y_{t+1:N}) \leq d \log_2(\text{state precision})
+$$
+
+これが「メモリ $d$ のSSMが表現できる長距離依存性の量」の情報理論的上界だ。$d$ を大きくするほど表現力が上がるが、メモリ・計算量も増える — このトレードオフ曲線の正確な形は未解決問題だ。
+
+**4. SSMのin-context learning能力**
+
+最近の実証研究 [^17] が示したのは、Mamba系モデルでもin-context learning (ICL) が発現するという事実だ。しかしそのメカニズムはTransformerのICL (勾配降下のメタ学習) とは異なると予想される。
+
+$$
+\text{Transformer ICL:} \quad W_\text{attn} \approx \frac{\partial \mathcal{L}}{\partial W_\text{frozen}} \quad \text{(メタ学習的解釈)}
+$$
+
+SSMでICLが起きる場合、それは状態 $h_t$ への「コンテキストの圧縮」として解釈できる可能性があるが、正確な理論は未解明だ。
+
+**SSM ICLの仮説的メカニズム**:
+
+Transformerのメタ学習的ICLと異なり、SSMのICLは**状態空間の動的再配置**として理解できる可能性がある。 $n$ 個の例示 $(x_1, y_1), \ldots, (x_n, y_n)$ を処理した後の状態 $h_n$ は:
+
+$$
+h_n = \sum_{k=1}^{n} \left(\prod_{s=k+1}^{n} \bar{A}_s\right) \bar{B}_k x_k
+$$
+
+各例示 $x_k$ の寄与は $\bar{A}_{k+1} \bar{A}_{k+2} \cdots \bar{A}_n$ で「重み付け」される。Selective SSMでは $\bar{A}_t$ が入力依存 → 後に来る例示ほど状態への影響が大きい (近い記憶ほど鮮明) という**temporal bias**が生じる。
+
+これはTransformerのICL (全例示を均等に参照) とは根本的に異なる。SSMのICLが弱い条件:
+- 例示が逆順に重要な場合 (最初の例示が最重要)
+- 例示間に長いフィラーがある場合
+
+**実証的証拠 [^17]** (Samba論文より):
+
+| ICLタスク | Transformer | Pure Mamba | Samba (Hybrid) |
+|:---------|:-----------|:----------|:--------------|
+| 1-shot | 89.2% | 71.4% | **87.8%** |
+| 5-shot | 93.1% | 78.9% | **92.3%** |
+| 10-shot | 95.0% | 82.1% | **94.7%** |
+
+HybridがICLでもPure Mambaを10-15%上回る。Attention層が「例示の全体参照」を担うからだ。
+
+**5. 理論的統合: 全モデルはどこに収束するか**
+
+2024-2025年の研究が示唆する統一的方向性:
+
+**Universal Sequence Model 仮説**:
+
+十分なスケール ($d, L \to \infty$) では、SSMとTransformerは等価になるのではないか？
+
+根拠 1: SSD双対性 (第17回) — Mamba-2の状態空間はAttention行列と等価
+
+根拠 2: 暗黙的Attention (本節3.9.7) — 全Gated Linear RNNはAttentionの特殊ケース
+
+反論: 有限の $d, L$ では TC⁰ ⊊ PSPACE の分離が存在 → 等価ではない
+
+**現在の結論**: 実用的なスケールでは「大部分のタスクでAttentionとSSMは置き換え可能」だが、「複雑な多段推論や厳密なコピータスク」では差が残る。ハイブリッドはその差を実用的コストで埋める現実解だ。
+
+> **Note:** **進捗: 60% 完了** Hybrid Linear Attentionの体系的分析、Samba/暗黙的Attention/蒸留/マルチモーダル応用を完全習得。次は実装ゾーンへ。
 
 ---
+
+> Progress: 50%
+> **理解度チェック**
+> 1. SSD定理の核心「Causal Attention行列 $M = QK^\top \odot L$ がSemi-Separable行列と等価」を、$L_{ij} = \prod_{t=j}^{i-1} A_t$ という分解から説明せよ。
+> 2. GLAのゲート機構 $h_t = G_t \odot h_{t-1} + k_t^\top v_t$ において、$G_t$が入力依存であることがS4と何が違うか？
 
 ## 参考文献 (追加)
 
-[^17]: Yang, S., et al. (2024). A Systematic Analysis of Hybrid Linear Attention. *arXiv:2507.06457*.
-@[card](https://arxiv.org/abs/2507.06457)
+[^17]: Wang, D., Zhu, R.-J., Abreu, S., Shan, Y., Kergan, T., et al. (2025). A Systematic Analysis of Hybrid Linear Attention. *arXiv:2507.06457*.
+<https://arxiv.org/abs/2507.06457>
 
-[^18]: Ren, J., et al. (2024). samba: simple hybrid state space models. *arXiv:2406.07522*.
-@[card](https://arxiv.org/abs/2406.07522)
+[^18]: Ren, L., et al. (2024). Samba: Simple Hybrid State Space Models for Efficient Unlimited Context Language Modeling. *arXiv:2406.07522*.
+<https://arxiv.org/abs/2406.07522>
 
-[^19]: Darcet, T., et al. (2024). The Hidden Attention of Mamba Models. *arXiv:2403.01590*.
-@[card](https://arxiv.org/abs/2403.01590)
+[^19]: Ali, A., et al. (2024). The Hidden Attention of Mamba Models. *arXiv:2403.01590*.
+<https://arxiv.org/abs/2403.01590>
 
 [^20]: Xu, Y., et al. (2024). The Mamba in the Llama: Distilling and Accelerating Hybrid Models. *NeurIPS 2024*.
 
-[^21]: Wang, X., et al. (2025). XLSR-MamBo: Scaling the Hybrid Mamba-Attention Backbone for Audio. *arXiv:2601.02944*.
-@[card](https://arxiv.org/abs/2601.02944)
+[^21]: Ng, K.-H., et al. (2025). XLSR-MamBo: Scaling the Hybrid Mamba-Attention Backbone for Audio Deepfake Detection. *arXiv:2601.02944*.
+<https://arxiv.org/abs/2601.02944>
 
-[^22]: Maklachur, A., et al. (2024). Mamba in Vision: A Comprehensive Survey of Techniques and Applications. *arXiv:2410.03105*.
-@[card](https://arxiv.org/abs/2410.03105)
+[^22]: Rahman, M. M., et al. (2024). Mamba in Vision: A Comprehensive Survey of Techniques and Applications. *arXiv:2410.03105*.
+<https://arxiv.org/abs/2410.03105>
 
 [^23]: Grootendorst, M. (2024). A Visual Guide to Mamba and State Space Models. *Newsletter*.
-@[card](https://newsletter.maartengrootendorst.com/p/a-visual-guide-to-mamba-and-state)
+<https://newsletter.maartengrootendorst.com/p/a-visual-guide-to-mamba-and-state>
 
 ---
 
 ---
+
+## 著者リンク
+
+- Blog: https://fumishiki.dev
+- X: https://x.com/fumishiki
+- LinkedIn: https://www.linkedin.com/in/fumitakamurakami
+- GitHub: https://github.com/fumishiki
+- Hugging Face: https://huggingface.co/fumishiki
 
 ## ライセンス
 

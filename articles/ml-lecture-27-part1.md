@@ -5,6 +5,10 @@ emoji: "📊"
 type: "tech"
 topics: ["machinelearning", "evaluation", "julia", "rust", "statistics"]
 published: true
+difficulty: "advanced"
+time_estimate: "90 minutes"
+languages: ["Julia", "Rust", "Elixir"]
+keywords: ["機械学習", "深層学習", "生成モデル"]
 ---
 
 # 第27回: 評価パイプライン構築 — 数値が改善すれば"良い"モデルか？
@@ -17,11 +21,9 @@ published: true
 
 本講義では、**数式完全導出→実装→統計検定統合→自動ベンチマークパイプライン**を構築する。評価指標の理論的基盤を理解し、Production環境で使える評価システムを作る。
 
-:::message
-**このシリーズについて**: 東京大学 松尾・岩澤研究室動画講義の**完全上位互換**の全50回シリーズ（全5コース）。理論（論文が書ける）、実装（Production-ready）、最新（2024-2026 SOTA）の3軸で差別化する。
-
-**Course III: 実践・橋渡し編（第19-32回）**: 本講義は第27回 — 評価の理論と実装。第24回の統計学を評価メトリクスに統合し、第32回の総合プロジェクトへ接続する。
-:::
+> **Note:** **このシリーズについて**: 東京大学 松尾・岩澤研究室動画講義の**完全上位互換**の全50回シリーズ（全5コース）。理論（論文が書ける）、実装（Production-ready）、最新（2024-2026 SOTA）の3軸で差別化する。
+>
+> **Course III: 実践・橋渡し編（第19-32回）**: 本講義は第27回 — 評価の理論と実装。第24回の統計学を評価メトリクスに統合し、第32回の総合プロジェクトへ接続する。
 
 ```mermaid
 graph LR
@@ -69,13 +71,12 @@ using LinearAlgebra, Statistics
 function fid_simplified(μ_r::Vector{Float64}, Σ_r::Matrix{Float64},
                          μ_g::Vector{Float64}, Σ_g::Matrix{Float64})
     # FID = ||μ_r - μ_g||² + Tr(Σ_r + Σ_g - 2(Σ_r Σ_g)^{1/2})
-    mean_diff = sum((μ_r .- μ_g).^2)
+    mean_diff = norm(μ_r .- μ_g)^2
 
     # Matrix square root: (Σ_r Σ_g)^{1/2}
     # Use eigen decomposition: A = V Λ V^T → A^{1/2} = V Λ^{1/2} V^T
-    product = Σ_r * Σ_g
-    eigen_decomp = eigen(product)
-    sqrt_product = eigen_decomp.vectors * Diagonal(sqrt.(abs.(eigen_decomp.values))) * eigen_decomp.vectors'
+    (; values, vectors) = eigen(Σ_r * Σ_g)
+    sqrt_product = vectors * Diagonal(sqrt.(abs.(values))) * vectors'
 
     trace_term = tr(Σ_r) + tr(Σ_g) - 2*tr(sqrt_product)
 
@@ -118,9 +119,7 @@ $$
 
 FIDが小さいほど、生成画像の分布が真画像に近い。だが、**FIDだけで判断してはいけない理由**がある（→ Zone 3で完全解説）。
 
-:::message
-**進捗: 3% 完了** FIDの計算式を体感した。ここから他の5つの指標（IS/LPIPS/P&R/CMMD/MMD）を触り、数式を完全導出していく。
-:::
+> **Note:** **進捗: 3% 完了** FIDの計算式を体感した。ここから他の5つの指標（IS/LPIPS/P&R/CMMD/MMD）を触り、数式を完全導出していく。
 
 ---
 
@@ -141,224 +140,26 @@ FIDが小さいほど、生成画像の分布が真画像に近い。だが、**
 
 #### 1.1.1 FID (Fréchet Inception Distance)
 
-```julia
-# FID: Inception特徴 → ガウス近似 → フレシェ距離
-function inception_features_dummy(images::Vector{Matrix{Float64}})
-    # Real impl: Inception-v3 pre-pool layer (2048-dim)
-    # Here: random projection to 64-dim for demo
-    n_samples = length(images)
-    d_features = 64
-    return randn(n_samples, d_features)  # (n_samples, 64)
-end
-
-function compute_fid(real_images::Vector{Matrix{Float64}},
-                      gen_images::Vector{Matrix{Float64}})
-    # Extract features
-    feats_r = inception_features_dummy(real_images)
-    feats_g = inception_features_dummy(gen_images)
-
-    # Compute μ, Σ
-    μ_r = vec(mean(feats_r, dims=1))
-    μ_g = vec(mean(feats_g, dims=1))
-    Σ_r = cov(feats_r)
-    Σ_g = cov(feats_g)
-
-    # Fréchet distance
-    mean_diff = sum((μ_r .- μ_g).^2)
-    product = Σ_r * Σ_g
-    eig_decomp = eigen(product)
-    sqrt_product = eig_decomp.vectors * Diagonal(sqrt.(abs.(eig_decomp.values))) * eig_decomp.vectors'
-    trace_term = tr(Σ_r) + tr(Σ_g) - 2*tr(sqrt_product)
-
-    return mean_diff + trace_term
-end
-
-# Test
-real_imgs = [randn(32, 32) for _ in 1:50]  # 50 images
-gen_imgs = [randn(32, 32) for _ in 1:50]
-fid = compute_fid(real_imgs, gen_imgs)
-println("FID: $(round(fid, digits=2))")
-```
 
 **解釈**: FID ≈ 0 なら分布が一致。実際のモデル評価では FID < 10 が高品質、FID > 50 は低品質とされる（ImageNet基準）。
 
 #### 1.1.2 IS (Inception Score)
 
-```julia
-# IS: Inception分類 → KL divergence
-function inception_classify_dummy(images::Vector{Matrix{Float64}})
-    # Real impl: Inception-v3 → softmax over 1000 ImageNet classes
-    # Here: 10 classes for demo
-    n_samples = length(images)
-    n_classes = 10
-    # Random softmax probs
-    logits = randn(n_samples, n_classes)
-    return exp.(logits) ./ sum(exp.(logits), dims=2)  # (n_samples, 10)
-end
-
-function inception_score(images::Vector{Matrix{Float64}})
-    # p(y|x) for each image
-    p_yx = inception_classify_dummy(images)  # (n, k)
-
-    # p(y) = E_x[p(y|x)] = marginal over dataset
-    p_y = vec(mean(p_yx, dims=1))  # (k,)
-
-    # IS = exp(E_x[KL(p(y|x) || p(y))])
-    # KL(p||q) = Σ p log(p/q)
-    kl_divs = zeros(size(p_yx, 1))
-    for i in 1:size(p_yx, 1)
-        for j in 1:length(p_y)
-            if p_yx[i,j] > 0 && p_y[j] > 0
-                kl_divs[i] += p_yx[i,j] * log(p_yx[i,j] / p_y[j])
-            end
-        end
-    end
-
-    mean_kl = mean(kl_divs)
-    return exp(mean_kl)
-end
-
-is_score = inception_score(gen_imgs)
-println("Inception Score: $(round(is_score, digits=2))")
-println("Range: [1.0, n_classes]. Higher = better quality + diversity")
-```
 
 **解釈**: IS ∈ [1, 1000]（ImageNet 1000クラスの場合）。IS > 30 が高品質（CIFAR-10では IS > 8）。
 
 #### 1.1.3 LPIPS (Learned Perceptual Image Patch Similarity)
 
-```julia
-# LPIPS: VGG特徴 → L2距離
-function vgg_features_dummy(image::Matrix{Float64})
-    # Real impl: VGG-16 layers → multiple scales
-    # Here: 3 scales × 32-dim = 96-dim
-    return randn(96)
-end
-
-function lpips_distance(img1::Matrix{Float64}, img2::Matrix{Float64})
-    # Extract features
-    feat1 = vgg_features_dummy(img1)
-    feat2 = vgg_features_dummy(img2)
-
-    # L2 distance in feature space
-    return sqrt(sum((feat1 .- feat2).^2))
-end
-
-# Test: compare 2 images
-img_a = randn(64, 64)
-img_b = randn(64, 64)
-img_c = img_a .+ 0.1 .* randn(64, 64)  # similar to A
-lpips_ab = lpips_distance(img_a, img_b)
-lpips_ac = lpips_distance(img_a, img_c)
-println("LPIPS(A, B): $(round(lpips_ab, digits=4))")
-println("LPIPS(A, C): $(round(lpips_ac, digits=4))")
-println("Lower = more perceptually similar")
-```
 
 **解釈**: LPIPS ∈ [0, ∞)。LPIPS < 0.1 は知覚的に近い。人間の判断と Pearson 相関 ~0.8 [^3]。
 
 #### 1.1.4 Precision-Recall (P&R)
 
-```julia
-# P&R: 多様体ベース
-function precision_recall_manifold(real_feats::Matrix{Float64},
-                                    gen_feats::Matrix{Float64}, k::Int=5)
-    # Precision: 生成画像が真画像多様体にどれだけ近いか
-    # Recall: 真画像多様体をどれだけカバーしているか
-
-    # k-NN distance to define manifold
-    n_real = size(real_feats, 1)
-    n_gen = size(gen_feats, 1)
-
-    # Precision: for each generated sample, check if it's near real manifold
-    precision_count = 0
-    for i in 1:n_gen
-        dists = [sqrt(sum((gen_feats[i,:] .- real_feats[j,:]).^2)) for j in 1:n_real]
-        if minimum(dists) < quantile(dists, 0.1)  # simplified threshold
-            precision_count += 1
-        end
-    end
-    precision = precision_count / n_gen
-
-    # Recall: for each real sample, check if generated manifold covers it
-    recall_count = 0
-    for i in 1:n_real
-        dists = [sqrt(sum((real_feats[i,:] .- gen_feats[j,:]).^2)) for j in 1:n_gen]
-        if minimum(dists) < quantile(dists, 0.1)
-            recall_count += 1
-        end
-    end
-    recall = recall_count / n_real
-
-    return precision, recall
-end
-
-# Test
-real_f = randn(100, 64)
-gen_f = randn(100, 64)
-prec, rec = precision_recall_manifold(real_f, gen_f)
-println("Precision: $(round(prec, digits=3)), Recall: $(round(rec, digits=3))")
-println("Precision ≈ quality, Recall ≈ diversity")
-```
 
 **解釈**: Precision = 1.0 なら生成画像は全て高品質。Recall = 1.0 なら真画像分布を完全カバー。
 
 #### 1.1.5 CMMD (CLIP-MMD)
 
-```julia
-# CMMD: CLIP埋め込み → MMD (RBF kernel)
-function clip_embeddings_dummy(images::Vector{Matrix{Float64}})
-    # Real impl: CLIP image encoder → 512-dim
-    n_samples = length(images)
-    return randn(n_samples, 512)  # (n, 512)
-end
-
-function rbf_kernel(x::Vector{Float64}, y::Vector{Float64}, σ::Float64=1.0)
-    # k(x, y) = exp(-||x - y||² / (2σ²))
-    return exp(-sum((x .- y).^2) / (2*σ^2))
-end
-
-function cmmd(real_images::Vector{Matrix{Float64}},
-              gen_images::Vector{Matrix{Float64}}, σ::Float64=1.0)
-    # CLIP embeddings
-    emb_r = clip_embeddings_dummy(real_images)  # (n, 512)
-    emb_g = clip_embeddings_dummy(gen_images)   # (m, 512)
-
-    n = size(emb_r, 1)
-    m = size(emb_g, 1)
-
-    # MMD² = E[k(x,x')] + E[k(y,y')] - 2E[k(x,y)]
-    # x,x' ~ P_real, y,y' ~ P_gen
-
-    # E[k(x, x')]
-    kxx = 0.0
-    for i in 1:n, j in 1:n
-        kxx += rbf_kernel(emb_r[i,:], emb_r[j,:], σ)
-    end
-    kxx /= (n * n)
-
-    # E[k(y, y')]
-    kyy = 0.0
-    for i in 1:m, j in 1:m
-        kyy += rbf_kernel(emb_g[i,:], emb_g[j,:], σ)
-    end
-    kyy /= (m * m)
-
-    # E[k(x, y)]
-    kxy = 0.0
-    for i in 1:n, j in 1:m
-        kxy += rbf_kernel(emb_r[i,:], emb_g[j,:], σ)
-    end
-    kxy /= (n * m)
-
-    mmd_squared = kxx + kyy - 2*kxy
-    return sqrt(max(0, mmd_squared))  # max(0, ...) for numerical stability
-end
-
-cmmd_score = cmmd(real_imgs[1:20], gen_imgs[1:20])  # subset for speed
-println("CMMD: $(round(cmmd_score, digits=4))")
-println("Lower = more similar distributions (0 = identical)")
-```
 
 **解釈**: CMMD ≈ 0 なら分布が一致。CMMD は FID と異なり**正規性を仮定しない** [^5]。
 
@@ -404,15 +205,17 @@ graph TD
 | 品質vs多様性トレードオフ | P&R | 両者を分離測定 |
 | 少サンプル（<1000） | FLD+ [^7] | 数百サンプルで安定 |
 
-:::message alert
-**ここが引っかかりやすい**: FIDが改善してもISが悪化することがある。各指標は異なる側面を測定する — **複数の指標を組み合わせて総合判断**すること。
-:::
+> **⚠️ Warning:** **ここが引っかかりやすい**: FIDが改善してもISが悪化することがある。各指標は異なる側面を測定する — **複数の指標を組み合わせて総合判断**すること。
 
-:::message
-**進捗: 10% 完了** 5つの指標を触った。ここからなぜ評価が難しいのか、各指標の限界を直感的に理解していく。
-:::
+> **Note:** **進捗: 10% 完了** 5つの指標を触った。ここからなぜ評価が難しいのか、各指標の限界を直感的に理解していく。
 
 ---
+
+
+> Progress: 10%
+> **理解度チェック**
+> 1. このゾーンの主要な概念・定義を自分の言葉で説明してください。
+> 2. この手法が他のアプローチより優れている点と、その限界を述べてください。
 
 ## 🧩 2. 直感ゾーン（15分）— なぜ評価は難しいのか
 
@@ -552,11 +355,15 @@ graph TD
     style C fill:#c8e6c9
 ```
 
-:::message
-**進捗: 20% 完了** 評価の困難さを理解した。ここから数式修行ゾーンへ。FID/IS/LPIPS/MMDの完全導出に挑む。
-:::
+> **Note:** **進捗: 20% 完了** 評価の困難さを理解した。ここから数式修行ゾーンへ。FID/IS/LPIPS/MMDの完全導出に挑む。
 
 ---
+
+
+> Progress: 20%
+> **理解度チェック**
+> 1. このゾーンの主要な概念・定義を自分の言葉で説明してください。
+> 2. この手法が他のアプローチより優れている点と、その限界を述べてください。
 
 ## 📐 3. 数式修行ゾーン（60分）— 評価指標の完全理論
 
@@ -616,7 +423,7 @@ $$
 3. $T$ の形を求めると、$A = \Sigma_1^{-1/2}(\Sigma_1^{1/2}\Sigma_2\Sigma_1^{1/2})^{1/2}\Sigma_1^{-1/2}$, $b = \mu_2 - A\mu_1$。
 4. 輸送コスト $\mathbb{E}[\|x - T(x)\|^2]$ を計算すると上式を得る。
 
-:::details ガウス分布間Wasserstein距離の詳細導出（発展）
+<details><summary>ガウス分布間Wasserstein距離の詳細導出（発展）</summary>
 
 **Step 1**: 最適輸送マップ $T$ の形を仮定。
 
@@ -664,7 +471,7 @@ $$
 W_2^2 = \|\mu_1 - \mu_2\|^2 + \text{Tr}(\Sigma_1 + \Sigma_2 - 2(\Sigma_1\Sigma_2)^{1/2})
 $$
 
-:::
+</details>
 
 #### 3.2.3 行列平方根 $(\Sigma_1\Sigma_2)^{1/2}$ の計算
 
@@ -688,23 +495,6 @@ $$
 1. $\Sigma_1, \Sigma_2$ が正定値でも、$\Sigma_1\Sigma_2$ は正定値とは限らない → 固有値が負になる可能性。
 2. 数値安定性のため、$\lambda_i < 0$ の場合は $|\lambda_i|$ を使う（or small positive value で clipping）。
 
-```julia
-# Matrix square root via eigen decomposition
-function matrix_sqrt(A::Matrix{Float64})
-    eig = eigen(A)
-    # Handle numerical errors: negative eigenvalues → abs
-    λ_sqrt = sqrt.(Complex.(eig.values))  # complex sqrt for negative λ
-    return real(eig.vectors * Diagonal(λ_sqrt) * inv(eig.vectors))
-end
-
-# Test
-Σ1 = [2.0 0.5; 0.5 1.5]
-Σ2 = [1.8 0.3; 0.3 1.2]
-prod = Σ1 * Σ2
-sqrt_prod = matrix_sqrt(prod)
-println("(Σ1*Σ2)^{1/2} computed")
-println("Verification: (sqrt)^2 ≈ original? ", isapprox(sqrt_prod^2, prod, atol=1e-6))
-```
 
 #### 3.2.4 FIDの実装とInception特徴抽出
 
@@ -714,78 +504,9 @@ println("Verification: (sqrt)^2 ≈ original? ", isapprox(sqrt_prod^2, prod, ato
 2. **統計量計算**: $\mu_r, \Sigma_r$ (真画像), $\mu_g, \Sigma_g$ (生成画像)
 3. **フレシェ距離計算**: 上記の式
 
-```julia
-# FID implementation (with dummy Inception features)
-using LinearAlgebra, Statistics
-
-function extract_inception_features(images::Vector{Matrix{Float64}})
-    # Real impl: load pre-trained Inception-v3, extract pool3 layer
-    # Here: simulate with random projection
-    n = length(images)
-    d_feat = 2048  # Inception pool3 dimension
-    return randn(n, d_feat)
-end
-
-function compute_statistics(features::Matrix{Float64})
-    # features: (n_samples, d_features)
-    μ = vec(mean(features, dims=1))  # (d_features,)
-    Σ = cov(features)  # (d_features, d_features)
-    return μ, Σ
-end
-
-function frechet_distance(μ1::Vector{Float64}, Σ1::Matrix{Float64},
-                           μ2::Vector{Float64}, Σ2::Matrix{Float64})
-    # Mean difference
-    diff = μ1 .- μ2
-    mean_term = sum(diff.^2)
-
-    # Covariance term: Tr(Σ1 + Σ2 - 2(Σ1*Σ2)^{1/2})
-    # Matrix square root
-    product = Σ1 * Σ2
-    eig = eigen(product)
-    # Use abs for numerical stability
-    sqrt_eig = sqrt.(abs.(eig.values))
-    sqrt_product = real(eig.vectors * Diagonal(sqrt_eig) * eig.vectors')
-
-    trace_term = tr(Σ1) + tr(Σ2) - 2 * tr(sqrt_product)
-
-    return mean_term + trace_term
-end
-
-function fid_score(real_images::Vector{Matrix{Float64}},
-                    gen_images::Vector{Matrix{Float64}})
-    # Extract features
-    feats_real = extract_inception_features(real_images)
-    feats_gen = extract_inception_features(gen_images)
-
-    # Compute statistics
-    μ_r, Σ_r = compute_statistics(feats_real)
-    μ_g, Σ_g = compute_statistics(feats_gen)
-
-    # Compute Fréchet distance
-    return frechet_distance(μ_r, Σ_r, μ_g, Σ_g)
-end
-
-# Test with synthetic data
-n_samples = 100
-real_imgs = [randn(64, 64) for _ in 1:n_samples]
-gen_imgs = [randn(64, 64) for _ in 1:n_samples]  # random images
-
-fid = fid_score(real_imgs, gen_imgs)
-println("FID: $(round(fid, digits=2))")
-println("Expected range: 0 (identical) to ~400 (completely different)")
-```
 
 **数値検証**: $\mu_1 = \mu_2$, $\Sigma_1 = \Sigma_2$ のとき FID = 0 になるか確認。
 
-```julia
-# Sanity check: identical distributions → FID = 0
-μ_test = randn(10)
-Σ_test = randn(10, 10); Σ_test = Σ_test * Σ_test' + I  # ensure PD
-fid_identical = frechet_distance(μ_test, Σ_test, μ_test, Σ_test)
-println("FID (identical distributions): $(round(fid_identical, digits=10))")
-# Should be ~0 (machine precision errors ~1e-10)
-```
 
 #### 3.2.5 FIDの限界と対策
 
@@ -816,9 +537,7 @@ Inception-v3はImageNetで訓練 → 自然画像以外で不適切（医療画�
 - ドメイン特化の特徴抽出器（例: 医療画像用ResNet）
 - CLIP埋め込み（CMMD [^5]）→ より汎用的
 
-:::message alert
-**数式修行のコツ**: FIDの式を**暗記するな。導出しろ**。Wasserstein距離 → ガウス間の閉形式 → 行列平方根の計算、という流れを追えば、式の意味が理解できる。
-:::
+> **⚠️ Warning:** **数式修行のコツ**: FIDの式を**暗記するな。導出しろ**。Wasserstein距離 → ガウス間の閉形式 → 行列平方根の計算、という流れを追えば、式の意味が理解できる。
 
 ### 3.3 IS (Inception Score) 完全導出
 
@@ -880,88 +599,113 @@ $$
 
 ここで $K$ はInceptionの分類クラス数（ImageNetでは1000）。
 
+#### 3.3.3b エントロピー解釈 — IS = exp(H(p(y)) − E_x[H(p(y|x))])
+
+ISはエントロピーの言葉で書き直すと意味が一気に透明になる。
+
+**エントロピーの定義**:
+
+$$
+H(p) = -\sum_y p(y) \log p(y) = \mathbb{E}_{y \sim p}[-\log p(y)]
+$$
+
+**KLダイバージェンスのエントロピー分解**:
+
+$$
+\text{KL}(p(y|x) \| p(y)) = \sum_y p(y|x) \log \frac{p(y|x)}{p(y)}
+= \sum_y p(y|x) \log p(y|x) - \sum_y p(y|x) \log p(y)
+$$
+
+$$
+= -H(p(y|x)) - \sum_y p(y|x) \log p(y)
+$$
+
+両辺の $x$ に関する期待値をとる:
+
+$$
+\mathbb{E}_x[\text{KL}(p(y|x) \| p(y))]
+= -\mathbb{E}_x[H(p(y|x))] - \mathbb{E}_x\!\left[\sum_y p(y|x) \log p(y)\right]
+$$
+
+第2項を整理する。$p(y) = \mathbb{E}_x[p(y|x)]$ を使うと:
+
+$$
+\mathbb{E}_x\!\left[\sum_y p(y|x) \log p(y)\right]
+= \sum_y \underbrace{\mathbb{E}_x[p(y|x)]}_{= p(y)} \log p(y)
+= \sum_y p(y) \log p(y) = -H(p(y))
+$$
+
+まとめると:
+
+$$
+\boxed{
+\mathbb{E}_x[\text{KL}(p(y|x) \| p(y))] = H(p(y)) - \mathbb{E}_x[H(p(y|x))]
+}
+$$
+
+したがって IS は:
+
+$$
+\text{IS}(G) = \exp\!\bigl(H(p(y)) - \mathbb{E}_x[H(p(y|x))]\bigr)
+$$
+
+**読み方**:
+- $H(p(y))$: 周辺分布のエントロピー → **多様性**。$p(y)$ が uniform に近いほど大きい
+- $\mathbb{E}_x[H(p(y|x))]$: 条件付き分布の平均エントロピー → **不確実性**。各画像に対する分類が鋭いほど小さい
+
+IS = exp(**多様性** − **不確実性**) という構造。両項が同時に最適のとき（多様かつ高品質）に IS は最大化される。
+
+**数値で確認**: $p(y|x) = \delta(y - y^*)$（confidence=1）、$p(y) = \text{Uniform}(1/K)$ のとき:
+- $H(p(y|x)) = 0$（確定的）
+- $H(p(y)) = \log K$（最大多様）
+- IS = $\exp(\log K) = K$ ✅（最大値と一致）
+
+#### 3.3.3c 周辺分布 $p(y) = \mathbb{E}_x[p(y|x)]$ — モードカバレッジとの関係
+
+周辺分布の役割を正確に理解しておく:
+
+$$
+p(y) = \int p(y|x) \, p_g(x) \, dx
+$$
+
+「生成モデルが $x$ を生成したとき、クラス $y$ と判定される確率の平均」。これが全クラスにわたって均一であるほど IS は高くなる。
+
+**mode collapse との関係**:
+
+- モデルが **1 つのモード**（例: 犬の画像のみ）を生成するとき: $p(y)$ は「犬」クラスに集中 → $H(p(y))$ が小さい → IS が低下
+- モデルが **全クラス**を均等に生成するとき: $p(y) \approx \text{Uniform}(1/K)$ → $H(p(y)) = \log K$ → IS が上昇
+
+ところが、**クラス内モード崩壊**（例: 犬の画像しか生成しないが、全て同じポーズ）は $p(y)$ には現れない — IS はこれを検出できない。これが IS の構造的な盲点。
+
+$$
+\text{mode collapse（クラス内）} \Rightarrow p(y)\text{ は均一のまま} \Rightarrow H(p(y))\text{ は高いまま} \Rightarrow \text{IS は高値を保つ}
+$$
+
+IS が高くてもモード崩壊している可能性がある、という重要な注意点。
+
+#### 3.3.3d Jensen 不等式と IS の下界
+
+IS の指数の内側 $\mathbb{E}_x[\text{KL}(p(y|x) \| p(y))]$ は期待値なので、Jensen 不等式（exp は凸関数）から:
+
+$$
+\exp\!\left(\mathbb{E}_x[g(x)]\right) \geq 1, \quad g(x) = \text{KL}(p(y|x) \| p(y)) \geq 0
+$$
+
+等号は $g(x) = 0$ a.s.、すなわち $p(y|x) = p(y)$ がほぼ確実に成立するとき（生成モデルが完全にランダム）。
+
+より実践的な下界: $p(y)$ が $K$ クラスに完全に均一で、各 $p(y|x)$ が任意であるとき:
+
+$$
+\text{IS} \leq K
+$$
+
+等号は $p(y|x) = \delta(y - y_x^*)$（各生成画像が単一クラスに確信して属する）かつ $p(y) = 1/K$（全クラスを均等にカバー）のとき。
+
 #### 3.3.4 数式↔コード 1:1対応
 
-```julia
-# Inception Score implementation
-using Statistics
-
-function inception_score(images::Vector{Matrix{Float64}}, n_splits::Int=10)
-    # Step 1: Inception-v3 classification → p(y|x) for each image
-    # Real impl: forward pass through Inception-v3
-    # Here: random softmax for demo
-    n_samples = length(images)
-    n_classes = 1000  # ImageNet classes
-
-    # Simulate Inception predictions
-    logits = randn(n_samples, n_classes)
-    p_yx = exp.(logits) ./ sum(exp.(logits), dims=2)  # (n_samples, n_classes)
-
-    # Step 2: Compute p(y) = E_x[p(y|x)] (marginal distribution)
-    p_y = vec(mean(p_yx, dims=1))  # (n_classes,)
-
-    # Step 3: Compute KL(p(y|x) || p(y)) for each image
-    kl_divs = zeros(n_samples)
-    for i in 1:n_samples
-        for j in 1:n_classes
-            if p_yx[i,j] > 1e-10 && p_y[j] > 1e-10  # avoid log(0)
-                kl_divs[i] += p_yx[i,j] * log(p_yx[i,j] / p_y[j])
-            end
-        end
-    end
-
-    # Step 4: IS = exp(E[KL])
-    mean_kl = mean(kl_divs)
-    is_score = exp(mean_kl)
-
-    # Optional: compute IS over multiple splits for stability
-    # (split dataset into n_splits parts, compute IS for each, average)
-    # Here: simplified version with single split
-
-    return is_score, mean_kl
-end
-
-# Test
-test_imgs = [randn(64, 64) for _ in 1:1000]
-is, kl = inception_score(test_imgs)
-println("Inception Score: $(round(is, digits=2))")
-println("Mean KL: $(round(kl, digits=4))")
-println("Expected range: [1.0, 1000.0] for ImageNet")
-```
 
 **数値検証**: 極端なケースで確認。
 
-```julia
-# Case 1: perfect quality + diversity (maximum IS)
-# p(y|x) = one-hot, p(y) = uniform → IS = K
-n = 1000
-k = 100  # simplified: 100 classes
-p_yx_perfect = zeros(n, k)
-for i in 1:n
-    p_yx_perfect[i, mod(i-1, k)+1] = 1.0  # one-hot, cyclic
-end
-p_y_perfect = vec(mean(p_yx_perfect, dims=1))  # should be uniform
-
-kl_perfect = zeros(n)
-for i in 1:n, j in 1:k
-    if p_yx_perfect[i,j] > 0 && p_y_perfect[j] > 0
-        kl_perfect[i] += p_yx_perfect[i,j] * log(p_yx_perfect[i,j] / p_y_perfect[j])
-    end
-end
-is_perfect = exp(mean(kl_perfect))
-println("IS (perfect case): $(round(is_perfect, digits=2)) ≈ $k")
-
-# Case 2: p(y|x) = p(y) (worst case) → IS = 1
-p_yx_worst = repeat(p_y_perfect', n, 1)  # all images have same p(y|x) = p(y)
-kl_worst = zeros(n)
-for i in 1:n, j in 1:k
-    if p_yx_worst[i,j] > 0
-        kl_worst[i] += p_yx_worst[i,j] * log(p_yx_worst[i,j] / p_y_perfect[j])
-    end
-end
-is_worst = exp(mean(kl_worst))
-println("IS (worst case): $(round(is_worst, digits=4)) ≈ 1.0")
-```
 
 #### 3.3.5 ISの限界
 
@@ -984,9 +728,19 @@ IS = 30 vs 35 の差は実質的にどれくらい？定量的な解釈が困難
 - Precision-Recall → 品質と多様性を分離測定
 - 人間評価 → 最終判断
 
-:::message
-**ボス戦への準備 30% 完了**: FIDとISの数式を完全導出した。ここからLPIPS, Precision-Recall, MMD/CMMDを導出する。
-:::
+> **⚠️ Warning:** IS の高さは「ImageNet クラスに対して分類器が確信を持てる画像を多様に生成している」ことを示すに過ぎない。IS が高くてもクラス内多様性は全く保証されない。
+
+**IS のもう 1 つの限界 — 参照分布なし**:
+
+FID は真画像との距離を直接測るが、IS は**真画像分布を一切参照しない**。IS は生成モデルが「Inception にとって分類しやすい画像を多様に生成しているか」を測るだけで、生成画像が真画像に近いかどうかは不問。これにより IS と FID が逆方向に動くことが起こりうる:
+
+| モデル | IS | FID | 解釈 |
+|:-------|:---|:----|:-----|
+| 多様だがノイズ多 | 高 | 高 | IS はノイズを検出しない |
+| 高品質だが単調 | 低 | 低 | IS は多様性欠如を検出 |
+| 高品質かつ多様 | 高 | 低 | 理想 |
+
+> **Note:** **ボス戦への準備 30% 完了**: FIDとISの数式を完全導出した。ここからLPIPS, Precision-Recall, MMD/CMMDを導出する。
 
 ### 3.4 LPIPS (Learned Perceptual Image Patch Similarity) 完全導出
 
@@ -1034,74 +788,6 @@ $$
 
 #### 3.4.4 実装と数式対応
 
-```julia
-# LPIPS implementation (simplified)
-using Statistics
-
-# Dummy VGG feature extractor (real impl: pre-trained VGG-16)
-function vgg_features(image::Matrix{Float64})
-    # Real impl: extract features from VGG layers: conv1_2, conv2_2, conv3_3, conv4_3, conv5_3
-    # Here: simulate with 5 scales × 64 channels
-    n_layers = 5
-    features = []
-    for ℓ in 1:n_layers
-        # Simulate feature map: (H_ℓ, W_ℓ, C_ℓ)
-        h_size = 64 ÷ (2^(ℓ-1))  # decreasing spatial size
-        c_size = 64 * (2^(ℓ-1))  # increasing channels
-        feat = randn(h_size, h_size, c_size)
-        push!(features, feat)
-    end
-    return features
-end
-
-function channel_normalize(feat::Array{Float64,3})
-    # feat: (H, W, C)
-    # Normalize each channel
-    H, W, C = size(feat)
-    feat_norm = zeros(H, W, C)
-    for c in 1:C
-        channel = feat[:,:,c]
-        μ = mean(channel)
-        σ = std(channel) + 1e-10  # avoid division by zero
-        feat_norm[:,:,c] = (channel .- μ) ./ σ
-    end
-    return feat_norm
-end
-
-function lpips(img1::Matrix{Float64}, img2::Matrix{Float64}, weights::Vector{Float64}=[1.0, 1.0, 1.0, 1.0, 1.0])
-    # Extract multi-scale features
-    feats1 = vgg_features(img1)
-    feats2 = vgg_features(img2)
-
-    # Compute distance per layer
-    distance = 0.0
-    for (ℓ, (f1, f2)) in enumerate(zip(feats1, feats2))
-        # Channel-wise normalization
-        f1_norm = channel_normalize(f1)
-        f2_norm = channel_normalize(f2)
-
-        # L2 distance, averaged over spatial dimensions
-        diff = f1_norm .- f2_norm
-        layer_dist = sum(diff.^2) / (size(f1, 1) * size(f1, 2))
-
-        # Weighted sum
-        distance += weights[ℓ] * layer_dist
-    end
-
-    return sqrt(distance)  # or distance (squared)
-end
-
-# Test
-img_a = randn(128, 128)
-img_b = randn(128, 128)
-img_c = img_a .+ 0.05 .* randn(128, 128)  # similar to A
-
-lpips_ab = lpips(img_a, img_b)
-lpips_ac = lpips(img_a, img_c)
-println("LPIPS(A, B): $(round(lpips_ab, digits=4))")
-println("LPIPS(A, C): $(round(lpips_ac, digits=4))")
-println("Expected: LPIPS(A, C) < LPIPS(A, B)")
-```
 
 #### 3.4.5 LPIPSと人間評価の相関
 
@@ -1135,9 +821,7 @@ VGG/AlexNetはImageNetで訓練 → ドメインバイアス。
 - ドメイン特化の特徴抽出器を訓練
 - 複数の特徴抽出器でensemble
 
-:::message
-**ボス戦への準備 50% 完了**: LPIPS完了。ここからPrecision-Recall, MMD/CMMDの数式へ。
-:::
+> **Note:** **ボス戦への準備 50% 完了**: LPIPS完了。ここからPrecision-Recall, MMD/CMMDの数式へ。
 
 ### 3.5 Precision-Recall for Generative Models 完全導出
 
@@ -1185,7 +869,55 @@ $$
 
 「真画像のうち、生成画像の多様体に含まれる割合」→ 多様性が高い（真分布をカバー）ほど1に近い。
 
-#### 3.5.3 直感的理解
+#### 3.5.2b $k$-NN 球の厳密定義と幾何的直感
+
+$k$-NN 球を厳密に定義しておく。サンプル集合 $X_r = \{x_r^{(1)}, \ldots, x_r^{(N_r)}\}$ と点 $x$ に対して:
+
+$$
+d_k(x, X_r) = \text{（$x$ から $X_r$ の各点までの距離を昇順に並べたとき、$k$ 番目の値）}
+$$
+
+**$k$-NN 球の定義**:
+
+$$
+\text{ball}(x, X_r, k) = \left\{ z \in \mathbb{R}^d : \|z - x\| \leq d_k(x, X_r) \right\}
+$$
+
+この球は $x$ を中心とし、半径は「$x$ の $k$ 番目の最近傍までの距離」。
+
+**真画像多様体の近似**:
+
+$$
+\mathcal{M}_r = \bigcup_{x_r \in X_r} \text{ball}(x_r, X_r, k)
+$$
+
+各真サンプルの周囲に球を貼り合わせることで、真分布が乗る多様体を近似する。
+
+**Precision の完全表記**:
+
+$$
+\text{Precision}(X_r, X_g, k) = \frac{1}{|X_g|} \sum_{x_g \in X_g} \mathbf{1}\!\left[ \exists\, x_r \in X_r : \|x_g - x_r\| \leq d_k(x_r, X_r) \right]
+$$
+
+「生成サンプル $x_g$ が、真サンプルのどれか 1 つの $k$-NN 球に入っているか」を数える。
+
+**Recall の完全表記**:
+
+$$
+\text{Recall}(X_r, X_g, k) = \frac{1}{|X_r|} \sum_{x_r \in X_r} \mathbf{1}\!\left[ \exists\, x_g \in X_g : \|x_r - x_g\| \leq d_k(x_g, X_g) \right]
+$$
+
+「真サンプル $x_r$ が、生成サンプルのどれか 1 つの $k$-NN 球に入っているか」を数える。
+
+**分類タスクの Precision/Recall との比較**:
+
+| | 分類タスク | 生成モデル |
+|:--|:----------|:----------|
+| Precision | TP / (TP + FP) | 生成サンプルが真多様体に含まれる割合 |
+| Recall | TP / (TP + FN) | 真サンプルが生成多様体に含まれる割合 |
+| "陽性" | 正クラスのサンプル | 現実的（リアル）な画像 |
+
+高次元データでは生成分布と真分布の「重なり」を直接測るより、多様体近傍を使う方が統計的に安定する。$k=5$ が論文 [^4] の推奨値。
 
 ```mermaid
 graph TD
@@ -1206,124 +938,11 @@ graph TD
 
 #### 3.5.4 実装と数式対応
 
-```julia
-# Precision-Recall for generative models
-using NearestNeighbors
-
-function precision_recall(feats_real::Matrix{Float64},
-                           feats_gen::Matrix{Float64}, k::Int=5)
-    # feats: (n_samples, d_features)
-    n_real = size(feats_real, 1)
-    n_gen = size(feats_gen, 1)
-
-    # Build k-NN trees
-    tree_real = KDTree(feats_real')  # NearestNeighbors expects (d, n)
-    tree_gen = KDTree(feats_gen')
-
-    # Compute k-th nearest neighbor distances for manifold radius
-    # Real manifold: r_k^(i) = distance to k-th NN in real data
-    radii_real = zeros(n_real)
-    for i in 1:n_real
-        idxs, dists = knn(tree_real, feats_real[i,:], k+1)  # k+1 to exclude self
-        radii_real[i] = dists[end]  # k-th NN distance
-    end
-
-    # Gen manifold
-    radii_gen = zeros(n_gen)
-    for i in 1:n_gen
-        idxs, dists = knn(tree_gen, feats_gen[i,:], k+1)
-        radii_gen[i] = dists[end]
-    end
-
-    # Precision: fraction of gen samples within real manifold
-    precision_count = 0
-    for i in 1:n_gen
-        # Find nearest real sample
-        idxs, dists = knn(tree_real, feats_gen[i,:], 1)
-        nearest_idx = idxs[1]
-        if dists[1] <= radii_real[nearest_idx]
-            precision_count += 1
-        end
-    end
-    precision = precision_count / n_gen
-
-    # Recall: fraction of real samples within gen manifold
-    recall_count = 0
-    for i in 1:n_real
-        idxs, dists = knn(tree_gen, feats_real[i,:], 1)
-        nearest_idx = idxs[1]
-        if dists[1] <= radii_gen[nearest_idx]
-            recall_count += 1
-        end
-    end
-    recall = recall_count / n_real
-
-    return precision, recall
-end
-
-# Test with synthetic data
-n_real = 200
-n_gen = 200
-d = 64
-
-# Case 1: high quality, low diversity (mode collapse)
-# Gen samples concentrated around a subset of real samples
-feats_real_1 = randn(n_real, d)
-feats_gen_1 = feats_real_1[1:50,:] .+ 0.1 .* randn(50, d)  # only 50 modes
-feats_gen_1 = vcat(feats_gen_1, feats_gen_1[rand(1:50, 150),:])  # replicate to 200
-
-p1, r1 = precision_recall(feats_real_1, feats_gen_1)
-println("Case 1 (mode collapse): Precision=$(round(p1, digits=3)), Recall=$(round(r1, digits=3))")
-println("Expected: high P, low R")
-
-# Case 2: high diversity, low quality (noisy samples)
-feats_gen_2 = feats_real_1 .+ 2.0 .* randn(n_real, d)  # far from real manifold but diverse
-p2, r2 = precision_recall(feats_real_1, feats_gen_2)
-println("Case 2 (noisy): Precision=$(round(p2, digits=3)), Recall=$(round(r2, digits=3))")
-println("Expected: low P, high R (if noise covers broadly)")
-
-# Case 3: ideal (perfect match)
-feats_gen_3 = feats_real_1 .+ 0.01 .* randn(n_real, d)  # very close to real
-p3, r3 = precision_recall(feats_real_1, feats_gen_3)
-println("Case 3 (ideal): Precision=$(round(p3, digits=3)), Recall=$(round(r3, digits=3))")
-println("Expected: high P, high R")
-```
 
 #### 3.5.5 Precision-Recallの可視化
 
 **P-R曲線**: 生成パラメータ（例: temperature, truncation）を変えながらPrecision-Recallをプロット。
 
-```julia
-# Visualize P-R tradeoff (conceptual)
-# Vary generation temperature → observe P-R tradeoff
-temperatures = [0.5, 0.7, 0.9, 1.0, 1.2, 1.5]
-precisions = Float64[]
-recalls = Float64[]
-
-feats_real = randn(200, 64)
-
-for temp in temperatures
-    # Simulate: lower temp → higher quality, lower diversity
-    if temp < 1.0
-        # Mode collapse simulation
-        n_modes = Int(round(50 * temp))
-        feats_gen = feats_real[1:n_modes,:] .+ (0.1/temp) .* randn(n_modes, 64)
-        feats_gen = vcat(feats_gen, feats_gen[rand(1:n_modes, 200-n_modes),:])
-    else
-        # Higher diversity, lower quality
-        feats_gen = feats_real .+ (temp-0.5) .* randn(200, 64)
-    end
-
-    p, r = precision_recall(feats_real, feats_gen)
-    push!(precisions, p)
-    push!(recalls, r)
-end
-
-println("Temperature vs Precision-Recall:")
-for (i, temp) in enumerate(temperatures)
-    println("T=$temp: P=$(round(precisions[i], digits=3)), R=$(round(recalls[i], digits=3))")
-end
-```
 
 **解釈**: P-R平面上で右上（P=1, R=1）に近いほど良い。
 
@@ -1341,9 +960,52 @@ $k$（最近傍数）によって結果が変わる。論文 [^4] では $k=5$ �
 
 Inception特徴に依存 → ドメインバイアス（FIDと同じ問題）。
 
-:::message
-**ボス戦への準備 70% 完了**: Precision-Recall完了。残りMMD/CMMD → ボス戦へ。
-:::
+#### 3.5.7 Density & Coverage — 改良版 Precision-Recall (Naeem et al. 2020)
+
+Kynkäänniemi ら [^4] の Precision は構造的な弱点を持つ。Precision は $x_g$ が **どれか 1 つ** の真サンプルの球に入れば 1 をカウントするため、生成サンプルが真分布の**一点に高密度集中**しても Precision = 1 になってしまう（偽陽性）。
+
+Naeem et al. (2020)[^naeem2020] は **Density & Coverage** でこの問題を解決した:
+
+$$
+\text{Density}(X_r, X_g, k) = \frac{1}{kM} \sum_{x_g \in X_g} \sum_{x_r \in X_r} \mathbf{1}\!\left[ x_g \in \text{ball}(x_r, X_r, k) \right]
+$$
+
+$$
+\text{Coverage}(X_r, X_g, k) = \frac{1}{M} \sum_{x_r \in X_r} \mathbf{1}\!\left[ \exists\, x_g \in X_g : x_g \in \text{ball}(x_r, X_r, k) \right]
+$$
+
+ここで $M = |X_r|$（真サンプル数）。
+
+**Density vs Precision の本質的な違い**:
+
+- **Precision**: 生成サンプル $x_g$ が **少なくとも 1 つ** の真サンプルの球に入っているか（0/1 判定）
+- **Density**: 生成サンプル $x_g$ が **いくつの** 真サンプルの球に入っているかをカウント（連続値）。$k$ で正規化して 1 前後が基準。
+
+Density > 1 は「生成サンプルが真分布の稠密な領域に集中している」ことを意味する。これにより **pseudo mode collapse**（生成サンプルが少数の真サンプルのみをカバー）を検出できる。
+
+**Coverage vs Recall の本質的な違い**:
+
+- **Recall**: 真サンプル $x_r$ が **生成多様体**（$\text{ball}(x_g, X_g, k)$）に入っているか
+- **Coverage**: 真サンプル $x_r$ の **真自身の球**（$\text{ball}(x_r, X_r, k)$）に生成サンプルが入っているか
+
+Coverage の判定球は真-真 間の $k$-NN で決まるため、**生成分布の推定品質に依存しない**。Recall は生成サンプルが疎に分布すると球が大きくなり Recall が人工的に高くなる問題がある（Coverage はこれを回避）。
+
+```mermaid
+graph LR
+    A["Precision<br/>0/1 判定<br/>(1点集中を見落とす)"] -->|改善| B["Density<br/>カウント / k<br/>(稠密度を定量化)"]
+    C["Recall<br/>生成多様体で判定<br/>(生成球の品質依存)"] -->|改善| D["Coverage<br/>真多様体で判定<br/>(安定したカバレッジ測定)"]
+    style B fill:#c8e6c9
+    style D fill:#c8e6c9
+```
+
+**数値例で失敗モードを確認**:
+
+モデルA（pseudo mode collapse）: 1000 生成サンプルのうち 900 枚が真画像の**同じ 10 サンプルの周辺**に集中。
+- Precision = 1.0（全生成サンプルが真多様体に入っている）
+- Density ≫ 1（同じ球に 90 枚が集中 → $k=5$ で正規化しても Density ≈ 18）
+- Coverage = 10 / 1000 = 0.01（真分布の 0.1% しかカバーしていない）
+
+Precision はモードの多様性欠如を完全に見落とす。Density と Coverage の組み合わせが実態を正確に反映する。
 
 ### 3.6 MMD (Maximum Mean Discrepancy) & CMMD 完全導出
 
@@ -1400,63 +1062,69 @@ $$
 
 ここで $\{x_i\}_{i=1}^n \sim P$, $\{y_j\}_{j=1}^m \sim Q$。
 
-#### 3.6.4 数式↔コード 1:1対応 (MMD)
+#### 3.6.3b カーネルトリックの完全証明
 
-```julia
-# MMD implementation with RBF kernel
-using Statistics
+なぜ $\text{MMD}^2$ が上記の期待値式で書けるのか — $\|\mu_P - \mu_Q\|_{\mathcal{H}}^2$ から出発して完全に導出する。
 
-function rbf_kernel(x::Vector{Float64}, y::Vector{Float64}, σ::Float64=1.0)
-    # k(x, y) = exp(-||x - y||² / (2σ²))
-    return exp(-sum((x .- y).^2) / (2*σ^2))
-end
+**出発点**: $\mu_P = \mathbb{E}_{x \sim P}[\phi(x)] \in \mathcal{H}$ とおく。
 
-function mmd_squared(X::Matrix{Float64}, Y::Matrix{Float64}, σ::Float64=1.0)
-    # X: (n, d), Y: (m, d)
-    n = size(X, 1)
-    m = size(Y, 1)
+$$
+\text{MMD}^2(P, Q) = \|\mu_P - \mu_Q\|_{\mathcal{H}}^2 = \langle \mu_P - \mu_Q,\, \mu_P - \mu_Q \rangle_{\mathcal{H}}
+$$
 
-    # E_{x,x'}[k(x, x')]
-    kxx = 0.0
-    for i in 1:n, j in 1:n
-        kxx += rbf_kernel(X[i,:], X[j,:], σ)
-    end
-    kxx /= (n * n)
+内積を双線形性で展開:
 
-    # E_{y,y'}[k(y, y')]
-    kyy = 0.0
-    for i in 1:m, j in 1:m
-        kyy += rbf_kernel(Y[i,:], Y[j,:], σ)
-    end
-    kyy /= (m * m)
+$$
+= \langle \mu_P, \mu_P \rangle_{\mathcal{H}} - 2\langle \mu_P, \mu_Q \rangle_{\mathcal{H}} + \langle \mu_Q, \mu_Q \rangle_{\mathcal{H}}
+$$
 
-    # E_{x,y}[k(x, y)]
-    kxy = 0.0
-    for i in 1:n, j in 1:m
-        kxy += rbf_kernel(X[i,:], Y[j,:], σ)
-    end
-    kxy /= (n * m)
+**第 1 項** $\langle \mu_P, \mu_P \rangle_{\mathcal{H}}$ を計算する。RKHS の再生性 (reproducing property):
 
-    # MMD²
-    mmd_sq = kxx + kyy - 2*kxy
-    return max(0, mmd_sq)  # numerical stability
-end
+$$
+\langle \phi(x), \phi(x') \rangle_{\mathcal{H}} = k(x, x')
+$$
 
-function mmd(X::Matrix{Float64}, Y::Matrix{Float64}, σ::Float64=1.0)
-    return sqrt(mmd_squared(X, Y, σ))
-end
+これと内積の線形性（期待値と交換可能）を使う:
 
-# Test: identical distributions → MMD ≈ 0
-X_test = randn(100, 32)
-Y_test = randn(100, 32)
-Y_test_same = X_test .+ 0.01 .* randn(100, 32)  # very similar
+$$
+\langle \mu_P, \mu_P \rangle_{\mathcal{H}}
+= \left\langle \mathbb{E}_{x \sim P}[\phi(x)],\, \mathbb{E}_{x' \sim P}[\phi(x')] \right\rangle_{\mathcal{H}}
+= \mathbb{E}_{x, x' \sim P}\!\left[ \langle \phi(x), \phi(x') \rangle_{\mathcal{H}} \right]
+= \mathbb{E}_{x, x' \sim P}[k(x, x')]
+$$
 
-mmd_diff = mmd(X_test, Y_test)
-mmd_same = mmd(X_test, Y_test_same)
-println("MMD (different): $(round(mmd_diff, digits=4))")
-println("MMD (similar): $(round(mmd_same, digits=6))")
-println("Expected: MMD(similar) ≈ 0")
-```
+**第 2 項** と **第 3 項** も同様に:
+
+$$
+\langle \mu_P, \mu_Q \rangle_{\mathcal{H}} = \mathbb{E}_{x \sim P,\, y \sim Q}[k(x, y)]
+$$
+
+$$
+\langle \mu_Q, \mu_Q \rangle_{\mathcal{H}} = \mathbb{E}_{y, y' \sim Q}[k(y, y')]
+$$
+
+まとめると:
+
+$$
+\boxed{
+\text{MMD}^2(P, Q) = \mathbb{E}_{x,x' \sim P}[k(x,x')] - 2\,\mathbb{E}_{x \sim P,\, y \sim Q}[k(x,y)] + \mathbb{E}_{y,y' \sim Q}[k(y,y')]
+}
+$$
+
+$\phi$ を陽に計算する必要はない — **カーネル評価 $k(\cdot,\cdot)$ のみ**で MMD が計算できる。これがカーネルトリックの本質。
+
+#### 3.6.3c 不偏推定量
+
+経験的推定 $\widehat{\text{MMD}}^2 = \frac{1}{n^2}\sum_{i,j}k(x_i,x_j) + \cdots$ は**対角項 $k(x_i, x_i)$（自己類似度）を含む**ため有偏推定量になる。不偏版:
+
+$$
+\widehat{\text{MMD}}^2_{\text{unbiased}} = \frac{1}{n(n-1)}\sum_{i \neq j} k(x_i, x_j) - \frac{2}{mn}\sum_{i=1}^n\sum_{j=1}^m k(x_i, y_j) + \frac{1}{m(m-1)}\sum_{i \neq j} k(y_i, y_j)
+$$
+
+**なぜ $i \neq j$ で不偏になるか**: $\mathbb{E}_{x \sim P}[k(x_i, x_j)]$ を $x_i, x_j$ が独立なら $\mathbb{E}_{x,x'}[k(x,x')]$ と書ける。$i = j$ の場合は同じサンプルの自己カーネル $k(x_i, x_i) = \|\phi(x_i)\|^2$ が入り込んで $\mathbb{E}[k(x,x)] \neq \mathbb{E}_{x,x'}[k(x,x')]$ となる（$P=Q$ のときでも正の値）。
+
+CMMD 論文 [^5] はこの不偏推定量を使用する。$O(n^2)$ の計算だが、$n \leq 2000$ 程度なら実用的。
+
 
 #### 3.6.5 CMMD (CLIP-MMD) — FIDの代替 [^5]
 
@@ -1486,31 +1154,6 @@ $$
 
 #### 3.6.6 実装 (CMMD)
 
-```julia
-# CMMD implementation (with dummy CLIP embeddings)
-function clip_embed_dummy(images::Vector{Matrix{Float64}})
-    # Real impl: CLIP image encoder → 512-dim
-    n = length(images)
-    return randn(n, 512)  # (n, 512)
-end
-
-function cmmd(real_images::Vector{Matrix{Float64}},
-              gen_images::Vector{Matrix{Float64}}, σ::Float64=10.0)
-    # Extract CLIP embeddings
-    emb_real = clip_embed_dummy(real_images)  # (n, 512)
-    emb_gen = clip_embed_dummy(gen_images)    # (m, 512)
-
-    # Compute MMD
-    return mmd(emb_real, emb_gen, σ)
-end
-
-# Test
-real_imgs_cmmd = [randn(64, 64) for _ in 1:100]
-gen_imgs_cmmd = [randn(64, 64) for _ in 1:100]
-cmmd_score = cmmd(real_imgs_cmmd, gen_imgs_cmmd)
-println("CMMD: $(round(cmmd_score, digits=4))")
-println("Lower = more similar distributions")
-```
 
 #### 3.6.7 カーネル選択とハイパーパラメータ $\sigma$
 
@@ -1525,31 +1168,33 @@ $$
 \sigma = \text{median}(\{\|x_i - x_j\| : i,j\})
 $$
 
-```julia
-# Median heuristic for σ
-function median_heuristic(X::Matrix{Float64})
-    n = size(X, 1)
-    dists = Float64[]
-    # Subsample for efficiency
-    n_samples = min(1000, n*(n-1)÷2)
-    for _ in 1:n_samples
-        i, j = rand(1:n, 2)
-        if i != j
-            push!(dists, sqrt(sum((X[i,:] .- X[j,:]).^2)))
-        end
-    end
-    return median(dists)
-end
+**中央値ヒューリスティックの理論的背景**:
 
-# Test
-X_test2 = randn(200, 64)
-σ_auto = median_heuristic(X_test2)
-println("Auto-selected σ (median heuristic): $(round(σ_auto, digits=2))")
-```
+$d_{ij} = \|x_i - x_j\|$ の中央値は、分布 $P$ のサンプル間の「典型的な距離」を表す。$\sigma^2 = \text{median}(\{d_{ij}^2\})$ とおくとき、RBF カーネル $k(x,y) = \exp(-d^2 / 2\sigma^2)$ は:
 
-:::message
-**ボス戦クリア 準備 90% 完了**: MMD/CMMDの理論を完全導出した。これで全指標（FID/IS/LPIPS/P&R/CMMD）の数式基盤が整った。ここから実装ゾーンへ。
-:::
+- 典型的な距離（$d \approx \sigma$）で $k \approx \exp(-1/2) \approx 0.61$（中程度の類似度）
+- これより遠い点では $k \to 0$（無関係）
+- これより近い点では $k \to 1$（非常に類似）
+
+$\sigma$ が小さすぎる → ほとんどの $k(x,y) \approx 0$ → MMD が退化（サンプル間の違いを検出できない）
+
+$\sigma$ が大きすぎる → ほとんどの $k(x,y) \approx 1$ → MMD $\approx 0$（分布の違いを見落とす）
+
+**CLIP 埋め込みが Inception より優れる理由**:
+
+| 特徴 | Inception-v3 | CLIP (ViT-B/32) |
+|:-----|:------------|:----------------|
+| 訓練タスク | ImageNet 1000 クラス分類 | 画像-テキストコントラスト学習 |
+| 特徴次元 | 2048 | 512 ～ 768 |
+| バイアス | 自然画像・ImageNet カテゴリ | より汎用（多様なコンテンツ） |
+| テキスト条件付き評価 | ❌ 不可 | ✅ 直接対応 |
+| 表現の意味性 | カテゴリ的（分類境界に沿う） | 意味的・概念的 |
+
+CLIP は画像-テキストペアの大規模コントラスト学習で、「この画像は猫らしいか（カテゴリ判定）」ではなく「この画像の意味的内容は何か」を捉える特徴空間を持つ。Stable Diffusion や DALL-E のような多様なコンテンツを生成するモデルの評価に CLIP の方が本質的に適している。
+
+**サンプル複雑度の優位性**:
+
+MMD 不偏推定量の分散は $O(1/n)$ のオーダー。FID の共分散行列推定（$d \times d$ 行列、$d=2048$）は $O(d^2/n)$ のサンプルが必要で、実用上は $n \geq 5000$ 以上が必要。CMMD は約 1,000 〜 2,000 サンプルで安定した推定が可能。
 
 ### 3.7 ⚔️ Boss Battle: 論文のメトリクス式を完全読解
 
@@ -1557,90 +1202,234 @@ println("Auto-selected σ (median heuristic): $(round(σ_auto, digits=2))")
 
 **論文抜粋** (Jayasumana et al. 2024 [^5], Algorithm 1 simplified):
 
-```
-Algorithm: CMMD Computation
-Input: Real images I_r, Generated images I_g, CLIP model C, kernel bandwidth σ
-Output: CMMD score
-
-1. Extract CLIP embeddings:
-   E_r = [C(img) for img in I_r]  # (n_r, 512)
-   E_g = [C(img) for img in I_g]  # (n_g, 512)
-
-2. Compute kernel matrices:
-   K_rr[i,j] = k(E_r[i], E_r[j]; σ)
-   K_gg[i,j] = k(E_g[i], E_g[j]; σ)
-   K_rg[i,j] = k(E_r[i], E_g[j]; σ)
-
-3. Compute MMD²:
-   MMD² = mean(K_rr) + mean(K_gg) - 2*mean(K_rg)
-
-4. Return CMMD = sqrt(max(0, MMD²))
-```
 
 **実装**:
 
-```julia
-# Boss Battle: Full CMMD implementation following paper
-using LinearAlgebra, Statistics
-
-function cmmd_paper(real_imgs::Vector{Matrix{Float64}},
-                     gen_imgs::Vector{Matrix{Float64}})
-    # Step 1: CLIP embeddings (dummy)
-    E_r = clip_embed_dummy(real_imgs)  # (n_r, 512)
-    E_g = clip_embed_dummy(gen_imgs)   # (n_g, 512)
-
-    # Step 2: Auto-select σ via median heuristic
-    σ = median_heuristic(vcat(E_r, E_g))
-
-    # Step 3: Compute kernel matrices
-    n_r, n_g = size(E_r, 1), size(E_g, 1)
-
-    K_rr = zeros(n_r, n_r)
-    for i in 1:n_r, j in 1:n_r
-        K_rr[i,j] = rbf_kernel(E_r[i,:], E_r[j,:], σ)
-    end
-
-    K_gg = zeros(n_g, n_g)
-    for i in 1:n_g, j in 1:n_g
-        K_gg[i,j] = rbf_kernel(E_g[i,:], E_g[j,:], σ)
-    end
-
-    K_rg = zeros(n_r, n_g)
-    for i in 1:n_r, j in 1:n_g
-        K_rg[i,j] = rbf_kernel(E_r[i,:], E_g[j,:], σ)
-    end
-
-    # Step 4: MMD²
-    mmd_sq = mean(K_rr) + mean(K_gg) - 2*mean(K_rg)
-
-    # Step 5: CMMD
-    cmmd_val = sqrt(max(0, mmd_sq))
-
-    return cmmd_val, σ
-end
-
-# Test
-imgs_r_boss = [randn(64, 64) for _ in 1:50]
-imgs_g_boss = [randn(64, 64) for _ in 1:50]
-cmmd_boss, σ_boss = cmmd_paper(imgs_r_boss, imgs_g_boss)
-println("⚔️ Boss Battle: CMMD = $(round(cmmd_boss, digits=4)), σ = $(round(σ_boss, digits=2))")
-println("✅ Boss クリア！")
-```
 
 **検証**: 同一分布で CMMD ≈ 0 になるか。
 
-```julia
-# Sanity check: identical → CMMD ≈ 0
-imgs_same = [randn(64, 64) for _ in 1:50]
-imgs_same2 = [img .+ 0.01.*randn(64,64) for img in imgs_same]  # very similar
-cmmd_same, _ = cmmd_paper(imgs_same, imgs_same2)
-println("CMMD (near-identical): $(round(cmmd_same, digits=6)) ≈ 0")
-```
 
-:::message
-**ボス戦クリア！🎉** 全指標の数式を完全導出し、論文疑似コードを再実装した。
-**進捗: 50% 完了** 数式修行ゾーン完了。ここから実装ゾーンへ — Julia統計分析 + Rust Criterion ベンチマーク。
-:::
+#### 3.7b FID の具体的導出演習
+
+FID の式の意味を、具体的なガウス分布で数値検証する。3 つの例題を通じて「FID が何を測っているか」を完全に把握する。
+
+**例題 1**: 同一ガウス分布 → FID = 0
+
+$P = \mathcal{N}(\mu, \Sigma)$, $Q = \mathcal{N}(\mu, \Sigma)$（全く同じ分布）のとき:
+
+$$
+\text{FID} = \|\mu - \mu\|^2 + \text{Tr}(\Sigma + \Sigma - 2(\Sigma \cdot \Sigma)^{1/2})
+$$
+
+$(\Sigma^2)^{1/2} = \Sigma$（正定値対称行列の場合）だから:
+
+$$
+\text{FID} = 0 + \text{Tr}(2\Sigma - 2\Sigma) = \text{Tr}(\mathbf{0}) = 0 \quad \checkmark
+$$
+
+同一分布では FID = 0。**FID の「正規性 (regularity)」の確認**。
+
+---
+
+**例題 2**: 平均ずれの感度 — $\mathcal{N}(\mathbf{0}, I_d)$ vs $\mathcal{N}(\delta \mathbf{1}, I_d)$
+
+$\mu_r = \mathbf{0}$, $\mu_g = \delta\mathbf{1} = (\delta, \delta, \ldots, \delta)^\top$, $\Sigma_r = \Sigma_g = I_d$ のとき:
+
+**第 1 項（平均のずれ）**:
+
+$$
+\|\mu_r - \mu_g\|^2 = \|\mathbf{0} - \delta\mathbf{1}\|^2 = \sum_{k=1}^d \delta^2 = d\delta^2
+$$
+
+**第 2 項（共分散のずれ）**: $\Sigma_r = \Sigma_g = I_d$ → $(I_d \cdot I_d)^{1/2} = (I_d)^{1/2} = I_d$ だから:
+
+$$
+\text{Tr}(I_d + I_d - 2I_d) = \text{Tr}(\mathbf{0}) = 0
+$$
+
+**結果**:
+
+$$
+\boxed{\text{FID}\!\left(\mathcal{N}(\mathbf{0}, I_d),\, \mathcal{N}(\delta\mathbf{1}, I_d)\right) = d\delta^2}
+$$
+
+次元数 $d$ に比例して FID が増大する。Inception 特徴 $d = 2048$ では、わずか $\delta = 0.1$ の平均ずれで FID = $2048 \times 0.01 = 20.48$。**FID が次元数に敏感**であることを示す。
+
+---
+
+**例題 3**: 分散スケールの感度 — $\mathcal{N}(\mathbf{0}, I_d)$ vs $\mathcal{N}(\mathbf{0}, \alpha I_d)$
+
+$\mu_r = \mu_g = \mathbf{0}$, $\Sigma_r = I_d$, $\Sigma_g = \alpha I_d$ ($\alpha > 0$) のとき:
+
+**第 1 項**: $\|\mathbf{0} - \mathbf{0}\|^2 = 0$
+
+**第 2 項**: $(I_d \cdot \alpha I_d)^{1/2} = (\alpha I_d)^{1/2} = \sqrt{\alpha}\, I_d$ だから:
+
+$$
+\text{Tr}(I_d + \alpha I_d - 2\sqrt{\alpha}\, I_d) = \text{Tr}\!\left((1 + \alpha - 2\sqrt{\alpha}) I_d\right) = d(1 - \sqrt{\alpha})^2
+$$
+
+**結果**:
+
+$$
+\boxed{\text{FID}\!\left(\mathcal{N}(\mathbf{0}, I_d),\, \mathcal{N}(\mathbf{0}, \alpha I_d)\right) = d(1 - \sqrt{\alpha})^2}
+$$
+
+**具体値で確認**:
+
+| $\alpha$ | $d(1-\sqrt{\alpha})^2$ / $d$ | 解釈 |
+|:---------|:-----------------------------|:-----|
+| $1.0$ | $0$ | 同一分布 |
+| $4.0$ | $(1-2)^2 = 1$ | 生成が 2 倍広がり |
+| $0.25$ | $(1-0.5)^2 = 0.25$ | 生成が半分縮小 |
+| $9.0$ | $(1-3)^2 = 4$ | 生成が 3 倍広がり |
+
+**重要な対称性**: $\alpha > 1$（生成が広がりすぎ）と $\alpha < 1$（生成が縮みすぎ）はどちらも FID > 0。共分散項 $(1 - \sqrt{\alpha})^2$ は $\alpha = 1$ を軸とした**対称なペナルティ**。
+
+---
+
+**3 つの例題まとめ**:
+
+$$
+\text{FID} = \underbrace{d\delta^2}_{\text{平均ずれ項}} + \underbrace{d(1-\sqrt{\alpha})^2}_{\text{共分散スケールずれ項}}
+$$
+
+（両方が同時にずれる場合、交差項が出るが一般には加法的に近似できる）
+
+### 3.8 人間評価プロトコル — 定量指標との統合
+
+定量指標は生成モデルのスクリーニングに有効だが、最終判断には人間評価が必要。§2.1.3 で見たように FID の人間評価との相関は $r \approx 0.6$ に過ぎない — 決定係数 $r^2 \approx 0.36$ は「FID の変動の 36% しか人間評価で説明できない」ことを意味する。
+
+#### 3.8.1 MOS (Mean Opinion Score)
+
+**定義**: $N$ 人の評価者が 5 段階スコアを付けたとき:
+
+$$
+\text{MOS} = \frac{1}{N} \sum_{i=1}^{N} r_i, \quad r_i \in \{1, 2, 3, 4, 5\}
+$$
+
+**95% 信頼区間**（正規近似）:
+
+$$
+\text{MOS} \pm 1.96 \cdot \frac{\hat{\sigma}}{\sqrt{N}}, \quad \hat{\sigma}^2 = \frac{1}{N-1}\sum_{i=1}^N (r_i - \text{MOS})^2
+$$
+
+$N \geq 30$ で信頼区間幅が $\hat{\sigma}$ の 70% 未満に収まる（十分な精度）。$N < 10$ では信頼区間が広すぎてモデル間の差が検出できない。
+
+**実用的基準**: MOS > 4.0 は高品質、MOS > 3.5 は許容範囲。ただしスコアの絶対値はタスクや評価基準の設定に大きく依存する。
+
+#### 3.8.2 評価者間一致度 — Cohen's kappa
+
+複数の評価者が同じ画像を評価するとき、評価者間の一致度が低ければ評価の信頼性が疑わしい。
+
+**Cohen's kappa**:
+
+$$
+\kappa = \frac{p_o - p_e}{1 - p_e}
+$$
+
+- $p_o$: **観測された一致率**（2 評価者が同じラベルを付けた割合）
+- $p_e$: **偶然の一致率**（ランダムに評価したときの期待一致率）
+
+**$p_e$ の計算**: カテゴリ $c$ に対して評価者 A の割合を $p_A(c)$、評価者 B の割合を $p_B(c)$ とすると:
+
+$$
+p_e = \sum_{c} p_A(c) \cdot p_B(c)
+$$
+
+**具体例**: 100 枚の画像を "good / bad" で 2 評価者が評価。
+- 評価者 A: 60 枚 good、40 枚 bad
+- 評価者 B: 55 枚 good、45 枚 bad
+- 両者が good と評価した枚数: 40 枚、両者が bad: 25 枚
+
+$$
+p_o = \frac{40 + 25}{100} = 0.65
+$$
+
+$$
+p_e = 0.60 \times 0.55 + 0.40 \times 0.45 = 0.33 + 0.18 = 0.51
+$$
+
+$$
+\kappa = \frac{0.65 - 0.51}{1 - 0.51} = \frac{0.14}{0.49} \approx 0.286
+$$
+
+**解釈の基準**:
+
+| $\kappa$ の範囲 | 解釈 | 対処 |
+|:--------------|:-----|:-----|
+| $< 0.20$ | 偶然の一致に近い (slight) | 評価基準を根本的に見直し |
+| $0.20 - 0.40$ | 低い一致 (fair) | 具体例・ガイドラインを追加 |
+| $0.40 - 0.60$ | 中程度 (moderate) | 許容範囲（要注記） |
+| $0.60 - 0.80$ | 高い一致 (substantial) | 信頼できる評価 |
+| $> 0.80$ | ほぼ完全な一致 (almost perfect) | 非常に信頼性が高い |
+
+$\kappa < 0.4$ の場合は評価プロトコル（評価基準の曖昧さ）を見直す必要がある。
+
+#### 3.8.3 Krippendorff's alpha — 順序尺度への一般化
+
+Cohen's kappa は 2 評価者・カテゴリ変数を前提とする。5 段階 MOS のような**順序尺度**には Krippendorff's alpha が適切:
+
+$$
+\alpha = 1 - \frac{D_o}{D_e}
+$$
+
+- $D_o$: 観測された不一致度（順序尺度では差の二乗 $(r_i - r_j)^2$ の加重和）
+- $D_e$: 期待される不一致度（全評価者・全データのランダム割り当て時）
+
+**Cohen's kappa との違い**: Krippendorff's alpha は任意の評価者数・欠損値を許容し、尺度（名義・順序・比率）に応じた距離関数を使う。MOS（5 段階）では $\alpha > 0.8$ が高品質評価の基準。
+
+#### 3.8.4 Bradley-Terry モデル — ペア比較の統計理論
+
+絶対評価より**相対比較**（A vs B: どちらが良いか）の方が人間は安定した判断を下しやすい。
+
+**Bradley-Terry モデル**:
+
+$$
+P(\text{モデル}\ i\ \text{がモデル}\ j\ \text{に勝つ}) = \frac{e^{\beta_i}}{e^{\beta_i} + e^{\beta_j}} = \sigma(\beta_i - \beta_j)
+$$
+
+ここで $\beta_i \in \mathbb{R}$ はモデル $i$ の「強さパラメータ」、$\sigma$ はシグモイド関数。
+
+**パラメータ推定**: 全ペア比較データから最尤推定 (MLE):
+
+$$
+\hat{\boldsymbol{\beta}} = \arg\max_{\boldsymbol{\beta}} \sum_{(i \succ j)} \log \sigma(\beta_i - \beta_j)
+$$
+
+これは**ロジスティック回帰**と数学的に等価（$x_{ij} = e_i - e_j$ を特徴ベクトルとする二値分類）。
+
+**Elo レーティングとの関係**:
+
+チェスの Elo レーティングは Bradley-Terry の逐次オンライン更新版。勝敗 $s_{ij} \in \{0, 1\}$ のとき:
+
+$$
+\beta_i \leftarrow \beta_i + K\bigl(s_{ij} - \sigma(\beta_i - \beta_j)\bigr)
+$$
+
+$K$（K-factor）は更新学習率。生成モデルの評価では: 各モデルに初期レーティングを割り当て、人間評価者にペア比較させ、結果に応じてレーティングを更新する。比較数 $O(M \log M)$ で $M$ モデルをランキング可能（総当り $O(M^2)$ より効率的）。
+
+#### 3.8.5 定量指標と人間評価の相関
+
+どの指標が人間評価の代理として最も機能するかは、Pearson 相関係数で測定される:
+
+$$
+r(M, H) = \frac{\text{Cov}(M, H)}{\sigma_M \sigma_H}
+= \frac{\sum_k (m_k - \bar{m})(h_k - \bar{h})}{\sqrt{\sum_k (m_k - \bar{m})^2} \cdot \sqrt{\sum_k (h_k - \bar{h})^2}}
+$$
+
+ここで $m_k$ はモデル $k$ の定量指標スコア、$h_k$ は同モデルの人間評価スコア。
+
+**実測値** [^5]:
+
+| 指標 | Pearson 相関（人間評価） | 決定係数 $r^2$ | 備考 |
+|:-----|:----------------------|:--------------|:-----|
+| FID | $0.56$ – $0.68$ | $0.31$ – $0.46$ | モデル間で不一致がある |
+| IS | $0.34$ – $0.52$ | $0.12$ – $0.27$ | 最も低い相関 |
+| LPIPS | $0.78$ – $0.82$ | $0.61$ – $0.67$ | ペアwise で高相関 |
+| CMMD | $0.72$ – $0.79$ | $0.52$ – $0.62$ | FID より人間評価に近い |
+
+**含意**: FID の変動の 64% は人間評価と無関係。定量指標だけで人間評価を完全に代替することは不可能。定量指標はスクリーニング、最終判断は人間評価という役割分担が合理的。
 
 ### 3.6 評価指標の最新動向（2024-2026）
 
@@ -1736,49 +1525,6 @@ FLD+は、FIDの**1/40のサンプル数**で同等の信頼性を達成。
 
 **実装例** (Julia疑似コード):
 
-```julia
-using Flux, Statistics
-
-# LeNet-like feature extractor
-lenet = Chain(
-    Conv((5, 5), 1=>6, relu),  # Layer 1
-    MaxPool((2, 2)),
-    Conv((5, 5), 6=>16, relu), # Layer 2
-    MaxPool((2, 2)),
-    Flux.flatten,
-    Dense(400 => 120, relu),   # Layer 3
-    Dense(120 => 84, relu)     # Layer 4
-)
-
-function extract_multilayer_features(model, images)
-    layers = [model[1:2], model[1:4], model[1:6], model[1:8]]  # 4 layers
-    features = [model_layer(images) for model_layer in layers]
-    return features
-end
-
-function frechet_distance(μ1, Σ1, μ2, Σ2)
-    diff = μ1 - μ2
-    covmean = sqrt(Σ1 * Σ2)
-    return dot(diff, diff) + tr(Σ1 + Σ2 - 2 * covmean)
-end
-
-function fld_plus(real_images, fake_images, model)
-    # Extract features from all layers
-    feats_real = extract_multilayer_features(model, real_images)
-    feats_fake = extract_multilayer_features(model, fake_images)
-
-    # Compute FD for each layer
-    fds = []
-    for (fr, ff) in zip(feats_real, feats_fake)
-        μ_r, Σ_r = mean(fr, dims=2), cov(fr)
-        μ_f, Σ_f = mean(ff, dims=2), cov(ff)
-        push!(fds, frechet_distance(μ_r, Σ_r, μ_f, Σ_f))
-    end
-
-    # Average across layers
-    return mean(fds)
-end
-```
 
 **数式とコードの対応**:
 
@@ -1801,38 +1547,22 @@ end
 
 **2026年のベストプラクティス**:
 
-```julia
-# Comprehensive evaluation pipeline
-function evaluate_generative_model(real_imgs, fake_imgs)
-    results = Dict()
-
-    # Primary metric (sample efficient, reliable)
-    results["CMMD"] = cmmd(real_imgs, fake_imgs)
-
-    # Legacy metric (for comparison with prior work)
-    results["FID"] = fid(real_imgs, fake_imgs)
-
-    # Quality vs Diversity decomposition
-    prec, rec = precision_recall(real_imgs, fake_imgs)
-    results["Precision"] = prec
-    results["Recall"] = rec
-
-    # Perceptual quality
-    results["LPIPS"] = mean_lpips(real_imgs, fake_imgs)
-
-    return results
-end
-```
 
 **結論**: FIDは依然として標準だが、**CMDDとFLD+の併用**が2024-2026年のベストプラクティス。サンプル数に応じて使い分ける。
 
-:::message
-**進捗: 55% 完了** 最新の評価指標動向（CMMD, FLD+）を完全に理解した。次は実装ゾーンへ — Julia統計分析 + Rust Criterion ベンチマーク。
-:::
+> **Note:** **進捗: 55% 完了** 最新の評価指標動向（CMMD, FLD+）を完全に理解した。次は実装ゾーンへ — Julia統計分析 + Rust Criterion ベンチマーク。
 
 ---
 
----
+[^naeem2020]: Naeem, M. F., et al. (2020). "Reliable Fidelity and Diversity Metrics for Generative Models". *arXiv:2002.09797*.
+
+## 著者リンク
+
+- Blog: https://fumishiki.dev
+- X: https://x.com/fumishiki
+- LinkedIn: https://www.linkedin.com/in/fumitakamurakami
+- GitHub: https://github.com/fumishiki
+- Hugging Face: https://huggingface.co/fumishiki
 
 ## ライセンス
 

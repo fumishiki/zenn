@@ -4,13 +4,16 @@ emoji: "🔥"
 type: "tech"
 topics: ["machinelearning", "deeplearning", "julia", "rust", "elixir"]
 published: true
+slug: "ml-lecture-20-part1"
+difficulty: "advanced"
+time_estimate: "90 minutes"
+languages: ["Julia", "Rust", "Elixir"]
+keywords: ["機械学習", "深層学習", "生成モデル"]
 ---
 
-:::message
-**前提知識**: 第19回で3言語環境とFFIパイプラインを構築済み。Course IIでVAE/GAN/Transformerの理論を習得済み。
-**目標**: 理論を3言語パイプライン（Julia訓練→Rust推論→Elixir配信）で実装する。
-**進捗**: 全体の80%完了
-:::
+> **Note:** **前提知識**: 第19回で3言語環境とFFIパイプラインを構築済み。Course IIでVAE/GAN/Transformerの理論を習得済み。
+> **目標**: 理論を3言語パイプライン（Julia訓練→Rust推論→Elixir配信）で実装する。
+> **進捗**: 全体の80%完了
 
 ## 🚀 0. クイックスタート（30秒）— 理論→実装の1行対応
 
@@ -28,15 +31,15 @@ function elbo_loss(encoder, decoder, ps_enc, ps_dec, st_enc, st_dec, x)
 
     # Reparameterization: z = μ + σ⊙ε
     ε = randn(Float32, size(μ)...)
-    σ = exp.(logσ² ./ 2)
-    z = μ .+ σ .* ε
+    σ = @. exp(logσ² / 2)
+    z = @. μ + σ * ε
 
     # Decoder: p_θ(x|z) → x̂
     x̂, st_dec = decoder(z, ps_dec, st_dec)
 
     # ELBO = 𝔼[log p(x|z)] - KL[q(z|x) || p(z)]
-    recon = -sum((x .- x̂).^2) / size(x, 2)  # 再構成項（ガウス尤度）
-    kl = -0.5f0 * sum(1 .+ logσ² .- μ.^2 .- exp.(logσ²)) / size(x, 2)  # KL発散
+    recon = -sum(@. (x - x̂)^2) / size(x, 2)  # 再構成項（ガウス尤度）
+    kl = -0.5f0 * sum(@. 1 + logσ² - μ^2 - exp(logσ²)) / size(x, 2)  # KL発散
 
     return -(recon - kl), (st_enc, st_dec)  # ELBOを最大化 = 負のELBOを最小化
 end
@@ -54,9 +57,7 @@ $$
 
 これがJuliaの威力。数式↔コードの距離がゼロ。
 
-:::message
-**進捗**: 全体の3%完了。理論を実装に翻訳する準備ができた。
-:::
+> **Note:** **進捗**: 全体の3%完了。理論を実装に翻訳する準備ができた。
 
 ---
 
@@ -68,47 +69,6 @@ $$
 
 第10回で学んだVAEの核心：**観測データ $x$ を低次元潜在変数 $z$ に圧縮し、そこから再構成する**。
 
-```julia
-using Lux, MLUtils, MLDatasets, Optimisers
-
-# MNIST データ読み込み
-train_data = MNIST(split=:train)
-x_train = Float32.(train_data.features) |> flatten_images  # (784, 60000)
-
-# VAE アーキテクチャ
-encoder = Chain(
-    Dense(784 => 400, tanh),
-    Dense(400 => 200, tanh),
-    Dense(200 => 40)  # → [μ(20次元), log_σ²(20次元)]
-)
-
-decoder = Chain(
-    Dense(20 => 200, tanh),
-    Dense(200 => 400, tanh),
-    Dense(400 => 784, sigmoid)  # sigmoid for pixel values [0,1]
-)
-
-# 訓練ループ（簡略版）
-opt = Adam(0.001f0)
-ps_enc, st_enc = Lux.setup(Random.default_rng(), encoder)
-ps_dec, st_dec = Lux.setup(Random.default_rng(), decoder)
-
-for epoch in 1:10
-    for batch in DataLoader((x_train,), batchsize=128, shuffle=true)
-        x = batch[1]
-        loss, grads = Lux.Training.compute_gradients(
-            AutoZygote(), elbo_loss, encoder, decoder, ps_enc, ps_dec, st_enc, st_dec, x
-        )
-        ps_enc, ps_dec = Optimisers.update!(opt, (ps_enc, ps_dec), grads)
-    end
-    println("Epoch $epoch: loss = $(loss)")
-end
-
-# 潜在空間でのサンプリング
-z_random = randn(Float32, 20, 10)  # 10個のランダム潜在ベクトル
-x_generated, _ = decoder(z_random, ps_dec, st_dec)
-# → 新しい数字画像が生成される
-```
 
 | 数式 | コード | 意味 |
 |:-----|:-------|:-----|
@@ -135,56 +95,6 @@ $$
 \mathcal{L}_G = -\mathbb{E}_{z \sim p_z}[D(G(z))]
 $$
 
-```julia
-# Generator: z (100次元ノイズ) → 画像 (28×28)
-generator = Chain(
-    Dense(100 => 256, relu),
-    Dense(256 => 512, relu),
-    Dense(512 => 784, tanh)  # tanh for [-1, 1] pixel range
-)
-
-# Critic (WGAN-GPでは識別器を"Critic"と呼ぶ)
-critic = Chain(
-    Dense(784 => 512, leakyrelu),
-    Dense(512 => 256, leakyrelu),
-    Dense(256 => 1)  # スコア出力（確率ではない）
-)
-
-# WGAN-GP訓練ループ（簡略版）
-function train_wgan_gp!(generator, critic, real_data, epochs=100, λ_gp=10.0f0)
-    opt_g = Adam(0.0001f0, (0.5f0, 0.9f0))  # Generator optimizer
-    opt_c = Adam(0.0001f0, (0.5f0, 0.9f0))  # Critic optimizer
-
-    for epoch in 1:epochs
-        for batch in DataLoader((real_data,), batchsize=64, shuffle=true)
-            x_real = batch[1]
-            batch_size = size(x_real, 2)
-
-            # --- Criticを5回更新 ---
-            for _ in 1:5
-                z = randn(Float32, 100, batch_size)
-                x_fake = generator(z, ps_g, st_g)[1]
-
-                # Gradient Penalty 計算
-                α = rand(Float32, 1, batch_size)
-                x_interp = α .* x_real .+ (1 .- α) .* x_fake
-                grad_interp = gradient(x -> sum(critic(x, ps_c, st_c)[1]), x_interp)[1]
-                gp = mean((sqrt.(sum(grad_interp.^2, dims=1)) .- 1).^2)
-
-                # Critic loss
-                loss_c = mean(critic(x_fake, ps_c, st_c)[1]) - mean(critic(x_real, ps_c, st_c)[1]) + λ_gp * gp
-                ps_c = update!(opt_c, ps_c, gradient(loss_c, ps_c)[1])
-            end
-
-            # --- Generatorを1回更新 ---
-            z = randn(Float32, 100, batch_size)
-            loss_g = -mean(critic(generator(z, ps_g, st_g)[1], ps_c, st_c)[1])
-            ps_g = update!(opt_g, ps_g, gradient(loss_g, ps_g)[1])
-        end
-        println("Epoch $epoch: D_loss=$(loss_c), G_loss=$(loss_g)")
-    end
-end
-```
 
 | 数式 | コード | 意味 |
 |:-----|:-------|:-----|
@@ -195,6 +105,45 @@ end
 | $(\|\nabla_{\hat{x}} D(\hat{x})\|_2 - 1)^2$ | `(sqrt(...) .- 1).^2` | Gradient Penalty |
 
 **体感**：Criticを5回、Generatorを1回更新（WGAN-GP推奨比率）。第12回・第13回の数式がそのまま動く。
+
+#### 1.2.1 Wasserstein距離の直感 — JSDが引き起こす壁
+
+通常のGAN損失の核心問題は、Jensen-Shannon発散（JSD）にある。$p_r$（実データ）と $p_g$（生成データ）のサポートが重ならないとき、JSDは定数に収束する：
+
+$$
+\text{JSD}(p_r \| p_g) = \log 2 \quad (\text{サポートが非重複のとき})
+$$
+
+これは識別器 $D$ が完璧に分類できる状況—実際には訓練序盤によく起きる—において、生成器 $G$ に届く勾配が完全にゼロになることを意味する。識別器が強すぎると学習が止まる、というGANの直観的弱点の数学的正体がこれだ。
+
+**Earth Mover's Distance の直感**
+
+$W_1$ を「土砂輸送問題」として考える。$p_r$ を砂山の分布、$p_g$ を穴の分布として、$W_1(p_r, p_g)$ は「砂を穴に移動させる最小輸送コスト」：
+
+$$
+W_1(p_r, p_g) = \inf_{\gamma \in \Pi(p_r, p_g)} \mathbb{E}_{(x, y) \sim \gamma}[\|x - y\|]
+$$
+
+$\Pi(p_r, p_g)$ は $p_r, p_g$ を周辺分布に持つ同時分布（輸送計画）の全体。$\gamma(x, y)$ は「点 $x$ の砂を点 $y$ の穴に運ぶ量」を表す。最も安い輸送計画を選ぶのが Wasserstein 距離だ。
+
+**点質量で比較する**：$p_r = \delta(0)$（原点の点質量）、$p_g = \delta(\theta)$ のとき：
+
+$$
+\text{JSD}(p_r \| p_g) = \log 2 \quad (\theta \neq 0 \text{ ならば常に定数})
+$$
+
+$$
+W_1(p_r, p_g) = |\theta|
+$$
+
+$\theta$ に関する勾配は：JSD $= 0$、$W_1 = \text{sgn}(\theta)$。Wasserstein 距離は $\theta = 0$ へ向かう一定の引力を持ち続ける。$p_g$ が $p_r$ からどれだけ離れていても、生成器には常に有意義な方向の勾配が届く。
+
+| 発散尺度 | サポート重複あり | サポート重複なし |
+|:---------|:----------------|:----------------|
+| JSD | 有意義な勾配 | $\log 2$（定数、勾配ゼロ） |
+| Wasserstein $W_1$ | 有意義な勾配 | 距離に比例する有意義な勾配 |
+
+これが WGAN-GP で生成器が訓練序盤でも学習できる理由の数学的根拠。識別器（Critic）をいくら強化しても、Wasserstein 距離は「どれだけ遠いか」を正直に伝え続ける。
 
 ---
 
@@ -208,68 +157,6 @@ $$
 \text{Attention}(Q, K, V) = \text{softmax}\left(\frac{QK^\top}{\sqrt{d_k}}\right)V
 $$
 
-```julia
-using Lux, NNlib
-
-# Multi-Head Attention レイヤー
-struct MultiHeadAttention <: Lux.AbstractExplicitLayer
-    num_heads::Int
-    d_model::Int
-    d_k::Int
-    q_proj::Dense
-    k_proj::Dense
-    v_proj::Dense
-    o_proj::Dense
-end
-
-function MultiHeadAttention(d_model::Int, num_heads::Int)
-    d_k = d_model ÷ num_heads
-    return MultiHeadAttention(
-        num_heads, d_model, d_k,
-        Dense(d_model => d_model),  # Q projection
-        Dense(d_model => d_model),  # K projection
-        Dense(d_model => d_model),  # V projection
-        Dense(d_model => d_model)   # Output projection
-    )
-end
-
-function (mha::MultiHeadAttention)(x, ps, st)
-    batch_size, seq_len, _ = size(x)
-
-    # Q, K, V projection
-    Q, st_q = mha.q_proj(x, ps.q_proj, st.q_proj)
-    K, st_k = mha.k_proj(x, ps.k_proj, st.k_proj)
-    V, st_v = mha.v_proj(x, ps.v_proj, st.v_proj)
-
-    # Reshape for multi-head: (batch, seq_len, d_model) → (batch, num_heads, seq_len, d_k)
-    Q = reshape(Q, batch_size, mha.num_heads, seq_len, mha.d_k) |> permutedims([1,2,4,3])
-    K = reshape(K, batch_size, mha.num_heads, seq_len, mha.d_k) |> permutedims([1,2,4,3])
-    V = reshape(V, batch_size, mha.num_heads, seq_len, mha.d_k) |> permutedims([1,2,4,3])
-
-    # Scaled Dot-Product Attention: softmax(QK^T / √d_k) V
-    scores = batched_mul(Q, batched_transpose(K)) ./ sqrt(Float32(mha.d_k))  # (batch, heads, seq, seq)
-    attn_weights = softmax(scores, dims=4)  # Softmax over key dimension
-    out = batched_mul(attn_weights, V)  # (batch, heads, d_k, seq)
-
-    # Concatenate heads and project
-    out = permutedims(out, [1,4,2,3]) |> x -> reshape(x, batch_size, seq_len, mha.d_model)
-    out, st_o = mha.o_proj(out, ps.o_proj, st.o_proj)
-
-    return out, (st_q=st_q, st_k=st_k, st_v=st_v, st_o=st_o)
-end
-
-# Causal Mask（未来のトークンを見せない）
-function causal_mask(seq_len)
-    mask = triu(ones(Float32, seq_len, seq_len), 1)  # 上三角行列
-    return mask .* -Inf32  # Softmax前に加算 → 未来トークンの重みを0に
-end
-
-# 使用例
-x = randn(Float32, 2, 10, 512)  # (batch=2, seq_len=10, d_model=512)
-mha = MultiHeadAttention(512, 8)
-ps, st = Lux.setup(Random.default_rng(), mha)
-y, st = mha(x, ps, st)  # y: (2, 10, 512) — 各トークンの新しい表現
-```
 
 | 数式 | コード | 意味 |
 |:-----|:-------|:-----|
@@ -281,22 +168,56 @@ y, st = mha(x, ps, st)  # y: (2, 10, 512) — 各トークンの新しい表現
 
 **体感**：Multi-Head Attentionが並列に複数の視点で文脈を捉える。第16回の数式がそのまま動く。
 
+#### 1.3.1 Attentionの情報理論的解釈 — なぜ $\sqrt{d_k}$ で割るか
+
+Attention 重みは確率分布だ：
+
+$$
+\sum_j \alpha_{ij} = 1, \quad \alpha_{ij} \geq 0
+$$
+
+この分布のエントロピーを考えると、Attention の「鋭さ」を情報量で測れる：
+
+$$
+H(\alpha_i) = -\sum_j \alpha_{ij} \log \alpha_{ij}
+$$
+
+$H = 0$ は「完全に一点に集中（Hard Attention）」、$H = \log n$ は「全トークンに均一（Uniform Attention）」を意味する。良い Attention は必要な情報に集中しながら、タスクに応じて鋭さを調整できる。
+
+**$\sqrt{d_k}$ スケーリングの必要性：分散の証明**
+
+$q_i, k_j \in \mathbb{R}^{d_k}$ の各成分が独立に $\mathcal{N}(0, 1)$ に従うとする。内積のスカラー値は：
+
+$$
+q_i \cdot k_j = \sum_{l=1}^{d_k} (q_i)_l (k_j)_l
+$$
+
+各項 $(q_i)_l (k_j)_l$ は平均 $0$、分散 $1$ の積（独立な零平均変数 $X, Y$ に対して $\text{Var}[XY] = \text{Var}[X]\text{Var}[Y] = 1$）。独立な和の分散は加法的なので：
+
+$$
+\text{Var}(q_i \cdot k_j) = d_k
+$$
+
+$d_k$ が大きいほど内積の分散も大きくなる。極端に大きな値 $e_{ij}$ が生まれると、Softmax は飽和する：
+
+$$
+\alpha_{ij} = \frac{\exp(e_{ij})}{\sum_k \exp(e_{ik})} \approx \begin{cases} 1 & \text{最大値の位置} \\ 0 & \text{それ以外} \end{cases}
+$$
+
+これはほぼ Hard Attention と等価になり、飽和領域の Softmax の微分 $\approx 0$ で勾配消失が起きる。$\sqrt{d_k}$ で割ることで分散を正規化する：
+
+$$
+\text{Var}\!\left(\frac{q_i \cdot k_j}{\sqrt{d_k}}\right) = \frac{d_k}{d_k} = 1
+$$
+
+分散が $1$ に保たれ、Softmax が飽和しない領域で動作し続ける。$d_k = 64$ のとき、スケーリングなしでは標準偏差が $8$ 倍に膨らむ—この違いが訓練安定性を決定的に左右する。
+
 ---
 
 ### 1.4 数式↔コード対応の完全性
 
 3モデルで共通するパターン：
 
-```julia
-# 数式: 𝔼[f(z)] where z ~ q(z)
-# コード: mean(f(z) for z in sample(q, n_samples))
-
-# 数式: ∇_θ L(θ)
-# コード: gradient(θ -> L(θ), θ)
-
-# 数式: θ ← θ - η∇_θ L
-# コード: θ = update!(optimizer, θ, grads)
-```
 
 Juliaの利点：
 - `.=` broadcast演算子 → 要素ごとの演算を1行で
@@ -305,11 +226,15 @@ Juliaの利点：
 
 次のZone 2で、なぜこの3モデルを実装するのか、全体像を見る。
 
-:::message
-**進捗**: 全体の10%完了。3モデルの動作を体感した。
-:::
+> **Note:** **進捗**: 全体の10%完了。3モデルの動作を体感した。
 
 ---
+
+> Progress: 10%
+> **理解度チェック**
+> 1. $Q, K, V = xW_Q, xW_K, xW_V$ の各記号の意味と、この式が表す操作を説明してください。
+> 2. このゾーンで学んだ手法の直感的な意味と、なぜこの定式化が必要なのかを説明してください。
+
 ## 🧩 2. 直感ゾーン（15分）— なぜこの3モデルか
 
 ### 2.1 Course IIIの位置づけ — 理論→実装の橋渡し
@@ -390,6 +315,63 @@ graph TD
 
 これら3つをマスターすれば、他のモデル（Diffusion/Flow/VQ-VAE）の実装も理解できる。
 
+#### 2.2.1 3パラダイムの数学的統一視点
+
+VAE、GAN、Transformer は見かけ上まったく異なるが、数学的には同じ問題—**データ分布 $p_\text{data}$ の密度推定**—を解いている。統一的な視点で書くと：
+
+$$
+\min_\theta D(p_\text{data} \| p_\theta)
+$$
+
+3モデルの違いは、使う「距離尺度 $D$」と「最小化の方法」だけだ。
+
+**VAE：ELBOによるKL下界近似**
+
+$$
+D = D_\text{KL}[p_\text{data}(x) \| p_\theta(x)]
+$$
+
+$p_\theta(x) = \int p_\theta(x|z)p(z)dz$ は潜在変数の周辺化で計算不能。変分推論で近似事後分布 $q_\phi(z|x)$ を導入し、ELBO で下界を取る：
+
+$$
+\log p_\theta(x) \geq \mathcal{L}_\text{ELBO} = \mathbb{E}_{q_\phi}[\log p_\theta(x|z)] - D_\text{KL}[q_\phi(z|x) \| p(z)]
+$$
+
+**GAN：Adversarialによる暗黙的最小化**
+
+元のGANは $D = \text{JSD}$ を adversarial に最小化する。最適識別器のもとでMinimax損失はJSDに等しい（第12回証明済み）。WGAN-GPは $D = W_1$（Wasserstein-1距離）に置き換える：
+
+$$
+W_1(p_\text{data}, p_\theta) = \sup_{\|f\|_L \leq 1} \mathbb{E}_{p_\text{data}}[f(x)] - \mathbb{E}_{p_\theta}[f(x)]
+$$
+
+分布を明示的に表現せず、adversarial損失で間接的に最小化する点が他の2つと根本的に異なる。
+
+**Transformer：MLEの直接最小化**
+
+自己回帰モデルは明示的密度 $p_\theta(x)$ を持ち、MLE はKL最小化と等価：
+
+$$
+\min_\theta D_\text{KL}[p_\text{data} \| p_\theta] \equiv \min_\theta \left(-\mathbb{E}_{x \sim p_\text{data}}[\log p_\theta(x)]\right)
+$$
+
+次トークン予測の形では：
+
+$$
+\mathcal{L}_\text{NLL} = -\frac{1}{T}\sum_{t=1}^T \log p_\theta(x_t | x_{<t})
+$$
+
+**3パラダイムの統一表**
+
+| モデル | 距離尺度 $D$ | 最小化方法 | 密度の扱い |
+|:-------|:------------|:----------|:----------|
+| VAE | $D_\text{KL}[p_\text{data} \| p_\theta]$ | ELBO（下界最大化） | 潜在変数で近似（implicit） |
+| GAN (原型) | JSD | Minimax（adversarial） | 暗黙的（生成のみ） |
+| WGAN-GP | $W_1$ | Critic最大化（adversarial） | 暗黙的（生成のみ） |
+| Transformer | $D_\text{KL}[p_\text{data} \| p_\theta]$ | MLE（直接最適化） | 明示的（tractable） |
+
+VAEとTransformerは同じ発散を最適化しているが、密度の計算可能性が異なる。GANだけが分布を明示せず adversarial損失で間接的に最適化する—この構造上の違いが、各モデルの強み（安定性、鮮明さ、スケーラビリティ）と弱み（ぼやけ、不安定さ、逐次生成）を生み出している。
+
 ---
 
 ### 2.3 3言語パイプラインの全体像
@@ -442,11 +424,15 @@ graph LR
 - [ ] Elixirで**Broadwayパイプライン**を構築できる
 - [ ] プロセスをkillしても**自動復旧**するシステムを設計できる
 
-:::message
-**進捗**: 全体の20%完了。全体像を把握した。数式修行の準備ができた。
-:::
+> **Note:** **進捗**: 全体の20%完了。全体像を把握した。数式修行の準備ができた。
 
 ---
+
+
+> Progress: 20%
+> **理解度チェック**
+> 1. このゾーンの主要な概念・定義を自分の言葉で説明してください。
+> 2. この手法が他のアプローチより優れている点と、その限界を述べてください。
 
 ## 📐 3. 数式修行ゾーン（60分）— VAE/GAN/Transformer完全導出
 
@@ -539,19 +525,68 @@ $$
 
 **Juliaコード**：
 
-```julia
-# Decoder出力: x̂ = decoder(z)
-x̂, st_dec = decoder(z, ps_dec, st_dec)
-
-# 再構成項: -||x - x̂||² / batch_size
-recon_term = -sum((x .- x̂).^2) / size(x, 2)
-```
 
 | 数式 | コード | 対応 |
 |:-----|:-------|:-----|
 | $\mu_\theta(\mathbf{z})$ | `decoder(z)` | Decoderの出力 |
 | $\|\mathbf{x} - \mu_\theta(\mathbf{z})\|^2$ | `sum((x .- x̂).^2)` | 二乗誤差 |
 | $\mathbb{E}_{q_\phi}[\cdot]$ | `/ size(x, 2)` | バッチ平均 |
+
+#### 3.1.2.1 BCE vs MSE：再構成損失の選択理論
+
+再構成損失の選択は「$p_\theta(x|z)$ に何の分布を仮定するか」の問題だ。
+
+**二値画像：ベルヌーイ尤度 → BCE**
+
+各ピクセル $x_i \in \{0, 1\}$ をベルヌーイ確率変数とすると：
+
+$$
+p_\theta(x|z) = \prod_{i=1}^D \hat{x}_i^{x_i}(1 - \hat{x}_i)^{1 - x_i}
+$$
+
+対数尤度は：
+
+$$
+\log p_\theta(x|z) = \sum_{i=1}^D \left[x_i \log \hat{x}_i + (1 - x_i)\log(1 - \hat{x}_i)\right]
+$$
+
+これが Binary Cross-Entropy（BCE）の正体だ。$\hat{x}_i = \sigma(\text{decoder\_output}_i)$ となるよう、Decoder の最終活性化関数はSigmoidを使う。
+
+**連続画像：ガウス尤度 → MSE**
+
+各ピクセル $x_i \in \mathbb{R}$ をガウス確率変数とすると：
+
+$$
+p_\theta(x|z) = \mathcal{N}(x;\, \hat{x},\, \sigma^2 I)
+$$
+
+対数尤度は：
+
+$$
+\log p_\theta(x|z) = -\frac{1}{2\sigma^2}\|x - \hat{x}\|^2 + \text{const}
+$$
+
+$\sigma^2 = 1$ と固定すると Mean Squared Error（MSE）になる。
+
+**MSE がぼやける理由：条件付き期待値問題**
+
+MSE の最適解を求めよう。$\hat{x}$ を定数として $p(x|z)$ に関する期待値を最小化する：
+
+$$
+\arg\min_{\hat{x}} \; \mathbb{E}_{p(x|z)}\!\left[(x - \hat{x})^2\right]
+$$
+
+$\hat{x}$ で微分してゼロに置く：
+
+$$
+\frac{\partial}{\partial \hat{x}} \mathbb{E}\!\left[(x - \hat{x})^2\right] = -2\,\mathbb{E}[x - \hat{x}] = 0 \implies \hat{x}^* = \mathbb{E}[x | z]
+$$
+
+MSEを最小化する $\hat{x}^*$ は条件付き期待値 $\mathbb{E}[x|z]$ だ。$p(x|z)$ が多峰性を持つとき—「黒猫」と「白猫」の両方が同じ $z$ から生成されうるとき—、最適解は両分布の平均（グレーの猫）になる。これがぼやけの数学的根拠。
+
+BCE（ベルヌーイ尤度）はこの問題を回避する。各ピクセルを独立なベルヌーイ変数と見なすため、中間値ではなく0または1に向かう勾配を与える。
+
+**選択指針**：$x \in \{0, 1\}^D$（MNIST等二値画像）→ BCE、$x \in \mathbb{R}^D$（自然画像、正規化済み）→ MSE。後者でぼやけを回避したければ、Laplace尤度（$\ell_1$ 再構成）や Flow-based Decoder の導入を検討する。
 
 ---
 
@@ -581,15 +616,6 @@ $$
 
 **Juliaコード**：
 
-```julia
-# Encoder出力: (μ, log_σ²)
-output, st_enc = encoder(x, ps_enc, st_enc)
-μ = output[1:latent_dim, :]
-logσ² = output[latent_dim+1:end, :]
-
-# KL発散: -0.5 * Σ(1 + log_σ² - μ² - σ²) / batch_size
-kl_term = -0.5f0 * sum(1 .+ logσ² .- μ.^2 .- exp.(logσ²)) / size(x, 2)
-```
 
 | 数式 | コード | 対応 |
 |:-----|:-------|:-----|
@@ -599,9 +625,70 @@ kl_term = -0.5f0 * sum(1 .+ logσ² .- μ.^2 .- exp.(logσ²)) / size(x, 2)
 | $\sigma_i^2 = \exp(\log\sigma_i^2)$ | `exp.(logσ²)` | 指数関数 |
 | $\sum_{i=1}^d$ | `sum(...)` | 全要素の和 |
 
-:::message alert
-**注意**: $\log\sigma^2$ を出力する理由は数値安定性。直接 $\sigma$ を出力すると、勾配消失・爆発のリスクがある。
-:::
+> **⚠️ Warning:** **注意**: $\log\sigma^2$ を出力する理由は数値安定性。直接 $\sigma$ を出力すると、勾配消失・爆発のリスクがある。
+
+#### 3.1.3.1 ガウスKL閉形式の完全導出
+
+第4回で使った閉形式を、今こそ一から導出する。出発点はKLの定義：
+
+$$
+D_\text{KL}[q_\phi(z|x) \| p(z)] = \int q_\phi(z|x) \log \frac{q_\phi(z|x)}{p(z)} \, dz
+$$
+
+仮定：$q_\phi(z|x) = \mathcal{N}(z;\, \mu,\, \sigma^2 I)$（対角共分散）、$p(z) = \mathcal{N}(z;\, 0,\, I)$、次元数 $d$。
+
+**Step 1: KLをエントロピーとクロスエントロピーに分解**
+
+$$
+D_\text{KL}[q \| p] = \underbrace{-\mathbb{E}_q[\log q]}_{H[q]\;(\text{エントロピー})} + \underbrace{(-\mathbb{E}_q[\log p])}_{H[q,p]\;(\text{クロスエントロピー})}
+$$
+
+**Step 2: $q$ のエントロピー**
+
+多変量ガウス分布 $\mathcal{N}(\mu, \Sigma)$ のエントロピーは：
+
+$$
+H[q] = \frac{d}{2}(1 + \log 2\pi) + \frac{1}{2}\log|\Sigma|
+$$
+
+対角共分散 $\Sigma = \text{diag}(\sigma_1^2, \ldots, \sigma_d^2)$ のとき $|\Sigma| = \prod_{j=1}^d \sigma_j^2$、よって：
+
+$$
+-\mathbb{E}_q[\log q] = \frac{d}{2}(1 + \log 2\pi) + \frac{1}{2}\sum_{j=1}^d \log \sigma_j^2
+$$
+
+**Step 3: クロスエントロピー $-\mathbb{E}_q[\log p(z)]$**
+
+$p(z) = \mathcal{N}(0, I)$ なので $\log p(z) = -\frac{d}{2}\log 2\pi - \frac{1}{2}\|z\|^2$。$z \sim q = \mathcal{N}(\mu, \sigma^2 I)$ のもとでの期待値を計算する。$\mathbb{E}_q[\|z\|^2] = \|\mu\|^2 + \text{tr}(\Sigma) = \sum_j (\mu_j^2 + \sigma_j^2)$ を使うと：
+
+$$
+-\mathbb{E}_q[\log p(z)] = \frac{d}{2}\log 2\pi + \frac{1}{2}\sum_{j=1}^d (\mu_j^2 + \sigma_j^2)
+$$
+
+**Step 4: 合算してKL閉形式を得る**
+
+$$
+\begin{align}
+D_\text{KL} &= \left[\frac{d}{2}\log 2\pi + \frac{1}{2}\sum_j(\mu_j^2 + \sigma_j^2)\right] - \left[\frac{d}{2}(1 + \log 2\pi) + \frac{1}{2}\sum_j \log\sigma_j^2\right] \\
+&= \frac{1}{2}\sum_{j=1}^d \left(\mu_j^2 + \sigma_j^2 - \log\sigma_j^2 - 1\right)
+\end{align}
+$$
+
+**Step 5: $\log\sigma^2$ を出力変数に書き換え**
+
+Encoder が $\log\sigma_j^2$ を出力する場合、$\sigma_j^2 = \exp(\log\sigma_j^2)$ を代入して：
+
+$$
+\boxed{D_\text{KL} = -\frac{1}{2}\sum_{j=1}^d \left(1 + \log\sigma_j^2 - \mu_j^2 - \sigma_j^2\right)}
+$$
+
+**数値検証**：$\mu = 0$、$\sigma^2 = 1$（$q = p$ のとき）：
+
+$$
+D_\text{KL} = -\frac{1}{2}\sum_j (1 + 0 - 0 - 1) = 0 \quad \checkmark
+$$
+
+これが訓練目標の理論的下限。$q = p$ で KL = 0、すなわち潜在空間が事前分布と完全に一致するとき ELBO は対数尤度 $\log p_\theta(x)$ そのものになる。
 
 ---
 
@@ -619,12 +706,6 @@ $$
 
 **Juliaコード**：
 
-```julia
-# Reparameterization: z = μ + σ ⊙ ε
-ε = randn(Float32, size(μ)...)
-σ = exp.(logσ² ./ 2)  # σ = exp(log_σ² / 2) = √(σ²)
-z = μ .+ σ .* ε
-```
 
 | 数式 | コード | 対応 |
 |:-----|:-------|:-----|
@@ -648,96 +729,68 @@ graph LR
 
 再パラメータ化により、$\nabla_\phi \mathcal{L}_{\text{ELBO}}$ が計算可能になる。
 
+#### 3.1.4.1 再パラメータ化トリックの数学的正当性
+
+**問題設定**：ELBO の勾配 $\nabla_\phi \mathbb{E}_{q_\phi(z|x)}[f(z)]$ を計算したい。ここで $f(z) = \log p_\theta(x|z)$（再構成項）。
+
+直接微分しようとすると：
+
+$$
+\nabla_\phi \mathbb{E}_{q_\phi}[f(z)] = \nabla_\phi \int q_\phi(z|x)\, f(z)\, dz
+$$
+
+$z \sim q_\phi(z|x)$ が $\phi$ に依存するため、単純なモンテカルロ推定 $\frac{1}{S}\sum_{s=1}^S f(z^{(s)})$ の各 $z^{(s)}$ は $\phi$ の関数でない—サンプリング操作は微分不可能だ。
+
+**LOGトリック（REINFORCE）：高分散な代替**
+
+対数微分恒等式 $\nabla_\phi \log q = \nabla_\phi q / q$ を使うと：
+
+$$
+\nabla_\phi \mathbb{E}_q[f] = \mathbb{E}_q\!\left[f(z)\, \nabla_\phi \log q_\phi(z|x)\right]
+$$
+
+モンテカルロ推定は可能だが、**分散が極めて高い**。強化学習の REINFORCE と同じ問題で、実用的に収束が遅い。
+
+**再パラメータ化：分散を根本から落とす**
+
+$z \sim \mathcal{N}(\mu_\phi, \sigma^2_\phi I)$ を、$\phi$ に依存しないノイズ $\epsilon \sim \mathcal{N}(0, I)$ で書き直す：
+
+$$
+z = \mu_\phi(x) + \sigma_\phi(x) \odot \epsilon, \quad \epsilon \sim \mathcal{N}(0, I)
+$$
+
+期待値の確率変数が $\phi$ に依存しなくなる：
+
+$$
+\mathbb{E}_{q_\phi(z|x)}[f(z)] = \mathbb{E}_{\epsilon \sim \mathcal{N}(0,I)}\!\left[f\!\left(\mu_\phi(x) + \sigma_\phi(x) \odot \epsilon\right)\right]
+$$
+
+$\epsilon$ の分布は $\phi$ に無関係なので、$\nabla_\phi$ を積分の外に出せる：
+
+$$
+\nabla_\phi \mathbb{E}_\epsilon[f(\mu_\phi + \sigma_\phi \odot \epsilon)] = \mathbb{E}_\epsilon\!\left[\nabla_\phi f(\mu_\phi + \sigma_\phi \odot \epsilon)\right]
+$$
+
+右辺は $f$ の滑らかさが $\phi$ にチェーンルールで直接伝わるため、分散が劇的に低い。
+
+**再パラメータ化可能な分布族**
+
+「$z = g(\phi, \epsilon)$（$\epsilon$ は $\phi$ に無関係）」と書ける分布に適用できる：
+
+| 分布 | 再パラメータ化 | 条件 |
+|:-----|:-------------|:-----|
+| $\mathcal{N}(\mu, \sigma^2)$ | $z = \mu + \sigma\epsilon$, $\epsilon \sim \mathcal{N}(0,1)$ | 常に可 |
+| $\text{Laplace}(\mu, b)$ | $z = \mu - b\,\text{sgn}(u)\log(1-2|u|)$, $u \sim \text{Uniform}(-\tfrac{1}{2},\tfrac{1}{2})$ | 常に可 |
+| $\text{Gamma}(\alpha, \beta)$ | Marsaglia-Tsang 変換 | $\alpha > 1$ |
+| $\text{Bernoulli}(p)$ | Concrete/Gumbel-Softmax 緩和 | 近似的 |
+| $\text{Categorical}$ | Gumbel-Softmax trick | 近似的（第18回） |
+
+LOGトリックは離散分布を含む全ての分布に使える汎用性を持つ代わりに高分散を払う。再パラメータ化は連続分布に限定されるが低分散という明確なトレードオフがある。VAEがガウス潜在変数を選ぶ最大の理由の一つがここにある。
+
 ---
 
 #### 3.1.5 VAE完全実装 — 全てを統合
 
-```julia
-using Lux, Optimisers, Zygote, Random
-
-# === モデル定義 ===
-function create_vae(input_dim, latent_dim, hidden_dim)
-    encoder = Chain(
-        Dense(input_dim => hidden_dim, tanh),
-        Dense(hidden_dim => hidden_dim÷2, tanh),
-        Dense(hidden_dim÷2 => latent_dim*2)  # [μ, log_σ²]
-    )
-
-    decoder = Chain(
-        Dense(latent_dim => hidden_dim÷2, tanh),
-        Dense(hidden_dim÷2 => hidden_dim, tanh),
-        Dense(hidden_dim => input_dim, sigmoid)  # [0, 1] pixel range
-    )
-
-    return encoder, decoder
-end
-
-# === ELBO損失関数 ===
-function elbo_loss(encoder, decoder, ps_enc, ps_dec, st_enc, st_dec, x, latent_dim)
-    # Encoder: q_φ(z|x) → (μ, log_σ²)
-    output, st_enc = encoder(x, ps_enc, st_enc)
-    μ = output[1:latent_dim, :]
-    logσ² = output[latent_dim+1:end, :]
-
-    # Reparameterization: z = μ + σ⊙ε
-    ε = randn(Float32, size(μ)...)
-    σ = exp.(logσ² ./ 2)
-    z = μ .+ σ .* ε
-
-    # Decoder: p_θ(x|z) → x̂
-    x̂, st_dec = decoder(z, ps_dec, st_dec)
-
-    # ELBO = 再構成項 - KL正則化項
-    batch_size = size(x, 2)
-    recon = -sum((x .- x̂).^2) / batch_size  # ガウス尤度
-    kl = -0.5f0 * sum(1 .+ logσ² .- μ.^2 .- exp.(logσ²)) / batch_size
-
-    elbo = recon - kl
-
-    return -elbo, (st_enc, st_dec)  # 最大化 = 負の最小化
-end
-
-# === 訓練ループ ===
-function train_vae!(encoder, decoder, train_data, latent_dim, epochs=100, lr=1e-3)
-    # パラメータ初期化
-    rng = Random.default_rng()
-    ps_enc, st_enc = Lux.setup(rng, encoder)
-    ps_dec, st_dec = Lux.setup(rng, decoder)
-
-    # Optimizer
-    opt_state_enc = Optimisers.setup(Adam(lr), ps_enc)
-    opt_state_dec = Optimisers.setup(Adam(lr), ps_dec)
-
-    for epoch in 1:epochs
-        total_loss = 0.0f0
-
-        for batch in DataLoader((train_data,), batchsize=128, shuffle=true)
-            x = batch[1]
-
-            # 勾配計算
-            (loss, (st_enc, st_dec)), back = Zygote.pullback(
-                (pe, pd) -> elbo_loss(encoder, decoder, pe, pd, st_enc, st_dec, x, latent_dim),
-                ps_enc, ps_dec
-            )
-            grads_enc, grads_dec = back((one(loss), nothing))
-
-            # パラメータ更新
-            opt_state_enc, ps_enc = Optimisers.update(opt_state_enc, ps_enc, grads_enc)
-            opt_state_dec, ps_dec = Optimisers.update(opt_state_dec, ps_dec, grads_dec)
-
-            total_loss += loss
-        end
-
-        println("Epoch $epoch: ELBO loss = $(total_loss/length(train_data))")
-    end
-
-    return ps_enc, ps_dec, st_enc, st_dec
-end
-
-# === 使用例 ===
-encoder, decoder = create_vae(784, 20, 400)
-ps_enc, ps_dec, st_enc, st_dec = train_vae!(encoder, decoder, x_train, 20, epochs=50)
-```
 
 **全体の流れ**：
 
@@ -763,57 +816,9 @@ sequenceDiagram
 
 **訓練時のデバッグTips**：
 
-```julia
-# 損失が発散する場合のチェックリスト
-function debug_vae_loss(encoder, decoder, ps_enc, ps_dec, st_enc, st_dec, x)
-    # 1. Encoder出力の範囲チェック
-    enc_out, _ = encoder(x, ps_enc, st_enc)
-    μ = enc_out[1:20, :]
-    logσ² = enc_out[21:end, :]
-
-    println("μ range: [$(minimum(μ)), $(maximum(μ))]")  # 期待: [-3, 3]程度
-    println("logσ² range: [$(minimum(logσ²)), $(maximum(logσ²))]")  # 期待: [-5, 5]程度
-
-    # 2. σ²が極端に小さい/大きい場合はclip
-    logσ² = clamp.(logσ², -10.0f0, 10.0f0)
-
-    # 3. Decoder出力の範囲チェック
-    z = μ .+ exp.(logσ² ./ 2) .* randn(Float32, size(μ)...)
-    x̂, _ = decoder(z, ps_dec, st_dec)
-
-    println("Decoder output range: [$(minimum(x̂)), $(maximum(x̂))]")  # 期待: [0, 1]
-
-    # 4. KL項が負にならないことを確認
-    kl = -0.5f0 * sum(1 .+ logσ² .- μ.^2 .- exp.(logσ²))
-    println("KL term: $kl")  # 期待: ≥0 (負なら実装バグ)
-
-    # 5. 各項のスケール確認
-    recon = -sum((x .- x̂).^2) / size(x, 2)
-    println("Recon: $recon, KL: $kl")
-    # 期待: 同じオーダー（KLが極端に大きいとPosterior Collapse）
-end
-```
 
 **Posterior Collapse対策**：
 
-```julia
-# KL Annealing: KL項の重みを徐々に増加
-function kl_annealing_schedule(epoch, total_epochs, anneal_start=10, anneal_end=50)
-    if epoch < anneal_start
-        return 0.0f0
-    elseif epoch > anneal_end
-        return 1.0f0
-    else
-        return Float32((epoch - anneal_start) / (anneal_end - anneal_start))
-    end
-end
-
-# 訓練ループで使用
-for epoch in 1:epochs
-    β_kl = kl_annealing_schedule(epoch, epochs)
-    # loss = recon - β_kl * kl
-end
-```
 
 ---
 
@@ -864,6 +869,62 @@ $$
 
 $D$ は"Critic"（識別器ではなく、スコア関数）。
 
+#### 3.2.1.1 Kantorovich双対性の導出
+
+WGAN の目標関数 $\mathbb{E}_{p_r}[D(x)] - \mathbb{E}_{p_g}[D(x)]$ がなぜ Wasserstein 距離を近似するのか—その数学的根拠が Kantorovich 双対性だ。
+
+**Primal 問題（最適輸送）**
+
+$$
+W_1(p_r, p_g) = \inf_{\gamma \in \Pi(p_r, p_g)} \int \|x - y\| \, d\gamma(x, y)
+$$
+
+これは輸送計画 $\gamma$ の最小化問題。しかし高次元では $\Pi(p_r, p_g)$ 上の最適化は直接解けない。
+
+**双対問題（Kantorovich-Rubinstein双対性）**
+
+Lagrange 双対を取ると、等価な最大化問題に変換される：
+
+$$
+W_1(p_r, p_g) = \sup_{\|f\|_L \leq 1} \left\{\mathbb{E}_{x \sim p_r}[f(x)] - \mathbb{E}_{x \sim p_g}[f(x)]\right\}
+$$
+
+ここで $\|f\|_L$ は Lipschitz 定数：
+
+$$
+\|f\|_L = \sup_{x \neq y} \frac{|f(x) - f(y)|}{\|x - y\|} \leq 1
+$$
+
+**双対性の直感的スケッチ**
+
+強双対性（primal = dual）は Fenchel-Moreau 定理の適用で成立する。直感は次のとおりだ：「$p_r$ と $p_g$ の差を最も鋭く見分ける 1-Lipschitz 関数 $f^*$ を見つけよ。その差 $\mathbb{E}_{p_r}[f^*] - \mathbb{E}_{p_g}[f^*]$ が Wasserstein 距離に等しい。」
+
+Lipschitz-1 制約は $f$ の変化率を距離で制限する。$\|x - y\|$ が大きいほど $|f(x) - f(y)|$ も大きくできる—これがまさに「輸送コスト = 移動距離」という構造を反映している。
+
+**WGAN の訓練目標への接続**
+
+Critic（識別器）$D_w$（パラメータ $w$）を 1-Lipschitz 関数のニューラルネット近似として使うと：
+
+$$
+\max_{\|D_w\|_L \leq 1} \;\mathbb{E}_{x \sim p_r}[D_w(x)] - \mathbb{E}_{z \sim p_z}[D_w(G(z))] \approx W_1(p_r, p_g)
+$$
+
+Generator は Wasserstein 距離を直接最小化する：
+
+$$
+\min_G W_1(p_r, p_g) \approx \min_G \left(-\mathbb{E}_{z \sim p_z}[D_w(G(z))]\right)
+$$
+
+**Lipschitz 制約の実装方法比較**
+
+| 手法 | 制約強制方法 | 欠点 |
+|:-----|:------------|:-----|
+| Weight Clipping（元のWGAN） | $w \leftarrow \text{clip}(w, -c, c)$ | 容量低下・勾配消失 |
+| **Gradient Penalty（WGAN-GP）** | $\mathbb{E}[(\|\nabla D(\hat{x})\|_2 - 1)^2] \to 0$ | 補間点のみに適用（近似） |
+| Spectral Normalization（SN-GAN） | $W \leftarrow W / \sigma_1(W)$ | 最大特異値のみ制約 |
+
+双対性により、Critic のアーキテクチャをどれだけリッチにしても Lipschitz 制約さえ満たせば Wasserstein 距離の近似として機能する。これが WGAN の理論的健全性の源泉だ。
+
 ---
 
 #### 3.2.2 Gradient Penalty — Lipschitz制約の強制
@@ -906,11 +967,6 @@ $$
 
 **Juliaコード**：
 
-```julia
-# 本物と偽物の補間
-α = rand(Float32, 1, batch_size)
-x_interp = α .* x_real .+ (1 .- α) .* x_fake
-```
 
 | 数式 | コード | 対応 |
 |:-----|:-------|:-----|
@@ -926,10 +982,6 @@ $$
 
 Juliaでは`Zygote.gradient`を使う：
 
-```julia
-# 補間点での勾配計算
-grad_interp = Zygote.gradient(x -> sum(critic(x, ps_c, st_c)[1]), x_interp)[1]
-```
 
 **Step 3: 勾配ノルム計算**
 
@@ -937,13 +989,6 @@ $$
 \|\nabla_{\hat{\mathbf{x}}} D(\hat{\mathbf{x}})\|_2 = \sqrt{\sum_i (\partial D / \partial \hat{x}_i)^2}
 $$
 
-```julia
-# 勾配ノルム: √(Σ grad²) for each sample
-grad_norm = sqrt.(sum(grad_interp.^2, dims=1))  # (1, batch_size)
-
-# Gradient Penalty: 𝔼[(||∇D||₂ - 1)²]
-gp = mean((grad_norm .- 1).^2)
-```
 
 | 数式 | コード | 対応 |
 |:-----|:-------|:-----|
@@ -957,105 +1002,6 @@ gp = mean((grad_norm .- 1).^2)
 
 #### 3.2.4 WGAN-GP完全実装
 
-```julia
-using Lux, Optimisers, Zygote, Random
-
-# === モデル定義 ===
-function create_wgan_gp(latent_dim, img_dim, hidden_dim)
-    generator = Chain(
-        Dense(latent_dim => hidden_dim, relu),
-        Dense(hidden_dim => hidden_dim*2, relu),
-        Dense(hidden_dim*2 => img_dim, tanh)  # [-1, 1] range
-    )
-
-    critic = Chain(
-        Dense(img_dim => hidden_dim*2, x -> leakyrelu(x, 0.2f0)),
-        Dense(hidden_dim*2 => hidden_dim, x -> leakyrelu(x, 0.2f0)),
-        Dense(hidden_dim => 1)  # スコア出力
-    )
-
-    return generator, critic
-end
-
-# === Critic損失（WGAN-GP） ===
-function critic_loss(generator, critic, ps_g, ps_c, st_g, st_c, x_real, λ_gp=10.0f0)
-    batch_size = size(x_real, 2)
-
-    # 偽画像生成
-    z = randn(Float32, size(ps_g)[1], batch_size)
-    x_fake, st_g = generator(z, ps_g, st_g)
-
-    # Criticスコア
-    score_real, st_c_real = critic(x_real, ps_c, st_c)
-    score_fake, st_c_fake = critic(x_fake, ps_c, st_c)
-
-    # Wasserstein距離: 𝔼[D(fake)] - 𝔼[D(real)]
-    wasserstein = mean(score_fake) - mean(score_real)
-
-    # Gradient Penalty
-    α = rand(Float32, 1, batch_size)
-    x_interp = α .* x_real .+ (1 .- α) .* x_fake
-
-    grad_interp = Zygote.gradient(x -> sum(critic(x, ps_c, st_c)[1]), x_interp)[1]
-    grad_norm = sqrt.(sum(grad_interp.^2, dims=1))
-    gp = mean((grad_norm .- 1).^2)
-
-    loss = wasserstein + λ_gp * gp
-
-    return loss, st_c
-end
-
-# === Generator損失（WGAN-GP） ===
-function generator_loss(generator, critic, ps_g, ps_c, st_g, st_c, batch_size)
-    # 偽画像生成
-    z = randn(Float32, size(ps_g)[1], batch_size)
-    x_fake, st_g = generator(z, ps_g, st_g)
-
-    # Generatorの目的: Criticスコアを最大化
-    score_fake, st_c = critic(x_fake, ps_c, st_c)
-    loss = -mean(score_fake)
-
-    return loss, st_g
-end
-
-# === 訓練ループ ===
-function train_wgan_gp!(generator, critic, train_data, latent_dim, epochs=100, n_critic=5)
-    rng = Random.default_rng()
-    ps_g, st_g = Lux.setup(rng, generator)
-    ps_c, st_c = Lux.setup(rng, critic)
-
-    opt_g = Optimisers.setup(Adam(1e-4, (0.5, 0.9)), ps_g)
-    opt_c = Optimisers.setup(Adam(1e-4, (0.5, 0.9)), ps_c)
-
-    for epoch in 1:epochs
-        for batch in DataLoader((train_data,), batchsize=64, shuffle=true)
-            x_real = batch[1]
-
-            # Criticを n_critic 回更新
-            for _ in 1:n_critic
-                (loss_c, st_c), back_c = Zygote.pullback(
-                    pc -> critic_loss(generator, critic, ps_g, pc, st_g, st_c, x_real),
-                    ps_c
-                )
-                grads_c = back_c((one(loss_c), nothing))[1]
-                opt_c, ps_c = Optimisers.update(opt_c, ps_c, grads_c)
-            end
-
-            # Generatorを 1 回更新
-            (loss_g, st_g), back_g = Zygote.pullback(
-                pg -> generator_loss(generator, critic, pg, ps_c, st_g, st_c, size(x_real, 2)),
-                ps_g
-            )
-            grads_g = back_g((one(loss_g), nothing))[1]
-            opt_g, ps_g = Optimisers.update(opt_g, ps_g, grads_g)
-        end
-
-        println("Epoch $epoch: C_loss=$(loss_c), G_loss=$(loss_g)")
-    end
-
-    return ps_g, ps_c, st_g, st_c
-end
-```
 
 **訓練ループの流れ**：
 
@@ -1091,9 +1037,7 @@ sequenceDiagram
 - Gradient Penaltyの $\lambda=10$ はハイパーパラメータ（論文推奨値）
 - Adamの $\beta_1=0.5$ はGAN訓練の安定化に有効（通常は0.9）
 
-:::message
-**ここが重要**: WGAN-GPの核心は「勾配ノルムを1に保つ」こと。これがLipschitz制約の実用的実装。
-:::
+> **Note:** **ここが重要**: WGAN-GPの核心は「勾配ノルムを1に保つ」こと。これがLipschitz制約の実用的実装。
 
 ---
 
@@ -1151,6 +1095,56 @@ $$
 - $QK^\top \in \mathbb{R}^{n \times m}$：各QueryとKeyの類似度行列
 - $\text{softmax}$：行ごとに正規化（各Queryが全Keyの重みを合計1に）
 - 結果 $\in \mathbb{R}^{n \times d_v}$：各Queryに対する加重Valueの和
+
+#### 3.3.1.1 Attention機構の確率論的解釈
+
+**Soft Attention vs Hard Attention**
+
+Attention 重み $\alpha_{ij} = \text{softmax}(e_{ij}/\sqrt{d_k})$ は Soft Attention だ。Hard Attention は：
+
+$$
+\alpha_{ij} = \mathbf{1}\!\left[j = \arg\max_k \, e_{ik}\right]
+$$
+
+Softmax は Hard Attention の「温度を下げた」連続近似。温度パラメータ $\tau$ を明示すると：
+
+$$
+\alpha_{ij} = \frac{\exp(e_{ij}/\tau)}{\sum_k \exp(e_{ik}/\tau)} \xrightarrow{\tau \to 0} \mathbf{1}[j = \arg\max_k e_{ik}]
+$$
+
+$1/\sqrt{d_k}$ はスケーリングであり、実質的に内積の分散を正規化することで温度を調整している。
+
+**Key-Value Store としての解釈**
+
+Attention はソフトな連想メモリ（Associative Memory）だ。メモリに $(k_j, v_j)$ ペアが格納され、クエリ $q_i$ でソフト検索する：
+
+$$
+\text{output}_i = \sum_j \alpha_{ij}\, v_j = \sum_j \underbrace{\text{softmax}\!\left(\frac{q_i \cdot k_j}{\sqrt{d_k}}\right)}_{\text{関連度}} \cdot v_j
+$$
+
+古典的ハッシュマップが「完全一致検索（Hard）」なら、Attention は「類似度検索（Soft）」。このメタファーは、KV-Cache の設計（第16回）を直感的に理解する鍵でもある。生成時は過去の $(K, V)$ を再計算せずキャッシュできるのは、この Key-Value Store 構造のおかげだ。
+
+**Linear Attention の近似：$O(n^2) \to O(nd^2)$**
+
+標準 Attention の計算量は系列長 $n$ に対して $O(n^2 d)$—長文脈で爆発する。カーネルトリックによる近似：
+
+$$
+\text{softmax}(q \cdot k / \sqrt{d_k}) \approx \phi(q)^\top \phi(k)
+$$
+
+ここで $\phi: \mathbb{R}^d \to \mathbb{R}^r$ は特徴マップ（例：$\phi(x)_i = \text{elu}(x_i) + 1$）。この近似を Attention 全体に適用すると：
+
+$$
+\text{Attention}(Q, K, V) \approx \frac{\phi(Q)\bigl(\phi(K)^\top V\bigr)}{\phi(Q)\bigl(\phi(K)^\top \mathbf{1}_n\bigr)}
+$$
+
+行列積の結合順序を変えると $(\phi(K)^\top V) \in \mathbb{R}^{r \times d_v}$ を先にキャッシュでき、各クエリへの計算は $O(rd_v)$。全体で：
+
+$$
+O(n^2 d) \xrightarrow{\text{Linear Attention}} O(n d^2) \quad (r = O(d) \text{ のとき})
+$$
+
+$n \gg d$ の長文脈では劇的な削減になる。ただし Softmax の近似誤差（特に鋭い Attention が必要なタスク）はトレードオフとして残る。FlashAttention はこの近似をせず、正確な Softmax を $O(n)$ メモリで実現する別アプローチで、現在の実用的標準になっている。
 
 ---
 
@@ -1217,19 +1211,6 @@ $M_{ij} = -\infty$ の部分は $\exp(-\infty) = 0$ になり、未来トーク�
 
 **Juliaコード**：
 
-```julia
-# Causal Mask生成
-function causal_mask(seq_len)
-    mask = triu(ones(Float32, seq_len, seq_len), 1)  # 上三角行列（対角より上）
-    return mask .* -Inf32  # Softmax前に加算 → exp(-∞) = 0
-end
-
-# Attentionにマスク適用
-scores = Q @ K' ./ sqrt(Float32(d_k))  # (seq_len, seq_len)
-scores = scores .+ causal_mask(seq_len)  # 未来トークンを-∞に
-attn_weights = softmax(scores, dims=2)  # 行ごとに正規化
-output = attn_weights @ V
-```
 
 | 数式 | コード | 対応 |
 |:-----|:-------|:-----|
@@ -1238,94 +1219,61 @@ output = attn_weights @ V
 | $M$ | `causal_mask(seq_len)` | マスク行列 |
 | $\text{softmax}(\cdot + M)$ | `softmax(scores .+ mask, dims=2)` | 行ごとsoftmax |
 
+#### 3.3.3.1 Masking戦略の数学的体系
+
+Causal Mask はマスク行列の一種に過ぎない。$M$ の設計によって Attention の「視野」を任意に制御できる。
+
+**マスクの統一定式化**
+
+任意のマスクは次の行列で定義される：
+
+$$
+M_{ij} = \begin{cases}
+0 & \text{位置 } j \text{ を位置 } i \text{ が参照できる} \\
+-\infty & \text{参照不可}
+\end{cases}
+$$
+
+**主要な3種類のマスク**
+
+1. **Full Attention（マスクなし）**：全トークンが全トークンを参照（$M = 0$）。Encoder で使う。計算量 $O(n^2 d_k)$。
+
+2. **Causal Mask（下三角マスク）**：
+
+$$
+M^{\text{causal}}_{ij} = \begin{cases} 0 & j \leq i \\ -\infty & j > i \end{cases}
+$$
+
+時刻 $i$ のトークンは過去 $j \leq i$ のみ参照。自己回帰生成・GPT 系 Decoder で使う。
+
+3. **Sliding Window Attention**：
+
+$$
+M^{\text{window}}_{ij} = \begin{cases} 0 & |i - j| \leq w \\ -\infty & |i - j| > w \end{cases}
+$$
+
+ウィンドウ幅 $w$ 以内のみ参照。計算量 $O(nwd_k)$（$w \ll n$ で効率的）。Longformer はこれを基礎とする。
+
+**Causal Mask の数値的注意点**
+
+$M_{ij} = -\infty$ を `Float32(-Inf)` で実装すると、全要素が $-\infty$ の行（系列長ゼロの境界ケース）で $\text{softmax}$ が `NaN` を返しうる。実装では大きな負数で近似する：
+
+$$
+M^{\text{impl}}_{ij} = -10^4 \implies \exp(-10^4) \approx 0 \quad \text{（Float32 で実質 0）}
+$$
+
+**Prefix LM マスク**：BERT 系双方向と GPT 系単方向のハイブリッド（T5 / UL2）：
+
+$$
+M^{\text{prefix}}_{ij} = \begin{cases} 0 & j \leq P \text{ または } (i > P \text{ かつ } j \leq i) \\ -\infty & \text{それ以外} \end{cases}
+$$
+
+最初の $P$ トークン（プレフィックス）は全トークンから双方向参照できる。残りはCausal Attention のみ。この設計により、条件付き生成（プレフィックス固定→続きを生成）を一つのモデルで扱える。
+
 ---
 
 #### 3.3.4 Multi-Head Attention完全実装
 
-```julia
-using Lux, NNlib, Random
-
-# === Multi-Head Attention Layer ===
-struct MultiHeadAttention <: Lux.AbstractExplicitLayer
-    num_heads::Int
-    d_model::Int
-    d_k::Int
-    q_proj::Dense
-    k_proj::Dense
-    v_proj::Dense
-    o_proj::Dense
-end
-
-function MultiHeadAttention(d_model::Int, num_heads::Int)
-    @assert d_model % num_heads == 0 "d_model must be divisible by num_heads"
-    d_k = d_model ÷ num_heads
-
-    return MultiHeadAttention(
-        num_heads, d_model, d_k,
-        Dense(d_model => d_model, use_bias=false),  # Q projection
-        Dense(d_model => d_model, use_bias=false),  # K projection
-        Dense(d_model => d_model, use_bias=false),  # V projection
-        Dense(d_model => d_model, use_bias=false)   # Output projection
-    )
-end
-
-function (mha::MultiHeadAttention)(x, ps, st; mask=nothing)
-    # x: (d_model, seq_len, batch_size)
-    d_model, seq_len, batch_size = size(x)
-
-    # Linear projections: Q, K, V
-    Q, st_q = mha.q_proj(x, ps.q_proj, st.q_proj)
-    K, st_k = mha.k_proj(x, ps.k_proj, st.k_proj)
-    V, st_v = mha.v_proj(x, ps.v_proj, st.v_proj)
-
-    # Reshape for multi-head: (d_model, seq_len, batch) → (num_heads, d_k, seq_len, batch)
-    Q = reshape(Q, mha.d_k, mha.num_heads, seq_len, batch_size) |> x -> permutedims(x, (2,1,3,4))
-    K = reshape(K, mha.d_k, mha.num_heads, seq_len, batch_size) |> x -> permutedims(x, (2,1,3,4))
-    V = reshape(V, mha.d_k, mha.num_heads, seq_len, batch_size) |> x -> permutedims(x, (2,1,3,4))
-
-    # Scaled Dot-Product Attention for all heads
-    # scores: (num_heads, seq_len, seq_len, batch)
-    scores = batched_mul(batched_transpose(Q), K) ./ sqrt(Float32(mha.d_k))
-
-    # Apply mask if provided
-    if !isnothing(mask)
-        scores = scores .+ reshape(mask, 1, seq_len, seq_len, 1)  # broadcast over heads and batch
-    end
-
-    # Softmax over keys dimension
-    attn_weights = softmax(scores, dims=2)  # normalize over keys (dim 2)
-
-    # Weighted sum of values
-    out = batched_mul(V, attn_weights)  # (num_heads, d_k, seq_len, batch)
-
-    # Concatenate heads: (num_heads, d_k, seq_len, batch) → (d_model, seq_len, batch)
-    out = permutedims(out, (2,1,3,4)) |> x -> reshape(x, d_model, seq_len, batch_size)
-
-    # Output projection
-    out, st_o = mha.o_proj(out, ps.o_proj, st.o_proj)
-
-    return out, (st_q=st_q, st_k=st_k, st_v=st_v, st_o=st_o)
-end
-
-# === Causal Mask ===
-function causal_mask(seq_len)
-    mask = triu(ones(Float32, seq_len, seq_len), 1)
-    return mask .* -Inf32
-end
-
-# === 使用例 ===
-d_model = 512
-num_heads = 8
-seq_len = 10
-batch_size = 2
-
-x = randn(Float32, d_model, seq_len, batch_size)
-mha = MultiHeadAttention(d_model, num_heads)
-ps, st = Lux.setup(Random.default_rng(), mha)
-
-mask = causal_mask(seq_len)
-y, st = mha(x, ps, st; mask=mask)  # y: (512, 10, 2)
-```
 
 **処理の流れ**：
 
@@ -1368,9 +1316,7 @@ graph TD
 | Concat heads | `reshape(..., d, n, b)` | $(h, d_k, n, b) \to (d, n, b)$ |
 | Output projection | `mha.o_proj(out)` | $(d, n, b) \to (d, n, b)$ |
 
-:::message
-**ここが重要**: Multi-Head Attentionは「並列に複数の視点でAttention」。各ヘッドが異なる部分空間で類似度を計算。
-:::
+> **Note:** **ここが重要**: Multi-Head Attentionは「並列に複数の視点でAttention」。各ヘッドが異なる部分空間で類似度を計算。
 
 ---
 
@@ -1391,13 +1337,69 @@ graph TD
 
 **解答例は Zone 4 で提供**。まずは自分で設計してみよう。
 
+#### 3.4.1 訓練ループの数学的基盤 — スケジューラとEarly Stopping
+
+Boss Battle で設計すべき訓練ループには、3つの数学的コンポーネントがある。
+
+**1. 学習率スケジューラ**
+
+学習率 $\eta_t$（ステップ $t$ のステップサイズ）の設計は収束速度と最終精度に直結する。
+
+*Cosine Annealing*（現代の標準）：
+
+$$
+\eta_t = \eta_{\min} + \frac{1}{2}(\eta_{\max} - \eta_{\min})\left(1 + \cos\frac{\pi t}{T}\right)
+$$
+
+$t = 0$ で $\eta_{\max}$、$t = T$ で $\eta_{\min}$ に減衰。余弦曲線で滑らかに下がるため、局所解の谷に穏やかに降りていける。
+
+*Warmup + Cosine*（Transformer 標準、元論文 Vaswani et al. 2017 より派生）：
+
+$$
+\eta_t = \begin{cases}
+\eta_{\max} \cdot \dfrac{t}{T_{\text{warm}}} & t \leq T_{\text{warm}} \\[8pt]
+\eta_{\min} + \dfrac{\eta_{\max} - \eta_{\min}}{2}\!\left(1 + \cos\dfrac{\pi(t - T_{\text{warm}})}{T - T_{\text{warm}}}\right) & t > T_{\text{warm}}
+\end{cases}
+$$
+
+Warmup フェーズ（$t \leq T_{\text{warm}}$）でゆっくり $\eta_{\max}$ まで増加する。訓練初期にパラメータが不安定な状態で大きな学習率を使うと勾配爆発が起きるため、Warmup で安定させてから本格的に最適化する。
+
+**2. Early Stopping の統計的根拠**
+
+検証損失のエポック $e$ での値を $v_e$ とする。Early Stopping の停止条件（patience $P$）：
+
+$$
+\text{stop if } \; v_e > \min_{e' \leq e - P} v_{e'} + \delta \quad \text{が } P \text{ エポック連続}
+$$
+
+$\delta$ は許容誤差（float比較の安定化）。Early Stopping が機能する理由：過学習はモデルが訓練データの確率的ノイズを「記憶」する現象で、汎化ギャップが増大し続ける：
+
+$$
+\mathcal{L}_{\text{gen}} = \mathcal{L}_{\text{train}} + \underbrace{(\mathcal{L}_{\text{val}} - \mathcal{L}_{\text{train}})}_{\text{汎化ギャップ}}
+$$
+
+Early Stopping は汎化ギャップが増大し始める点で打ち切る、最も単純かつ効果的な正則化手法だ。
+
+**3. Gradient Clipping**
+
+勾配爆発を防ぐための標準手技。全パラメータの勾配ベクトルのノルムが閾値 $c$ を超えたときのみスケールする：
+
+$$
+g \leftarrow \begin{cases}
+g & \|g\|_2 \leq c \\[4pt]
+c \cdot \dfrac{g}{\|g\|_2} & \|g\|_2 > c
+\end{cases}
+$$
+
+方向は保持し、大きさのみを制限する。RNN や Transformer の深い計算グラフで有効。VAE では KL 爆発（KL が急激に増大するフェーズ）でも役立つ。通常 $c = 1.0$ が推奨値。
+
+これら3つ（スケジューラ・Early Stopping・Gradient Clipping）は互いに補完し合う。スケジューラは最適化の軌跡を整え、Gradient Clipping は爆発を抑え、Early Stopping は汎化の崖から引き戻す。
+
 ### 3.5 最新研究動向（2024-2025）— Production Deployment最適化
 
 #### 3.5.1 Safetensors Format の生産環境での利用
 
 HuggingFaceが開発したsafetensors形式は、生産環境でのモデル配信に最適化されている [^safetensors_prod].
-
-[^safetensors_prod]: [VAE safetensors deployment](https://huggingface.co/stabilityai/sd-vae-ft-mse-original), [WAN21-VAE Model](https://huggingface.co/wangkanai/wan21-vae)
 
 **Safetensorsの利点**:
 
@@ -1405,19 +1407,10 @@ HuggingFaceが開発したsafetensors形式は、生産環境でのモデル配�
 2. **Zero-copy loading**: メモリマップで直接ロード、コピー不要
 3. **高速化**: 243MB VAEモデルで、PyTorch `.pth` より30%高速ロード
 
-```python
-from safetensors.torch import load_file
-
-# Zero-copy loading
-model_weights = load_file("vae-ft-mse-840000-ema-pruned.safetensors")
-# メモリマップで直接参照、コピーなし
-```
 
 #### 3.5.2 Transformer-GAN Hybrid Architectures
 
 2024-2025の最新研究では、GANとTransformerを統合したアーキテクチャが登場 [^gan_transformer_2024].
-
-[^gan_transformer_2024]: [Scalable GANs with Transformers (2024)](https://arxiv.org/html/2509.24935v1), [GAN vs Transformer Comparison](https://www.techtarget.com/searchenterpriseai/tip/GAN-vs-transformer-models-Comparing-architectures-and-uses)
 
 **GANsformer Architecture**:
 
@@ -1448,19 +1441,8 @@ Transformerは計算・メモリ・データ効率でGANに劣るが、GANsforme
 
 2024-2025の生産環境では、以下の最適化が標準となっている [^inference_opt_2024]:
 
-[^inference_opt_2024]: [Generative AI Production Deployment 2025](https://thinkpalm.com/blogs/generative-ai-in-2024-industry-applications-and-implications/), [VAE Inference Optimization](https://civitai.com/models/276082/vae-ft-mse-840000-ema-pruned-or-840000-or-840k-sd15-vae)
-
 **1. Model Compilation**: PyTorch 2.0+ の `torch.compile()` で推論を高速化
 
-```python
-import torch
-
-vae = VAE.from_pretrained("stabilityai/sd-vae-ft-mse")
-vae_compiled = torch.compile(vae, mode="reduce-overhead")
-
-# 推論時間: 45ms → 28ms (1.6x speedup)
-latent = vae_compiled.encode(image)
-```
 
 **2. xFormers Efficient Attention**: メモリ効率的なAttention実装
 
@@ -1470,10 +1452,6 @@ $$
 
 **3. Half Precision (FP16/BF16)**: 推論速度2倍、メモリ半減
 
-```python
-vae = vae.half()  # FP32 → FP16
-# VRAM: 1.2GB → 0.6GB, Latency: 45ms → 23ms
-```
 
 **4. Resolution-based Batching**: 解像度に応じた最適バッチサイズ
 
@@ -1486,8 +1464,6 @@ vae = vae.half()  # FP32 → FP16
 #### 3.5.4 Comparative Analysis: GAN vs Transformer Architectures
 
 2024-2025研究では、GANとTransformerの統合アプローチが注目されている [^gan_vs_transformer].
-
-[^gan_vs_transformer]: [GAN vs Transformer Models](https://www.techtarget.com/searchenterpriseai/tip/GAN-vs-transformer-models-Comparing-architectures-and-uses), [Comparing Generative AI Models](https://hyqoo.com/artificial-intelligence/comparing-generative-ai-models-gans-vaes-and-transformers)
 
 **Computational Efficiency Trade-offs**:
 
@@ -1506,29 +1482,11 @@ Transformerはメモリ・計算・データ効率でGANより要求が高い。
 
 2025年、Juliaは **Reactant.jl** により、JAX/XLA並みの性能を達成 [^reactant_julia].
 
-[^reactant_julia]: Reactant.jl enables Julia code to compile to MLIR→XLA, achieving JAX-level performance on GPU/TPU.
-
 **Before Reactant** (純Julia):
 
-```julia
-using Flux
-
-model = Chain(Dense(784 => 256, relu), Dense(256 => 10))
-loss(x, y) = Flux.crossentropy(model(x), y)
-
-# GPU推論: ~15ms/batch (1000 samples)
-```
 
 **With Reactant** (XLA compilation):
 
-```julia
-using Reactant
-
-@compile model_compiled = model  # MLIR→XLA変換
-loss_compiled = @compile (x, y) -> Flux.crossentropy(model_compiled(x), y)
-
-# GPU推論: ~5ms/batch (3x speedup)
-```
 
 Reactantは、JuliaコードをMLIR中間表現に変換し、XLAバックエンドで最適化:
 
@@ -1538,18 +1496,10 @@ $$
 
 **Multi-device自動対応**:
 
-```julia
-# 自動的に利用可能デバイス（GPU/TPU）を検出・最適化
-@compile device_agnostic = my_model
-
-# A100 GPU, TPU v4, Apple M2 — 全て同じコード
-```
 
 #### 3.5.5 Rust Candle vs Burn — Production Framework比較
 
 2024-2025のRust ML frameworkは2強時代 [^rust_ml_frameworks]:
-
-[^rust_ml_frameworks]: Candle (HuggingFace) focuses on lightweight inference; Burn supports training with WGPU/WASM for edge deployment.
 
 | Framework | Developer | Training | Inference | Target | License |
 |:----------|:----------|:---------|:----------|:-------|:--------|
@@ -1559,31 +1509,9 @@ $$
 
 **Candle**: PyTorch風API、safetensors直接ロード、推論最適化に特化
 
-```rust
-use candle_core::{Device, Tensor};
-use candle_nn::VarBuilder;
-
-let device = Device::cuda_if_available(0)?;
-let vb = VarBuilder::from_safetensors(vec!["model.safetensors"], DType::F32, &device)?;
-
-// PyTorchライクな記法
-let x = Tensor::randn(0f32, 1.0, (32, 784), &device)?;
-let h = x.matmul(&w)?  + &b)?;
-```
 
 **Burn**: WGPU対応（Vulkan/Metal/DX12）、WASMターゲット、訓練フル対応
 
-```rust
-use burn::prelude::*;
-use burn::backend::Wgpu;  // または Candle, LibTorch, NdArray
-
-type Backend = Wgpu;
-
-let model = MLP::<Backend>::new();
-let optim = AdamWConfig::new().init();
-
-// WASM/Edge deviceでも訓練可能
-```
 
 **Production Recommendation**:
 
@@ -1591,16 +1519,75 @@ let optim = AdamWConfig::new().init();
 - エッジデバイス（Raspberry Pi, WASM）: **Burn** — WGPU対応、軽量
 - 研究プロトタイプ: **Julia + Reactant** — 数式↔コード1:1、JAX級速度
 
-:::message
-**進捗**: 全体の50%完了。数式修行ゾーンクリア + 最新2024-2025研究動向を把握。実装ゾーンへ。
-:::
+#### 3.5.6 3モデルの計算複雑度比較
+
+VAE・GAN・Transformer を**パラメータ数 $N$** と**推論計算量**の観点で比較する。
+
+**パラメータ数の推定**: Encoder/Decoder が $L$ 層の MLP（各層幅 $d$）からなる VAE:
+
+$$
+N_{\text{VAE}} = 2 \times L \times d^2 \quad \text{(Encoder + Decoder)}
+$$
+
+$L=4$, $d=512$ なら $N_{\text{VAE}} \approx 2 \times 4 \times 512^2 \approx 2.1 \times 10^6 \approx 2\text{M}$ パラメータ。
+
+**Transformer の計算量**: Sequence length $T$, hidden dim $d$, heads $h$, layers $L$ の Transformer の Self-Attention 計算量:
+
+$$
+\text{FLOPs}_{\text{Attention}} = O(T^2 d) \times L
+$$
+
+$T=1024$（コンテキスト長）、$d=512$、$L=6$ なら:
+
+$$
+\text{FLOPs} \approx 6 \times 1024^2 \times 512 \approx 3.2 \times 10^9 \approx 3.2\;\text{GFLOPs}
+$$
+
+Attention は $T^2$ に比例するため、長いシーケンスで計算量が爆発する — これが Flash Attention や Linear Attention が必要な理由だ。
+
+**GAN の訓練比率**: WGAN-GP では Critic を $n_{\text{critic}} = 5$ 回更新して Generator を 1 回更新する。1 訓練ステップの計算量:
+
+$$
+C_{\text{step}} = n_{\text{critic}} \times C_{\text{Critic}} + C_{\text{Generator}} = 5 C_D + C_G
+$$
+
+Generator と Critic が同サイズなら $C_D = C_G = C$ として $C_{\text{step}} = 6C$ — 通常の教師あり学習より6倍コストがかかる。Gradient Penalty の計算は Backward pass 1 回分追加される:
+
+$$
+C_{\text{GP}} = C_G + C_{\text{backward}} \approx 2C_G
+$$
+
+よって実質的な訓練コスト比は Transformer > GAN > VAE となることが多い。
+
+> **Note:** **進捗**: 全体の50%完了。数式修行ゾーンクリア + 最新2024-2025研究動向を把握。実装ゾーンへ。
 
 **次回予告**: Zone 4実装ゾーンでは、Flow MatchingのJulia実装とRust FFI統合を完全実装する。
 
 ---
 
+## 参考文献
+
+[^safetensors_prod]: [VAE safetensors deployment](https://huggingface.co/stabilityai/sd-vae-ft-mse-original), [WAN21-VAE Model](https://huggingface.co/wangkanai/wan21-vae)
+
+[^gan_transformer_2024]: [Scalable GANs with Transformers (2024)](https://arxiv.org/html/2509.24935v1), [GAN vs Transformer Comparison](https://www.techtarget.com/searchenterpriseai/tip/GAN-vs-transformer-models-Comparing-architectures-and-uses)
+
+[^inference_opt_2024]: [Generative AI Production Deployment 2025](https://thinkpalm.com/blogs/generative-ai-in-2024-industry-applications-and-implications/), [VAE Inference Optimization](https://civitai.com/models/276082/vae-ft-mse-840000-ema-pruned-or-840000-or-840k-sd15-vae)
+
+[^gan_vs_transformer]: [GAN vs Transformer Models](https://www.techtarget.com/searchenterpriseai/tip/GAN-vs-transformer-models-Comparing-architectures-and-uses), [Comparing Generative AI Models](https://hyqoo.com/artificial-intelligence/comparing-generative-ai-models-gans-vaes-and-transformers)
+
+[^reactant_julia]: Reactant.jl enables Julia code to compile to MLIR→XLA, achieving JAX-level performance on GPU/TPU.
+
+[^rust_ml_frameworks]: Candle (HuggingFace) focuses on lightweight inference; Burn supports training with WGPU/WASM for edge deployment.
 
 ---
+
+## 著者リンク
+
+- Blog: https://fumishiki.dev
+- X: https://x.com/fumishiki
+- LinkedIn: https://www.linkedin.com/in/fumitakamurakami
+- GitHub: https://github.com/fumishiki
+- Hugging Face: https://huggingface.co/fumishiki
 
 ## ライセンス
 

@@ -59,7 +59,7 @@ sigma_mle = data.std(ddof=0)    # sqrt(E[(X-mu)^2]) = sigma (biased MLE)
 # ddof=1 は不偏推定量だが MLE は ddof=0
 
 # verify: log-likelihood at MLE vs perturbed
-def log_lik_normal(x, mu, sigma):
+def log_lik_normal(x: np.ndarray, mu: float, sigma: float) -> float:
     return np.sum(stats.norm.logpdf(x, loc=mu, scale=sigma))
 
 ll_mle = log_lik_normal(data, mu_mle, sigma_mle)
@@ -150,13 +150,13 @@ $p_k = \frac{\exp(z_k)}{\sum_j \exp(z_j)}$（Softmax = Categorical の自然パ�
 ```python
 import numpy as np
 
-def log_softmax(z):
+def log_softmax(z: np.ndarray) -> np.ndarray:
     # z: (K,) -> log_p: (K,)  numerically stable
     c = z.max()                      # log-sum-exp shift
     log_Z = np.log(np.exp(z - c).sum()) + c
     return z - log_Z
 
-def entropy_categorical(pi):
+def entropy_categorical(pi: np.ndarray) -> float:
     # H(pi) = -sum pi_k log pi_k,  pi: (K,)
     pi = np.clip(pi, 1e-12, 1.0)    # numerical safety
     return float(-np.sum(pi * np.log(pi)))
@@ -260,7 +260,7 @@ shape: `x` `(d,)`, `mu` `(d,)`, `Sigma` `(d,d)`, `v = L^{-1}(x-mu)` `(d,)`
 import numpy as np
 from scipy.stats import multivariate_normal
 
-def mvn_log_prob(x, mu, Sigma):
+def mvn_log_prob(x: np.ndarray, mu: np.ndarray, Sigma: np.ndarray) -> float:
     # x: (d,), mu: (d,), Sigma: (d,d) positive definite
     d = len(mu)
     L = np.linalg.cholesky(Sigma)               # Sigma = L L^T
@@ -269,7 +269,7 @@ def mvn_log_prob(x, mu, Sigma):
     log_det = 2.0 * np.sum(np.log(np.diag(L))) # log|Sigma|
     return -0.5 * (d * np.log(2 * np.pi) + log_det + maha2)
 
-def mvn_mle(X):
+def mvn_mle(X: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     # X: (N, d) -> (mu_hat, Sigma_hat)
     N = len(X)
     mu_hat = X.mean(axis=0)
@@ -307,7 +307,7 @@ $$
 $\boldsymbol{\Sigma}_{12}\boldsymbol{\Sigma}_{22}^{-1}$ は Kalman gain と同型。$\mathbf{x}_2$ を観測すると分散は必ず縮む: $\boldsymbol{\Sigma}_{1|2} \preceq \boldsymbol{\Sigma}_{11}$（半正定値順序）。
 
 ```python
-def mvn_conditional(mu, Sigma, obs_idx, obs_val):
+def mvn_conditional(mu: np.ndarray, Sigma: np.ndarray, obs_idx: list[int], obs_val: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     d = len(mu)
     free = [i for i in range(d) if i not in obs_idx]
     S11 = Sigma[np.ix_(free, free)]
@@ -576,7 +576,7 @@ $$
 ```python
 import numpy as np
 
-def gaussian_conjugate_update(mu0, tau0_sq, sigma_sq, x_bar, N):
+def gaussian_conjugate_update(mu0: float, tau0_sq: float, sigma_sq: float, x_bar: float, N: int) -> tuple[float, float]:
     prec_N = 1.0/tau0_sq + N/sigma_sq
     tau_N_sq = 1.0 / prec_N
     mu_N = tau_N_sq * (mu0/tau0_sq + x_bar * N/sigma_sq)
@@ -759,18 +759,11 @@ def mgf_gaussian(t: float, mu: float, sigma2: float) -> float:
     """M_X(t) = exp(mu*t + sigma^2*t^2/2) for X ~ N(mu, sigma^2)"""
     return float(np.exp(mu * t + 0.5 * sigma2 * t**2))
 
-def moments_from_mgf(mu: float, sigma2: float, k_max: int = 4):
+def moments_from_mgf(mu: float, sigma2: float, k_max: int = 4) -> dict[int, float]:
     """k次モーメントを数値微分で確認: M^(k)(0) = E[X^k]"""
-    h = 1e-4
-    moments = {}
-    for k in range(1, k_max + 1):
-        # k次数値微分 at t=0 (central differences k times)
-        # 1次: [M(h)-M(-h)]/(2h), 2次: [M(h)-2M(0)+M(-h)]/h^2 etc.
-        # 簡略版: モンテカルロで検算
-        rng = np.random.default_rng(42)
-        X = rng.normal(mu, sigma2**0.5, 200000)
-        moments[k] = float(np.mean(X**k))
-    return moments
+    rng = np.random.default_rng(42)
+    X = rng.normal(mu, sigma2**0.5, 200_000)
+    return {k: float(np.mean(X**k)) for k in range(1, k_max + 1)}
 
 # MGF から 4次モーメントまでを確認
 mu, sigma2 = 2.0, 3.0
@@ -1142,7 +1135,7 @@ $$
 - $\mathbb{R}^d$ 上の全ての部分集合に確率を定義できるか？
 - 「ほとんど確実に」とは何か？
 
-第5回では測度論の言葉で $f(x) = \frac{dP}{d\lambda}$ （Radon-Nikodym導関数）として密度関数を厳密に定義する。さらに確率過程（Markov連鎖、Brown運動）を導入し、拡散モデルのSDE定式化への橋渡しを行う。
+第5回では測度論の言葉で $f(x) = \frac{dP}{d\lambda}$ （Radon-Nikodym導関数）として密度関数を厳密に定義する。確率過程（Markov連鎖、Brown運動）も導入し、拡散モデルのSDE定式化への橋渡しを行う。
 </details>
 
 ### 7.3 確率論でよくある「罠」
@@ -1248,7 +1241,7 @@ CLTが「多数の独立微小効果の和→正規分布」を保証するか�
 「正規分布を仮定する」のは、脳が「世界は滑らかだ」と仮定するのと同じかもしれない。
 </details>
 
-さらに考えてみよう:
+考えてみよう:
 
 - **LLMの出力分布はCategorical。** 正規分布ではない。だがCategorical分布の自然パラメータ（logit）は連続値で、その空間では正規分布的な仮定が使われる
 - **次元の呪い**: 100次元のガウス分布のサンプルは、ほぼ確実に原点から $\sqrt{100} = 10$ の距離にある。「高次元のガウスは球殻に集中する」— これが正規分布の直感が崩壊する瞬間だ
@@ -1441,6 +1434,10 @@ Nucleus sampling（Top-p）は累積確率 $\sum_{k \in \text{top-p}} p(k) \geq 
 
 > Progress: 100%
 
+> **理解度チェック**
+> 1. ベイズの定理 $p(\theta|\mathcal{D}) \propto p(\mathcal{D}|\theta)p(\theta)$ において、事前分布・尤度・事後分布をそれぞれ同定せよ。
+> 2. 正規分布 $\mathcal{N}(\mu, \sigma^2)$ の平均・分散を $\mu, \sigma$ で書き、$\sigma \to 0$ のとき分布はどう変化するか説明せよ。
+
 ---
 > **📖 前編もあわせてご覧ください**
 > [【前編】第4回: 確率論・統計学](/articles/ml-lecture-04-part1) では、確率論・ベイズの定理・指数型分布族の理論を学びました。
@@ -1485,7 +1482,7 @@ Nucleus sampling（Top-p）は累積確率 $\sum_{k \in \text{top-p}} p(k) \geq 
 [^14]: Relative Performance of Fisher Information in Interval Estimation. (2021). *arXiv preprint*.
 [https://arxiv.org/abs/2107.04620](https://arxiv.org/abs/2107.04620)
 
-[^15]: Maximum Ideal Likelihood Estimator: A New Estimation and Inference Framework for Latent Variable Models. (2024). *arXiv preprint*.
+[^15]: Maximum Ideal Likelihood Estimation: A Unified Inference Framework for Latent Variable Models. (2024). *arXiv preprint*.
 [https://arxiv.org/abs/2410.01194](https://arxiv.org/abs/2410.01194)
 
 [^16]: A Latent-Variable Formulation of the Poisson Canonical Polyadic Tensor Model: Maximum Likelihood Estimation and Fisher Information. (2025). *arXiv preprint*.
@@ -1503,7 +1500,7 @@ Nucleus sampling（Top-p）は累積確率 $\sum_{k \in \text{top-p}} p(k) \geq 
 [^20]: Alpha Entropy Search for New Information-based Bayesian Optimization. (2024). *arXiv preprint*.
 [https://arxiv.org/abs/2411.16586](https://arxiv.org/abs/2411.16586)
 
-[^21]: Connecting Jensen-Shannon and Kullback-Leibler. (2025). *arXiv preprint*.
+[^21]: Dorent, R., et al. (2025). Connecting Jensen-Shannon and Kullback-Leibler Divergences: A New Bound for Representation Learning. *arXiv preprint*.
 [https://arxiv.org/abs/2510.20644](https://arxiv.org/abs/2510.20644)
 
 [^22]: GAIT: A Geometric Approach to Information Theory. (2019). *arXiv preprint*.
@@ -1512,7 +1509,7 @@ Nucleus sampling（Top-p）は累積確率 $\sum_{k \in \text{top-p}} p(k) \geq 
 [^23]: Statistical Inference for Random Unknowns via Modifications of Extended Likelihood. (2023). *arXiv preprint*.
 [https://arxiv.org/abs/2310.09955](https://arxiv.org/abs/2310.09955)
 
-[^24]: Maximum Ideal Likelihood Estimator: An New Estimation and Inference Framework for Latent Variable Models. (2024). *arXiv preprint*.
+[^24]: Maximum Ideal Likelihood Estimation: A Unified Inference Framework for Latent Variable Models. (2024). *arXiv preprint*.
 [https://arxiv.org/abs/2410.01194](https://arxiv.org/abs/2410.01194)
 
 ---

@@ -4,7 +4,14 @@ emoji: "🔀"
 type: "tech"
 topics: ["machinelearning", "deeplearning", "attention", "mamba", "julia"]
 published: true
+slug: "ml-lecture-18-part2"
+difficulty: "advanced"
+time_estimate: "90 minutes"
+languages: ["Julia", "Rust"]
+keywords: ["機械学習", "深層学習", "生成モデル"]
 ---
+
+**← Part1（理論編）**: [第18回 Part1](./ml-lecture-18-part1)
 
 ## 💻 4. 実装ゾーン（45分）— Julia/Rust Hybrid実装
 
@@ -105,12 +112,12 @@ function forward(model::TinyHybridModel, x::Matrix{Float64})
             attn_out = attn * V
             attn_out = attn_out * layer[:W_O]
 
-            h = h + attn_out  # residual
+            h .+= attn_out  # residual (in-place, zero alloc)
 
             # FFN
             z_ffn = layer_norm(h)
             ffn_out = relu.(z_ffn * layer[:W_ffn1]) * layer[:W_ffn2]
-            h = h + ffn_out
+            h .+= ffn_out
         else
             # SSM block
             z = layer_norm(h)
@@ -118,12 +125,12 @@ function forward(model::TinyHybridModel, x::Matrix{Float64})
             # Simplified SSM: just linear transformation (full SSM too complex for demo)
             ssm_out = z * layer[:A]
 
-            h = h + ssm_out  # residual
+            h .+= ssm_out  # residual (in-place, zero alloc)
 
             # FFN
             z_ffn = layer_norm(h)
             ffn_out = relu.(z_ffn * layer[:W_ffn1]) * layer[:W_ffn2]
-            h = h + ffn_out
+            h .+= ffn_out
         end
     end
 
@@ -176,8 +183,8 @@ function train!(model::TinyHybridModel, X_train::Matrix{Float64}, y_train::Vecto
 
         # Mini-batch training (batch_size=32)
         for i in 1:32:size(X_train, 1)
-            batch_X = X_shuffled[i:min(i+31, end), :]
-            batch_y = y_shuffled[i:min(i+31, end)]
+            @views batch_X = X_shuffled[i:min(i+31, end), :]
+            @views batch_y = y_shuffled[i:min(i+31, end)]
 
             # Forward
             logits = forward(model, batch_X)
@@ -238,7 +245,7 @@ B = randn(8, 8) / sqrt(8)
 x = randn(10, 8)  # 10 steps
 h = zeros(10, 8)
 
-for t in 1:10
+@views @inbounds for t in 1:10
     h[t, :] = (t > 1 ? A * h[t-1, :] : zeros(8)) + B * x[t, :]
 end
 
@@ -280,7 +287,7 @@ impl HybridModel {
     fn forward(&self, input: &Array2<f32>) -> Array2<f32> {
         let mut x = input.clone();
 
-        for (layer_idx, layer) in self.layers.iter().enumerate() {
+        for layer in &self.layers {
             match layer {
                 LayerType::Attention { q, k, v, o } => {
                     // Attention forward
@@ -288,16 +295,17 @@ impl HybridModel {
                     let k_mat = x.dot(&self.weights[*k]);
                     let v_mat = x.dot(&self.weights[*v]);
 
-                    let scores = q_mat.dot(&k_mat.t()) / (k_mat.shape()[1] as f32).sqrt();
-                    let attn = softmax(&scores, Axis(1));
-                    let attn_out = attn.dot(&v_mat).dot(&self.weights[*o]);
+                    let d_k = (k_mat.shape()[1] as f32).sqrt();
+                    let attn_out = softmax(&(q_mat.dot(&k_mat.t()) / d_k), Axis(1))
+                        .dot(&v_mat)
+                        .dot(&self.weights[*o]);
 
-                    x = &x + &attn_out;  // residual
+                    x += &attn_out;  // residual
                 },
-                LayerType::SSM { a, b, c } => {
+                LayerType::SSM { a, .. } => {
                     // SSM forward (simplified: linear transformation)
                     let ssm_out = x.dot(&self.weights[*a]);
-                    x = &x + &ssm_out;  // residual
+                    x += &ssm_out;  // residual
                 }
             }
 
@@ -309,8 +317,11 @@ impl HybridModel {
 }
 
 fn softmax(x: &Array2<f32>, axis: Axis) -> Array2<f32> {
-    // Softmax implementation (use ndarray-stats or manual)
-    unimplemented!("Use ndarray-stats crate")
+    let max = x.fold_axis(axis, f32::NEG_INFINITY, |&a, &b| a.max(b));
+    let shifted = x - &max.insert_axis(axis);
+    let exp = shifted.mapv(f32::exp);
+    let sum = exp.sum_axis(axis).insert_axis(axis);
+    exp / sum
 }
 
 fn main() {
@@ -346,30 +357,23 @@ fn main() {
 use std::simd::f32x8;
 
 fn matmul_simd(a: &[f32], b: &[f32], m: usize, n: usize, k: usize) -> Vec<f32> {
-    let mut c = vec![0.0f32; m * n];
+    (0..m * n).map(|idx| {
+        let (i, j) = (idx / n, idx % n);
+        let mut sum = f32x8::splat(0.0);
 
-    for i in 0..m {
-        for j in 0..n {
-            let mut sum = f32x8::splat(0.0);
-
-            // SIMD loop: process 8 elements at once
-            for kk in (0..k).step_by(8) {
-                let a_vec = f32x8::from_slice(&a[i*k + kk..]);
-                let b_vec = f32x8::from_slice(&b[kk*n + j..]);  // needs transpose
-                sum += a_vec * b_vec;
-            }
-
-            c[i*n + j] = sum.reduce_sum();
+        // SIMD loop: process 8 elements at once
+        for kk in (0..k).step_by(8) {
+            let a_vec = f32x8::from_slice(&a[i*k + kk..]);
+            let b_vec = f32x8::from_slice(&b[kk*n + j..]);  // needs transpose
+            sum += a_vec * b_vec;
         }
-    }
 
-    c
+        sum.reduce_sum()
+    }).collect()
 }
 ```
 
-:::message
-**進捗: 70% 完了** Julia訓練実装、Math-Code対応、Rust推論の骨格を理解した。次はZone 5の実験ゾーン — Pure vs Hybrid の性能比較実験を行う。
-:::
+> **Note:** **進捗: 70% 完了** Julia訓練実装、Math-Code対応、Rust推論の骨格を理解した。次はZone 5の実験ゾーン — Pure vs Hybrid の性能比較実験を行う。
 
 ---
 
@@ -492,36 +496,22 @@ Hybrid (Jamba):
 ```julia
 # Sequence length scaling experiment
 function compute_scaling(seq_lengths::Vector{Int}, d::Int=128, L::Int=6)
-    results = Dict()
-
-    for model_type in [:transformer, :mamba, :hybrid]
-        costs = []
-        mems = []
-
-        for N in seq_lengths
-            if model_type == :transformer
-                # O(N^2 d L)
-                cost = L * N^2 * d
-                mem = N^2  # KV cache
-            elseif model_type == :mamba
-                # O(N d L)
-                cost = L * N * d
-                mem = d  # state vector
-            else  # :hybrid (1/6 attention)
-                L_attn = 1
-                L_ssm = 5
-                cost = L_attn * N^2 * d + L_ssm * N * d
-                mem = N^2 / 6  # partial KV cache
-            end
-
-            push!(costs, cost / 1e6)  # MFLOPs
-            push!(mems, mem / 1024)  # KB
+    function flops_mem(model_type, N)
+        if model_type == :transformer
+            L * N^2 * d, N^2               # O(N^2 d L), KV cache
+        elseif model_type == :mamba
+            L * N * d, d                   # O(N d L), state vector
+        else  # :hybrid (1/6 attention)
+            L_attn, L_ssm = 1, 5
+            L_attn * N^2 * d + L_ssm * N * d, N^2 ÷ 6  # partial KV cache
         end
-
-        results[model_type] = (costs=costs, mems=mems)
     end
 
-    return results
+    Dict(t => begin
+        pairs = [flops_mem(t, N) for N in seq_lengths]
+        (costs = [c / 1e6 for (c, _) in pairs],   # MFLOPs
+         mems  = [m / 1024 for (_, m) in pairs])   # KB
+    end for t in [:transformer, :mamba, :hybrid])
 end
 
 seq_lengths = [512, 1024, 2048, 4096, 8192, 16384]
@@ -602,27 +592,13 @@ function ablation_attention_ratio()
     rs = 0.0:0.05:1.0
     N, d, L = 4096, 128, 24
 
-    results = []
-
-    for r in rs
-        # Compute cost
-        cost = compute_cost(N, d, L, r).total / 1e9  # GFLOPs
-
-        # Memory
-        mem = memory_usage(N, d, L, r).total  # MB
-
-        # Simulated performance (fictional formula for demonstration)
-        # Language modeling: plateaus quickly with r
-        perf_lm = 100.0 - 5.0 * (1 - r)^2
-
-        # Associative recall: needs higher r
-        perf_recall = 100.0 * (1 - exp(-10 * r))
-
-        # Few-shot ICL: strongly depends on r
-        perf_fewshot = 100.0 * min(1.0, r * 5)
-
-        push!(results, (r=r, cost=cost, mem=mem, lm=perf_lm, recall=perf_recall, fewshot=perf_fewshot))
-    end
+    results = [(r        = r,
+                cost     = compute_cost(N, d, L, r).total / 1e9,       # GFLOPs
+                mem      = memory_usage(N, d, L, r).total,              # MB
+                lm       = 100.0 - 5.0 * (1 - r)^2,                    # plateaus quickly with r
+                recall   = 100.0 * (1 - exp(-10r)),                     # needs higher r
+                fewshot  = 100.0 * min(1.0, 5r))                        # strongly depends on r
+               for r in rs]
 
     return results
 end
@@ -722,8 +698,7 @@ function compare_placement_patterns()
         (early=96.0, late=97.0, icl=94.0, coherence=98.0),  # Uniform
     ]
 
-    for (i, (name, indices)) in enumerate(patterns)
-        perf = performances[i]
+    for ((name, _), perf) in zip(patterns, performances)
         @printf("%-26s | %8.1f | %7.1f | %3.0f | %9.1f |\n",
                 name, perf.early, perf.late, perf.icl, perf.coherence)
     end
@@ -798,22 +773,6 @@ println(output)  # "A fluffy orange cat sitting on a windowsill..."
 """)
 ```
 
-**実際の推論** (Pythonで実行する場合):
-
-```python
-from transformers import AutoModelForVision2Seq, AutoProcessor
-from PIL import Image
-
-model = AutoModelForVision2Seq.from_pretrained("HuggingFaceTB/SmolVLM2-Instruct")
-processor = AutoProcessor.from_pretrained("HuggingFaceTB/SmolVLM2-Instruct")
-
-image = Image.open("cat.jpg")
-inputs = processor(images=image, text="Describe this image", return_tensors="pt")
-
-outputs = model.generate(**inputs, max_length=50)
-print(processor.decode(outputs[0], skip_special_tokens=True))
-```
-
 ### 5.4 自己診断テスト
 
 #### Test 1: Hybrid設計パターンの理解
@@ -825,7 +784,8 @@ B. Jamba-style ($L_\text{attn}=3$, $L_\text{ssm}=21$)
 C. Zamba-style ($L_\text{attn}=2$ shared, $L_\text{ssm}=22$)
 D. Pure Mamba ($L_\text{attn}=0$)
 
-:::details 解答
+<details><summary>解答</summary>
+
 **答え: D (Pure Mamba)**
 
 計算量:
@@ -835,13 +795,15 @@ D. Pure Mamba ($L_\text{attn}=0$)
 - D: $24 \cdot 8192 \cdot 128 \approx 0.025$ GFLOPs
 
 D (Pure Mamba) が圧倒的に小さい。ただし **性能とのトレードオフ** があり、Associative recallではAttention必要。
-:::
+
+</details>
 
 #### Test 2: Attention=SSM双対性
 
 **問題**: 第17回で学んだ「Attention=SSM双対性 (SSD)」の本質を説明せよ。
 
-:::details 解答
+<details><summary>解答</summary>
+
 **Mamba-2/SSD [^4] の証明**:
 
 Attention行列 $A \in \mathbb{R}^{N \times N}$ は **Semi-Separable行列** として表現できる:
@@ -860,7 +822,8 @@ $$
 $$
 
 **結論**: AttentionとSSMは「同じ計算を異なる形で表現」している。見た目の違いは実装の問題。
-:::
+
+</details>
 
 #### Test 3: Hybrid vs Pure の選択基準
 
@@ -870,11 +833,13 @@ $$
 2. Long document summarization (100K tokens)
 3. Real-time streaming speech recognition
 
-:::details 解答
+<details><summary>解答</summary>
+
 1. **Hybrid or Pure Attention** — Few-shot learning はAttentionの強み (ICL)。HybridならAttention比率高め ($r \geq 0.25$)。
 2. **Hybrid (Jamba/Zamba)** — 100Kトークンは Pure Attention で $O(N^2)$ 爆発。Hybridで効率化しつつ、Attentionで要約品質保持。
 3. **Pure SSM or Hybrid (SSM-heavy)** — ストリーミングは逐次処理。SSMの $O(1)$ 状態更新が最適。Attention は不要。
-:::
+
+</details>
 
 #### Test 4: 計算量とメモリのトレードオフ
 
@@ -888,7 +853,7 @@ rs = 0.0:0.05:1.0
 compute_costs = [compute_cost(4096, 128, 24, r).total / 1e9 for r in rs]
 
 # Simulated perplexity (fictional formula for demo)
-perplexities = [8.0 + 2.0 * (1 - r)^2 for r in rs]
+perplexities = @. 8.0 + 2.0 * (1 - rs)^2
 
 plot(compute_costs, perplexities, marker=:circle, label="Hybrid design space",
      xlabel="Compute Cost (GFLOPs)", ylabel="Perplexity (lower is better)",
@@ -913,11 +878,13 @@ scatter!([zamba_cost], [zamba_ppl], marker=:diamond, markersize=10, label="Zamba
 2. Mamba-style Selective SSM ($\Delta, B, C$ を入力依存にする)
 3. 訓練ループ (Adam optimizer, learning rate scheduling)
 
-:::details ヒント
+<details><summary>ヒント</summary>
+
 - Multi-Head: `W_Q, W_K, W_V` を head数分に分割 → `rearrange` で `(batch, seq, heads, d_head)`
 - Selective SSM: `Δ = σ(Linear_Δ(x))` で入力依存の時間ステップ
 - Adam: `Flux.jl` or `Optim.jl` を使う
-:::
+
+</details>
 
 ### 5.5 Self-Check Checklist
 
@@ -932,11 +899,14 @@ Lecture 18修了前に確認しよう:
 - [ ] Pareto最適の概念を理解し、Jambaの設計決定を正当化できる
 - [ ] Course IIの10回 (VI→VAE→OT→GAN→AR→Attention→SSM→Hybrid) を振り返ることができる
 
-:::message
-**進捗: 85% 完了** 実験・比較・SmolVLMデモ・自己診断を完了した。次はZone 6の発展ゾーン — 研究landscape、NAS、dynamic switchingを見る。
-:::
+> **Note:** **進捗: 85% 完了** 実験・比較・SmolVLMデモ・自己診断を完了した。次はZone 6の発展ゾーン — 研究landscape、NAS、dynamic switchingを見る。
 
 ---
+
+> Progress: 85%
+> **理解度チェック**
+> 1. Tiny Hybrid Julia実装で、SSM層とAttention層のLayer比率を変えたアブレーション実験から何が分かるか？
+> 2. Rust推論パイプラインでSSM再帰とAttention並列を「切り替える」実装上の鍵は何か？
 
 ## 🎓 6. 振り返りゾーン（30分）— まとめ・発展・問い
 
@@ -1048,7 +1018,7 @@ println("------------------|-----|-----|--------|------------|---------|")
 
 for model in [:pure_transformer, :pure_ssm, :hybrid]
     scores = expressivity_score(model)
-    overall = mean([scores[:cfl], scores[:csl], scores[:recall], scores[:efficiency]])
+    overall = mean(values(scores))  # mean over all dimensions
     @printf("%-17s | %3d | %3d | %6d | %10d | %7.1f |\n",
             String(model), scores[:cfl], scores[:csl], scores[:recall], scores[:efficiency], overall)
 end
@@ -1159,14 +1129,8 @@ function nas_hybrid_search(n_trials::Int=100)
     return best_arch
 end
 
-function sample_architecture()
-    # Random sampling from design space
-    L = 24
-    r_attn = rand() * 0.5  # 0-50% attention
-    pattern = rand([:alternation, :shared, :local_global])
-
-    return (L=L, r_attn=r_attn, pattern=pattern)
-end
+# Random sampling from design space (0-50% attention, 24 layers)
+sample_architecture() = (L=24, r_attn=rand() * 0.5, pattern=rand([:alternation, :shared, :local_global]))
 ```
 
 **課題**: NAS は計算コスト大 (100+ trials × 訓練)。**Proxy task** (小規模データ・モデル) で初期探索 → 本番で fine-tune。
@@ -1208,18 +1172,9 @@ $$
 ```julia
 # Dynamic routing pseudo-code
 function dynamic_hybrid_layer(x::Matrix{Float64}, w_gate::Vector{Float64}, threshold::Float64=0.5)
-    # Compute global feature
-    h_global = mean(x, dims=1)  # (1, d)
-
-    # Gate score
-    gate_score = sigmoid(dot(w_gate, h_global[:]))
-
-    # Route
-    if gate_score > threshold
-        return attention_layer(x)  # "need attention"
-    else
-        return ssm_layer(x)  # "SSM sufficient"
-    end
+    h_global   = mean(x, dims=1)                       # (1, d) global feature
+    gate_score = sigmoid(dot(w_gate, vec(h_global)))   # scalar routing score
+    gate_score > threshold ? attention_layer(x) : ssm_layer(x)  # "need attention" : "SSM sufficient"
 end
 
 sigmoid(x) = 1.0 / (1.0 + exp(-x))
@@ -1265,19 +1220,9 @@ struct HybridExpert
 end
 
 function mohe_forward(mohe::MoHELayer, x::Matrix{Float64})
-    # Compute router scores
-    h_global = mean(x, dims=1)  # (1, d)
-    logits = h_global * mohe.router  # (1, K)
-    probs = softmax(logits, dims=2)  # (1, K)
-
-    # Weighted sum over experts
-    y = zeros(size(x))
-    for (i, expert) in enumerate(mohe.experts)
-        expert_out = hybrid_forward(expert, x)
-        y += probs[i] * expert_out
-    end
-
-    return y
+    probs = softmax(mean(x, dims=1) * mohe.router, dims=2)  # (1, K) router scores
+    # Weighted sum over experts (generator accumulation, zero temp alloc)
+    sum(probs[i] .* hybrid_forward(expert, x) for (i, expert) in enumerate(mohe.experts))
 end
 
 # Initialize MoHE with 3 experts
@@ -1347,7 +1292,7 @@ $$
 | **Attention Is All You Need** | Vaswani+ (2017) | Transformer原論文 | Lec 14基礎 |
 | **Deep Learning** | Goodfellow+ (2016) | DL教科書、RNN/CNN基礎 | Lec 9基礎 |
 | **Probabilistic Machine Learning** | Murphy (2022-2023) | ベイズML完全版 | Course I確率論 |
-| **State Space Models (survey)** | Gu+ (2025) | S4→Mamba包括的サーベイ | [arXiv:2503.18970](https://arxiv.org/abs/2503.18970) [^6] |
+| **State Space Models (survey)** | Somvanshi+ (2025) | S4→Mambaサーベイ | [arXiv:2503.18970](https://arxiv.org/abs/2503.18970) [^6] |
 
 #### Online Resources
 
@@ -1367,7 +1312,7 @@ $$
 3. **Samba** (未公開): Microsoft MoE+SSM+Attn hybrid
 4. **CPA O(n log n) Attention** (Nature 2025): 準線形Attention近似
 
-### 6.6 :::details 用語集 (Lecture 18)
+### 6.6 用語集 (Lecture 18)
 
 | 用語 | 定義 |
 |:-----|:-----|
@@ -1426,9 +1371,7 @@ mindmap
       MoE Hybrid
 ```
 
-:::message
-**進捗: 95% 完了** 研究landscape、NAS、Dynamic Hybrid、参考文献を完了した。最後はZone 7 — Course II振り返り + Course III予告。
-:::
+> **Note:** **進捗: 95% 完了** 研究landscape、NAS、Dynamic Hybrid、参考文献を完了した。最後はZone 7 — Course II振り返り + Course III予告。
 
 ---
 
@@ -1604,19 +1547,17 @@ Course I (第1-8回) の数学が、Course IIでどう使われたか:
 2. FFI概念の復習（第9-18回で既出）
 3. 実装環境の構築準備（第19回で詳細解説）
 
-:::message
-**進捗: 100% 完了** 🎉
-
-**Course II: 生成モデル理論編 完全読了！**
-
-10回の旅路で、変分推論・VAE・最適輸送・GAN・自己回帰・Attention・SSM・Mamba・Hybridの理論と実装を完全習得した。
-
-**「論文が読める」→「論文が書ける」レベルに到達。**
-
-次はCourse III「実践編」で、理論を「動くシステム」に変える技術を身につける。
-
-🚀 **Let's dive into Course III!**
-:::
+> **Note:** **進捗: 100% 完了** 🎉
+>
+> **Course II: 生成モデル理論編 完全読了！**
+>
+> 10回の旅路で、変分推論・VAE・最適輸送・GAN・自己回帰・Attention・SSM・Mamba・Hybridの理論と実装を完全習得した。
+>
+> **「論文が読める」→「論文が書ける」レベルに到達。**
+>
+> 次はCourse III「実践編」で、理論を「動くシステム」に変える技術を身につける。
+>
+> 🚀 **Let's dive into Course III!**
 
 ---
 
@@ -1655,57 +1596,62 @@ Jamba、Zamba、Griffin、StripedHyena — どれも「ハイブリッド」を�
 
 ---
 
+> Progress: 95%
+> **理解度チェック**
+> 1. Neural Architecture Search (NAS) がハイブリッドSSM設計に応用された場合、探索空間はどのように定義されるか？
+> 2. Dynamic Hybrid（タスク適応的切替）は静的なLayer交互配置と比べ、どのようなシナリオで優位か？
+
 ## 参考文献
 
 ### 主要論文
 
 [^1]: Lieber, O., Lenz, B., et al. (2024). "Jamba: A Hybrid Transformer-Mamba Language Model". *arXiv:2403.19887*.
-@[card](https://arxiv.org/abs/2403.19887)
+<https://arxiv.org/abs/2403.19887>
 
 [^2]: Glorioso, P., Anthony, Q., et al. (2024). "Zamba: A Compact 7B SSM Hybrid Model". *arXiv:2405.16712*.
-@[card](https://arxiv.org/abs/2405.16712)
+<https://arxiv.org/abs/2405.16712>
 
 [^3]: De, S., Smith, S. L., et al. (2024). "Griffin: Mixing Gated Linear Recurrences with Local Attention for Efficient Language Models". *arXiv:2402.19427*.
-@[card](https://arxiv.org/abs/2402.19427)
+<https://arxiv.org/abs/2402.19427>
 
 [^4]: Google DeepMind (2024). "RecurrentGemma: Moving Past Transformers for Efficient Open Language Models". *arXiv:2404.07839*.
-@[card](https://arxiv.org/abs/2404.07839)
+<https://arxiv.org/abs/2404.07839>
 
 [^5]: Together AI (2024). "StripedHyena: Paving the way to efficient architectures".
-@[card](https://www.together.ai/blog/stripedhyena-7b)
+<https://www.together.ai/blog/stripedhyena-7b>
 
-[^6]: Gu, A., Dao, T. (2025). "From S4 to Mamba: A Comprehensive Survey on Structured State Space Models". *arXiv:2503.18970*.
-@[card](https://arxiv.org/abs/2503.18970)
+[^6]: Somvanshi, S., et al. (2025). "From S4 to Mamba: A Comprehensive Survey on Structured State Space Models". *arXiv:2503.18970*.
+<https://arxiv.org/abs/2503.18970>
 
-[^7]: Patel, D., et al. (2025). "Characterizing State Space Model (SSM) and SSM-Transformer Hybrid Language Model Performance with Long Context Length". *arXiv:2507.12442*.
-@[card](https://arxiv.org/abs/2507.12442)
+[^7]: Mitra, S., et al. (2025). "Characterizing State Space Model (SSM) and SSM-Transformer Hybrid Language Model Performance with Long Context Length". *arXiv:2507.12442*.
+<https://arxiv.org/abs/2507.12442>
 
 [^8]: Vaswani, A., Shazeer, N., et al. (2017). "Attention Is All You Need". *NeurIPS 2017*.
-@[card](https://arxiv.org/abs/1706.03762)
+<https://arxiv.org/abs/1706.03762>
 
 [^9]: Gu, A., Goel, K., Ré, C. (2021). "Efficiently Modeling Long Sequences with Structured State Spaces". *ICLR 2022*.
-@[card](https://arxiv.org/abs/2111.00396)
+<https://arxiv.org/abs/2111.00396>
 
 [^10]: Liu, H., Simonyan, K., Yang, Y. (2018). "DARTS: Differentiable Architecture Search". *ICLR 2019*.
-@[card](https://arxiv.org/abs/1806.09055)
+<https://arxiv.org/abs/1806.09055>
 
 [^11]: Pham, H., Guan, M. Y., et al. (2018). "Efficient Neural Architecture Search via Parameter Sharing". *ICML 2018*.
-@[card](https://arxiv.org/abs/1802.03268)
+<https://arxiv.org/abs/1802.03268>
 
 [^12]: Guo, Z., Zhang, X., et al. (2020). "Single Path One-Shot Neural Architecture Search with Uniform Sampling". *ECCV 2020*.
-@[card](https://arxiv.org/abs/1904.00420)
+<https://arxiv.org/abs/1904.00420>
 
 [^13]: Real, E., Liang, C., et al. (2020). "AutoML-Zero: Evolving Machine Learning Algorithms From Scratch". *ICML 2020*.
-@[card](https://arxiv.org/abs/2003.03384)
+<https://arxiv.org/abs/2003.03384>
 
 [^14]: White, C., Neiswanger, W., et al. (2021). "BANANAS: Bayesian Optimization with Neural Architectures for Neural Architecture Search". *AAAI 2021*.
-@[card](https://arxiv.org/abs/1910.11858)
+<https://arxiv.org/abs/1910.11858>
 
 [^15]: Jang, E., Gu, S., Poole, B. (2017). "Categorical Reparameterization with Gumbel-Softmax". *ICLR 2017*.
-@[card](https://arxiv.org/abs/1611.01144)
+<https://arxiv.org/abs/1611.01144>
 
 [^16]: Shazeer, N., Mirhoseini, A., et al. (2017). "Outrageously Large Neural Networks: The Sparsely-Gated Mixture-of-Experts Layer". *ICLR 2017*.
-@[card](https://arxiv.org/abs/1701.06538)
+<https://arxiv.org/abs/1701.06538>
 
 ### 教科書
 
@@ -1713,49 +1659,13 @@ Jamba、Zamba、Griffin、StripedHyena — どれも「ハイブリッド」を�
 - Goodfellow, I., Bengio, Y., Courville, A. (2016). *Deep Learning*. MIT Press. [deeplearningbook.org](https://www.deeplearningbook.org/)
 - Gu, A., et al. (2025). *State Space Models: From Classical Control to Modern Sequence Modeling*. (Survey paper, draft).
 
-## 記法規約
+## 著者リンク
 
-本講義で使用した数学記号・プログラミング記法の一覧。
-
-| 記号 | 読み | 意味 | 例 |
-|:-----|:-----|:-----|:---|
-| $N$ | エヌ | 系列長 (sequence length) | $N=4096$ |
-| $d, d_k, d_v$ | ディー | 隠れ次元 (hidden dimension) | $d=128$ |
-| $L$ | エル | 層数 (number of layers) | $L=24$ |
-| $r$ | アール | Attention比率 (attention ratio) | $r = L_\text{attn} / L$ |
-| $L_\text{attn}, L_\text{ssm}$ | エル アテンション/エスエスエム | Attention層/SSM層の数 | $L_\text{attn}=3, L_\text{ssm}=21$ |
-| $\mathcal{L}_\text{attn}, \mathcal{L}_\text{ssm}$ | エル アテンション/エスエスエム | Attention層/SSM層のインデックス集合 | $\mathcal{L}_\text{attn} = \{8, 16, 24\}$ |
-| $Q, K, V$ | キュー、ケー、ヴイ | Query, Key, Value行列 | $Q = \mathbf{X} W^Q$ |
-| $\mathbf{h}_t$ | エイチ ティー | 時刻 $t$ の状態ベクトル (SSM) | $\mathbf{h}_t \in \mathbb{R}^d$ |
-| $\Delta, \mathbf{B}, \mathbf{C}$ | デルタ、ビー、シー | SSMのパラメータ (Mamba) | 入力依存 |
-| $O(N^2 d)$ | オー エヌ二乗 ディー | Attentionの計算量 | 系列長の2乗に比例 |
-| $O(N d)$ | オー エヌ ディー | SSMの計算量 | 系列長に線形 |
-| $\alpha$ | アルファ | 重み付けパラメータ (StripedHyena) | $\alpha \in [0, 1]$ |
-| `@` | at | Julia行列積演算子 | `A @ B` ≡ `A * B` |
-| `.=` | ドット イコール | Juliaブロードキャスト代入 | `A .= f.(B)` |
-| `einsum` | アインサム | Einstein記法での和 | `np.einsum('ik,kj->ij', A, B)` |
-| `softmax` | ソフトマックス | 正規化指数関数 | $p_i = \exp(x_i) / \sum_j \exp(x_j)$ |
-| `layer_norm` | レイヤー ノーム | 層正規化 | $(x - \mu) / \sqrt{\sigma^2 + \epsilon}$ |
-
-**プログラミング慣例**:
-- Julia: `function`, `end`, `struct`, `mutable struct`, `.` (broadcast), `@` (行列積)
-- Rust: `fn`, `impl`, `struct`, `&` (借用), `mut` (可変)
-- 変数命名: `snake_case` (Julia/Rust), `PascalCase` (型名)
-
----
-
-**本講義は以上です。Course II完全読了、おめでとうございます！** 🎉
-
-Course IIIでは、理論を「動くシステム」に変える実践技術を学びます。Elixirによる分散推論、訓練パイプライン、評価指標、デプロイ、MLOpsの全てをカバーします。
-
-**次回、第19回: Elixir登場 — 分散推論 & 耐障害性でお会いしましょう！** 🔮
-
----
-
-**執筆: 2026-02-11**
-**Course II: 生成モデル理論編 (第9-18回) 完結**
-
----
+- Blog: https://fumishiki.dev
+- X: https://x.com/fumishiki
+- LinkedIn: https://www.linkedin.com/in/fumitakamurakami
+- GitHub: https://github.com/fumishiki
+- Hugging Face: https://huggingface.co/fumishiki
 
 ## ライセンス
 

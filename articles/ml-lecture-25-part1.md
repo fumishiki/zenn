@@ -5,7 +5,14 @@ emoji: "🔗"
 type: "tech"
 topics: ["machinelearning", "causalinference", "julia", "statistics", "experiment"]
 published: true
+difficulty: "advanced"
+time_estimate: "90 minutes"
+languages: ["Julia", "Rust", "Elixir"]
+keywords: ["機械学習", "深層学習", "生成モデル"]
 ---
+
+> **第25回【後編】**: [第25回【後編】](https://zenn.dev/fumishiki/ml-lecture-25-part2)
+
 
 # 第25回: 因果推論 — 相関は因果ではない、正しい効果測定の技法
 
@@ -15,9 +22,7 @@ published: true
 
 本講義では、Rubin因果モデル（潜在的結果フレームワーク）とPearl因果理論（構造因果モデル・do-演算）の2大理論を完全習得し、傾向スコア・操作変数法・RDD・DiDといった実践手法を、数式からJulia実装まで一貫して学ぶ。
 
-:::message
-**このシリーズについて**: 東京大学 松尾・岩澤研究室動画講義の**完全上位互換**の全50回シリーズ。理論（論文が書ける）、実装（Production-ready）、最新（2024-2026 SOTA）の3軸で差別化する。
-:::
+> **Note:** **このシリーズについて**: 東京大学 松尾・岩澤研究室動画講義の**完全上位互換**の全50回シリーズ。理論（論文が書ける）、実装（Production-ready）、最新（2024-2026 SOTA）の3軸で差別化する。
 
 ```mermaid
 graph TD
@@ -62,12 +67,12 @@ using Statistics, LinearAlgebra
 function generate_observational_data(n::Int=1000)
     X = randn(n, 2)  # confounders: age, income (standardized)
     # Treatment assignment depends on confounders (selection bias)
-    propensity = 1 ./ (1 .+ exp.(-X[:, 1] - 0.5 * X[:, 2]))
+    @views propensity = @. 1 / (1 + exp(-X[:,1] - 0.5X[:,2]))
     D = rand(n) .< propensity  # biased treatment assignment
 
     # True causal effect: treatment adds +2 to outcome
     # Outcome also depends on confounders (confounding)
-    Y = 2 * D .+ X[:, 1] + 0.5 * X[:, 2] + randn(n) * 0.5
+    @views Y = 2 .* D .+ X[:,1] .+ 0.5 .* X[:,2] .+ randn(n) .* 0.5
 
     return D, X, Y, propensity
 end
@@ -80,7 +85,7 @@ println("Naive ATE (confounded): $(round(naive_ate, digits=3))")
 # Propensity score matching (CORRECT)
 function propensity_score_matching(D, X, Y)
     # Estimate propensity scores e(X) = P(D=1|X)
-    e_hat = 1 ./ (1 .+ exp.(-X[:, 1] - 0.5 * X[:, 2]))  # simplified: use logistic regression
+    @views e_hat = @. 1 / (1 + exp(-X[:,1] - 0.5X[:,2]))  # simplified: use logistic regression
 
     # Inverse Probability Weighting (IPW) estimator
     # ATE = E[Y(1) - Y(0)] = E[D*Y/e(X)] - E[(1-D)*Y/(1-e(X))]
@@ -120,9 +125,7 @@ $$
 
 ここで $e(X) = P(D=1 \mid X)$ は**傾向スコア**（propensity score）、$Y^1, Y^0$ は**潜在的結果**（potential outcomes）だ。この式をRubinとPearlの理論から完全導出していく。
 
-:::message
-**進捗: 3% 完了** 因果推論の威力を体感した。ここから相関vs因果の基礎→Rubin/Pearl理論→実践手法を習得する。
-:::
+> **Note:** **進捗: 3% 完了** 因果推論の威力を体感した。ここから相関vs因果の基礎→Rubin/Pearl理論→実践手法を習得する。
 
 ---
 
@@ -132,40 +135,8 @@ $$
 
 #### 1.1.1 アイスクリームと溺死 — 典型的な交絡の例
 
-```julia
-# 季節を交絡因子とするシミュレーション
-function icecream_drowning_simulation()
-    months = 1:12
-    temperature = 15 .+ 10 * sin.(2π * (months .- 3) / 12)  # seasonal temperature
-
-    # Ice cream sales driven by temperature
-    icecream_sales = 100 .+ 50 * (temperature .- 15) / 10 + randn(12) * 5
-
-    # Drowning incidents driven by temperature (more swimming)
-    drownings = 10 .+ 8 * (temperature .- 15) / 10 + randn(12) * 2
-
-    # Correlation
-    corr_value = cor(icecream_sales, drownings)
-    println("Correlation(Icecream, Drowning): $(round(corr_value, digits=3))")
-
-    # But causal effect is ZERO (temperature is the confounder)
-    # If we control for temperature:
-    residual_icecream = icecream_sales - 50 * (temperature .- 15) / 10
-    residual_drowning = drownings - 8 * (temperature .- 15) / 10
-    partial_corr = cor(residual_icecream, residual_drowning)
-    println("Partial correlation (control temp): $(round(partial_corr, digits=3))")
-
-    return temperature, icecream_sales, drownings
-end
-
-temp, ice, drown = icecream_drowning_simulation()
-```
 
 出力:
-```
-Correlation(Icecream, Drowning): 0.923
-Partial correlation (control temp): -0.089
-```
 
 **強い相関(0.923)があっても、温度を制御すると相関は消える。** これが交絡の典型例だ。
 
@@ -206,43 +177,8 @@ $$
 
 #### 1.1.3 選択バイアス — 誰が処置を受けるか
 
-```julia
-# Selection bias simulation
-function selection_bias_simulation()
-    n = 1000
-    # True ability (unobserved confounder)
-    ability = randn(n)
-
-    # High-ability people more likely to get treatment
-    treatment_prob = 1 ./ (1 .+ exp.(-ability))
-    D = rand(n) .< treatment_prob
-
-    # Outcome depends on BOTH ability and treatment
-    # True treatment effect = +1.0
-    Y = 1.0 * D .+ 2.0 * ability + randn(n) * 0.5
-
-    # Naive comparison
-    naive = mean(Y[D]) - mean(Y[.!D])
-
-    # Selection bias = difference in ability
-    ability_diff = mean(ability[D]) - mean(ability[.!D])
-
-    println("Naive treatment effect: $(round(naive, digits=3))")
-    println("True treatment effect: 1.0")
-    println("Selection bias (ability diff): $(round(2.0 * ability_diff, digits=3))")
-
-    return D, Y, ability
-end
-
-D, Y, ability = selection_bias_simulation()
-```
 
 出力:
-```
-Naive treatment effect: 2.987
-True treatment effect: 1.0
-Selection bias (ability diff): 1.994
-```
 
 **処置を受けた人が元々優秀だったら、効果が過大評価される。** これが選択バイアスだ。
 
@@ -271,11 +207,15 @@ timeline
     2020s : 拡散×統合<br/>Staggered DiD/Sensitivity
 ```
 
-:::message
-**進捗: 10% 完了** 相関vs因果の罠を体感した。ここからRubin/Pearl理論の完全導出に入る。
-:::
+> **Note:** **進捗: 10% 完了** 相関vs因果の罠を体感した。ここからRubin/Pearl理論の完全導出に入る。
 
 ---
+
+
+> Progress: [10%]
+> **理解度チェック**
+> 1. なぜ RCT が因果効果推定の「黄金標準」なのか、潜在的結果フレームワークから説明せよ。
+> 2. ATE $\mathbb{E}[Y^1 - Y^0]$、ATT、CATEの定義の違いを式で示せ。
 
 ## 🧩 2. 直感ゾーン（15分）— なぜ因果推論が必須なのか
 
@@ -367,7 +307,8 @@ graph LR
 | Day 6 | Zone 4 (Julia実装) | 3h |
 | Day 7 | Zone 5-7 (実験/復習) | 2h |
 
-:::details トロイの木馬: Juliaでの因果推論実装
+<details><summary>トロイの木馬: Juliaでの因果推論実装</summary>
+
 本講義では**Julia + CausalInference.jl**を使う。PythonのdoWhyより:
 
 - **DAG操作が直感的**: LightGraphs.jlベース
@@ -375,13 +316,18 @@ graph LR
 - **型安全**: 傾向スコアが[0,1]の範囲外になる前に検出
 
 第24回の統計学で学んだ推定・検定と、本講義の因果推論を組み合わせれば、**論文の結果セクションが完全に読める**ようになる。
-:::
 
-:::message
-**進捗: 20% 完了** 因果推論の全体像を把握した。ここから60分の数式修行に入る — Rubinの潜在的結果からPearlのdo-演算まで完全導出する。
-:::
+</details>
+
+> **Note:** **進捗: 20% 完了** 因果推論の全体像を把握した。ここから60分の数式修行に入る — Rubinの潜在的結果からPearlのdo-演算まで完全導出する。
 
 ---
+
+
+> Progress: [20%]
+> **理解度チェック**
+> 1. バックドア基準を満たす調整変数セットが複数存在するとき、どれを選ぶかの判断基準は？
+> 2. Colliderを誤って条件付けると選択バイアスが生じる理由をd-分離で説明せよ。
 
 ## 📐 3. 数式修行ゾーン（60分）— 因果推論理論の完全構築
 
@@ -509,38 +455,6 @@ $$
 P(Y=1 \mid do(D=1)) - P(Y=1 \mid do(D=0)) \neq P(Y=1 \mid D=1) - P(Y=1 \mid D=0)
 $$
 
-```julia
-# Simpson's Paradox simulation
-function simpsons_paradox()
-    # Hospital A: mostly mild cases
-    hosp_A_treat = [fill(1, 90), fill(0, 10)]  # 90 mild, 10 severe, treatment
-    hosp_A_treat_survival = [fill(1, 50), fill(0, 50)]  # 50% survival
-    hosp_A_control = [fill(1, 80), fill(0, 20)]  # 80 mild, 20 severe, control
-    hosp_A_control_survival = [fill(1, 40), fill(0, 60)]  # 40% survival
-
-    # Hospital B: mostly severe cases
-    hosp_B_treat = [fill(1, 20), fill(0, 80)]  # 20 mild, 80 severe, treatment
-    hosp_B_treat_survival = [fill(1, 90), fill(0, 10)]  # 90% survival
-    hosp_B_control = [fill(1, 30), fill(0, 70)]  # 30 mild, 70 severe, control
-    hosp_B_control_survival = [fill(1, 85), fill(0, 15)]  # 85% survival
-
-    # Overall survival rates (pooled)
-    overall_treat = (50 + 90) / 200  # 70%
-    overall_control = (40 + 85) / 200  # 62.5%
-    overall_effect = overall_treat - overall_control
-
-    # Stratified by severity
-    mild_treat = (50*0.9/90) / (90/100)  # approximate
-    mild_control = (40*0.8/80) / (80/100)
-
-    println("Overall treatment effect: $(round(overall_effect, digits=3))")
-    println("Hospital A effect: $(round(0.10, digits=3))")
-    println("Hospital B effect: $(round(0.05, digits=3))")
-    println("⚠️ Paradox: overall positive, but aggregation hides severity confounding")
-end
-
-simpsons_paradox()
-```
 
 ### 3.2 Rubin因果モデル (Potential Outcomes Framework)
 
@@ -645,57 +559,6 @@ Overlapがないと、反実仮想 $\mathbb{E}[Y^0 \mid D=1, X]$ が推定不能
 
 #### 3.2.5 数値検証: ATE推定
 
-```julia
-using Statistics, Distributions
-
-# ATE estimation under unconfoundedness
-function ate_estimation_demo()
-    n = 10000
-    # Covariate X ~ N(0,1)
-    X = randn(n)
-
-    # Treatment assignment (unconfounded given X)
-    e_X = 1 ./ (1 .+ exp.(-X))  # propensity score
-    D = rand(n) .< e_X
-
-    # Potential outcomes
-    # Y^1 = 2 + X + ε₁
-    # Y^0 = X + ε₀
-    # True ATE = E[Y^1 - Y^0] = 2
-    Y1 = 2 .+ X .+ randn(n) * 0.5
-    Y0 = X .+ randn(n) * 0.5
-
-    # Observed outcome
-    Y = D .* Y1 .+ (1 .- D) .* Y0
-
-    # Naive estimator (biased)
-    ate_naive = mean(Y[D]) - mean(Y[.!D])
-
-    # Regression adjustment (unbiased under unconfoundedness)
-    # E[Y|D=1,X] - E[Y|D=0,X] = CATE(X)
-    # Approximate with linear regression
-    function linear_reg(D, X, Y)
-        # Y ~ β₀ + β₁D + β₂X + β₃DX
-        n = length(Y)
-        design_matrix = hcat(ones(n), D, X, D .* X)
-        β = design_matrix \ Y
-        return β
-    end
-
-    β = linear_reg(D, X, Y)
-    # ATE = E[Y|D=1,X] - E[Y|D=0,X] averaged over X
-    # = β₁ + β₃ * E[X] = β₁ (since E[X]=0)
-    ate_reg = β[2]
-
-    println("True ATE: 2.0")
-    println("Naive ATE: $(round(ate_naive, digits=3))")
-    println("Regression ATE: $(round(ate_reg, digits=3))")
-
-    return ate_naive, ate_reg
-end
-
-ate_estimation_demo()
-```
 
 ### 3.3 Pearl因果理論 (Structural Causal Models)
 
@@ -1043,28 +906,6 @@ $\text{SMD} < 0.1$ なら良好なバランス。
 
 **Love Plot**: 各共変量の SMD をマッチング前後で比較するプロット。
 
-```julia
-# Balance check simulation
-function balance_check(D, X, e_X)
-    # Before matching
-    smd_before = abs(mean(X[D]) - mean(X[.!D])) / sqrt((var(X[D]) + var(X[.!D])) / 2)
-
-    # After IPW weighting
-    weights_1 = D ./ e_X
-    weights_0 = (1 .- D) ./ (1 .- e_X)
-    mean_1_weighted = sum(weights_1 .* X) / sum(weights_1)
-    mean_0_weighted = sum(weights_0 .* X) / sum(weights_0)
-    var_1_weighted = sum(weights_1 .* (X .- mean_1_weighted).^2) / sum(weights_1)
-    var_0_weighted = sum(weights_0 .* (X .- mean_0_weighted).^2) / sum(weights_0)
-    smd_after = abs(mean_1_weighted - mean_0_weighted) / sqrt((var_1_weighted + var_0_weighted) / 2)
-
-    println("SMD before matching: $(round(smd_before, digits=3))")
-    println("SMD after IPW: $(round(smd_after, digits=3))")
-    println(smd_after < 0.1 ? "✅ Good balance" : "❌ Poor balance")
-
-    return smd_before, smd_after
-end
-```
 
 ### 3.5 操作変数法 (Instrumental Variables)
 
@@ -1422,24 +1263,22 @@ $$
 \hat{\tau}(X) = \arg\min_{\tau} \mathbb{E}[(\tilde{Y} - \tilde{D} \tau(X))^2]
 $$
 
-:::message alert
-**ボス戦: 因果効果の完全推定**
-
-以下のシナリオで因果効果を推定せよ:
-
-1. 観測データ: $(D, X, Y)$ with $n=5000$
-2. 未測定交絡 $U$ あり
-3. 操作変数 $Z$ (徴兵くじ) が利用可能
-4. カットオフ $c=18$ (年齢) でRDD適用可能
-5. 2期間データあり (DiD可能)
-
-**タスク**:
-- 各手法 (IPW, IV, RDD, DiD, Causal Forest) で ATE 推定
-- 標準誤差を計算
-- 結果を比較し、最も頑健な推定値を選ぶ
-
-これができれば数式修行ゾーン完全クリア！
-:::
+> **⚠️ Warning:** **ボス戦: 因果効果の完全推定**
+>
+> 以下のシナリオで因果効果を推定せよ:
+>
+> 1. 観測データ: $(D, X, Y)$ with $n=5000$
+> 2. 未測定交絡 $U$ あり
+> 3. 操作変数 $Z$ (徴兵くじ) が利用可能
+> 4. カットオフ $c=18$ (年齢) でRDD適用可能
+> 5. 2期間データあり (DiD可能)
+>
+> **タスク**:
+> - 各手法 (IPW, IV, RDD, DiD, Causal Forest) で ATE 推定
+> - 標準誤差を計算
+> - 結果を比較し、最も頑健な推定値を選ぶ
+>
+> これができれば数式修行ゾーン完全クリア！
 
 ### 3.9 因果発見の最新手法（2023-2026）
 
@@ -1584,23 +1423,6 @@ $$
 
 **アルゴリズム**:
 
-```
-function RecursiveDiscovery(X, Depth=0):
-    if |X| == 1:
-        return Leaf(X)
-
-    # Step 1: Find root node (no parents in X)
-    r = argmin_{x ∈ X} Score(x | X \ {x})
-
-    # Step 2: Identify children of r
-    Children(r) = {x ∈ X \ {r} : x ⊥̸ r | X \ {r, x}}
-
-    # Step 3: Recurse on children
-    for c in Children(r):
-        Subgraph(c) = RecursiveDiscovery(Descendants(c), Depth+1)
-
-    return Graph(r, Children, Subgraphs)
-```
 
 **数式**:
 
@@ -1790,11 +1612,6 @@ $$
 - 実際の長期効果は短期の半分以下
 
 **ハイブリッド戦略**:
-```
-1. A/Bテストで短期因果効果を確認（内部妥当性◎）
-2. A/Bデータを教師として、観測データで長期効果を予測
-3. 傾向スコア・DiDで全ユーザーへの効果を推定（外部妥当性◎）
-```
 
 #### 3.10.5 実践のための推奨事項
 
@@ -1817,13 +1634,24 @@ $$
 4. ✅ **標準誤差**: ブートストラップまたはクラスタ頑健標準誤差
 5. ✅ **可視化**: 傾向スコア分布・共変量バランス・効果の異質性
 
-:::message
-**進捗: 50% 完了** 因果推論理論 + 最新の因果発見手法（HLCD, Differentiable Constraint-Based, Recursive, 時系列）+ 実践応用例まで完全習得した。次は実装ゾーンでJulia + CausalInference.jlで全手法を実装する。
-:::
+> **Note:** **進捗: 50% 完了** 因果推論理論 + 最新の因果発見手法（HLCD, Differentiable Constraint-Based, Recursive, 時系列）+ 実践応用例まで完全習得した。次は実装ゾーンでJulia + CausalInference.jlで全手法を実装する。
 
 ---
 
 ---
+
+
+> Progress: [50%]
+> **理解度チェック**
+> 1. 操作変数法で推定されるLATEがATEと一致しない条件を数式で示せ。
+> 2. DiD推定量の並行トレンド仮定を数式で表し、日本語で解釈せよ。
+
+## 著者リンク
+- Blog: https://fumishiki.dev
+- X: https://x.com/fumishiki
+- LinkedIn: https://www.linkedin.com/in/fumitakamurakami
+- GitHub: https://github.com/fumishiki
+- Hugging Face: https://huggingface.co/fumishiki
 
 ## ライセンス
 

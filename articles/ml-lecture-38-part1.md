@@ -4,17 +4,22 @@ emoji: "🌀"
 type: "tech"
 topics: ["machinelearning", "deeplearning", "flowmatching", "julia", "diffusion"]
 published: true
+slug: "ml-lecture-38-part1"
+difficulty: "advanced"
+time_estimate: "90 minutes"
+languages: ["Julia", "Rust"]
+keywords: ["機械学習", "深層学習", "生成モデル"]
 ---
 
 # 第38回: Flow Matching & 生成モデル統一理論
 
-:::message
-**本講義の位置づけ**
-第37回でSDE/ODEによる連続時間定式化を学んだ。VP-SDE/VE-SDEがDDPM/NCSNを統一し、Probability Flow ODEで決定論的過程へと拡張した。だが、SDEの訓練には確率的軌道のシミュレーションが必要で、計算コストが高い。Flow Matchingは「シミュレーションフリー」な訓練を実現し、より直線的な輸送経路を学習する。本講義では、Flow Matchingの理論、Conditional Flow Matching、Optimal Transport ODE、そして**Score ↔ Flow ↔ Diffusion ↔ ODEの数学的等価性**を完全証明する。生成モデル統一理論への最終章だ。
-
-**前提知識**: 第5回（Itô積分・SDE）、第6回（KL・OT・Wasserstein）、第13回（OT完全版）、第35回（Score Matching）、第36回（DDPM）、第37回（SDE/ODE）
-**次回予告**: 第39回 Latent Diffusion Models（潜在空間拡散・CFG・Text Conditioning）
-:::
+> **Note:** **本講義の位置づけ**
+> 第37回でSDE/ODEによる連続時間定式化を学んだ。VP-SDE/VE-SDEがDDPM/NCSNを統一し、Probability Flow ODEで決定論的過程へと拡張した。だが、SDEの訓練には確率的軌道のシミュレーションが必要で、計算コストが高い。Flow Matchingは「シミュレーションフリー」な訓練を実現し、より直線的な輸送経路を学習する。本講義では、Flow Matchingの理論、Conditional Flow Matching、Optimal Transport ODE、そして**Score ↔ Flow ↔ Diffusion ↔ ODEの数学的等価性**を完全証明する。生成モデル統一理論への最終章だ。
+>
+> **前提知識**: 第5回（Itô積分・SDE）、第6回（KL・OT・Wasserstein）、第13回（OT完全版）、第35回（Score Matching）、第36回（DDPM）、第37回（SDE/ODE）
+> **次回予告**: 第39回 Latent Diffusion Models（潜在空間拡散・CFG・Text Conditioning）
+>
+> **→ 後編（実装編）**: [ml-lecture-38-part2](./ml-lecture-38-part2)
 
 ## 🚀 0. クイックスタート（30秒）— Flow Matchingで直線輸送を体感
 
@@ -33,16 +38,16 @@ x_data = randn(rng, Float32, 1000)
 # ターゲット分布: p_1 = データの経験分布
 
 # Conditional Probability Path (ガウシアン確率パス)
-# p_t(x|x_1) = N(tx_1, (1-t)²σ²)
-conditional_path(t, x_1, x_0) = t * x_1 + (1 - t) * x_0  # μ_t(x_1, x_0)
+# p_t(x|x₁) = N(tx₁, (1-t)²σ²)
+conditional_path(t, x₁, x₀) = @. t * x₁ + (1 - t) * x₀  # μ_t(x₁, x₀)
 
 # Conditional Vector Field (ターゲット方向への速度)
-# u_t(x|x_1) = dx_t/dt = x_1 - x_0
-conditional_vector_field(t, x_1, x_0) = x_1 - x_0
+# u_t(x|x₁) = dx_t/dt = x₁ - x₀
+conditional_vector_field(t, x₁, x₀) = x₁ .- x₀
 
 # Marginal Vector Field (周辺化後の速度場)
-# v_t(x) = E_{x_1~p_1}[u_t(x|x_1) | x_t = x]
-# CFM Loss: L_CFM(θ) = E_{t,x_0,x_1}[||v_θ(t, x_t) - u_t(x|x_1)||²]
+# v_t(x) = E_{x₁~p₁}[u_t(x|x₁) | x_t = x]
+# CFM Loss: L_CFM(θ) = E_{t,x₀,x₁}[||v_θ(t, xₜ) - u_t(x|x₁)||²]
 
 # 簡易ベクトル場ネットワーク: v_θ(t, x) = MLP([t, x])
 model = Chain(
@@ -54,18 +59,18 @@ ps, st = Lux.setup(rng, model)
 
 # CFM損失計算（バッチサンプル）
 function cfm_loss(ps, st, batch_size=32)
-    t = rand(rng, Float32, batch_size)  # t ~ U[0,1]
-    x_0 = randn(rng, Float32, batch_size)  # source: N(0,1)
-    x_1 = rand(rng, x_data, batch_size)  # target: data
-    x_t = t .* x_1 .+ (1 .- t) .* x_0  # conditional path
-    u_t = x_1 .- x_0  # conditional vector field (target velocity)
+    t  = rand(rng, Float32, batch_size)       # t ~ U[0,1]
+    x₀ = randn(rng, Float32, batch_size)      # source: N(0,1)
+    x₁ = rand(rng, x_data, batch_size)        # target: data
+    xₜ = @. t * x₁ + (1 - t) * x₀           # conditional path
+    uₜ = x₁ .- x₀                            # conditional vector field (target velocity)
 
     # Network prediction
-    input = hcat(t', x_t')'  # [2, batch_size]
-    v_pred, st = model(input, ps, st)
+    input = hcat(t', xₜ')'  # [2, batch_size]
+    v_θ, st = model(input, ps, st)
 
     # MSE loss
-    loss = mean((v_pred .- u_t') .^ 2)
+    loss = mean(@. (v_θ - uₜ')^2)
     return loss, st
 end
 
@@ -75,7 +80,7 @@ println("CFM Loss: ", loss_val)
 # CFM Loss: 0.21834567
 
 # 訓練後、ODEソルバーでサンプリング
-# dx_t/dt = v_θ(t, x_t), x_0 ~ p_0 -> x_1 ~ p_1
+# dx_t/dt = v_θ(t, xₜ), x₀ ~ p₀ -> x₁ ~ p₁
 ```
 
 **出力**:
@@ -90,10 +95,8 @@ CFM Loss: 0.21834567
 
 Flow Matchingの革新は、**条件付きベクトル場 $u_t(x|x_1)$ が解析的に計算できる**ことだ。Diffusionのようにノイズ付加プロセスをシミュレートする必要がなく、直接ベクトル場を回帰できる。
 
-:::message
-**ここまでで全体の3%完了！**
-Flow Matchingは「Conditional Flow Matching (CFM)」の周辺化トリックで、条件付きベクトル場を学習し、周辺化後のベクトル場を自動的に獲得する。Diffusionとの違いは「シミュレーションフリー」「直線的輸送」「効率的訓練」の3点だ。
-:::
+> **Note:** **ここまでで全体の3%完了！**
+> Flow Matchingは「Conditional Flow Matching (CFM)」の周辺化トリックで、条件付きベクトル場を学習し、周辺化後のベクトル場を自動的に獲得する。Diffusionとの違いは「シミュレーションフリー」「直線的輸送」「効率的訓練」の3点だ。
 
 ---
 
@@ -104,46 +107,6 @@ Flow Matchingの3つの核心概念（Conditional Path / Conditional Vector Fiel
 ### 1.1 ガウシアン確率パス（Gaussian Probability Paths）
 
 Conditional Flow Matchingの基礎となる確率パスを可視化する。
-
-```julia
-using Plots
-
-# ガウシアン確率パス: p_t(x|x_1) = N(μ_t(x_1), σ_t²)
-# 最も単純な選択: μ_t(x_1) = tx_1, σ_t² = (1-t)²σ²
-
-function gaussian_conditional_path(t, x_1, σ_base=1.0)
-    μ_t = t * x_1
-    σ_t = (1 - t) * σ_base
-    return μ_t, σ_t
-end
-
-# 時刻tごとの条件付き分布を可視化
-x_1 = 3.0  # target sample
-σ_base = 1.0
-x_range = -2:0.01:5
-
-p1 = plot(title="Gaussian Conditional Path", xlabel="x", ylabel="p_t(x|x_1)", legend=:topright)
-for t in [0.0, 0.25, 0.5, 0.75, 1.0]
-    μ_t, σ_t = gaussian_conditional_path(t, x_1, σ_base)
-    density = @. exp(-(x_range - μ_t)^2 / (2σ_t^2)) / (σ_t * sqrt(2π))
-    plot!(p1, x_range, density, label="t=$t", lw=2)
-end
-vline!(p1, [x_1], label="x_1", linestyle=:dash, color=:red)
-display(p1)
-
-# t=0: p_0(x|x_1) = N(0, σ²) (source, x_1に依存しない)
-# t=1: p_1(x|x_1) = N(x_1, 0) = δ(x - x_1) (target, Dirac delta)
-```
-
-**出力**:
-```
-[グラフ表示]
-t=0.0: 幅広いガウス分布（中心0、分散1.0）
-t=0.25: やや狭まり、中心が0.75へ移動
-t=0.5: 中心1.5、分散0.25
-t=0.75: 中心2.25、分散0.0625
-t=1.0: x=3.0にDirac delta（実際は非常に狭いガウス）
-```
 
 **重要な観察**:
 - $t=0$: 条件付き分布は$x_1$に依存せず、標準正規分布 $\mathcal{N}(0, \sigma^2)$
@@ -156,37 +119,6 @@ t=1.0: x=3.0にDirac delta（実際は非常に狭いガウス）
 
 Flow Matchingの訓練で学習する対象を理解する。
 
-```julia
-# Conditional Vector Field: u_t(x|x_1) = d/dt μ_t(x_1)
-# μ_t(x_1) = tx_1 の場合、u_t(x|x_1) = x_1
-
-function conditional_vector_field_demo(t_vals, x_1_samples)
-    # 各x_1ごとの条件付きベクトル場を可視化
-    p2 = plot(title="Conditional Vector Field", xlabel="t", ylabel="u_t(x|x_1)", legend=:topleft)
-    for x_1 in x_1_samples
-        u_t = fill(x_1, length(t_vals))  # constant velocity = x_1
-        plot!(p2, t_vals, u_t, label="x_1=$x_1", lw=2)
-    end
-    display(p2)
-end
-
-t_vals = 0:0.01:1
-x_1_samples = [-2.0, 0.0, 2.0]
-conditional_vector_field_demo(t_vals, x_1_samples)
-
-# Marginal Vector Field: v_t(x) = ∫ u_t(x|x_1) p_t(x_1|x) p_1(x_1) dx_1
-# = E_{p(x_1|x_t)}[u_t(x|x_1)]
-# CFMの訓練では、u_t(x|x_1)を直接回帰し、周辺化は暗黙的に実現される
-```
-
-**出力**:
-```
-[グラフ表示]
-x_1=-2.0: 一定速度 u_t=-2.0（左向き）
-x_1=0.0: 一定速度 u_t=0.0（静止）
-x_1=2.0: 一定速度 u_t=2.0（右向き）
-```
-
 **重要な洞察**:
 - **Conditional Vector Field** $u_t(x|x_1)$: 「もしターゲットが $x_1$ なら、速度は $x_1$ 方向へ一定」
 - **Marginal Vector Field** $v_t(x)$: 「現在位置 $x_t$ から、全ての可能な $x_1$ へのベクトルの期待値」
@@ -195,38 +127,6 @@ x_1=2.0: 一定速度 u_t=2.0（右向き）
 ### 1.3 Optimal Transport Path vs Diffusion Path
 
 Flow MatchingとDiffusionの輸送経路を比較する。
-
-```julia
-# Optimal Transport (OT) Path vs Diffusion Path
-function compare_paths(x_0, x_1, t_vals)
-    # OT Path: 直線補間
-    ot_path = @. t_vals * x_1 + (1 - t_vals) * x_0
-
-    # Diffusion Path: VP-SDE forward
-    # dx = -0.5βx dt + √β dW, β_t = β_0 + (β_1 - β_0)t
-    # 平均: μ_t = exp(-0.25(β_1 - β_0)t² - 0.5β_0t) x_0
-    β_0, β_1 = 0.1, 20.0
-    α_bar_t = @. exp(-0.25 * (β_1 - β_0) * t_vals^2 - 0.5 * β_0 * t_vals)
-    diffusion_path = @. sqrt(α_bar_t) * x_0 + sqrt(1 - α_bar_t) * x_1  # 近似
-
-    p3 = plot(title="OT Path vs Diffusion Path", xlabel="t", ylabel="x_t", legend=:topleft)
-    plot!(p3, t_vals, ot_path, label="OT (straight)", lw=2, color=:blue)
-    plot!(p3, t_vals, diffusion_path, label="Diffusion (curved)", lw=2, color=:red, linestyle=:dash)
-    scatter!(p3, [0.0, 1.0], [x_0, x_1], label="endpoints", markersize=8, color=:black)
-    display(p3)
-end
-
-x_0 = 0.0  # source
-x_1 = 3.0  # target
-compare_paths(x_0, x_1, t_vals)
-```
-
-**出力**:
-```
-[グラフ表示]
-OT Path: 直線（x_0からx_1へ最短経路）
-Diffusion Path: 曲線（初期は速く、後半は遅い）
-```
 
 **物理的解釈**:
 - **OT Path**: 一定速度で移動（効率的、最短経路）
@@ -243,42 +143,18 @@ Flow Matchingの利点は「直線的輸送」にある。より少ないステ�
 | **Flow Matching** | $\mathbb{E}_{t,x_0,x_1}\left[\|v_\theta(t, x_t) - u_t(x|x_1)\|^2\right]$ | ODE Solver |
 | **Probability Flow ODE** | SDE↔ODE変換 | ODE Solver |
 
-**体感**:
-```julia
-# 4つの損失関数を同一データで計算
-x_0 = randn(rng, Float32, 100)
-x_1 = rand(rng, x_data, 100)
-t = rand(rng, Float32, 100)
-
-# 1. Score Matching Loss (概念的)
-# L_SM = E[||∇log p_t(x_t) - s_θ(t, x_t)||²]
-
-# 2. Diffusion Loss
-α_bar_t = 1 .- t
-x_t_diff = sqrt.(α_bar_t) .* x_1 .+ sqrt.(1 .- α_bar_t) .* x_0
-ε = x_0  # noise
-# L_Diff = E[||ε - ε_θ(t, x_t)||²]
-
-# 3. Flow Matching Loss
-x_t_flow = t .* x_1 .+ (1 .- t) .* x_0
-u_t = x_1 .- x_0
-# L_FM = E[||v_θ(t, x_t) - u_t||²]
-
-# 4. Probability Flow ODE
-# dx_t/dt = v_θ(t, x_t)
-
-println("All 4 formulations learn the same underlying transport map!")
-```
-
 **重要な結論**:
 - 4つの定式化は**数学的に等価**（ガウシアン仮定下）
 - 訓練目的関数の見た目は異なるが、**最適解は同じベクトル場**を学習
 - **Flow Matchingの利点**: シミュレーションフリー、直線的輸送、効率的訓練
 
-:::message
-**ここまでで全体の10%完了！**
-Flow Matchingの3つの核心（Conditional Path / Conditional VF / Marginal VF）を触った。OT Pathは直線、Diffusion Pathは曲線。4つの定式化（Score/Diffusion/FM/PF-ODE）は数学的に等価だが、Flow Matchingが最も効率的な訓練を実現する。次は「なぜFlow Matchingなのか？」の動機へ。
-:::
+> **Note:** **ここまでで全体の10%完了！**
+> Flow Matchingの3つの核心（Conditional Path / Conditional VF / Marginal VF）を触った。OT Pathは直線、Diffusion Pathは曲線。4つの定式化（Score/Diffusion/FM/PF-ODE）は数学的に等価だが、Flow Matchingが最も効率的な訓練を実現する。次は「なぜFlow Matchingなのか？」の動機へ。
+
+> **Progress: 10%**
+> **理解度チェック**
+> 1. Conditional Flow Matching の損失関数 $\mathcal{L}_\text{CFM} = \mathbb{E}_{t,x_0,x_1}[\|v_\theta(x_t,t) - u_t(x_t|x_0,x_1)\|^2]$ において、なぜ $u_t(x_t)$（周辺ベクトル場）ではなく条件付き $u_t(x_t|x_0,x_1)$ を回帰目標にできるのか？
+> 2. OT パス $x_t = (1-t)x_0 + tx_1$ と VP パス $x_t = \alpha_t x_1 + \sigma_t \epsilon$ の本質的な違いを、軌道の直線性と分散の観点から説明せよ。
 
 ---
 
@@ -404,10 +280,13 @@ graph TD
 
 Zone 3は**800行の数式修行**だ。Score Matching、Flow Matching、Diffusion、ODEの**4つの定式化が数学的に等価**であることを完全証明する。生成モデル統一理論の核心部分だ。
 
-:::message
-**ここまでで全体の20%完了！**
-Flow Matchingの動機を理解した。Diffusionの3つの制限（シミュレーション必須/曲線的輸送/Noise Schedule依存）を、CFMの周辺化トリックとOT Pathで解決する。次はいよいよ数式修行ゾーン。Conditional Flow Matching理論の完全導出へ。
-:::
+> **Note:** **ここまでで全体の20%完了！**
+> Flow Matchingの動機を理解した。Diffusionの3つの制限（シミュレーション必須/曲線的輸送/Noise Schedule依存）を、CFMの周辺化トリックとOT Pathで解決する。次はいよいよ数式修行ゾーン。Conditional Flow Matching理論の完全導出へ。
+
+> **Progress: 20%**
+> **理解度チェック**
+> 1. Flow Matching が「シミュレーションフリー」と呼ばれる理由を、従来の CNF 訓練（軌道積分が必要）と対比して説明せよ。
+> 2. Stochastic Interpolants の確率パス $x_t = \alpha_t x_0 + \beta_t x_1 + \gamma_t \epsilon$ において、$\alpha_t, \beta_t, \gamma_t$ に課される境界条件 ($t=0,1$) を書け。
 
 ---
 
@@ -638,7 +517,7 @@ $\square$ （証明終わり）
 
 **ODEソルバー**: Euler法、Heun法、DPM-Solver++、等々（第40回で詳説）
 
-:::details より詳細な数学（オプション）
+<details><summary>より詳細な数学（オプション）</summary>
 
 **Conditional Vector Fieldの一般的な導出**:
 
@@ -661,7 +540,7 @@ $$
 
 実際には、$u_t(x|x_1) = \frac{x_1 - (1-t)x_0}{1-t}$ のように書かれることが多い（$x_t = tx_1 + (1-t)x_0$ を代入すると $u_t = \frac{x_t - (1-t)^2 x_0}{1-t}$）。
 
-:::
+</details>
 
 ### 3.2 ガウシアン確率パス（Gaussian Probability Paths）
 
@@ -776,10 +655,8 @@ $$
 - **安定重視**: VP Path（訓練安定）
 - **両立**: 混合Path（OT + 小ノイズ $\sigma_t^2 = \epsilon(1-t)^2$, $\epsilon \ll 1$）
 
-:::message alert
-**ここが混乱ポイント！**
-「直線的輸送が常に最適」は誤解だ。ICLR 2025の研究（Guo+ 2025, Variational Rectified Flow）では、「曲線的な経路が多峰性の速度場を回避し、より良い性能を示すことがある」と報告されている。OT Pathは理論的に美しいが、実践では柔軟性が重要だ。
-:::
+> **⚠️ Warning:** **ここが混乱ポイント！**
+> 「直線的輸送が常に最適」は誤解だ。ICLR 2025の研究（Guo+ 2025, Variational Rectified Flow）では、「曲線的な経路が多峰性の速度場を回避し、より良い性能を示すことがある」と報告されている。OT Pathは理論的に美しいが、実践では柔軟性が重要だ。
 
 ### 3.3 Optimal Transport ODE & Rectified Flow
 
@@ -847,18 +724,6 @@ $$
 - 2nd Round: データペア $(x_0^{(1)}, x_1^{(1)})$ は $v_\theta^{(1)}$ の軌道に沿う → 経路がより直線的
 - k-th Round: 経路がほぼ直線に収束 → **1-stepサンプリング可能**
 
-**Rectified Flow Algorithm**:
-```
-for k = 1, 2, ..., K:
-    # Train CFM with (x_0^{(k)}, x_1^{(k)})
-    v_θ^{(k)} = CFM_train(x_0^{(k)}, x_1^{(k)})
-
-    # Generate new pairs by sampling
-    x_0^{(k+1)} ~ p_0
-    x_1^{(k+1)} = ODE_solve(v_θ^{(k)}, x_0^{(k+1)}, T=1)
-end
-```
-
 **理論的保証**（Liu+ 2023, Theorem 2）:
 Rectified Flowは、**Wasserstein-2距離を反復的に減少させる**:
 $$
@@ -916,7 +781,7 @@ $z$ の分布 $q(z|x_0, x_1)$ は変分推論で学習（VAE的）。
 - 曲線的な経路が**柔軟性**を提供し、Mode Collapseを回避
 - 実践では**OT + 小ノイズ**または**VRF**が推奨
 
-:::details OT-ODE vs Probability Flow ODEの関係（オプション）
+<details><summary>OT-ODE vs Probability Flow ODEの関係（オプション）</summary>
 
 **Probability Flow ODE**（第37回で学習）は、VP-SDEから導出される決定論的ODE:
 $$
@@ -935,7 +800,7 @@ $$
 
 つまり、**PF-ODEとOT-ODEは同じODEを異なる方法で導出**している。
 
-:::
+</details>
 
 ### 3.4 Stochastic Interpolants完全版（統一フレームワーク）
 
@@ -1062,7 +927,7 @@ $\alpha_t = t$, $\beta_t = 0$, $\gamma_t = \sqrt{1-t^2}$ の場合、VP-SDEと�
 - **確率的（VP）**: 安定だが、サンプリング遅い
 - **混合**: 両者の利点を統合（**実践的推奨**）
 
-:::details Stochastic Interpolantsの変分定式化（オプション）
+<details><summary>Stochastic Interpolantsの変分定式化（オプション）</summary>
 
 **変分的視点**:
 Stochastic Interpolantsは、以下の変分問題の解として導出できる:
@@ -1083,7 +948,7 @@ $$
 
 これは**Score-based SDEの変分的導出**と一致する。
 
-:::
+</details>
 
 ### 3.5 **生成モデル統一理論: Score ↔ Flow ↔ Diffusion ↔ ODEの数学的等価性**
 
@@ -1316,10 +1181,8 @@ $\square$ （証明終わり）
 
 **FIDが異なる理由**: アーキテクチャ・ハイパーパラメータ・サンプリング手法の違い（理論的等価性は最適解で成立）。
 
-:::message alert
-**ここが理論の核心！**
-Score Matching、Diffusion Models、Flow Matchingは「同じ山を異なるルートで登る」。どのルートも頂上（最適解）に到達するが、**訓練の容易さ**と**サンプリングの効率**が異なる。Flow Matchingは「最も効率的なルート」だ。
-:::
+> **⚠️ Warning:** **ここが理論の核心！**
+> Score Matching、Diffusion Models、Flow Matchingは「同じ山を異なるルートで登る」。どのルートも頂上（最適解）に到達するが、**訓練の容易さ**と**サンプリングの効率**が異なる。Flow Matchingは「最も効率的なルート」だ。
 
 ---
 
@@ -1398,6 +1261,72 @@ $$
 
 ---
 
+#### 3.6.2b GANとSDE漂流項の形式的同一性
+
+この等価性を厳密に示す。GANの最適Discriminator $D^*(\mathbf{x}, t)$ は、
+
+$$
+D^*(\mathbf{x}, t) = \frac{p_t(\mathbf{x})}{p_t(\mathbf{x}) + q_t(\mathbf{x})}
+$$
+
+である（Goodfellow+ 2014の結果）。ここで $q_t(\mathbf{x})$ はステップ $t$ における生成器分布。
+
+**GAN Generatorの更新方向**
+
+生成器 $G_\theta$ の損失関数（non-saturating loss）：
+
+$$
+\mathcal{L}_G(\theta) = -\mathbb{E}_{\mathbf{z} \sim p_z}\left[\log D^*(G_\theta(\mathbf{z}), t)\right]
+$$
+
+生成器の更新勾配を $\mathbf{x} = G_\theta(\mathbf{z})$ について整理すると、$D^*$ の $\mathbf{x}$ に関する勾配は：
+
+$$
+\nabla_{\mathbf{x}} \log D^*(\mathbf{x}, t) = \nabla_{\mathbf{x}} \log p_t(\mathbf{x}) - \nabla_{\mathbf{x}} \log\left(p_t(\mathbf{x}) + q_t(\mathbf{x})\right)
+$$
+
+**収束後の近似**
+
+$q_t(\mathbf{x}) \approx p_t(\mathbf{x})$（訓練後期、生成分布がデータ分布に接近）の極限では、分母 $p_t + q_t \approx 2p_t$ なので：
+
+$$
+\nabla_{\mathbf{x}} \log D^*(\mathbf{x}, t) \approx \nabla_{\mathbf{x}} \log p_t(\mathbf{x}) - \nabla_{\mathbf{x}} \log(2p_t(\mathbf{x})) = 0
+$$
+
+一方、最適点 $q_t = p_t$ 付近での**一次展開**を取ると、Discriminatorの勾配は密度比のスコア差：
+
+$$
+\nabla_{\mathbf{x}} \log D^*(\mathbf{x}, t) \approx \frac{1}{2}\left(\nabla_{\mathbf{x}} \log p_t(\mathbf{x}) - \nabla_{\mathbf{x}} \log q_t(\mathbf{x})\right)
+$$
+
+に収束する。これは **KL$(q_t \| p_t)$ の変分勾配**そのものだ。
+
+**ODE との形式的同一性**
+
+生成器の決定論的更新を連続時間に拡張する。サンプル $\mathbf{x}_t$ の時間発展を：
+
+$$
+\frac{d\mathbf{x}_t}{dt} = \nabla_{\mathbf{x}} \log D^*(\mathbf{x}_t, t)
+$$
+
+とみなすと、これは $g(t) = 0$（拡散係数ゼロ）のSDEに他ならない：
+
+$$
+d\mathbf{x}_t = \underbrace{\nabla_{\mathbf{x}} \log D^*(\mathbf{x}_t, t)}_{\mathbf{f}(\mathbf{x}_t,\,t)}\,dt + \underbrace{0}_{g(t)=0}\cdot d\mathbf{w}_t
+$$
+
+**命題（GAN Generator = Score ODE）**: 訓練収束後、GAN Generatorの出力軌道 $\{\mathbf{x}_t\}_t$ は以下のProbability Flow ODEを満たす：
+
+$$
+\frac{d\mathbf{x}_t}{dt} = \frac{1}{2}\left(\nabla_{\mathbf{x}}\log p_t(\mathbf{x}_t) - \nabla_{\mathbf{x}}\log q_t(\mathbf{x}_t)\right)
+$$
+
+Score-based DiffusionのProbability Flow ODE（$g(t)=0$ 時）と構造的に等価だ。$\square$
+
+**直感**：Discriminatorが完璧なとき、GANは**密度比のスコア**を計算している。この「密度比勾配 = Score差」という関係は、KL divergenceの変分表示 $\mathrm{KL}(q \| p) = \sup_f \mathbb{E}_q[f] - \log \mathbb{E}_p[e^f]$ から直接導かれる。
+
+---
+
 #### 3.6.3 統一目的関数
 
 DiffFlowは、次の**統一目的関数**を提案する：
@@ -1445,10 +1374,8 @@ Zhang+ (2023) は、CIFAR-10 / ImageNet で次を示した：
 - DiffFlowは**GANに匹敵する品質**を**Diffusionの1/20のステップ**で達成
 - GANより訓練が安定
 
-:::message
-**パラダイムシフト**
-「Diffusion vs GAN」という二項対立は誤り。正しくは「**SDE-ODEスペクトラムのどこに立つか**」という問いだ。DiffFlowは、両者の良いとこ取りを可能にする。
-:::
+> **Note:** **パラダイムシフト**
+> 「Diffusion vs GAN」という二項対立は誤り。正しくは「**SDE-ODEスペクトラムのどこに立つか**」という問いだ。DiffFlowは、両者の良いとこ取りを可能にする。
 
 ---
 
@@ -1566,7 +1493,8 @@ $$
 | Flow Matching | $W_2(p, p_1)^2$ | ODE solver (Euler/RK4) |
 | Rectified Flow | $W_2(p, p_1)^2$ + 直線制約 | 1-step (極限) |
 
-:::details JKOスキームの導出（補足）
+<details><summary>JKOスキームの導出（補足）</summary>
+
 変分問題：
 
 $$
@@ -1580,7 +1508,108 @@ $$
 $$
 
 ここで$\mathbf{T}_k$は$p_k$から$p$への最適輸送写像。$\tau \to 0$の極限で連続勾配流に収束する。
-:::
+
+</details>
+
+---
+
+#### 3.7.5b Fokker-Planck演算子とJKO収束解析
+
+JKOスキームが連続勾配流に収束することを、**Fokker-Planck演算子**を通じて厳密に示す。
+
+**Fokker-Planck演算子の定義**
+
+確率分布 $p_t$ の時間発展を記述する演算子 $\mathcal{L}_{FP}$ を定義する：
+
+$$
+\mathcal{L}_{FP}[p] := -\nabla \cdot \left(\mathbf{f}(\mathbf{x})\, p\right) + \frac{1}{2}\Delta\!\left(g^2 p\right)
+$$
+
+ここで第1項 $-\nabla \cdot (\mathbf{f}\, p)$ はドリフト（決定論的輸送）、第2項 $\frac{1}{2}\Delta(g^2 p)$ は拡散（確率的揺らぎ）を表す。連続方程式は $\partial_t p_t = \mathcal{L}_{FP}[p_t]$ と書ける。
+
+**エントロピー汎関数のWasserstein勾配**
+
+汎関数 $\mathcal{F}[p] = \int p(\mathbf{x})\log p(\mathbf{x})\,d\mathbf{x}$（負のShannon entropy）の関数微分は：
+
+$$
+\frac{\delta \mathcal{F}}{\delta p}(\mathbf{x}) = \log p(\mathbf{x}) + 1
+$$
+
+したがって勾配流の速度場：
+
+$$
+\mathbf{v}_t(\mathbf{x}) = -\nabla_\mathbf{x}\frac{\delta \mathcal{F}}{\delta p}\bigg|_{p=p_t} = -\nabla_\mathbf{x}\log p_t(\mathbf{x})
+$$
+
+連続方程式に代入すると：
+
+$$
+\frac{\partial p_t}{\partial t} = -\nabla \cdot (p_t \cdot (-\nabla \log p_t)) = \nabla \cdot (\nabla p_t) = \Delta p_t
+$$
+
+これは**熱方程式**（Heat Equation）だ。エントロピー勾配流 = 拡散過程という対応がこれで示された。
+
+より一般的に、KL divergence $\mathcal{F}[p] = \mathrm{KL}(p \| p_{\text{data}})$ の場合、速度場は：
+
+$$
+\mathbf{v}_t = -\nabla \log \frac{p_t}{p_{\text{data}}} = \nabla \log p_{\text{data}} - \nabla \log p_t
+$$
+
+この速度場を連続方程式に代入すると：
+
+$$
+\frac{\partial p_t}{\partial t} = \nabla \cdot \left(p_t \nabla \log \frac{p_t}{p_{\text{data}}}\right) = \Delta p_t - \nabla \cdot (p_t \nabla \log p_{\text{data}})
+$$
+
+これはFokker-Planck方程式（$\mathbf{f} = \nabla \log p_{\text{data}}$, $g=\sqrt{2}$ の場合）と完全に一致する。
+
+**JKOスキームの収束定理**
+
+**定理（Jordan-Kinderlehrer-Otto, 1998）**: ステップ幅 $\tau > 0$ のJKOスキーム：
+
+$$
+p_{k+1}^\tau = \arg\min_p \left[\mathcal{F}[p] + \frac{1}{2\tau}W_2(p,\, p_k^\tau)^2\right]
+$$
+
+において、$\tau \to 0$ のとき $p_{\lfloor t/\tau \rfloor}^\tau \to p_t$ （$W_2$-弱位相で）収束し、$p_t$ は勾配流方程式 $\partial_t p_t = -\nabla_{W_2}\mathcal{F}[p_t]$ の一意な解に一致する。収束レートはエネルギー誤差で $O(\sqrt{\tau})$。
+
+**証明の核心（$\tau \to 0$ の極限）**:
+
+JKOステップの最適性条件は、Lagrangeの変分原理より：
+
+$$
+\frac{\delta \mathcal{F}}{\delta p}\bigg|_{p_{k+1}} + \frac{1}{\tau}\!\left(\mathrm{id} - \mathbf{T}_k\right) = 0
+$$
+
+ここで $\mathbf{T}_k: p_k \to p_{k+1}$ は最適輸送写像。変形すると：
+
+$$
+\mathbf{T}_k(\mathbf{x}) = \mathbf{x} - \tau\,\nabla_\mathbf{x}\frac{\delta \mathcal{F}}{\delta p}\bigg|_{p_{k+1}}
+$$
+
+これは**後退Euler法**の1ステップ $\mathbf{x}_{k+1} = \mathbf{x}_k + \tau\,\mathbf{v}_{k+1}$（$\mathbf{v} = -\nabla \frac{\delta \mathcal{F}}{\delta p}$）だ。$\tau \to 0$ でこの差分スキームは連続ODEに収束する。$\square$
+
+**Fisher情報量との収束速度**
+
+エントロピー汎関数の勾配流において、収束速度は**Fisher情報量** $\mathcal{I}(p)$ で制御される：
+
+$$
+\mathcal{I}(p) = \int p(\mathbf{x}) \left\|\nabla \log p(\mathbf{x})\right\|^2 d\mathbf{x} = \mathbb{E}_p\!\left[\|\nabla \log p\|^2\right]
+$$
+
+$p_{\text{data}}$ が対数凸のとき、**対数Sobolev不等式**が成立する：
+
+$$
+\mathrm{KL}(p_t \| p_{\text{data}}) \leq \frac{1}{2\rho}\,\mathcal{I}(p_t \| p_{\text{data}})
+$$
+
+ここで $\rho > 0$ は対数凸定数、$\mathcal{I}(p \| q) = \mathbb{E}_p[\|\nabla \log(p/q)\|^2]$ は相対Fisher情報量。この不等式と勾配流の単調性から、KL divergenceの指数収束が導かれる：
+
+$$
+\mathrm{KL}(p_t \| p_{\text{data}}) \leq e^{-2\rho t}\,\mathrm{KL}(p_0 \| p_{\text{data}})
+$$
+
+**生成モデルへの含意**: Score-based DiffusionとFlow Matchingの訓練が理論的に収束保証を持つのは、この指数収束の結果だ。Fisher情報量が大きい（score関数の勾配が急峻）ほど収束は速く、これが「score関数の品質がサンプリング品質に直結する」という実践的観察と整合する。
 
 ---
 
@@ -1609,14 +1638,33 @@ graph TD
 
 すべてが**Wasserstein勾配流**という共通の数学的基盤の上に構築されている。
 
-:::message alert
-**ここが理論の到達点！**
-生成モデルの多様性（VAE、GAN、Diffusion、Flow）は、すべて**最適輸送理論のWasserstein勾配流**として統一的に理解できる。違いは「どの目的関数$\mathcal{F}$を最小化するか」と「どの離散化手法を使うか」だけだ。
-:::
+> **⚠️ Warning:** **ここが理論の到達点！**
+> 生成モデルの多様性（VAE、GAN、Diffusion、Flow）は、すべて**最適輸送理論のWasserstein勾配流**として統一的に理解できる。違いは「どの目的関数$\mathcal{F}$を最小化するか」と「どの離散化手法を使うか」だけだ。
+
+> **Progress: 50%**
+> **理解度チェック**
+> 1. Score ↔ Flow の等価性の核心：Score SDE の確率流 ODE $dx = [f(x,t) - \frac{1}{2}g^2(t)\nabla_x\log p_t(x)]dt$ が FM の $dx/dt = v_\theta(x,t)$ と一致することを、$v_t(x) = \mathbb{E}[u_t(x_t|x_0,x_1)|x_t=x]$ の関係から説明せよ。
+> 2. JKO scheme における汎関数 $\mathcal{F}(\rho) = \int \rho\log\rho\,dx$ の勾配流が Fokker-Planck 方程式 $\partial_t\rho = \nabla\cdot(\rho\nabla\log\rho) + \Delta\rho$ と等価になることを確認せよ。
 
 ---
 
----
+## 参考文献
+
+本講義で扱った理論の主要論文（詳細は後編参照）：
+
+- Lipman et al., "Flow Matching for Generative Modeling", arXiv:2210.02747 (2022)
+- Liu et al., "Flow Straight and Fast: Learning to Generate and Transfer Data with Rectified Flow", arXiv:2209.03003 (2022)
+- Song et al., "Score-Based Generative Modeling through Stochastic Differential Equations", arXiv:2011.13456 (2020)
+- De Bortoli et al., "Diffusion Schrödinger Bridge", arXiv:2106.01357 (2021)
+- Jordan et al., "The Variational Formulation of the Fokker-Planck Equation", SIAM Journal on Mathematical Analysis, 29(1):1–17 (1998)
+
+## 著者リンク
+
+- Blog: https://fumishiki.dev
+- X: https://x.com/fumishiki
+- LinkedIn: https://www.linkedin.com/in/fumitakamurakami
+- GitHub: https://github.com/fumishiki
+- Hugging Face: https://huggingface.co/fumishiki
 
 ## ライセンス
 

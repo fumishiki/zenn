@@ -5,7 +5,13 @@ emoji: "🔧"
 type: "tech"
 topics: ["machinelearning", "deeplearning", "finetuning", "julia", "rust"]
 published: true
+difficulty: "advanced"
+time_estimate: "90 minutes"
+languages: ["Julia", "Rust", "Elixir"]
+keywords: ["機械学習", "深層学習", "生成モデル"]
 ---
+
+> 📌 **前編（理論）**: [第23回 前編](./ml-lecture-23-part1)
 
 ## 💻 4. 実装ゾーン（45分）— ⚡Julia LoRA訓練 + 🦀Rust LoRA推論
 
@@ -45,11 +51,8 @@ function (l::LoRALayer)(x, ps, st)
     h_A, st_A = l.lora_A(x, ps.lora_A, st.lora_A)
     h_B, st_B = l.lora_B(h_A, ps.lora_B, st.lora_B)
 
-    scaling = l.α / l.r
-    h_lora = scaling .* h_B
-
-    # Combine
-    h = h_base .+ h_lora
+    # Combine: h = h_base + (α/r) * h_B
+    h = h_base .+ (l.α / l.r) .* h_B
 
     # Merge states
     st_new = (base_layer=st_base, lora_A=st_A, lora_B=st_B)
@@ -64,7 +67,7 @@ function Lux.initialparameters(rng::AbstractRNG, l::LoRALayer)
     ps_B = Lux.initialparameters(rng, l.lora_B)
 
     # Initialize A with Gaussian, B with zeros (ΔW starts at 0)
-    ps_A = (; weight=randn(rng, Float32, size(ps_A.weight)) ./ sqrt(Float32(size(ps_A.weight, 2))), bias=zeros(Float32, l.r))
+    ps_A = (; weight=randn(rng, Float32, size(ps_A.weight)) ./ √Float32(size(ps_A.weight, 2)), bias=zeros(Float32, l.r))
     ps_B = (; weight=zeros(Float32, size(ps_B.weight)), bias=zeros(Float32, size(ps_B.weight, 1)))
 
     return (base_layer=ps_base, lora_A=ps_A, lora_B=ps_B)
@@ -111,7 +114,7 @@ end
 # Loss function
 function loss_fn(model, ps, st, x, y)
     y_pred, st_new = model(x, ps, st)
-    loss = sum((y_pred .- y).^2) / size(y, 2)  # MSE
+    loss = sum(@. (y_pred - y)^2) / size(y, 2)  # MSE
     return loss, st_new, ()
 end
 
@@ -204,27 +207,15 @@ impl LoRAWeights {
     /// Merge LoRA into base weight: W_merged = W₀ + (α/r)BA
     pub fn merge(&self) -> Array2<f32> {
         let scaling = self.alpha / (self.r as f32);
-
-        // Compute BA: (d×r) @ (r×k) = (d×k)
-        let ba = self.lora_b.dot(&self.lora_a);
-
         // W₀ + (α/r)BA
-        &self.base + &(ba * scaling)
+        &self.base + &(self.lora_b.dot(&self.lora_a) * scaling)
     }
 
     /// Forward pass without merging (for multi-task switching)
     pub fn forward(&self, x: &Array2<f32>) -> Array2<f32> {
         let scaling = self.alpha / (self.r as f32);
-
-        // h_base = W₀x
-        let h_base = self.base.dot(x);
-
-        // h_lora = (α/r)BAx = (α/r)B(Ax)
-        let ax = self.lora_a.dot(x);
-        let bax = self.lora_b.dot(&ax);
-        let h_lora = bax * scaling;
-
-        h_base + h_lora
+        // h = W₀x + (α/r)B(Ax)
+        self.base.dot(x) + self.lora_b.dot(&self.lora_a.dot(x)) * scaling
     }
 }
 
@@ -290,16 +281,9 @@ impl MultiTaskLoRA {
     /// Forward with specific task adapter
     pub fn forward(&self, x: &Array2<f32>, task_name: &str) -> Option<Array2<f32>> {
         let (lora_b, lora_a) = self.adapters.get(task_name)?;
-
         let scaling = self.alpha / (self.r as f32);
-
-        // h = W₀x + (α/r)BAx
-        let h_base = self.base.dot(x);
-        let ax = lora_a.dot(x);
-        let bax = lora_b.dot(&ax);
-        let h_lora = bax * scaling;
-
-        Some(h_base + h_lora)
+        // h = W₀x + (α/r)B(Ax)
+        Some(self.base.dot(x) + lora_b.dot(&lora_a.dot(x)) * scaling)
     }
 
     /// List available tasks
@@ -353,27 +337,24 @@ pub fn quantize_nf4(w: &Array2<f32>) -> (Vec<u8>, f32) {
     // Step 2: Normalize to [-1, 1]
     let w_norm = w / absmax;
 
-    // Step 3: Quantize to nearest NF4 level
-    let mut quant = Vec::with_capacity(w.len());
-    for &val in w_norm.iter() {
-        let idx = NF4_LEVELS.iter()
+    // Step 3: Quantize to nearest NF4 level (iterator chain)
+    let quant = w_norm.iter()
+        .map(|&val| NF4_LEVELS.iter()
             .enumerate()
             .min_by_key(|(_, &level)| ((val - level).abs() * 1e6) as i32)
-            .map(|(i, _)| i)
-            .unwrap();
-        quant.push(idx as u8);
-    }
+            .map(|(i, _)| i as u8)
+            .unwrap())
+        .collect::<Vec<_>>();
 
     (quant, absmax)
 }
 
 /// Dequantize NF4 back to FP32
 pub fn dequantize_nf4(quant: &[u8], absmax: f32, shape: (usize, usize)) -> Array2<f32> {
-    let mut w = Array2::<f32>::zeros(shape);
-    for (i, &idx) in quant.iter().enumerate() {
-        w[[i / shape.1, i % shape.1]] = NF4_LEVELS[idx as usize] * absmax;
-    }
-    w
+    let vals = quant.iter()
+        .map(|&idx| NF4_LEVELS[idx as usize] * absmax)
+        .collect::<Vec<_>>();
+    Array2::from_shape_vec(shape, vals).unwrap()
 }
 
 fn main() {
@@ -423,18 +404,17 @@ Fine-tuningデータセット（Alpaca形式）:
 これを上記テンプレートに変換:
 
 ```julia
-function format_alpaca(instruction::String, input::String, output::String; system_prompt::String="You are a helpful assistant.")
-    user_msg = isempty(input) ? instruction : "$instruction\n\nInput: $input"
-
-    return """
+# Short-form: ternary for user message, return template directly
+format_alpaca(instruction::String, input::String, output::String;
+              system_prompt::String="You are a helpful assistant.") =
+    """
     <|system|>
     $system_prompt
     <|user|>
-    $user_msg
+    $(isempty(input) ? instruction : "$instruction\n\nInput: $input")
     <|assistant|>
     $output
     """
-end
 
 # Example
 formatted = format_alpaca(
@@ -458,9 +438,12 @@ System Promptはモデルの振る舞いを制御する重要な要素:
 
 Instruction Tuningでは、データセット全体で一貫したSystem Promptを使用することが重要 [^10]。
 
-:::message
-**進捗: 70% 完了** ⚡Julia LoRA訓練実装、🦀Rust LoRA推論・マージ・Multi-task切り替え・QLoRA概念実装、Instruction Tuning形式を完成。次は実験ゾーン — SmolVLM2 LoRA Fine-tuningへ。
-:::
+> **Note:** **進捗: 70% 完了** ⚡Julia LoRA訓練実装、🦀Rust LoRA推論・マージ・Multi-task切り替え・QLoRA概念実装、Instruction Tuning形式を完成。次は実験ゾーン — SmolVLM2 LoRA Fine-tuningへ。
+
+> **Progress: 85%**
+> **理解度チェック**
+> 1. LoRAウェイト合成 $W = W_0 + \frac{\alpha}{r}BA$ を推論前に行うとき、推論時のオーバーヘッドがゼロになる理由を説明せよ。
+> 2. 4-bit NormalFloat（NF4）量子化が均一量子化より優れている理由を、正規分布の特性と結びつけて説明せよ。
 
 ---
 
@@ -491,10 +474,8 @@ struct DiagramQA
     answer::String
 end
 
-function load_diagram_qa(json_path::String)
-    data = JSON3.read(json_path)
-    return [DiagramQA(d.image, d.question, d.answer) for d in data]
-end
+load_diagram_qa(json_path::String) =
+    [DiagramQA(d.image, d.question, d.answer) for d in JSON3.read(json_path)]
 
 # Example
 dataset = [
@@ -532,14 +513,12 @@ function add_lora_to_attention!(model; r=16, α=32.0f0)
 end
 
 function count_lora_params(model)
-    # Count only LoRA params (B, A)
-    total = 0
-    for layer in model.vision_tower.layers
-        total += length(layer.attn.q_proj.lora_A.weight) + length(layer.attn.q_proj.lora_B.weight)
-        total += length(layer.attn.v_proj.lora_A.weight) + length(layer.attn.v_proj.lora_B.weight)
-    end
-    # ... (similarly for language_model)
-    return total
+    # Count only LoRA params (B, A) via sum over layers
+    sum(
+        length(l.attn.q_proj.lora_A.weight) + length(l.attn.q_proj.lora_B.weight) +
+        length(l.attn.v_proj.lora_A.weight) + length(l.attn.v_proj.lora_B.weight)
+        for l in model.vision_tower.layers
+    )
 end
 
 add_lora_to_attention!(model; r=16)
@@ -553,9 +532,9 @@ function train_lora!(model, dataset; epochs=3, batch_size=4, lr=2e-4)
 
         for batch in Iterators.partition(dataset, batch_size)
             # Prepare batch
-            images = [load(d.image_path) for d in batch]
+            images    = [load(d.image_path) for d in batch]
             questions = [d.question for d in batch]
-            answers = [d.answer for d in batch]
+            answers   = [d.answer   for d in batch]
 
             # Forward pass
             loss = compute_vqa_loss(model, images, questions, answers)
@@ -581,22 +560,12 @@ train_lora!(model, dataset[1:500]; epochs=3, batch_size=4, lr=2e-4)
 ```julia
 # Evaluate on test set
 function evaluate_vqa(model, test_set)
-    correct = 0
-
-    for example in test_set
-        image = load(example.image_path)
-        question = example.question
-
-        # Generate answer
-        pred_answer = generate(model, image, question; max_length=20)
-
-        if lowercase(pred_answer) == lowercase(example.answer)
-            correct += 1
-        end
+    # count matching predictions with do-block (no manual accumulator)
+    correct = count(test_set) do ex
+        pred = generate(model, load(ex.image_path), ex.question; max_length=20)
+        lowercase(pred) == lowercase(ex.answer)
     end
-
-    accuracy = correct / length(test_set)
-    return accuracy
+    return correct / length(test_set)
 end
 
 # Zero-shot (before fine-tuning)
@@ -624,37 +593,36 @@ LoRA (r=16) は、**パラメータ0.8%**で Full FT の**97%性能**を達成�
 
 ### 5.6 QLoRA実験 — 4-bit量子化の効果
 
-```python
-# QLoRA with bitsandbytes (Python example for reference)
-from transformers import AutoModelForVision2Seq, BitsAndBytesConfig
-from peft import LoraConfig, get_peft_model
+```julia
+# QLoRA: NF4量子化 + LoRA (Julia実装)
+using LinearAlgebra, Statistics
 
-# 4-bit quantization config
-bnb_config = BitsAndBytesConfig(
-    load_in_4bit=True,
-    bnb_4bit_quant_type="nf4",           # NormalFloat4
-    bnb_4bit_compute_dtype=torch.bfloat16,
-    bnb_4bit_use_double_quant=True       # Double quantization
-)
+# NF4量子化レベル（16値）: Φ⁻¹(i/15) を正規化
+# Φ⁻¹: 標準正規分布の逆CDF（quantile function）
+function nf4_levels()
+    levels = [quantile(Normal(), i/15) for i in 1:14]
+    prepend!(levels, [-Inf])  # clamp to -1
+    push!(levels, Inf)        # clamp to +1
+    levels ./= maximum(abs.(levels))
+    return levels
+end
 
-# Load base model in 4-bit
-model = AutoModelForVision2Seq.from_pretrained(
-    "HuggingFaceTB/SmolVLM2-256M-Instruct",
-    quantization_config=bnb_config
-)
+# 4-bit量子化: float → NF4インデックス
+function quantize_nf4(W::Matrix{Float32})
+    levels = nf4_levels()
+    # Per-channel正規化: |W|の最大値でスケール
+    scale = maximum(abs, W, dims=1)  # shape: [1, d_model]
+    W_norm = W ./ scale              # shape: [d_in, d_model]
+    # 最近傍NF4レベルに丸める
+    idx = [argmin(abs.(w .- levels)) for w in W_norm]
+    return idx, scale
+end
 
-# Add LoRA
-lora_config = LoraConfig(
-    r=16,
-    lora_alpha=32,
-    target_modules=["q_proj", "v_proj"],
-    lora_dropout=0.05,
-    bias="none"
-)
-model = get_peft_model(model, lora_config)
-
-print(f"Trainable params: {model.print_trainable_parameters()}")
-# Output: trainable params: 2,097,152 || all params: 258,097,152 || trainable%: 0.81
+# 出力例:
+# W = randn(Float32, 4096, 4096)
+# idx, scale = quantize_nf4(W)
+# @assert size(idx) == (4096, 4096)
+# @assert size(scale) == (1, 4096)
 ```
 
 QLoRA結果:
@@ -673,7 +641,7 @@ Fine-tuning & PEFTの理解度を確認する3つのテスト。
 
 #### 5.7.1 記号読解テスト（10問）
 
-:::details **Q1: $\Delta W = BA$ の各記号の意味は？**
+<details><summary>**Q1: $\Delta W = BA$ の各記号の意味は？**</summary>
 
 **解答**:
 - $\Delta W$: 重みの変化量（Fine-tuning時の差分）
@@ -683,9 +651,9 @@ Fine-tuning & PEFTの理解度を確認する3つのテスト。
 
 低ランク分解により、$dk$ パラメータを $r(d+k)$ に削減。
 
-:::
+</details>
 
-:::details **Q2: $h = W_0 x + \frac{\alpha}{r} BA x$ の $\frac{\alpha}{r}$ の役割は？**
+<details><summary>**Q2: $h = W_0 x + \frac{\alpha}{r} BA x$ の $\frac{\alpha}{r}$ の役割は？**</summary>
 
 **解答**:
 $\alpha$: スケーリング定数（典型値8-64）
@@ -695,9 +663,9 @@ $\frac{\alpha}{r}$ スケーリングにより、ランク $r$ を変えても�
 
 **理由**: $\mathbb{E}[\|BA x\|^2] \propto r \|x\|^2$ なので、$\frac{\alpha}{r}$ で正規化すると、$r$ の影響を相殺。
 
-:::
+</details>
 
-:::details **Q3: NF4量子化の $\Phi^{-1}(i/15)$ の意味は？**
+<details><summary>**Q3: NF4量子化の $\Phi^{-1}(i/15)$ の意味は？**</summary>
 
 **解答**:
 $\Phi^{-1}$: 標準正規分布 $\mathcal{N}(0, 1)$ の逆CDF（分位点関数）
@@ -705,9 +673,9 @@ $i/15$: 確率値（$i=0, 1, \dots, 15$）
 
 NF4は、正規分布の分位点を量子化レベルとする → 情報理論的に最適な4-bit量子化。
 
-:::
+</details>
 
-:::details **Q4: DreamBoothの $\mathcal{L}_\text{prior}$ の第1引数 $x_{pr}$ は何か？**
+<details><summary>**Q4: DreamBoothの $\mathcal{L}_\text{prior}$ の第1引数 $x_{pr}$ は何か？**</summary>
 
 **解答**:
 $x_{pr}$: Prior preservation用の画像。事前学習モデル $\theta_0$ が生成した「一般的なクラス」の画像。
@@ -720,9 +688,9 @@ $c_{\text{class}} = \text{``a dog''}$ （ユニークトークン [V] なし）
 
 Language driftを防ぐため、クラス一般の知識を保持する。
 
-:::
+</details>
 
-:::details **Q5: Adapter の $W_{\text{down}} \in \mathbb{R}^{r \times d}$ のランク $r$ の典型値は？**
+<details><summary>**Q5: Adapter の $W_{\text{down}} \in \mathbb{R}^{r \times d}$ のランク $r$ の典型値は？**</summary>
 
 **解答**:
 $r = 64$（BERT-baseなど、$d=768$ の場合）
@@ -731,9 +699,9 @@ $r = 64$（BERT-baseなど、$d=768$ の場合）
 
 Adapterパラメータ数: $2dr + d + r \approx 2dr$
 
-:::
+</details>
 
-:::details **Q6: Prefix Tuningの $P \in \mathbb{R}^{l \times d}$ の $l$ の意味は？**
+<details><summary>**Q6: Prefix Tuningの $P \in \mathbb{R}^{l \times d}$ の $l$ の意味は？**</summary>
 
 **解答**:
 $l$: プレフィックス長（典型値10-20トークン）
@@ -743,9 +711,9 @@ $P$ は trainable な連続ベクトル列。入力 $X$ の先頭に連結: $[P;
 
 パラメータ数: $l \times d \times L$（$L$=層数）
 
-:::
+</details>
 
-:::details **Q7: P-Tuning v2の $P_i$ （層ごとのプレフィックス）の利点は？**
+<details><summary>**Q7: P-Tuning v2の $P_i$ （層ごとのプレフィックス）の利点は？**</summary>
 
 **解答**:
 各層 $i$ に専用の $P_i \in \mathbb{R}^{l \times d}$ を持つ（Prefix Tuningは全層共有）。
@@ -754,9 +722,9 @@ $P$ は trainable な連続ベクトル列。入力 $X$ の先頭に連結: $[P;
 
 実験的に、多くのタスクで Full FT を超える性能 [^7]。
 
-:::
+</details>
 
-:::details **Q8: QLoRAの Double Quantization の $c_{\text{global}}$ は何を保存するか？**
+<details><summary>**Q8: QLoRAの Double Quantization の $c_{\text{global}}$ は何を保存するか？**</summary>
 
 **解答**:
 $c_{\text{global}} = \max_{i=1}^B c_i$
@@ -765,9 +733,9 @@ $c_{\text{global}} = \max_{i=1}^B c_i$
 
 各 $c_i$ を8-bitに量子化する際の正規化に使用。
 
-:::
+</details>
 
-:::details **Q9: LoRAの初期化で $B=0$ とする理由は？**
+<details><summary>**Q9: LoRAの初期化で $B=0$ とする理由は？**</summary>
 
 **解答**:
 $B=0$ により、訓練開始時 $\Delta W = BA = 0$。
@@ -776,9 +744,9 @@ $B=0$ により、訓練開始時 $\Delta W = BA = 0$。
 
 これにより、Fine-tuning初期の安定性を確保。$A$ はランダム初期化だが、$B=0$ で打ち消される。
 
-:::
+</details>
 
-:::details **Q10: Prompt Tuning vs Prefix Tuning の違いは？**
+<details><summary>**Q10: Prompt Tuning vs Prefix Tuning の違いは？**</summary>
 
 **解答**:
 
@@ -791,11 +759,11 @@ $B=0$ により、訓練開始時 $\Delta W = BA = 0$。
 
 Prompt Tuningは軽量だが、10B超モデルでのみ効果的 [^8]。
 
-:::
+</details>
 
 #### 5.7.2 数式導出テスト（5問）
 
-:::details **Q1: LoRAの勾配 $\nabla_B \mathcal{L}$ を導出せよ（$h = W_0 x + \frac{\alpha}{r} BA x$）**
+<details><summary>**Q1: LoRAの勾配 $\nabla_B \mathcal{L}$ を導出せよ（$h = W_0 x + \frac{\alpha}{r} BA x$）**</summary>
 
 **解答**:
 
@@ -815,9 +783,9 @@ $$
 \nabla_B \mathcal{L} = \frac{\alpha}{r} \sum_{i=1}^N \frac{\partial \mathcal{L}}{\partial h_i} (A x_i)^\top
 $$
 
-:::
+</details>
 
-:::details **Q2: NF4量子化誤差を $\mathbb{E}[(w - Q(w))^2]$ で評価せよ（$w \sim \mathcal{N}(0, 1)$）**
+<details><summary>**Q2: NF4量子化誤差を $\mathbb{E}[(w - Q(w))^2]$ で評価せよ（$w \sim \mathcal{N}(0, 1)$）**</summary>
 
 **解答**:
 
@@ -836,9 +804,9 @@ $\phi(w) = \frac{1}{\sqrt{2\pi}} e^{-w^2/2}$: 標準正規分布PDF
 
 NF4は**29%削減**。
 
-:::
+</details>
 
-:::details **Q3: DreamBooth の $\mathcal{L}_\text{total}$ を $\lambda$ で微分し、最適 $\lambda$ の条件を求めよ**
+<details><summary>**Q3: DreamBooth の $\mathcal{L}_\text{total}$ を $\lambda$ で微分し、最適 $\lambda$ の条件を求めよ**</summary>
 
 **解答**:
 
@@ -862,9 +830,9 @@ $$
 
 （$\lambda$ は訓練時の固定値、微分最適化の対象ではない）
 
-:::
+</details>
 
-:::details **Q4: Adapterのパラメータ数 $2dr + d + r$ を導出せよ**
+<details><summary>**Q4: Adapterのパラメータ数 $2dr + d + r$ を導出せよ**</summary>
 
 **解答**:
 
@@ -883,9 +851,9 @@ $$
 
 $r \ll d$ なら、$\approx 2dr$。
 
-:::
+</details>
 
-:::details **Q5: QLoRAのメモリ削減率を $d, k, r, B$ で表せ（Full FT → QLoRA）**
+<details><summary>**Q5: QLoRAのメモリ削減率を $d, k, r, B$ で表せ（Full FT → QLoRA）**</summary>
 
 **解答**:
 
@@ -911,28 +879,24 @@ $$
 
 GPT-3 (175B): 削減率 **約50倍**。
 
-:::
+</details>
 
 #### 5.7.3 コード翻訳テスト（5問）
 
-:::details **Q1: 数式 $h = W_0 x + \frac{\alpha}{r} BA x$ をJuliaで実装せよ**
+<details><summary>**Q1: 数式 $h = W_0 x + \frac{\alpha}{r} BA x$ をJuliaで実装せよ**</summary>
 
 **解答**:
 
 ```julia
-function lora_forward(W0::Matrix{Float32}, B::Matrix{Float32}, A::Matrix{Float32},
-                      x::Vector{Float32}, α::Float32, r::Int)
-    # h = W₀x + (α/r)BAx
-    scaling = α / r
-    h_base = W0 * x
-    h_lora = scaling * (B * (A * x))
-    return h_base + h_lora
-end
+# Short-form: h = W₀x + (α/r)B(Ax)
+lora_forward(W0::Matrix{Float32}, B::Matrix{Float32}, A::Matrix{Float32},
+             x::Vector{Float32}, α::Float32, r::Int) =
+    W0 * x .+ (α / r) .* (B * (A * x))
 
 # Example
 d, k, r = 512, 512, 8
-W0 = randn(Float32, d, k) / sqrt(k)
-B = randn(Float32, d, r) / sqrt(r)
+W0 = randn(Float32, d, k) / √k
+B  = randn(Float32, d, r) / √r
 A = zeros(Float32, r, k)
 x = randn(Float32, k)
 α = 16.0f0
@@ -940,67 +904,67 @@ x = randn(Float32, k)
 h = lora_forward(W0, B, A, x, α, r)
 ```
 
-:::
+</details>
 
-:::details **Q2: NF4量子化 $q_i = \Phi^{-1}(i/15)$ をPythonで計算せよ**
+<details><summary>**Q2: NF4量子化 $q_i = \Phi^{-1}(i/15)$ をJuliaで計算せよ**</summary>
 
 **解答**:
 
-```python
-import numpy as np
-from scipy.stats import norm
+```julia
+using Distributions: Normal, quantile
 
-nf4_levels = []
-for i in range(16):
-    if i == 0:
-        nf4_levels.append(-1.0)  # clamp
-    elif i == 15:
-        nf4_levels.append(1.0)   # clamp
-    else:
-        q = norm.ppf(i / 15.0)   # Φ⁻¹
-        nf4_levels.append(q)
+nf4_levels = Float64[]
+for i in 1:16
+    if i == 1
+        push!(nf4_levels, -1.0)  # clamp
+    elseif i == 16
+        push!(nf4_levels, 1.0)   # clamp
+    else
+        q = quantile(Normal(), (i-1) / 15.0)   # Φ⁻¹
+        push!(nf4_levels, q)
+    end
+end
 
 # Normalize to [-1, 1]
-max_val = max(abs(min(nf4_levels)), abs(max(nf4_levels)))
-nf4_levels = [x / max_val for x in nf4_levels]
+max_val = maximum(abs.(nf4_levels))
+nf4_levels ./= max_val
 
-print("NF4:", [f"{x:.4f}" for x in nf4_levels])
-# [-1.0000, -0.6962, -0.5251, ..., 1.0000]
+println("NF4: ", round.(nf4_levels, digits=4))
+# [-1.0, -0.6962, -0.5251, ..., 1.0]
 ```
 
-:::
+</details>
 
-:::details **Q3: DreamBooth Prior Preservation Loss $\mathcal{L}_\text{prior}$ をPyTorchで実装せよ**
+<details><summary>**Q3: DreamBooth Prior Preservation Loss $\mathcal{L}_\text{prior}$ をJuliaで実装せよ**</summary>
 
 **解答**:
 
-```python
-import torch
-import torch.nn.functional as F
+```julia
+using Flux, Statistics
 
-def prior_preservation_loss(model, x_prior, c_class, t, eps):
-    """
-    model: Diffusion UNet
-    x_prior: Prior images [B, C, H, W]
-    c_class: Class prompt embedding
-    t: Timestep
-    eps: Ground truth noise
-    """
-    # Add noise: z_t = √(α_t)x + √(1-α_t)ε
-    alpha_t = get_alpha_schedule(t)  # from diffusion scheduler
-    z_t = torch.sqrt(alpha_t) * x_prior + torch.sqrt(1 - alpha_t) * eps
+# DreamBooth Prior Preservation Loss
+# 数式: ℒ_prior = 𝔼_{z,c,ε,t}[‖ε - ε_θ(z_t, t, c)‖²]
+#
+# 引数:
+#   ε_pred :: Matrix{Float32}  # 予測ノイズ [C×H×W×B]
+#   ε      :: Matrix{Float32}  # 正解ノイズ [C×H×W×B]
+#
+# 記号対応:
+#   ε_pred ↔ eps_pred
+#   ε      ↔ eps
 
-    # Predict noise
-    eps_pred = model(z_t, t, c_class)
+function prior_preservation_loss(ε_pred, ε)
+    return mean((ε_pred .- ε).^2)  # MSE
+end
 
-    # MSE loss
-    loss = F.mse_loss(eps_pred, eps)
-    return loss
+# 検算: 同一ノイズなら損失=0
+ε_test = randn(Float32, 4, 4, 4, 2)
+@assert prior_preservation_loss(ε_test, ε_test) ≈ 0.0f0
 ```
 
-:::
+</details>
 
-:::details **Q4: Rust で LoRA マージ $W_{\text{merged}} = W_0 + \frac{\alpha}{r} BA$ を実装せよ**
+<details><summary>**Q4: Rust で LoRA マージ $W_{\text{merged}} = W_0 + \frac{\alpha}{r} BA$ を実装せよ**</summary>
 
 **解答**:
 
@@ -1015,12 +979,8 @@ fn lora_merge(
     r: usize,
 ) -> Array2<f32> {
     let scaling = alpha / (r as f32);
-
-    // Compute BA: (d×r) @ (r×k) = (d×k)
-    let ba = b.dot(a);
-
     // W_merged = W₀ + (α/r)BA
-    w0 + &(ba * scaling)
+    w0 + &(b.dot(a) * scaling)
 }
 
 fn main() {
@@ -1037,9 +997,9 @@ fn main() {
 }
 ```
 
-:::
+</details>
 
-:::details **Q5: Adapter の Forward pass $h_{\text{out}} = h + W_{\text{up}} \text{ReLU}(W_{\text{down}} h + b_{\text{down}}) + b_{\text{up}}$ をJuliaで実装せよ**
+<details><summary>**Q5: Adapter の Forward pass $h_{\text{out}} = h + W_{\text{up}} \text{ReLU}(W_{\text{down}} h + b_{\text{down}}) + b_{\text{up}}$ をJuliaで実装せよ**</summary>
 
 **解答**:
 
@@ -1055,21 +1015,16 @@ end
 
 function (adapter::Adapter)(h::Vector{Float32})
     # h_adapter = W_up * ReLU(W_down * h + b_down) + b_up
-    h_down = adapter.W_down * h .+ adapter.b_down
-    h_relu = relu.(h_down)
-    h_up = adapter.W_up * h_relu .+ adapter.b_up
-
-    # Residual connection
-    h_out = h .+ h_up
-    return h_out
+    h_up = adapter.W_up * relu.(adapter.W_down * h .+ adapter.b_down) .+ adapter.b_up
+    return h .+ h_up  # residual connection
 end
 
 # Example
 d, r = 768, 64
 adapter = Adapter(
-    randn(Float32, r, d) / sqrt(d),
+    randn(Float32, r, d) / √d,
     zeros(Float32, r),
-    randn(Float32, d, r) / sqrt(r),
+    randn(Float32, d, r) / √r,
     zeros(Float32, d)
 )
 
@@ -1077,7 +1032,7 @@ h = randn(Float32, d)
 h_out = adapter(h)
 ```
 
-:::
+</details>
 
 #### 5.7.4 総合チェックリスト
 
@@ -1091,9 +1046,7 @@ h_out = adapter(h)
 
 **全てチェックできたら、第23回の内容を完全習得**。
 
-:::message
-**進捗: 85% 完了** SmolVLM2 LoRA Fine-tuningの実験を完了。Zero-shot 42%→LoRA 76%、QLoRAでメモリ60%削減を確認。次は発展ゾーン — 最新研究と理論的限界へ。
-:::
+> **Note:** **進捗: 85% 完了** SmolVLM2 LoRA Fine-tuningの実験を完了。Zero-shot 42%→LoRA 76%、QLoRAでメモリ60%削減を確認。次は発展ゾーン — 最新研究と理論的限界へ。
 
 ---
 
@@ -1335,9 +1288,7 @@ graph LR
 | [QLoRA実装 (GitHub)](https://github.com/artidoro/qlora) | QLoRAの公式実装 |
 | [DreamBooth公式サイト](https://dreambooth.github.io/) | デモ + 論文リンク |
 
-:::message
-**進捗: 95% 完了** 最新研究（DoRA/LoRA+/VeRA）、理論的限界（Intrinsic Dimension）、QLoRA数値安定性、DreamBooth拡張を学んだ。次は振り返りゾーン — まとめ + FAQ + 次回予告へ。
-:::
+> **Note:** **進捗: 95% 完了** 最新研究（DoRA/LoRA+/VeRA）、理論的限界（Intrinsic Dimension）、QLoRA数値安定性、DreamBooth拡張を学んだ。次は振り返りゾーン — まとめ + FAQ + 次回予告へ。
 
 ---
 
@@ -1360,13 +1311,13 @@ graph LR
 
 ### 6.8 FAQ — よくある疑問と誤解
 
-:::details **Q1: LoRAは全タスクで有効か？**
+<details><summary>**Q1: LoRAは全タスクで有効か？**</summary>
 
 **A**: ほとんどのタスクで有効だが、例外もある。**ドメインシフトが極端**な場合（例: 英語→非ローマ字言語）、Full FTの方が良いことがある。一般的には、タスクが事前学習に近いほどLoRAが有効。
 
-:::
+</details>
 
-:::details **Q2: $r$ はどう選ぶべきか？**
+<details><summary>**Q2: $r$ はどう選ぶべきか？**</summary>
 
 **A**: 経験則:
 - 小規模タスク（分類など）: $r=4-8$
@@ -1374,28 +1325,32 @@ graph LR
 - 大規模タスク（対話、複雑推論）: $r=16-64$
 
 実験的に複数の $r$ を試し、性能 vs メモリのトレードオフで選ぶ。
-:::
 
-:::details **Q3: QLoRAの4-bit量子化は推論でも使える？**
+</details>
+
+<details><summary>**Q3: QLoRAの4-bit量子化は推論でも使える？**</summary>
 
 **A**: 使える。ただし、推論時は $W_0$ を4-bitで保持し、on-the-flyでFP16に展開。メモリは削減されるが、展開コストで推論速度が5-10%低下する。
-:::
 
-:::details **Q4: DreamBoothとLoRAを組み合わせる利点は？**
+</details>
+
+<details><summary>**Q4: DreamBoothとLoRAを組み合わせる利点は？**</summary>
 
 **A**: 2つ:
 1. **メモリ削減**: Full DreamBooth（全UNet更新）は数GBメモリ。LoRAなら数百MB。
 2. **Multi-concept merge**: 複数被写体の $(B, A)$ ペアを保持し、推論時に合成可能（例: 「あなたの犬」+ 「あなたの猫」を同じ画像に）。
-:::
 
-:::details **Q5: Adapter vs LoRA、どちらを選ぶべきか？**
+</details>
+
+<details><summary>**Q5: Adapter vs LoRA、どちらを選ぶべきか？**</summary>
 
 **A**:
 - **LoRA**: 推論速度重視（マージ可能）、Multi-task（複数Adapter切り替え）
 - **Adapter**: 非線形変換が必要なタスク（LoRAは線形のみ）
 
 実用上、LoRAの方が広く使われている（HuggingFace PEFTライブラリのデフォルト）。
-:::
+
+</details>
 
 ### 6.9 学習スケジュール（1週間プラン）
 
@@ -1576,21 +1531,16 @@ const NF4_VALUES = Float32[
 ]
 
 function quantize_nf4(W::Matrix{Float32})
-    # Normalize to [-1, 1]
     absmax = maximum(abs.(W))
     W_norm = W ./ absmax
-
-    # Find nearest NF4 value
+    # Map each element to nearest NF4 index
     W_quant_idx = [argmin(abs.(w .- NF4_VALUES)) for w in W_norm]
-
-    # Store as 4-bit indices (0-15) + scale factor
     return W_quant_idx, absmax
 end
 
-function dequantize_nf4(W_quant_idx, absmax)
-    W_dequant = [NF4_VALUES[idx] * absmax for idx in W_quant_idx]
-    return reshape(W_dequant, size(W_quant_idx))
-end
+# Short-form dequantize: map indices back to FP32 and reshape
+dequantize_nf4(W_quant_idx, absmax) =
+    reshape([NF4_VALUES[idx] * absmax for idx in W_quant_idx], size(W_quant_idx))
 ```
 
 #### 7.3 Pre-Diag & SORA: 重み条件付けフレームワーク
@@ -1672,9 +1622,12 @@ peft_config = (
 
 **結論**: DoRAが2024年のSOTA、QLoRAはメモリ制約時の最適解、LoRAFusionはマルチタスクの標準。
 
-:::message
-**進捗: 100% 完了** 🎉 講義完走！最新PEFT手法（DoRA, QLoRA, LoRAFusion）まで網羅した。
-:::
+> **Note:** **進捗: 100% 完了** 🎉 講義完走！最新PEFT手法（DoRA, QLoRA, LoRAFusion）まで網羅した。
+
+> **Progress: 95%**
+> **理解度チェック**
+> 1. DoRA（Weight-Decomposed LoRA）がLoRAと異なるのは何を分解するからか？その利点は？
+> 2. LoRA+でAとBに異なる学習率を設定する理論的根拠は何か？
 
 ---
 
@@ -1682,51 +1635,51 @@ peft_config = (
 
 ### 主要論文
 
-[^1]: Hu, E. J., Shen, Y., Wallis, P., Allen-Zhu, Z., Li, Y., Wang, S., Wang, L., & Chen, W. (2022). **LoRA: Low-Rank Adaptation of Large Language Models**. *ICLR 2022*. @[card](https://arxiv.org/abs/2106.09685)
+[^1]: Hu, E. J., Shen, Y., Wallis, P., Allen-Zhu, Z., Li, Y., Wang, S., Wang, L., & Chen, W. (2022). **LoRA: Low-Rank Adaptation of Large Language Models**. *ICLR 2022*. <https://arxiv.org/abs/2106.09685>
 
-[^2]: Dettmers, T., Pagnoni, A., Holtzman, A., & Zettlemoyer, L. (2023). **QLoRA: Efficient Finetuning of Quantized LLMs**. *NeurIPS 2023*. @[card](https://arxiv.org/abs/2305.14314)
+[^2]: Dettmers, T., Pagnoni, A., Holtzman, A., & Zettlemoyer, L. (2023). **QLoRA: Efficient Finetuning of Quantized LLMs**. *NeurIPS 2023*. <https://arxiv.org/abs/2305.14314>
 
-[^3]: Kirkpatrick, J., Pascanu, R., Rabinowitz, N., Veness, J., Desjardins, G., Rusu, A. A., ... & Hadsell, R. (2017). **Overcoming catastrophic forgetting in neural networks**. *PNAS*, 114(13), 3521-3526. @[card](https://www.pnas.org/doi/10.1073/pnas.1611835114)
+[^3]: Kirkpatrick, J., Pascanu, R., Rabinowitz, N., Veness, J., Desjardins, G., Rusu, A. A., ... & Hadsell, R. (2017). **Overcoming catastrophic forgetting in neural networks**. *PNAS*, 114(13), 3521-3526. <https://www.pnas.org/doi/10.1073/pnas.1611835114>
 
-[^4]: Ruiz, N., Li, Y., Jampani, V., Pritch, Y., Rubinstein, M., & Aberman, K. (2023). **DreamBooth: Fine Tuning Text-to-Image Diffusion Models for Subject-Driven Generation**. *CVPR 2023*. @[card](https://arxiv.org/abs/2208.12242)
+[^4]: Ruiz, N., Li, Y., Jampani, V., Pritch, Y., Rubinstein, M., & Aberman, K. (2023). **DreamBooth: Fine Tuning Text-to-Image Diffusion Models for Subject-Driven Generation**. *CVPR 2023*. <https://arxiv.org/abs/2208.12242>
 
-[^5]: Houlsby, N., Giurgiu, A., Jastrzebski, S., Morrone, B., De Laroussilhe, Q., Gesmundo, A., Attariyan, M., & Gelly, S. (2019). **Parameter-Efficient Transfer Learning for NLP**. *ICML 2019*. @[card](https://arxiv.org/abs/1902.00751)
+[^5]: Houlsby, N., Giurgiu, A., Jastrzebski, S., Morrone, B., De Laroussilhe, Q., Gesmundo, A., Attariyan, M., & Gelly, S. (2019). **Parameter-Efficient Transfer Learning for NLP**. *ICML 2019*. <https://arxiv.org/abs/1902.00751>
 
-[^6]: Li, X. L., & Liang, P. (2021). **Prefix-Tuning: Optimizing Continuous Prompts for Generation**. *ACL 2021*. @[card](https://arxiv.org/abs/2101.00190)
+[^6]: Li, X. L., & Liang, P. (2021). **Prefix-Tuning: Optimizing Continuous Prompts for Generation**. *ACL 2021*. <https://arxiv.org/abs/2101.00190>
 
-[^7]: Liu, X., Ji, K., Fu, Y., Tam, W. L., Du, Z., Yang, Z., & Tang, J. (2022). **P-Tuning v2: Prompt Tuning Can Be Comparable to Fine-tuning Universally Across Scales and Tasks**. *ACL 2022*. @[card](https://arxiv.org/abs/2110.07602)
+[^7]: Liu, X., Ji, K., Fu, Y., Tam, W. L., Du, Z., Yang, Z., & Tang, J. (2022). **P-Tuning v2: Prompt Tuning Can Be Comparable to Fine-tuning Universally Across Scales and Tasks**. *ACL 2022*. <https://arxiv.org/abs/2110.07602>
 
-[^8]: Lester, B., Al-Rfou, R., & Constant, N. (2021). **The Power of Scale for Parameter-Efficient Prompt Tuning**. *EMNLP 2021*. @[card](https://arxiv.org/abs/2104.08691)
+[^8]: Lester, B., Al-Rfou, R., & Constant, N. (2021). **The Power of Scale for Parameter-Efficient Prompt Tuning**. *EMNLP 2021*. <https://arxiv.org/abs/2104.08691>
 
-[^9]: Lux.jl: Explicit Parameterization for Neural Networks in Julia. @[card](https://github.com/LuxDL/Lux.jl)
+[^9]: Lux.jl: Explicit Parameterization for Neural Networks in Julia. <https://github.com/LuxDL/Lux.jl>
 
-[^10]: Ouyang, L., Wu, J., Jiang, X., Almeida, D., Wainwright, C. L., Mishkin, P., ... & Lowe, R. (2022). **Training language models to follow instructions with human feedback**. *NeurIPS 2022*. @[card](https://arxiv.org/abs/2203.02155)
+[^10]: Ouyang, L., Wu, J., Jiang, X., Almeida, D., Wainwright, C. L., Mishkin, P., ... & Lowe, R. (2022). **Training language models to follow instructions with human feedback**. *NeurIPS 2022*. <https://arxiv.org/abs/2203.02155>
 
-[^11]: Liu, S., Zhang, Y., Qiu, L., Xiao, C., Zhao, H., Jia, Y., ... & Zhang, Y. (2024). **DoRA: Weight-Decomposed Low-Rank Adaptation**. *arXiv preprint*. @[card](https://arxiv.org/abs/2402.09353)
+[^11]: Liu, S., Zhang, Y., Qiu, L., Xiao, C., Zhao, H., Jia, Y., ... & Zhang, Y. (2024). **DoRA: Weight-Decomposed Low-Rank Adaptation**. *arXiv preprint*. <https://arxiv.org/abs/2402.09353>
 
-[^12]: Hayou, S., Ghosh, N., & Yu, B. (2024). **LoRA+: Efficient Low Rank Adaptation of Large Models**. *ICML 2024 Workshop*. @[card](https://arxiv.org/abs/2402.12354)
+[^12]: Hayou, S., Ghosh, N., & Yu, B. (2024). **LoRA+: Efficient Low Rank Adaptation of Large Models**. *ICML 2024 Workshop*. <https://arxiv.org/abs/2402.12354>
 
-[^13]: Aghajanyan, A., Gupta, S., & Zettlemoyer, L. (2020). **Intrinsic Dimensionality Explains the Effectiveness of Language Model Fine-Tuning**. *ACL 2021*. @[card](https://arxiv.org/abs/2012.13255)
+[^13]: Aghajanyan, A., Gupta, S., & Zettlemoyer, L. (2020). **Intrinsic Dimensionality Explains the Effectiveness of Language Model Fine-Tuning**. *ACL 2021*. <https://arxiv.org/abs/2012.13255>
 
 [^14]: Lloyd, S. (1982). **Least squares quantization in PCM**. *IEEE Transactions on Information Theory*, 28(2), 129-137.
 
-[^15]: Gal, R., Alaluf, Y., Atzmon, Y., Patashnik, O., Bermano, A. H., Chechik, G., & Cohen-Or, D. (2022). **An Image is Worth One Word: Personalizing Text-to-Image Generation using Textual Inversion**. *ICLR 2023*. @[card](https://arxiv.org/abs/2208.01618)
+[^15]: Gal, R., Alaluf, Y., Atzmon, Y., Patashnik, O., Bermano, A. H., Chechik, G., & Cohen-Or, D. (2022). **An Image is Worth One Word: Personalizing Text-to-Image Generation using Textual Inversion**. *ICLR 2023*. <https://arxiv.org/abs/2208.01618>
 
-[^16]: Kumari, N., Zhang, B., Zhang, R., Shechtman, E., & Zhu, J. Y. (2023). **Multi-Concept Customization of Text-to-Image Diffusion**. *CVPR 2023*. @[card](https://arxiv.org/abs/2212.04488)
+[^16]: Kumari, N., Zhang, B., Zhang, R., Shechtman, E., & Zhu, J. Y. (2023). **Multi-Concept Customization of Text-to-Image Diffusion**. *CVPR 2023*. <https://arxiv.org/abs/2212.04488>
 
-[^17]: Kopiczko, D. J., Blankevoort, T., & Asano, Y. M. (2024). **VeRA: Vector-based Random Matrix Adaptation**. *ICLR 2024*. @[card](https://arxiv.org/abs/2310.11454)
+[^17]: Kopiczko, D. J., Blankevoort, T., & Asano, Y. M. (2024). **VeRA: Vector-based Random Matrix Adaptation**. *ICLR 2024*. <https://arxiv.org/abs/2310.11454>
 
-[^18]: He, J., Zhou, C., Ma, X., Berg-Kirkpatrick, T., & Neubig, G. (2022). **Towards a Unified View of Parameter-Efficient Transfer Learning**. *ICLR 2022*. @[card](https://arxiv.org/abs/2110.04366)
+[^18]: He, J., Zhou, C., Ma, X., Berg-Kirkpatrick, T., & Neubig, G. (2022). **Towards a Unified View of Parameter-Efficient Transfer Learning**. *ICLR 2022*. <https://arxiv.org/abs/2110.04366>
 
-[^19]: Ding, N., et al. (2024). **Parameter-Efficient Fine-Tuning for Large Models: A Comprehensive Survey**. *arXiv preprint*. @[card](https://arxiv.org/abs/2403.14608)
+[^19]: Han, Z., et al. (2024). **Parameter-Efficient Fine-Tuning for Large Models: A Comprehensive Survey**. *arXiv preprint*. <https://arxiv.org/abs/2403.14608>
 
-[^20]: Liu, S., et al. (2024). **DoRA: Weight-Decomposed Low-Rank Adaptation**. *arXiv preprint*. @[card](https://arxiv.org/abs/2402.09353)
+[^20]: Liu, S., et al. (2024). **DoRA: Weight-Decomposed Low-Rank Adaptation**. *arXiv preprint*. <https://arxiv.org/abs/2402.09353>
 
-[^21]: Dettmers, T., et al. (2023). **QLoRA: Efficient Finetuning of Quantized LLMs**. *NeurIPS 2023*. @[card](https://arxiv.org/abs/2305.14314)
+[^21]: Dettmers, T., et al. (2023). **QLoRA: Efficient Finetuning of Quantized LLMs**. *NeurIPS 2023*. <https://arxiv.org/abs/2305.14314>
 
-[^22]: Wei, H., et al. (2024). **Calibrating and Rotating: A Unified Framework for Weight Conditioning in PEFT**. *arXiv preprint*. @[card](https://arxiv.org/abs/2511.00051)
+[^22]: Wei, H., et al. (2024). **Calibrating and Rotating: A Unified Framework for Weight Conditioning in PEFT**. *arXiv preprint*. <https://arxiv.org/abs/2511.00051>
 
-[^23]: Zhang, X., et al. (2024). **LoRAFusion: Efficient LoRA Fine-Tuning for LLMs**. *arXiv preprint*. @[card](https://arxiv.org/abs/2510.00206)
+[^23]: Zhu, Z., Su, Q., Ding, Y., Song, K., et al. (2025). **LoRAFusion: Efficient LoRA Fine-Tuning for LLMs**. *EuroSys 2026*. <https://arxiv.org/abs/2510.00206>
 
 ### 教科書
 
@@ -1736,35 +1689,13 @@ peft_config = (
 
 ---
 
-## 記法規約
+## 著者リンク
 
-| 記号 | 意味 | 備考 |
-|:-----|:-----|:-----|
-| $W_0 \in \mathbb{R}^{d \times k}$ | 事前学習重み行列（frozen） | d=出力次元、k=入力次元 |
-| $B \in \mathbb{R}^{d \times r}$ | LoRA行列B（trainable） | r=ランク |
-| $A \in \mathbb{R}^{r \times k}$ | LoRA行列A（trainable） | r=ランク |
-| $\Delta W = BA$ | 重みの変化量 | 低ランク分解 |
-| $h = W_0 x + \frac{\alpha}{r} BA x$ | LoRA Forward pass | α=スケーリング定数 |
-| $r$ | LoRAのランク | 典型値: 4-64 |
-| $\alpha$ | スケーリング定数 | 典型値: 8-64 |
-| $\theta_0$ | 事前学習パラメータ | Full FTでは更新、LoRAでは固定 |
-| $\theta_\text{ft}$ | Fine-tuning後パラメータ | - |
-| $\mathcal{L}$ | 損失関数 | タスク依存 |
-| $\eta$ | 学習率 | Adam/AdamWで使用 |
-| $\nabla_B, \nabla_A$ | LoRAパラメータの勾配 | Backpropで計算 |
-| NF4 | 4-bit NormalFloat量子化 | QLoRA |
-| $\epsilon_\theta(z_t, c)$ | Diffusionモデルのノイズ予測 | DreamBooth |
-| $\mathcal{L}_\text{prior}$ | Prior Preservation Loss | DreamBooth |
-
-**本シリーズの表記規則**:
-- ベクトル: 太字小文字 $\mathbf{x}$ または普通体 $x$（文脈で判断）
-- 行列: 大文字 $W$
-- スカラー: 小文字 $r, \alpha$
-- 期待値: $\mathbb{E}_{x \sim p}[\cdot]$
-- 確率分布: $p(x), q(x)$
-- KL divergence: $D_\text{KL}(p \| q)$
-
----
+- Blog: https://fumishiki.dev
+- X: https://x.com/fumishiki
+- LinkedIn: https://www.linkedin.com/in/fumitakamurakami
+- GitHub: https://github.com/fumishiki
+- Hugging Face: https://huggingface.co/fumishiki
 
 ## ライセンス
 

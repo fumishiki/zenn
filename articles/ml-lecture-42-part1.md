@@ -4,6 +4,11 @@ emoji: "🏆"
 type: "tech"
 topics: ["machinelearning", "deeplearning", "generativemodels", "julia", "unifiedtheory"]
 published: true
+slug: "ml-lecture-42-part1"
+difficulty: "advanced"
+time_estimate: "90 minutes"
+languages: ["Julia", "Rust"]
+keywords: ["機械学習", "深層学習", "生成モデル"]
 ---
 
 # 第42回: 全生成モデル理論の統一的整理 + Course IV 総括 — 最終章: 全てはつながっている
@@ -22,9 +27,7 @@ published: true
 
 そして、**Course IV 読了の総括**。10回の講義で獲得した理論武装を振り返り、Course V への道筋を示す。
 
-:::message
-**このシリーズについて**: 東京大学 松尾・岩澤研究室動画講義の**完全上位互換**の全50回シリーズ。理論（論文が書ける）、実装（Production-ready）、最新（2024-2026 SOTA）の3軸で差別化する。本講義は **Course IV の最終回** — 拡散モデル理論編のフィナーレにして、全生成モデル理論の統一的整理だ。
-:::
+> **Note:** **このシリーズについて**: 東京大学 松尾・岩澤研究室動画講義の**完全上位互換**の全50回シリーズ。理論（論文が書ける）、実装（Production-ready）、最新（2024-2026 SOTA）の3軸で差別化する。本講義は **Course IV の最終回** — 拡散モデル理論編のフィナーレにして、全生成モデル理論の統一的整理だ。
 
 ```mermaid
 graph TD
@@ -71,7 +74,7 @@ using LinearAlgebra, Statistics
 # VAE: ELBO = 𝔼[log p(x|z)] - KL[q(z|x) || p(z)]
 function vae_loss(x, z_mean, z_logvar)
     # Reconstruction term + KL regularization
-    recon = -sum((x - decode(z_mean)).^2)  # -||x - x_recon||²
+    recon = -sum((x .- decode(z_mean)).^2)  # -||x - x_recon||²
     kl = -0.5 * sum(1 .+ z_logvar .- z_mean.^2 .- exp.(z_logvar))
     return -(recon - kl)  # negative ELBO
 end
@@ -98,8 +101,8 @@ end
 function ddpm_loss(x0, ϵ, t, ϵ_θ)
     # xt = √ᾱt·x0 + √(1-ᾱt)·ϵ
     # Goal: predict noise ϵ
-    alpha_bar_t = get_alpha_bar(t)
-    xt = sqrt.(alpha_bar_t) .* x0 .+ sqrt.(1 .- alpha_bar_t) .* ϵ
+    ᾱ_t = get_alpha_bar(t)
+    xt = sqrt.(ᾱ_t) .* x0 .+ sqrt.(1 .- ᾱ_t) .* ϵ
     ϵ_pred = ϵ_θ(xt, t)
     return mean((ϵ_pred .- ϵ).^2)  # MSE between predicted and true noise
 end
@@ -110,7 +113,7 @@ D(x) = sigmoid.(sum(x, dims=2))  # Discriminator
 v_θ(x, t) = x  # Flow network
 ϵ_θ(x, t) = x  # Noise prediction network
 get_alpha_bar(t) = 1 .- t  # Noise schedule
-sigmoid(x) = 1 / (1 + exp(-x))
+sigmoid(x) = 1 ./ (1 .+ exp.(-x))
 
 # Test: 2D data
 x = randn(4, 2)
@@ -139,9 +142,7 @@ DDPM loss: 3.891
 
 **30秒で4つの損失関数を動かした。** 見た目は違えど、全て「モデルが予測した何かと、真の何かの距離」を最小化している。この統一的視点が、本講義の出発点だ。
 
-:::message
-**ここまでで全体の3%完了！** Zone 0 はウォーミングアップ。次は各モデルを実際に触って、違いと共通点を体感する。
-:::
+> **Note:** **ここまでで全体の3%完了！** Zone 0 はウォーミングアップ。次は各モデルを実際に触って、違いと共通点を体感する。
 
 ---
 
@@ -153,32 +154,6 @@ DDPM loss: 3.891
 
 VAE は $p(x) = \int p(x|z)p(z)dz$ という潜在変数モデルだ。エンコーダ $q_\phi(z|x)$ で潜在空間に写し、デコーダ $p_\theta(x|z)$ で再構成する。
 
-```julia
-# VAE generation: x → z → x'
-function vae_generate(x, encoder, decoder, latent_dim=2)
-    # Encode: q(z|x) → (μ, logσ²)
-    z_mean, z_logvar = encoder(x)
-
-    # Reparameterization trick: z = μ + σ·ε
-    ε = randn(size(z_mean))
-    z = z_mean .+ exp.(0.5 .* z_logvar) .* ε
-
-    # Decode: p(x|z)
-    x_recon = decoder(z)
-
-    return x_recon, z
-end
-
-# Dummy encoder/decoder
-encoder(x) = (mean(x, dims=2), log.(var(x, dims=2, corrected=false)))
-decoder(z) = z .* 2
-
-x_input = randn(4, 8)  # 4 samples, 8 dims
-x_vae, z_vae = vae_generate(x_input, encoder, decoder)
-println("VAE: Input → Latent → Reconstructed")
-println("  Latent z shape: ", size(z_vae))
-println("  Reconstruction error: ", mean((x_input - x_vae).^2))
-```
 
 **VAE の特徴**: 明示的な潜在空間 $z$。ぼやけた出力 (posterior collapse の影響)。
 
@@ -186,23 +161,6 @@ println("  Reconstruction error: ", mean((x_input - x_vae).^2))
 
 GAN は $p(x)$ を明示的にモデル化せず、Generator $G(z)$ と Discriminator $D(x)$ のゲームで学習する。
 
-```julia
-# GAN generation: z → G(z) = x
-function gan_generate(z, generator)
-    # Generator: z ~ N(0,I) → x
-    x_gen = generator(z)
-    return x_gen
-end
-
-# Dummy generator
-generator(z) = tanh.(z .* randn(size(z)))
-
-z_noise = randn(4, 8)
-x_gan = gan_generate(z_noise, generator)
-println("\nGAN: Noise → Generator → Fake sample")
-println("  Generated x shape: ", size(x_gan))
-println("  Mean: ", mean(x_gan), ", Std: ", std(x_gan))
-```
 
 **GAN の特徴**: シャープな出力。不安定な訓練。尤度計算不能。
 
@@ -210,31 +168,6 @@ println("  Mean: ", mean(x_gan), ", Std: ", std(x_gan))
 
 Flow Matching は $x_0 \sim p_0$ から $x_1 \sim p_1$ への直線パス $x_t = (1-t)x_0 + t·x_1$ に沿ってベクトル場を学習する。
 
-```julia
-# Flow Matching generation: x0 → xt → x1
-function flow_generate(x0, v_θ, steps=10)
-    dt = 1.0 / steps
-    xt = copy(x0)
-
-    for step in 1:steps
-        t = step * dt
-        # Euler integration: xt+dt = xt + v(xt, t)·dt
-        v = v_θ(xt, [t])
-        xt = xt .+ v .* dt
-    end
-
-    return xt
-end
-
-# Dummy velocity field
-v_θ_simple(x, t) = x .* (1 .- t[1])  # simple linear flow
-
-x0_data = randn(4, 8)
-x1_flow = flow_generate(x0_data, v_θ_simple)
-println("\nFlow: x0 → integrate v(x,t) → x1")
-println("  Final x1 shape: ", size(x1_flow))
-println("  Flow distance: ", mean((x1_flow - x0_data).^2))
-```
 
 **Flow の特徴**: シミュレーションフリー訓練。決定論的生成。高速サンプリング。
 
@@ -242,38 +175,6 @@ println("  Flow distance: ", mean((x1_flow - x0_data).^2))
 
 Diffusion は $x_T \sim \mathcal{N}(0,I)$ から逆拡散 $x_{t-1} = \mu_\theta(x_t, t) + \sigma_t z$ でノイズ除去を反復する。
 
-```julia
-# Diffusion generation: xT ~ N(0,I) → ... → x0
-function ddpm_generate(x_T, ϵ_θ, steps=10)
-    xt = copy(x_T)
-
-    for t in steps:-1:1
-        # Predict noise: ϵ̂ = ϵ_θ(xt, t)
-        ϵ_pred = ϵ_θ(xt, [t/steps])
-
-        # Remove noise: xt-1 = (xt - β·ϵ̂) / √ᾱ
-        beta_t = t / steps * 0.1  # simple linear schedule
-        alpha_t = 1 - beta_t
-        xt = (xt .- sqrt(beta_t) .* ϵ_pred) ./ sqrt(alpha_t)
-
-        if t > 1
-            # Add noise z ~ N(0,I) for t > 1
-            xt = xt .+ sqrt(beta_t) .* randn(size(xt))
-        end
-    end
-
-    return xt
-end
-
-# Dummy noise predictor
-ϵ_θ_simple(x, t) = x .* t[1]  # simple linear noise model
-
-x_T_noise = randn(4, 8)
-x0_ddpm = ddpm_generate(x_T_noise, ϵ_θ_simple)
-println("\nDDPM: xT ~ N(0,I) → denoise → x0")
-println("  Denoised x0 shape: ", size(x0_ddpm))
-println("  Final mean: ", mean(x0_ddpm), ", Std: ", std(x0_ddpm))
-```
 
 **Diffusion の特徴**: 高品質生成。遅いサンプリング（1000ステップ）。スコア関数 $\nabla_x \log p(x)$ の学習。
 
@@ -286,19 +187,16 @@ println("  Final mean: ", mean(x0_ddpm), ", Std: ", std(x0_ddpm))
 | **Flow** | $x_0 \to x_1$ | 可逆写像 | 厳密計算可能 | 中速 (10-100 steps) | 高 |
 | **Diffusion** | $x_T \to x_0$ | なし | 計算不能 | 低速 (1000 steps) | 最高 |
 
-```julia
-println("\n【パラダイム比較結果】")
-println("尤度計算: VAE(近似) Flow(厳密) GAN/Diffusion(不能)")
-println("品質: Diffusion > GAN ≈ Flow > VAE")
-println("速度: VAE/GAN(1step) > Flow(10-100) > Diffusion(1000)")
-println("\n→ 次のZone 2で、この違いの根本原因を掘り下げる")
-```
 
-:::message
-**ここまでで全体の10%完了！** 4つのパラダイムを触った。次は「なぜこの違いが生まれるのか？」を直感的に理解する。
-:::
+> **Note:** **ここまでで全体の10%完了！** 4つのパラダイムを触った。次は「なぜこの違いが生まれるのか？」を直感的に理解する。
 
 ---
+
+
+> Progress: 10%
+> **理解度チェック**
+> 1. $x_0 \sim p_0$ の各記号の意味と、この式が表す操作を説明してください。
+> 2. このゾーンで学んだ手法の直感的な意味と、なぜこの定式化が必要なのかを説明してください。
 
 ## 🧩 2. 直感ゾーン（15分）— なぜ統一理論が必要なのか
 
@@ -398,7 +296,8 @@ $\alpha=1, \beta=-1$ なら Score-based Diffusion、$\alpha=\beta$ なら GAN �
 2. **第34回 EBM が、第38回 FM 統一理論・第41回 World Models に繋がる**理論の連鎖
 3. **全生成モデルを4つのパラダイムで分類**し、数学的等価性で統一
 
-:::details トロイの木馬振り返り: 第9回の「Rust地獄」はどうなった？
+<details><summary>トロイの木馬振り返り: 第9回の「Rust地獄」はどうなった？</summary>
+
 第9回で Python → Rust の高速化に驚き、型パズルに苦しんだあなた。第10回で Julia の多重ディスパッチに感動し、以降はもう Python に戻ることはなかった。
 
 **Before (第8回まで)**:
@@ -412,7 +311,8 @@ $\alpha=1, \beta=-1$ なら Score-based Diffusion、$\alpha=\beta$ なら GAN �
 - **Python**: 査読者用（読むだけ）
 
 3言語が当たり前の武器になった。これが「トロイの木馬」の成果だ。
-:::
+
+</details>
 
 ### 2.4 本講義の3部構成
 
@@ -432,26 +332,16 @@ $\alpha=1, \beta=-1$ なら Score-based Diffusion、$\alpha=\beta$ なら GAN �
 - Before/After 振り返り
 - Course V 予告
 
-```julia
-println("\n【Course IV の旅路を振り返る準備ができた】")
-println("第33回: 可逆変換で厳密尤度 → だが制約あり")
-println("第34回: EBM で自由度 → だが Z 計算不能")
-println("第35回: Score で Z 回避 → だが低密度で不正確")
-println("第36回: DDPM で全域カバー → だが遅い")
-println("第37回: SDE で理論基盤 → 連続時間の威力")
-println("第38回: FM で訓練単純化 → 等価性の証明")
-println("第39回: LDM で実用化 → 潜在空間の力")
-println("第40回: CM で高速化 → 1-step の夢")
-println("第41回: WM で環境理解 → 生成の真の目的")
-println("第42回: 統一理論 → 全てがつながる")
-println("\n→ Zone 3 で、この全てを数式で統一する")
-```
 
-:::message
-**ここまでで全体の20%完了！** 直感的理解ができた。次は数学の本丸 — Zone 3 「数式修行ゾーン」で、等価性を完全に導出する。
-:::
+> **Note:** **ここまでで全体の20%完了！** 直感的理解ができた。次は数学の本丸 — Zone 3 「数式修行ゾーン」で、等価性を完全に導出する。
 
 ---
+
+
+> Progress: 20%
+> **理解度チェック**
+> 1. $dx = f(x,t)dt + g(t)dW$ の各記号の意味と、この式が表す操作を説明してください。
+> 2. このゾーンで学んだ手法の直感的な意味と、なぜこの定式化が必要なのかを説明してください。
 
 ## 📐 3. 数式修行ゾーン（60分）— 全生成モデルの統一理論
 
@@ -481,41 +371,6 @@ println("\n→ Zone 3 で、この全てを数式で統一する")
 - Flow: 可逆性制約 → 表現力の制限
 - AR: 逐次生成 → 遅いサンプリング
 
-```julia
-# Likelihood-based の統一インターフェース
-abstract type LikelihoodBased end
-
-struct VAE <: LikelihoodBased
-    encoder
-    decoder
-end
-
-struct NormalizingFlow <: LikelihoodBased
-    flow_layers
-end
-
-struct AutoregressiveModel <: LikelihoodBased
-    conditional_probs
-end
-
-# 全て log_likelihood(model, x) を実装
-function log_likelihood(model::VAE, x)
-    z_mean, z_logvar = model.encoder(x)
-    elbo = reconstruction_term(model, x, z_mean) - kl_term(z_mean, z_logvar)
-    return elbo  # lower bound
-end
-
-function log_likelihood(model::NormalizingFlow, x)
-    z, log_det_J = inverse_flow(model.flow_layers, x)
-    return log_p_z(z) + log_det_J  # exact likelihood
-end
-
-function log_likelihood(model::AutoregressiveModel, x)
-    return sum([log(model.conditional_probs[i](x[1:i-1])) for i in 1:length(x)])
-end
-
-println("パラダイム1: 尤度ベース → log p(x) を直接最大化")
-```
 
 #### パラダイム2: 暗黙的モデル (Implicit Models)
 
@@ -531,38 +386,6 @@ println("パラダイム1: 尤度ベース → log p(x) を直接最大化")
 - GAN: 訓練不安定、mode collapse
 - Diffusion: 遅いサンプリング（1000ステップ）
 
-```julia
-# Implicit models の統一インターフェース
-abstract type ImplicitModel end
-
-struct GAN <: ImplicitModel
-    generator
-    discriminator
-end
-
-struct DiffusionModel <: ImplicitModel
-    noise_predictor
-    noise_schedule
-end
-
-# 全て sample(model, n) を実装
-function sample(model::GAN, n::Int)
-    z = randn(n, latent_dim)
-    return model.generator(z)
-end
-
-function sample(model::DiffusionModel, n::Int, steps::Int=1000)
-    x_T = randn(n, data_dim)
-    x_t = x_T
-    for t in steps:-1:1
-        ϵ_pred = model.noise_predictor(x_t, t)
-        x_t = denoise_step(x_t, ϵ_pred, t, model.noise_schedule)
-    end
-    return x_t
-end
-
-println("パラダイム2: 暗黙的 → サンプリングプロセスのみ定義")
-```
 
 #### パラダイム3: スコアベース (Score-based Models)
 
@@ -576,41 +399,6 @@ println("パラダイム2: 暗黙的 → サンプリングプロセスのみ定
 
 **限界**: 低密度領域で不正確 → ノイズ付加で解決（→ Diffusion へ）
 
-```julia
-# Score-based の統一インターフェース
-abstract type ScoreBased end
-
-struct NCSN <: ScoreBased
-    score_network
-    noise_levels
-end
-
-struct ScoreSDE <: ScoreBased
-    score_network
-    sde_config
-end
-
-# 全て score(model, x, t) を実装
-function score(model::NCSN, x, sigma)
-    return model.score_network(x, sigma)
-end
-
-function score(model::ScoreSDE, x, t)
-    return model.score_network(x, t)
-end
-
-# Langevin sampling
-function langevin_sample(model::ScoreBased, x_init, steps, lr)
-    x = copy(x_init)
-    for step in 1:steps
-        s = score(model, x, step/steps)
-        x = x .+ lr .* s .+ sqrt(2*lr) .* randn(size(x))
-    end
-    return x
-end
-
-println("パラダイム3: スコアベース → ∇log p(x) を学習")
-```
 
 #### パラダイム4: Flow ベース (Flow-based Models)
 
@@ -625,37 +413,6 @@ println("パラダイム3: スコアベース → ∇log p(x) を学習")
 
 **限界**: Flow Matching は訓練は簡単だが、最適輸送の保証なし（→ OT 理論へ）
 
-```julia
-# Flow-based の統一インターフェース
-abstract type FlowBased end
-
-struct FlowMatching <: FlowBased
-    velocity_network
-end
-
-struct RectifiedFlow <: FlowBased
-    velocity_network
-end
-
-# 全て velocity(model, x, t) を実装
-function velocity(model::FlowMatching, x, t)
-    return model.velocity_network(x, t)
-end
-
-# ODE sampling
-function ode_sample(model::FlowBased, x0, steps)
-    dt = 1.0 / steps
-    x = copy(x0)
-    for step in 1:steps
-        t = step * dt
-        v = velocity(model, x, t)
-        x = x .+ v .* dt  # Euler method
-    end
-    return x
-end
-
-println("パラダイム4: Flow ベース → ODE dx/dt = v(x,t) で輸送")
-```
 
 #### 4つのパラダイムの関係図
 
@@ -681,7 +438,8 @@ graph TB
 
 次のセクションで、この変換を数学的に証明する。
 
-:::details 【補足】なぜ4つに分類したのか？
+<details><summary>【補足】なぜ4つに分類したのか？</summary>
+
 生成モデルの分類は多様だが、本講義では**訓練目的関数と生成メカニズム**の2軸で分類した:
 
 | パラダイム | 訓練目的 | 生成メカニズム |
@@ -692,7 +450,8 @@ graph TB
 | Flow ベース | Flow Matching | ODE integration |
 
 この分類により、**等価性の証明が自然に導かれる**。
-:::
+
+</details>
 
 ---
 
@@ -762,68 +521,6 @@ $$
 | VQ-VAE | 離散コードブック | Codebook + Commitment loss | 画像トークン化・圧縮 |
 | FSQ | 離散格子 | 格子量子化 | Codebook collapse 回避 |
 
-```julia
-# VAE family の統一的実装
-abstract type VAEFamily end
-
-struct StandardVAE <: VAEFamily
-    encoder
-    decoder
-    β::Float64
-end
-StandardVAE(enc, dec) = StandardVAE(enc, dec, 1.0)
-
-struct VQVAE <: VAEFamily
-    encoder
-    decoder
-    codebook
-    commitment_cost::Float64
-end
-
-struct FSQ <: VAEFamily
-    encoder
-    decoder
-    L::Int  # quantization level
-end
-
-# 全て elbo(model, x) を実装
-function elbo(model::StandardVAE, x)
-    z_mean, z_logvar = model.encoder(x)
-    z = reparameterize(z_mean, z_logvar)
-    recon = log_p_x_given_z(model.decoder, x, z)
-    kl = kl_divergence(z_mean, z_logvar)
-    return mean(recon) - model.β * mean(kl)
-end
-
-function elbo(model::VQVAE, x)
-    z_e = model.encoder(x)
-    z_q, indices = quantize(z_e, model.codebook)
-    recon = log_p_x_given_z(model.decoder, x, z_q)
-    codebook_loss = mean((stop_gradient(z_e) - z_q).^2)
-    commitment_loss = mean((z_e - stop_gradient(z_q)).^2)
-    return mean(recon) - codebook_loss - model.commitment_cost * commitment_loss
-end
-
-function elbo(model::FSQ, x)
-    z_e = model.encoder(x)
-    z_q = fsq_quantize(z_e, model.L)
-    recon = log_p_x_given_z(model.decoder, x, z_q)
-    return mean(recon)  # no codebook loss
-end
-
-# Helper functions
-reparameterize(μ, logσ²) = μ .+ exp.(0.5 .* logσ²) .* randn(size(μ))
-kl_divergence(μ, logσ²) = -0.5 .* sum(1 .+ logσ² .- μ.^2 .- exp.(logσ²), dims=2)
-log_p_x_given_z(decoder, x, z) = -sum((x - decoder(z)).^2, dims=2)  # Gaussian assumption
-stop_gradient(x) = x  # in practice: detach in PyTorch, Zygote.ignore in Julia
-quantize(z_e, codebook) = argmin_codebook(z_e, codebook)  # returns (z_q, indices)
-fsq_quantize(z, L) = round.(clamp.(z, -L, L))
-
-println("VAE family: 全て ELBO の変奏曲")
-println("  Standard VAE: β-weighted KL")
-println("  VQ-VAE: Discrete codebook + commitment")
-println("  FSQ: Lattice quantization, no codebook")
-```
 
 **統一的理解**: VAE ファミリーは全て、**潜在変数モデルの変分推論**という共通基盤を持つ。連続/離散、KL重み、量子化手法が違うだけだ。
 
@@ -927,82 +624,10 @@ Rectified Flow [^7] は、Flow Matching を反復して直線パスに近づけ�
 | Flow Matching | 条件付き ODE | 不能 | ODE Solver | No |
 | Rectified Flow | 直線化 ODE | 不能 | ODE Solver (少ステップ) | Yes (反復で) |
 
-```julia
-# Flow family の統一的実装
-abstract type FlowFamily end
-
-struct NormalizingFlow <: FlowFamily
-    layers  # list of invertible layers
-end
-
-struct CNF <: FlowFamily
-    ode_func  # f(x, t)
-end
-
-struct FlowMatching <: FlowFamily
-    velocity_net  # v_θ(x, t)
-end
-
-struct RectifiedFlow <: FlowFamily
-    velocity_net
-    reflow_iterations::Int
-end
-
-# 全て forward(model, x) と sample(model, z) を実装
-function forward(model::NormalizingFlow, x)
-    z = x
-    log_det_J = 0.0
-    for layer in model.layers
-        z, ldj = layer_forward(layer, z)
-        log_det_J += ldj
-    end
-    return z, log_det_J
-end
-
-function sample(model::NormalizingFlow, z)
-    x = z
-    for layer in reverse(model.layers)
-        x = layer_inverse(layer, x)
-    end
-    return x
-end
-
-function sample(model::CNF, z, solver=euler_ode)
-    # Integrate dx/dt = f(x, t) from t=0 to t=1
-    x = solver(model.ode_func, z, 0.0, 1.0, steps=100)
-    return x
-end
-
-function sample(model::FlowMatching, x0, solver=euler_ode)
-    # Integrate dx/dt = v_θ(x, t) from t=0 to t=1
-    v_func(x, t) = model.velocity_net(x, t)
-    x = solver(v_func, x0, 0.0, 1.0, steps=100)
-    return x
-end
-
-function train_reflow!(model::RectifiedFlow, data_pairs)
-    for iter in 1:model.reflow_iterations
-        # Generate new pairs using current velocity
-        new_pairs = [(x0, sample(FlowMatching(model.velocity_net), x0))
-                      for (x0, _) in data_pairs]
-        # Retrain on new pairs
-        train_flow_matching!(model.velocity_net, new_pairs)
-        data_pairs = new_pairs  # update for next iteration
-    end
-end
-
-println("Flow family: 可逆変換から連続輸送へ")
-println("  NF: Discrete invertible, exact likelihood")
-println("  CNF: Continuous ODE, exact likelihood (costly)")
-println("  FM: Conditional flow, simulation-free training")
-println("  RF: Reflow for straightness, 1-step generation")
-```
 
 **統一的理解**: Flow ファミリーは全て、**分布間の輸送**を ODE で実現する。可逆性・尤度・最適性のトレードオフが異なる。
 
-:::message
-**ここまでで全体の35%完了！** VAE と Flow ファミリーの統一的理解ができた。次は GAN ファミリー。
-:::
+> **Note:** **ここまでで全体の35%完了！** VAE と Flow ファミリーの統一的理解ができた。次は GAN ファミリー。
 
 ---
 
@@ -1131,81 +756,6 @@ $$
 | StyleGAN | JS (+ $\mathcal{W}$ space) | 中 | 最高 | No |
 | R3GAN | Relativistic + R3 正則化 | 最高 | 最高 | **Yes** |
 
-```julia
-# GAN family の統一的実装
-abstract type GANFamily end
-
-struct VanillaGAN <: GANFamily
-    generator
-    discriminator
-end
-
-struct WGAN <: GANFamily
-    generator
-    critic  # not "discriminator"
-    lipschitz_method::Symbol  # :clip, :gp, :sn
-end
-
-struct fGAN <: GANFamily
-    generator
-    discriminator
-    f_divergence::Function  # f(t) and f*(t)
-end
-
-struct R3GAN <: GANFamily
-    generator
-    discriminator
-    r3_weight::Float64
-end
-
-# 全て loss_D(model, x_real, x_fake) と loss_G(model, x_fake) を実装
-function loss_D(model::VanillaGAN, x_real, x_fake)
-    # max E[log D(x)] + E[log(1-D(G(z)))]
-    real_score = log.(model.discriminator(x_real))
-    fake_score = log.(1 .- model.discriminator(x_fake))
-    return -(mean(real_score) + mean(fake_score))
-end
-
-function loss_D(model::WGAN, x_real, x_fake)
-    # max E[D(x)] - E[D(G(z))]
-    loss = mean(model.critic(x_real)) - mean(model.critic(x_fake))
-
-    if model.lipschitz_method == :gp
-        # Gradient penalty
-        α = rand(size(x_real, 1))
-        x_interp = α .* x_real .+ (1 .- α) .* x_fake
-        grad = gradient(x -> mean(model.critic(x)), x_interp)
-        gp = mean((norm(grad, 2) .- 1).^2)
-        loss = loss - 10.0 * gp  # λ=10
-    end
-
-    return -loss  # negate for minimization
-end
-
-function loss_D(model::R3GAN, x_real, x_fake)
-    # Relativistic + R3 regularization
-    D_real = model.discriminator(x_real)
-    D_fake = model.discriminator(x_fake)
-    D_rel_real = D_real .- mean(D_fake)
-    D_rel_fake = D_fake .- mean(D_real)
-
-    # BCE on relativistic discriminator
-    loss_bce = -mean(log.(sigmoid.(D_rel_real))) - mean(log.(sigmoid.(-D_rel_fake)))
-
-    # R3 regularization: ||∇_x D_rel||²
-    grad_real = gradient(x -> mean(model.discriminator(x) .- mean(D_fake)), x_real)
-    grad_fake = gradient(x -> mean(model.discriminator(x) .- mean(D_real)), x_fake)
-    r3_reg = mean(grad_real.^2) + mean(grad_fake.^2)
-
-    return loss_bce + model.r3_weight * r3_reg
-end
-
-println("GAN family: 敵対的学習の多様性")
-println("  Vanilla: JS divergence, unstable")
-println("  WGAN: Wasserstein-1, Lipschitz constraint")
-println("  f-GAN: Arbitrary f-divergence")
-println("  R3GAN: Relativistic + R3, convergence guarantee")
-```
 
 **統一的理解**: GAN ファミリーは全て、**Generator が Discriminator を騙すゲーム**を解く。距離関数と正則化が違うだけだ。
 
@@ -1349,99 +899,10 @@ $$
 | LDM | 離散/潜在 | Markovian | 学習 Gaussian | 中速 (50-100) | 高 |
 | Consistency | 連続 | ODE | 1-step consistency | 高速 (1-4) | 中-高 |
 
-```julia
-# Diffusion family の統一的実装
-abstract type DiffusionFamily end
-
-struct DDPM <: DiffusionFamily
-    noise_pred_net  # ε_θ(x_t, t)
-    noise_schedule  # β_t
-end
-
-struct DDIM <: DiffusionFamily
-    noise_pred_net
-    noise_schedule
-    η::Float64  # stochasticity control
-end
-
-struct ScoreSDE <: DiffusionFamily
-    score_net  # s_θ(x, t) ≈ ∇log p_t(x)
-    sde_type::Symbol  # :vp or :ve
-end
-
-struct LDM <: DiffusionFamily
-    vae_encoder
-    vae_decoder
-    diffusion  # DDPM or DDIM in latent space
-end
-
-struct ConsistencyModel <: DiffusionFamily
-    consistency_net  # f_θ(x_t, t) → x_0
-    teacher_model  # Optional: for distillation
-end
-
-# 全て forward(model, x0, t) と sample(model, steps) を実装
-function forward(model::DDPM, x0, t)
-    # x_t = √ᾱ_t x_0 + √(1-ᾱ_t) ε
-    α_bar_t = get_alpha_bar(model.noise_schedule, t)
-    ε = randn(size(x0))
-    x_t = sqrt(α_bar_t) * x0 + sqrt(1 - α_bar_t) * ε
-    return x_t, ε
-end
-
-function sample(model::DDPM, x_T, steps)
-    x_t = x_T
-    for t in steps:-1:1
-        ε_pred = model.noise_pred_net(x_t, t)
-        x_t = ddpm_step(x_t, ε_pred, t, model.noise_schedule)
-    end
-    return x_t
-end
-
-function sample(model::DDIM, x_T, steps, skip=10)
-    # DDIM with skipping: use only steps/skip timesteps
-    x_t = x_T
-    timesteps = collect(steps:-skip:1)
-    for (i, t) in enumerate(timesteps)
-        t_prev = i < length(timesteps) ? timesteps[i+1] : 0
-        ε_pred = model.noise_pred_net(x_t, t)
-        x_t = ddim_step(x_t, ε_pred, t, t_prev, model.noise_schedule, model.η)
-    end
-    return x_t
-end
-
-function sample(model::LDM, x_T_latent, steps)
-    # Diffusion in latent space
-    z_T = x_T_latent
-    z_0 = sample(model.diffusion, z_T, steps)
-    # Decode to pixel space
-    x_0 = model.vae_decoder(z_0)
-    return x_0
-end
-
-function sample(model::ConsistencyModel, x_T, steps=1)
-    # 1-step or few-step generation
-    x_t = x_T
-    for step in 1:steps
-        t = (steps - step + 1) / steps
-        x_t = model.consistency_net(x_t, t)
-    end
-    return x_t
-end
-
-println("Diffusion family: ノイズ除去の階層構造")
-println("  DDPM: Discrete Markovian, slow")
-println("  DDIM: Non-Markovian, deterministic, faster")
-println("  Score SDE: Continuous, flexible")
-println("  LDM: Latent space, efficient")
-println("  CM: 1-step, distilled")
-```
 
 **統一的理解**: Diffusion ファミリーは全て、**Forward ノイズ付加の逆転**を学習する。離散/連続、決定論的/確率的、ピクセル/潜在空間が違うだけだ。
 
-:::message
-**ここまでで全体の50%完了！** VAE/Flow/GAN/Diffusion の4大ファミリーを統一的に整理した。次は AR と World Models、そして数学的等価性の証明へ。
-:::
+> **Note:** **ここまでで全体の50%完了！** VAE/Flow/GAN/Diffusion の4大ファミリーを統一的に整理した。次は AR と World Models、そして数学的等価性の証明へ。
 
 ---
 
@@ -1605,6 +1066,92 @@ $$
 | Genie [^30] | ゲーム環境 | AR | 行動 | 暗黙的 |
 
 **統一的理解**: World Models は、**時間的予測** $p(x_{t+1} | x_t, a_t)$ を学習する。潜在空間/ピクセル空間、AR/Diffusion の選択が異なる。
+
+#### 3.7.5 階層的 World Models の数理 — 予測階層と Cosmos 統一視点
+
+World Models の深層理論では、**表現の階層性**が本質的な役割を果たす。Schmidhuber (1991) の階層的 RNN から、現代の大規模 World Foundation Models まで、予測対象の抽象度が段階的に高まっている。
+
+##### 階層的 World Model の形式定義
+
+$L$ 層の階層的 World Model を次のように定義する:
+
+$$
+\mathcal{H} = \{(\phi_\ell,\, \psi_\ell,\, \pi_\ell)\}_{\ell=1}^{L}
+$$
+
+- $\phi_\ell: \mathcal{X}_{\ell-1} \to \mathcal{Z}_\ell$: 第 $\ell$ 層のエンコーダ
+- $\psi_\ell: \mathcal{Z}_\ell \times \mathcal{A} \to \mathcal{Z}_\ell$: 第 $\ell$ 層の予測器
+- $\pi_\ell: \mathcal{Z}_\ell \to \mathcal{X}_{\ell-1}$: 第 $\ell$ 層のデコーダ（任意）
+
+**3層階層の例**:
+
+| 層 $\ell$ | 空間 $\mathcal{Z}_\ell$ | 表現 | 予測ホライゾン |
+|:---------|:----------------------|:-----|:-------------|
+| $\ell=1$ | ピクセル空間 $\mathbb{R}^{H \times W \times C}$ | RGB 画像 | $\Delta t \sim 1$ フレーム |
+| $\ell=2$ | オブジェクト空間 $\mathbb{R}^{N \times d}$ | 物体の位置・速度 | $\Delta t \sim 10$ フレーム |
+| $\ell=3$ | 概念空間 $\mathbb{R}^{d_c}$ | シーン・関係 | $\Delta t \sim 100$ フレーム |
+
+各層の損失は $\mathcal{L}_\ell = \mathbb{E}\!\left[\left\|\psi_\ell(\phi_\ell(x_t^\ell), a_t) - \phi_\ell(x_{t+1}^\ell)\right\|^2\right]$ であり、総合損失は加重和 $\mathcal{L}_{\mathcal{H}} = \sum_{\ell=1}^{L} \lambda_\ell \mathcal{L}_\ell$ となる。$\lambda_\ell$ は各層の予測誤差スケールに逆比例して設定し、層間のスケール差を吸収する。
+
+##### JEPA と情報ボトルネック — 潜在空間予測の理論的根拠
+
+JEPA が「ピクセル生成を行わない」設計には情報理論的根拠がある。データ処理不等式より $I(s_t;\, x_{t+1}) \leq I(x_t;\, x_{t+1})$ だが、適切な $\phi$ は**タスク関連情報を保持**しつつ予測に不要な情報を捨てる。情報ボトルネック目標:
+
+$$
+\min_\phi \mathcal{L}_{\text{JEPA}} \;\Leftrightarrow\; \max_\phi \bigl[I(s_t;\, s_{t+1}) - \beta \cdot H(s_t)\bigr]
+$$
+
+$H(s_t)$ は潜在表現のエントロピー、$\beta$ はボトルネック強度。
+
+**崩壊解の防止**: $\phi(x) = c$（定数）は $\mathcal{L}_{\text{JEPA}} = 0$ を達成してしまう。V-JEPA はこれを時空間マスキングと EMA ターゲットエンコーダで防ぐ:
+
+$$
+\mathcal{L}_{\text{V-JEPA}} = \mathbb{E}_{M}\!\left[\left\|\psi\!\left(\phi_{\text{ctx}}(x_M),\, \mathrm{pos}\right) - \mathrm{sg}\!\left(\phi_{\text{tgt}}(x_{\bar{M}})\right)\right\|^2\right]
+$$
+
+$M$: マスク、$\bar{M}$: 補集合、$\mathrm{sg}(\cdot)$: stop-gradient、$\phi_{\text{tgt}}$: EMA 更新のターゲットエンコーダ。
+
+##### Cosmos (NVIDIA 2025) の統一 Video World Model
+
+Cosmos [^29] は**物理整合性**を持つ動画生成のための World Foundation Model だ。自己回帰条件付き生成:
+
+$$
+p_\theta(v_{1:T} \mid c) = \prod_{t=1}^{T} p_\theta(v_t \mid v_{<t},\, c)
+$$
+
+$v_t \in \mathbb{R}^{H \times W \times 3}$: 第 $t$ フレーム、$c$: 行動・物理条件。
+
+**Stage 1 — Causal Temporal Transformer**:
+
+$$
+h_t = \mathrm{CausalTransformer}(h_{<t},\, c), \quad h_t \in \mathbb{R}^{d}
+$$
+
+因果マスクにより過去フレームのみを参照し、$p(h_t \mid h_{<t}, c)$ を自己回帰的に学習する。
+
+**Stage 2 — Diffusion Decoder**:
+
+$$
+v_t = D_\theta(h_t), \quad D_\theta: \text{Latent Diffusion Model}
+$$
+
+潜在コード $h_t$ から条件付き LDM が高品質フレームを生成する。この2段階構成により、長期時間依存性（AR）と空間的細部（Diffusion）を分離して学習できる。
+
+**物理整合性補助損失**: 物理シミュレータ（Isaac Lab）からのデータで訓練し、オプティカルフロー $F$ と深度 $D$ を使った補助損失:
+
+$$
+\mathcal{L}_{\text{phys}} = \mathbb{E}\!\left[\lambda_{\text{flow}} \left\|F(v_t) - F(\hat{v}_t)\right\|^2 + \lambda_{\text{depth}} \left\|D(v_t) - D(\hat{v}_t)\right\|^2\right]
+$$
+
+##### World Models の統一情報圧縮原理
+
+全 World Models は、次の**情報圧縮問題の変種**に帰着する:
+
+$$
+\min_{\phi,\, \psi}\; \mathcal{L}_{\text{pred}} = \mathbb{E}\!\left[\mathrm{d}\!\left(\psi(\phi(x_t),\, a_t),\; \phi(x_{t+1})\right)\right]
+$$
+
+距離 $\mathrm{d}$ の選択（$L_2$、コサイン類似度、KL ダイバージェンス）と潜在空間 $\mathcal{Z}$（ピクセル、連続潜在、離散コード）の選択が、各モデルを特徴づける。
 
 ---
 
@@ -1856,14 +1403,444 @@ $$
 
 **結論**: Flow と Diffusion は、JKO scheme の連続時間 vs 離散時間の違いに過ぎない。
 
-:::message
-**ここまでで全体の70%完了！** 数学的等価性を完全に証明した。次は実装・実験ゾーンへ。
-:::
+---
+
+### 3.13 f-ダイバージェンス統一視点 — 全生成目標の共通基盤
+
+全ての生成モデルの学習目標は、**f-ダイバージェンス**の最小化として統一できる。
+
+#### f-ダイバージェンスの定義
+
+凸関数 $f: (0, \infty) \to \mathbb{R}$（$f(1) = 0$）に対し、f-ダイバージェンスを次のように定義する:
+
+$$
+D_f(p \| q) = \int q(x)\, f\!\left(\frac{p(x)}{q(x)}\right) dx
+$$
+
+重要な特例:
+
+| $f(u)$ | ダイバージェンス | 主な生成モデル |
+|:-------|:--------------|:------------|
+| $u \log u$ | KL$(p \| q)$ | VAE, Diffusion |
+| $-\log u$ | KL$(q \| p)$ | 最大尤度学習 |
+| $(u-1)^2 / u$ | Pearson $\chi^2$ | — |
+| $u \log u - (u+1)\log\tfrac{u+1}{2}$ | Jensen-Shannon | GAN |
+| $\lvert u - 1 \rvert / 2$ | Total Variation | — |
+
+**Legendre 変換による変分表現** (Nguyen et al. 2010):
+
+$$
+D_f(p \| q) = \sup_{T:\, \mathcal{X} \to \mathbb{R}} \left\{ \mathbb{E}_{x \sim p}[T(x)] - \mathbb{E}_{x \sim q}[f^*(T(x))] \right\}
+$$
+
+$f^*(t) = \sup_{u>0}\{tu - f(u)\}$: $f$ の凸共役。この変分表現が GAN の識別器 $T_\omega$ の役割を数学的に正当化する。
+
+#### VAE と Diffusion: 前向き KL 最小化
+
+**前向き KL** $\mathrm{KL}(p_{\text{data}} \| p_\theta)$ の最小化は対数尤度最大化と等価:
+
+$$
+-\mathrm{KL}(p_{\text{data}} \| p_\theta) = \mathbb{E}_{x \sim p_{\text{data}}}[\log p_\theta(x)] + H(p_{\text{data}})
+$$
+
+VAE の ELBO はその下界:
+
+$$
+\log p_\theta(x) \geq \underbrace{\mathbb{E}_{q_\phi(z|x)}[\log p_\theta(x|z)]}_{\text{再構成}} - \underbrace{\mathrm{KL}(q_\phi(z|x) \| p(z))}_{\text{正則化}}
+$$
+
+Diffusion の ELBO は時刻ごとの KL の和:
+
+$$
+\log p_\theta(x_0) \geq -\sum_{t=1}^{T} w_t \cdot \mathrm{KL}\!\left(q(x_{t-1}|x_t, x_0) \,\|\, p_\theta(x_{t-1}|x_t)\right) + C
+$$
+
+#### GAN: Jensen-Shannon ダイバージェンス最小化
+
+Vanilla GAN の最適識別器 $D^*(x) = \frac{p_{\text{data}}(x)}{p_{\text{data}}(x) + p_\theta(x)}$ を代入すると:
+
+$$
+\min_G \max_D \mathcal{L}_{\text{GAN}} = 2\,\mathrm{JSD}(p_{\text{data}} \| p_\theta) - \log 4
+$$
+
+$\mathrm{JSD}(p \| q) = \frac{1}{2}\mathrm{KL}(p \| m) + \frac{1}{2}\mathrm{KL}(q \| m)$、$m = \frac{p+q}{2}$。GAN の勾配消失問題: $p_{\text{data}}$ と $p_\theta$ のサポートが非重複のとき $\mathrm{JSD} = \log 2$ が定数となる。これが WGAN への動機だ。
+
+#### Wasserstein 距離: f-ダイバージェンスを超えて
+
+Wasserstein-1 距離は f-ダイバージェンスの族に属さないが、**積分確率距離 (IPM)** として:
+
+$$
+W_1(p, q) = \sup_{\|f\|_L \leq 1} \left\{ \mathbb{E}_{x \sim p}[f(x)] - \mathbb{E}_{x \sim q}[f(x)] \right\}
+$$
+
+（$\|f\|_L$: Lipschitz 定数 $\leq 1$）
+
+Wasserstein 距離の利点: $p$ と $q$ のサポートが非重複でも連続的に変化し、勾配消失が起きない。これは f-ダイバージェンスが弱収束を捉えられないのに対し、$W_1$ が輸送コストを直接最小化するためだ。
+
+#### Cramér 距離とエネルギー距離
+
+**エネルギー距離** ($X, X' \sim p$、$Y, Y' \sim q$):
+
+$$
+\mathcal{E}(p, q) = 2\,\mathbb{E}[\|X - Y\|] - \mathbb{E}[\|X - X'\|] - \mathbb{E}[\|Y - Y'\|]
+$$
+
+**Cramér 距離**はその CDF 版で、$\mathrm{CD}(p, q) = \int_{-\infty}^{\infty} (F_p(t) - F_q(t))^2 dt$。EBM の contrastive divergence 学習は、エネルギー距離の勾配推定と解釈できる。
+
+#### 情報幾何学的視点: Fisher 計量と自然勾配
+
+生成モデルのパラメータ空間 $\Theta$ を**統計多様体**とみなす。各点 $\theta \in \Theta$ に確率分布 $p_\theta$ が対応し、**Fisher 情報行列**がリーマン計量を定義する:
+
+$$
+G(\theta)_{ij} = \mathbb{E}_{x \sim p_\theta}\!\left[\frac{\partial \log p_\theta(x)}{\partial \theta_i} \frac{\partial \log p_\theta(x)}{\partial \theta_j}\right]
+$$
+
+$G(\theta)$ は KL ダイバージェンスの局所的 2 次近似:
+
+$$
+\mathrm{KL}(p_\theta \| p_{\theta + d\theta}) \approx \frac{1}{2}\, d\theta^\top G(\theta)\, d\theta
+$$
+
+**自然勾配法**: 通常の勾配降下 $\theta \leftarrow \theta - \eta \nabla_\theta \mathcal{L}$ を Fisher 計量で補正:
+
+$$
+\theta \leftarrow \theta - \eta\, G(\theta)^{-1} \nabla_\theta \mathcal{L}
+$$
+
+これは統計多様体上の最急降下方向（Amari 1998）であり、Score Matching の自然な最適化アルゴリズムを与える。
 
 ---
 
+### 3.14 統一損失関数の完全導出 — Stochastic Interpolants
+
+Section 3.8〜3.10 で個別に証明した等価性を、**Stochastic Interpolants** の枠組みで一括導出する。
+
+#### ELBO $= -\mathcal{L}_{\text{DDPM}}$（定数差を除く）
+
+DDPM の確率過程を $T$ 段階の階層 VAE として解釈すると、ELBO は:
+
+$$
+\log p_\theta(x_0) \geq \mathbb{E}_q\!\left[\log p_\theta(x_0|x_1) - \sum_{t=2}^{T} \mathrm{KL}(q(x_{t-1}|x_t,x_0) \| p_\theta(x_{t-1}|x_t)) - \mathrm{KL}(q(x_T|x_0) \| p(x_T))\right]
+$$
+
+**KL 項の閉形式**: 両分布はガウスなので:
+
+$$
+\mathrm{KL}(q(x_{t-1}|x_t,x_0) \| p_\theta(x_{t-1}|x_t)) = \frac{1}{2\sigma_t^2}\|\tilde{\mu}_t(x_t, x_0) - \mu_\theta(x_t, t)\|^2 + C
+$$
+
+$\tilde{\mu}_t = \frac{\sqrt{\bar{\alpha}_{t-1}}\beta_t}{1-\bar{\alpha}_t} x_0 + \frac{\sqrt{\alpha_t}(1-\bar{\alpha}_{t-1})}{1-\bar{\alpha}_t} x_t$: 後ろ向き過程の平均。$\epsilon$ 再パラメータ化 $x_0 = \frac{1}{\sqrt{\bar{\alpha}_t}}(x_t - \sqrt{1-\bar{\alpha}_t}\,\epsilon)$ を代入すると:
+
+$$
+\|\tilde{\mu}_t - \mu_\theta\|^2 = \frac{1-\bar{\alpha}_t}{\bar{\alpha}_t}\|\epsilon - \epsilon_\theta(x_t, t)\|^2
+$$
+
+各 $t$ を等重みで和をとると:
+
+$$
+\boxed{-\text{ELBO}(x_0) \propto \mathcal{L}_{\text{simple}} = \mathbb{E}_{t,\epsilon}\!\left[\|\epsilon - \epsilon_\theta(x_t, t)\|^2\right] + C}
+$$
+
+#### Score Matching $\equiv$ Flow Matching（ガウス確率パスの下）
+
+**命題** (Albergo & Vanden-Eijnden 2023): 確率パス $p_t(x) = \mathcal{N}(x;\, \mu_t,\, \sigma_t^2 I)$ がガウス型のとき:
+
+$$
+\mathcal{L}_{\text{SM}} = \mathbb{E}_{t,\, x \sim p_t}\!\left[\left\|s_\theta(x, t) - \nabla_x \log p_t(x)\right\|^2\right]
+$$
+
+$$
+\mathcal{L}_{\text{FM}} = \mathbb{E}_{t,\, x_0,\, x_1}\!\left[\left\|v_\theta(x_t, t) - \dot{x}_t\right\|^2\right]
+$$
+
+確率フロー ODE から $v_t(x) = \dot{\mu}_t + \frac{\dot{\sigma}_t}{\sigma_t}(x - \mu_t)$ および $s_t(x) = -\frac{x - \mu_t}{\sigma_t^2}$ より:
+
+$$
+v_t(x) = \dot{\mu}_t - \dot{\sigma}_t \sigma_t\, s_t(x)
+$$
+
+$v_\theta$ と $s_\theta$ の最適解は1対1対応するため:
+
+$$
+\boxed{\mathcal{L}_{\text{FM}} \equiv \mathcal{L}_{\text{SM}} + \text{const}}
+$$
+
+#### GAN Minimax $\equiv$ f-ダイバージェンス最小化
+
+f-GAN の識別器 $T_\omega$ の最適解 $T_\omega^* = f'\!\left(\frac{p_{\text{data}}}{p_\theta}\right)$ を代入:
+
+$$
+\max_{T_\omega}\!\left\{\mathbb{E}_{p_{\text{data}}}[T_\omega] - \mathbb{E}_{p_\theta}[f^*(T_\omega)]\right\} = D_f(p_{\text{data}} \| p_\theta)
+$$
+
+よって Generator の最小化目標:
+
+$$
+\boxed{\min_G \max_{T_\omega} \mathcal{L}_{f\text{-GAN}} = \min_G D_f(p_{\text{data}} \| p_G)}
+$$
+
+$f(u) = u\log u - (u+1)\log\frac{u+1}{2}$ のとき $D_f = \mathrm{JSD}$ → Vanilla GAN に帰着。
+
+#### Stochastic Interpolants: 全生成モデルの母体
+
+Albergo et al. (2023) [^1] の **Stochastic Interpolants** は、全生成モデルを一本の枠組みで統一する。
+
+**補間子**:
+
+$$
+I(x_0, x_1, t) = \alpha(t)\, x_0 + \beta(t)\, x_1 + \gamma(t)\, z, \quad z \sim \mathcal{N}(0, I)
+$$
+
+境界条件:
+- $t=0$: $\alpha(0)=1,\, \beta(0)=0,\, \gamma(0)=0 \Rightarrow I_0 = x_0$（データ）
+- $t=1$: $\alpha(1)=0,\, \beta(1)=1,\, \gamma(1)=0 \Rightarrow I_1 = x_1$（ノイズまたは別データ）
+
+時間微分:
+
+$$
+\dot{I}_t = \dot{\alpha}(t)\, x_0 + \dot{\beta}(t)\, x_1 + \dot{\gamma}(t)\, z
+$$
+
+**統一損失関数**:
+
+$$
+\boxed{\mathcal{L}_{\text{unified}} = \mathbb{E}_{t,\, x_0,\, x_1,\, z}\!\left[\left\|v_\theta(I_t, t) - \dot{I}_t\right\|^2\right]}
+$$
+
+スケジュール $(\alpha, \beta, \gamma)$ の選択により各モデルが得られる:
+
+| $\alpha(t)$ | $\beta(t)$ | $\gamma(t)$ | 対応モデル |
+|:-----------|:----------|:-----------|:---------|
+| $1-t$ | $t$ | $0$ | Rectified Flow / FM |
+| $\sqrt{\bar{\alpha}_t}$ | $0$ | $\sqrt{1-\bar{\alpha}_t}$ | DDPM |
+| $\cos(\frac{\pi t}{2})$ | $\sin(\frac{\pi t}{2})$ | $0$ | Cosine Schedule FM |
+| $e^{-t/2}$ | $0$ | $\sqrt{1-e^{-t}}$ | VP-SDE |
+
+**スコアとベクトル場の統一関係**:
+
+$$
+s_t(x) = \nabla_x \log p_t(x) = -\frac{1}{\gamma(t)^2}\,\mathbb{E}\!\left[\gamma(t)\, z \;\middle|\; I_t = x\right]
+$$
+
+$$
+v_t(x) = \mathbb{E}\!\left[\dot{I}_t \;\middle|\; I_t = x\right] = v_t^{\text{det}}(x) + \gamma(t)\dot{\gamma}(t)\, s_t(x)
+$$
+
+$v_t^{\text{det}}$: 確定的成分。この式はスコア関数とベクトル場が同じ情報の異なる表現であることを示し、Section 3.8〜3.10 の等価性証明を包含する。
 
 ---
+
+> **Note:** **ここまでで全体の70%完了！** 数学的等価性を完全に証明した。次は実装・実験ゾーンへ。
+
+---
+
+---
+
+## 🏆 4. Boss Battle — Course IV 総括: 全生成モデル理論の統一
+
+10回の講義（第33回〜第42回）で獲得した理論武装を俯瞰し、**生成モデル理論の系譜**を情報理論的に整理する。
+
+### 4.1 生成モデル理論の歴史的連鎖 (2013–2024)
+
+全ての理論的発展は、一本の論理的系譜でつながっている:
+
+$$
+\text{VAE} \xrightarrow{2013} \text{GAN} \xrightarrow{2014} \text{NF} \xrightarrow{2015} \text{DDPM} \xrightarrow{2020} \text{Score-SDE} \xrightarrow{2021} \text{FM} \xrightarrow{2022} \text{CM} \xrightarrow{2023} \text{World Models} \xrightarrow{2024}
+$$
+
+各ステップの数理的動機:
+
+**Step 1 — VAE (2013) → GAN (2014)**: VAE の後向き KL $\mathrm{KL}(q_\phi \| p)$ 最小化は mode averaging を引き起こす。GAN は JSD 最小化に切り替えシャープな生成を実現。代償として訓練不安定性が生じた。
+
+$$
+\mathrm{KL}(q_\phi \| p)\;\text{(VAE)} \;\to\; \mathrm{JSD}(p_{\text{data}} \| p_G)\;\text{(GAN)}
+$$
+
+**Step 2 — GAN (2014) → NF (2015)**: GAN の識別器依存の不安定性を回避するため可逆写像による exact likelihood を採用:
+
+$$
+\log p_\theta(x) = \log p_z(f_\theta(x)) + \log\left|\det \frac{\partial f_\theta}{\partial x}\right|
+$$
+
+ヤコビアン計算 $O(d^3)$ が律速となり、CNF・FM へ発展。
+
+**Step 3 — NF (2015) → DDPM (2020)**: NF の可逆性制約を緩和。Langevin 動力学に基づく漸進的ノイズ除去:
+
+$$
+x_{t-1} = \frac{1}{\sqrt{\alpha_t}}\!\left(x_t - \frac{1-\alpha_t}{\sqrt{1-\bar{\alpha}_t}}\epsilon_\theta(x_t, t)\right) + \sigma_t z
+$$
+
+**Step 4 — DDPM (2020) → Score-SDE (2021)**: 離散ステップを連続時間 SDE に拡張:
+
+$$
+dx = f(x,t)\,dt + g(t)\,dW_t \;\Leftrightarrow\; dx = \!\left[f - \frac{g^2}{2}\nabla_x \log p_t\right]\!dt \;\text{(逆 SDE)}
+$$
+
+**Step 5 — Score-SDE (2021) → FM (2022)**: 確率フロー ODE の発見により決定論的サンプリング:
+
+$$
+\frac{dx_t}{dt} = v_\theta(x_t, t), \quad v_\theta \text{ を条件付き回帰で直接学習}
+$$
+
+**Step 6 — FM (2022) → Consistency Models (2023)**: ODE 軌道の一貫性制約により 1-step サンプリングを実現:
+
+$$
+f_\theta(x_t, t) = f_\theta(x_{t'}, t') \quad (x_t,\, x_{t'} \text{ が同一軌道上})
+$$
+
+**Step 7 — CM (2023) → World Models (2024)**: 生成精度の向上を物理環境シミュレーションへ応用:
+
+$$
+p_\theta(v_{1:T} \mid c) = \prod_{t=1}^{T} p_\theta^{\text{FM/CM}}(v_t \mid v_{<t}, c)
+$$
+
+### 4.2 情報理論的統一: 全生成モデルは距離最小化
+
+全ての生成モデルは、**データ分布 $p_{\text{data}}$ と生成分布 $p_\theta$ の間の距離を最小化**する問題だ:
+
+$$
+\theta^* = \arg\min_\theta\; d(p_{\text{data}},\, p_\theta)
+$$
+
+距離の選択がモデルの性質を決定する:
+
+$$
+d = \begin{cases} \mathrm{KL}(p_{\text{data}} \| p_\theta) & \to \text{最大尤度（VAE, Flow, Diffusion）} \\ \mathrm{JSD}(p_{\text{data}} \| p_\theta) & \to \text{GAN} \\ W_2(p_{\text{data}},\, p_\theta) & \to \text{WGAN, OT-Flow} \\ W_2 + \tau\,\mathcal{H}[p_\theta] & \to \text{Langevin Diffusion (JKO)} \end{cases}
+$$
+
+また情報ボトルネックの不等式 $I(z;\, x) \leq I_{\text{encoder}} \leq H(x)$ は、全ての生成モデルが $H(x)$（データの複雑性）に上界された情報圧縮を行っていることを示す。VAE は $I(z;x)$ の下界を ELBO で最大化し、Diffusion は $T$ ステップで $H(x)$ に達するまでノイズを注入する。
+
+### 4.3 未解決問題: Course V への展望
+
+Course IV で獲得した統一理論には、依然として未解決の問題が残る。
+
+**問題 1 — 非ユークリッド多様体上の生成**: タンパク質・分子生成では $\mathcal{X} = SO(3)^N$ 上の分布を扱う。多様体 $\mathcal{M}$ 上の Score-SDE は Laplace-Beltrami 演算子を使う:
+
+$$
+dx = -\frac{1}{2}\,\mathrm{grad}_\mathcal{M} \log p_t\, dt + dW_t^{\mathcal{M}}
+$$
+
+測地線・曲率の扱いが本質的に難しく、大規模モデルへの拡張は未解決だ。Riemannian Score Matching (De Bortoli 2022) は初歩的な回答を与えるが、スケーラブルな実装には計量テンソルの高速近似が必要となる。
+
+**問題 2 — 離散 Flow Matching（タンパク質配列・言語への応用）**: $\mathcal{X} = \{1, \ldots, K\}^L$ では連続ベクトル場が定義できない。確率行列を使った離散フロー:
+
+$$
+\frac{d}{dt} P_t = Q_t\, P_t
+$$
+
+$Q_t \in \mathbb{R}^{K \times K}$: 遷移率行列。Campbell et al. (2024) の Discrete Flow Matching は $Q_t$ を学習するが、最適輸送との関係は未解決だ。
+
+**問題 3 — 因果的生成モデル**: 現在の生成モデルは $p(x)$ を学習するが、介入分布 $p(x \mid \mathrm{do}(z))$ を学習できない:
+
+$$
+p_\theta(x \mid \mathrm{do}(z)) \neq p_\theta(x \mid z) \quad \text{（介入 ≠ 観察条件付け）}
+$$
+
+SCM（構造的因果モデル）と生成モデルの融合が、Course V の中心テーマとなる。
+
+> **Note:** **Course IV 完了！** 第33〜42回の10講義で、生成モデルの統一理論を獲得した。次回 Course V では、基盤モデルと大規模応用へ進む。
+
+---
+
+## 参考文献
+
+[^1]: Kingma, D. P., et al. (2021). "Variational Diffusion Models". *arXiv:2107.00630*.
+   https://arxiv.org/abs/2107.00630
+
+[^2]: Song, Y., et al. (2021). "Score-Based Generative Modeling through Stochastic Differential Equations". *ICLR 2021*.
+   https://openreview.net/forum?id=PxTIG12RRHS
+
+[^3]: Kim, D., et al. (2023). "DiffFlow: A Unified SDE Framework for Score-Based Diffusion Models and Generative Adversarial Networks". *arXiv:2307.02159*.
+   https://arxiv.org/abs/2307.02159
+
+[^4]: Chen, R. T. Q., et al. (2018). "Neural Ordinary Differential Equations". *NeurIPS 2018*. arXiv:1806.07366.
+   https://arxiv.org/abs/1806.07366
+
+[^5]: Grathwohl, W., et al. (2019). "FFJORD: Free-Form Continuous Dynamics for Scalable Reversible Generative Models". *ICLR 2019*. arXiv:1810.01367.
+   https://arxiv.org/abs/1810.01367
+
+[^6]: Lipman, Y., et al. (2023). "Flow Matching for Generative Modeling". *ICLR 2023*.
+   https://openreview.net/forum?id=PqvMRDCJT9t
+
+[^7]: Liu, X., et al. (2022). "Flow Straight and Fast: Learning to Generate and Transfer Data with Rectified Flow". *arXiv:2209.03003*.
+   https://arxiv.org/abs/2209.03003
+
+[^8]: Goodfellow, I., et al. (2014). "Generative Adversarial Nets". *NeurIPS 2014*. arXiv:1406.2661.
+   https://arxiv.org/abs/1406.2661
+
+[^9]: Arjovsky, M., Chintala, S., & Bottou, L. (2017). "Wasserstein GAN". *arXiv:1701.07875*.
+   https://arxiv.org/abs/1701.07875
+
+[^10]: Gulrajani, I., et al. (2017). "Improved Training of Wasserstein GANs". *NeurIPS 2017*. arXiv:1704.00028.
+   https://arxiv.org/abs/1704.00028
+
+[^11]: Miyato, T., et al. (2018). "Spectral Normalization for Generative Adversarial Networks". *ICLR 2018*. arXiv:1802.05957.
+   https://arxiv.org/abs/1802.05957
+
+[^12]: Nowozin, S., Cseke, B., & Tomioka, R. (2016). "f-GAN: Training Generative Neural Samplers using Variational Divergence Minimization". *NeurIPS 2016*. arXiv:1606.00709.
+
+[^13]: Karras, T., et al. (2019). "A Style-Based Generator Architecture for Generative Adversarial Networks". *CVPR 2019*. arXiv:1812.04948.
+   https://arxiv.org/abs/1812.04948
+
+[^14]: Huang, Y., Gokaslan, A., Kuleshov, V., & Tompkin, J. (2024). "The GAN is dead; long live the GAN! A Modern GAN Baseline". *NeurIPS 2024*. arXiv:2501.05441.
+   https://arxiv.org/abs/2501.05441
+
+[^15]: Ho, J., Jain, A., & Abbeel, P. (2020). "Denoising Diffusion Probabilistic Models". *NeurIPS 2020*. arXiv:2006.11239.
+   https://arxiv.org/abs/2006.11239
+
+[^16]: Song, J., Meng, C., & Ermon, S. (2020). "Denoising Diffusion Implicit Models". *ICLR 2021*. arXiv:2010.02502.
+   https://arxiv.org/abs/2010.02502
+
+[^17]: Anderson, B. D. O. (1982). "Reverse-time diffusion equation models". *Stochastic Processes and their Applications*, 12(3), 313–326.
+
+[^18]: Rombach, R., et al. (2022). "High-Resolution Image Synthesis with Latent Diffusion Models". *CVPR 2022*. arXiv:2112.10752.
+   https://arxiv.org/abs/2112.10752
+
+[^19]: Song, Y., et al. (2023). "Consistency Models". *ICML 2023*.
+   https://proceedings.mlr.press/v202/song23a.html
+
+[^20]: van den Oord, A., Kalchbrenner, N., & Kavukcuoglu, K. (2016). "Pixel Recurrent Neural Networks". *ICML 2016*. arXiv:1601.06759.
+   https://arxiv.org/abs/1601.06759
+
+[^21]: van den Oord, A., et al. (2016). "Conditional Image Generation with PixelCNN Decoders". *NeurIPS 2016*. arXiv:1606.05328.
+   https://arxiv.org/abs/1606.05328
+
+[^22]: van den Oord, A., et al. (2016). "WaveNet: A Generative Model for Raw Audio". *arXiv:1609.03499*.
+   https://arxiv.org/abs/1609.03499
+
+[^23]: Vaswani, A., et al. (2017). "Attention Is All You Need". *NeurIPS 2017*. arXiv:1706.03762.
+   https://arxiv.org/abs/1706.03762
+
+[^24]: Tian, K., et al. (2024). "Visual Autoregressive Modeling: Scalable Image Generation via Next-Scale Prediction". *NeurIPS 2024*. arXiv:2404.02905.
+
+[^25]: Li, T., et al. (2024). "Autoregressive Image Generation without Vector Quantization". *NeurIPS 2024*. arXiv:2406.11838.
+
+[^26]: LeCun, Y. (2022). "A Path Towards Autonomous Machine Intelligence". *Open Review*. [openreview.net/pdf?id=BZ5a1r-kVsf](https://openreview.net/pdf?id=BZ5a1r-kVsf)
+
+[^27]: Bardes, A., et al. (2024). "Revisiting Feature Prediction for Learning Visual Representations from Video". *arXiv:2404.08471*.
+   https://arxiv.org/abs/2404.08471
+
+[^28]: Zhou, C., Yu, L., Babu, A., Tirumala, K., Yasunaga, M., Shamis, L., et al. (2024). "Transfusion: Predict the Next Token and Diffuse Images with One Multi-Modal Model". *arXiv:2408.11039*.
+
+[^29]: NVIDIA. (2025). "Cosmos World Foundation Model Platform for Physical AI". *arXiv:2501.03575*.
+
+[^30]: Bruce, J., et al. (2024). "Genie: Generative Interactive Environments". *ICML 2024*. arXiv:2402.15391.
+
+[^31]: Vincent, P. (2011). "A Connection Between Score Matching and Denoising Autoencoders". *Neural Computation*, 23(7).
+
+[^32]: Balcerak, M., Amiranashvili, T., Terpin, A., Shit, S., Bogensperger, L., et al. (2025). "Energy Matching: Unifying Flow Matching and Energy-Based Models for Generative Modeling". *arXiv:2504.10612*.
+
+[^33]: Choi, J., Choi, J., & Kang, M. (2024). "Scalable Wasserstein Gradient Flow for Generative Modeling through Unbalanced Optimal Transport". *arXiv:2402.05443*.
+
+---
+
+## 著者リンク
+
+- Blog: https://fumishiki.dev
+- X: https://x.com/fumishiki
+- LinkedIn: https://www.linkedin.com/in/fumitakamurakami
+- GitHub: https://github.com/fumishiki
+- Hugging Face: https://huggingface.co/fumishiki
 
 ## ライセンス
 

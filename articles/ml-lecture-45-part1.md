@@ -4,17 +4,20 @@ emoji: "🎬"
 type: "tech"
 topics: ["machinelearning","deeplearning","video","julia","rust","elixir"]
 published: true
+slug: "ml-lecture-45-part1"
+difficulty: "advanced"
+time_estimate: "90 minutes"
+languages: ["Julia", "Rust"]
+keywords: ["機械学習", "深層学習", "生成モデル"]
 ---
 
 # 第45回: Video生成 — 時空間Diffusionの最前線
 
-:::message
-**前回までの到達点**: 第44回で音声生成（TTS/Music/Flow Matching）を習得。静止画・音声を完全マスター。次は時間軸+空間=動画生成へ。
-
-**今回のゴール**: 動画生成の理論と実装。Sora 2解析、CogVideoX/HunyuanVideo/Open-Sora 2.0/Wan-2.1の最前線、SmolVLM2動画理解+LTX-Video動画生成デモ。
-
-**進捗**: 全体の90%完了（第45回/全50回）
-:::
+> **Note:** **前回までの到達点**: 第44回で音声生成（TTS/Music/Flow Matching）を習得。静止画・音声を完全マスター。次は時間軸+空間=動画生成へ。
+>
+> **今回のゴール**: 動画生成の理論と実装。Sora 2解析、CogVideoX/HunyuanVideo/Open-Sora 2.0/Wan-2.1の最前線、SmolVLM2動画理解+LTX-Video動画生成デモ。
+>
+> **進捗**: 全体の90%完了（第45回/全50回）
 
 ## 🚀 0. クイックスタート（30秒）— 3行で動画生成体験
 
@@ -52,9 +55,7 @@ $$
 
 この式は「各フレームに**独立に**ノイズを加える」ことを示す。しかし、これだけでは時間的一貫性が崩壊する。**Temporal AttentionやOptical Flow制約が救世主になる** — 本編で完全導出します。
 
-:::message
-**ボス戦予告**: Sora 2の「Spacetime DiT」は時空間を統一的に扱う。3D U-Netとの違いは？なぜTransformerが勝つのか？— Zone 3で数式の戦いが始まります。
-:::
+> **Note:** **ボス戦予告**: Sora 2の「Spacetime DiT」は時空間を統一的に扱う。3D U-Netとの違いは？なぜTransformerが勝つのか？— Zone 3で数式の戦いが始まります。
 
 ---
 
@@ -74,61 +75,6 @@ $$
 
 **Julia実装**:
 
-```julia
-using LinearAlgebra, Statistics
-
-function spatial_attention(frames::Array{Float32, 4})  # (H, W, C, T)
-    H, W, C, T = size(frames)
-    output = similar(frames)
-
-    for t in 1:T
-        frame = frames[:, :, :, t]  # 単一フレーム抽出
-        flat = reshape(frame, H*W, C)  # (H*W, C)
-
-        Q = flat  # 簡易版: 自己Attention
-        K = flat
-        V = flat
-
-        # Scaled Dot-Product Attention
-        scores = (Q * K') / sqrt(Float32(C))  # (H*W, H*W)
-        attn = softmax(scores, dims=2)  # 行方向でsoftmax
-        output_flat = attn * V  # (H*W, C)
-
-        output[:, :, :, t] = reshape(output_flat, H, W, C)
-    end
-
-    return output
-end
-
-function temporal_attention(frames::Array{Float32, 4})  # (H, W, C, T)
-    H, W, C, T = size(frames)
-    output = similar(frames)
-
-    for h in 1:H, w in 1:W
-        pixel_sequence = frames[h, w, :, :]  # (C, T) — 時間軸方向の系列
-
-        Q = pixel_sequence'  # (T, C)
-        K = Q
-        V = Q
-
-        scores = (Q * K') / sqrt(Float32(C))  # (T, T)
-        attn = softmax(scores, dims=2)
-        output_seq = attn * V  # (T, C)
-
-        output[h, w, :, :] = output_seq'
-    end
-
-    return output
-end
-
-# テスト: 5フレーム、16x16、3チャネル
-frames = randn(Float32, 16, 16, 3, 5)
-spatial_out = spatial_attention(frames)  # フレーム内の空間的一貫性
-temporal_out = temporal_attention(frames)  # ピクセル位置の時間的一貫性
-
-println("空間Attention: フレーム内の空間構造を保つ")
-println("時間Attention: ピクセルの時間的軌跡を保つ")
-```
 
 **挙動の違い**:
 
@@ -157,32 +103,6 @@ $$
 
 **Julia実装**:
 
-```julia
-using NNlib
-
-function conv3d_demo(video::Array{Float32, 4})  # (T, H, W, C)
-    T, H, W, C = size(video)
-
-    # 3D Convカーネル: (kernel_t, kernel_h, kernel_w, in_channels, out_channels)
-    kernel = randn(Float32, 3, 3, 3, C, C)  # 3x3x3の時空間カーネル
-
-    # NNlibのconv3dはCUDNN準拠: (W, H, T, C, Batch)形式を期待
-    video_nchw = permutedims(video, (3, 2, 1, 4))  # (W, H, T, C)
-    video_nchw = reshape(video_nchw, size(video_nchw)..., 1)  # バッチ次元追加
-
-    kernel_nchw = permutedims(kernel, (3, 2, 1, 4, 5))  # (W, H, T, C_in, C_out)
-
-    output = conv(video_nchw, kernel_nchw, pad=1)
-
-    return output
-end
-
-video = randn(Float32, 10, 32, 32, 3)  # 10フレーム、32x32、3チャネル
-output = conv3d_demo(video)
-
-println("3D Conv: 時空間の局所性を畳み込みで捉える")
-println("出力形状: ", size(output))
-```
 
 **2D vs 3D Convの違い**:
 
@@ -191,9 +111,7 @@ println("出力形状: ", size(output))
 | 2D Conv  | (k_h, k_w, C_in, C_out) | 空間のみ | $k_h \times k_w \times C_{in} \times C_{out}$ | 静止画 |
 | 3D Conv  | (k_t, k_h, k_w, C_in, C_out) | 時空間 | $k_t \times k_h \times k_w \times C_{in} \times C_{out}$ | 動画 |
 
-:::message
-**Trojan Horse**: Conv3Dは「時間軸にもカーネルをスライド」させるだけ。理論的には単純だが、**パラメータ数が$k_t$倍**に膨れ上がる。次世代モデルは**DiT（Diffusion Transformer）**でこの問題を解決 — Zone 3で詳説。
-:::
+> **Note:** **Trojan Horse**: Conv3Dは「時間軸にもカーネルをスライド」させるだけ。理論的には単純だが、**パラメータ数が$k_t$倍**に膨れ上がる。次世代モデルは**DiT（Diffusion Transformer）**でこの問題を解決 — Zone 3で詳説。
 
 ### 1.3 公式③ Optical Flow Loss — 物理的な動きの一貫性
 
@@ -207,75 +125,11 @@ $$
 
 **Julia実装**:
 
-```julia
-using Interpolations
-
-function warp_frame(frame::Matrix{Float32}, flow::Array{Float32, 3})  # flow: (H, W, 2)
-    H, W = size(frame)
-    warped = similar(frame)
-
-    for h in 1:H, w in 1:W
-        dx, dy = flow[h, w, 1], flow[h, w, 2]
-        src_h = clamp(h + dy, 1, H)
-        src_w = clamp(w + dx, 1, W)
-
-        # 線形補間
-        h_low, h_high = floor(Int, src_h), ceil(Int, src_h)
-        w_low, w_high = floor(Int, src_w), ceil(Int, src_w)
-
-        h_frac = src_h - h_low
-        w_frac = src_w - w_low
-
-        # Bilinear補間
-        if h_high <= H && w_high <= W
-            warped[h, w] = (1 - h_frac) * (1 - w_frac) * frame[h_low, w_low] +
-                          (1 - h_frac) * w_frac * frame[h_low, w_high] +
-                          h_frac * (1 - w_frac) * frame[h_high, w_low] +
-                          h_frac * w_frac * frame[h_high, w_high]
-        else
-            warped[h, w] = frame[h, w]
-        end
-    end
-
-    return warped
-end
-
-function optical_flow_loss(frames::Vector{Matrix{Float32}}, flows::Vector{Array{Float32, 3}})
-    T = length(frames)
-    total_loss = 0.0f0
-
-    for t in 1:(T-1)
-        warped = warp_frame(frames[t], flows[t])
-        loss = sum((frames[t+1] .- warped).^2)
-        total_loss += loss
-    end
-
-    return total_loss / (T - 1)
-end
-
-# テスト: 5フレーム、各32x32
-frames = [randn(Float32, 32, 32) for _ in 1:5]
-flows = [randn(Float32, 32, 32, 2) for _ in 1:4]  # T-1個のフロー
-
-loss = optical_flow_loss(frames, flows)
-println("Optical Flow Loss: ", loss)
-println("この損失が小さい = フレーム間の動きが物理的に一貫している")
-```
 
 **Optical Flowの直感**:
 
-```
-フレームt:    ●------->
-              |  dx=+5
-              |  dy=+2
-              ↓
-フレームt+1:      ●
 
-Warp(x_t, flow) = 「flowに従ってピクセルを動かす」
-                 → フレームt+1と一致すればflow正しい
-```
-
-:::details Optical Flow推定の3手法
+<details><summary>Optical Flow推定の3手法</summary>
 
 | 手法 | 原理 | 精度 | 速度 |
 |:-----|:-----|:-----|:-----|
@@ -284,7 +138,8 @@ Warp(x_t, flow) = 「flowに従ってピクセルを動かす」
 | FlowNet（CNN） | End-to-EndでFlowを予測 | 非常に高 | GPU必須 |
 
 現代の動画生成では**FlowNetやRAFT（Recurrent All-Pairs Field Transforms）**が主流。
-:::
+
+</details>
 
 ### 1.4 3公式の接続 — Video Diffusionのパイプライン
 
@@ -309,39 +164,18 @@ graph LR
 | ② 3D Convolution | 局所的な時空間パターン | テクスチャの滑らかさ | ノイズまみれの動画 |
 | ③ Optical Flow Loss | 物理的な動きの連続性 | 自然な運動 | 物体が瞬間移動 |
 
-:::details PyTorchとの対応（参考）
+<details><summary>PyTorchとの対応（参考）</summary>
 
-```python
-import torch
-import torch.nn.functional as F
 
-# Spatial Attention
-def spatial_attention(frames):  # (B, T, C, H, W)
-    B, T, C, H, W = frames.shape
-    output = []
-    for t in range(T):
-        frame = frames[:, t, :, :, :]  # (B, C, H, W)
-        flat = frame.view(B, C, H*W).permute(0, 2, 1)  # (B, H*W, C)
-        attn = F.softmax(flat @ flat.transpose(-2, -1) / (C ** 0.5), dim=-1)
-        out = (attn @ flat).permute(0, 2, 1).view(B, C, H, W)
-        output.append(out)
-    return torch.stack(output, dim=1)
-
-# 3D Convolution
-conv3d = torch.nn.Conv3d(in_channels=3, out_channels=64, kernel_size=(3, 3, 3), padding=1)
-
-# Optical Flow Warp
-def warp(x, flow):
-    B, C, H, W = x.shape
-    grid = torch.meshgrid(torch.arange(H), torch.arange(W), indexing='ij')
-    grid = torch.stack(grid, dim=-1).float()  # (H, W, 2)
-    grid = grid + flow
-    grid = grid / torch.tensor([H-1, W-1]) * 2 - 1  # [-1, 1]正規化
-    return F.grid_sample(x, grid.unsqueeze(0).expand(B, -1, -1, -1))
-```
-:::
+</details>
 
 ---
+
+
+> Progress: 10%
+> **理解度チェック**
+> 1. このゾーンの主要な概念・定義を自分の言葉で説明してください。
+> 2. この手法が他のアプローチより優れている点と、その限界を述べてください。
 
 ## 🧩 2. 直感ゾーン（15分）— なぜ動画生成は難しいのか
 
@@ -373,18 +207,46 @@ graph TD
 
 **問題**: フレームごとに独立にDiffusionすると「チラつく」動画になる。
 
-```
-静止画Diffusion:  ノイズ → [Denoise] → 1枚の画像
-動画Diffusion:    ノイズ → [Denoise] → 50フレーム
-                  ↑
-                  各フレームが独立 → フレーム間でオブジェクトの位置がジャンプ
-```
 
 **解決策**: Temporal Attentionで「フレーム間の依存関係」を学習。
 
-#### 困難② 計算量の爆発
+**時間的一貫性の定量化 — Temporal Consistency Score (TCS)**:
 
-**数値例**:
+フレーム間の一貫性を定量的に測る指標として TCS を定義する。
+
+$$
+\text{TCS} = \frac{1}{T-1} \sum_{t=1}^{T-1} \frac{\langle \mathbf{f}_t, \mathbf{f}_{t+1} \rangle}{\|\mathbf{f}_t\| \|\mathbf{f}_{t+1}\|}
+$$
+
+ここで $\mathbf{f}_t$ は事前学習済み視覚エンコーダ（CLIP または DINO）によるフレーム $t$ の特徴ベクトル。分子 $\langle \mathbf{f}_t, \mathbf{f}_{t+1} \rangle$ は隣接フレームの特徴内積、分母は $L_2$ ノルムの積。TCS は**隣接フレームのコサイン類似度の時間平均**だ。
+
+- TCS = 1：完全な一貫性（全フレームが同一）
+- TCS ≈ 0：ランダムなフレーム列（意味のない動画）
+
+**Temporal Attention の有無による TCS の差**:
+
+| アーキテクチャ | 一貫性の源 | 典型的 TCS |
+|:---------------|:----------|:----------|
+| フレーム独立 Diffusion（Temporal Attention なし） | プロンプトの意味的類似度のみ | ≈ 0.85 |
+| Video Diffusion with Temporal Attention | フレーム間依存性を直接学習 | ≈ 0.97 |
+
+差分 $\Delta\text{TCS} \approx 0.12$ が「動画」と「スライドショー」の境界線に相当する。
+
+**数値例（TCS の計算）**:
+
+フレーム 3 枚の動画で $\mathbf{f}_1 = (1, 0, 0)$、$\mathbf{f}_2 = (0.9, 0.3, 0)$、$\mathbf{f}_3 = (0.8, 0.5, 0.2)$（単位ベクトルに正規化済み）とすると:
+
+$$
+\text{TCS} = \frac{1}{2}\!\left[\frac{\mathbf{f}_1 \cdot \mathbf{f}_2}{\|\mathbf{f}_1\|\|\mathbf{f}_2\|} + \frac{\mathbf{f}_2 \cdot \mathbf{f}_3}{\|\mathbf{f}_2\|\|\mathbf{f}_3\|}\right] = \frac{1}{2}[0.90 + 0.97] = 0.935
+$$
+
+単位ベクトルなので $\| \cdot \| = 1$、内積がそのままコサイン類似度になる。この値 0.935 は「Temporal Attention あり」の典型値（≈ 0.97）に近く、フレームが滑らかに遷移していることを示す。
+
+**TCS は「動画品質の必要条件」であって「十分条件」ではない**: TCS = 1 であっても全フレームが同一の静止画であれば「動画」とは言えない。動画品質の評価には TCS と CLIP-SIM（テキスト整合性）の両方が必要だ——これは後述の 3.6b 節で体系化する。
+
+**Temporal Coherence と TCS の関係の数値確認**: Temporal Attention を持たないフレーム独立 Diffusion では、各フレームが同じテキストから独立にサンプリングされる。CLIP 特徴空間ではプロンプトに対応するクラスター内にランダムに落ちるため、典型的な CLIP 特徴内積は $\approx 0.85$（同一プロンプト内の多様性に相当）。Temporal Attention を加えると隣接フレームが共通のコンテキストを強制的に共有し、TCS が $\approx 0.97$ まで改善する。
+
+#### 困難② 計算量の爆発
 
 | モダリティ | データサイズ | Diffusionステップ | 総計算量 |
 |:----------|:------------|:------------------|:---------|
@@ -394,6 +256,46 @@ graph TD
 動画は静止画の**120倍**のデータ量。単純なU-Netでは破綻する。
 
 **解決策**: 3D VAEで時空間圧縮（CogVideoX: 192倍圧縮）
+
+**計算量の爆発 — FLOPs 比較の厳密な導出**:
+
+Self-Attention の計算量 (FLOPs) は入力系列長の 2 乗に比例する。
+
+空間方向のみ Attention（2D Spatial Attention）のフレームあたり FLOPs:
+
+$$
+\text{FLOPs}_\text{2D Attention} = 4 \cdot N^2 \cdot D = 4 \cdot (HW)^2 \cdot D
+$$
+
+全フレームを統合した 3D Full Attention の FLOPs:
+
+$$
+\text{FLOPs}_\text{3D Attention} = 4 \cdot (HWT)^2 \cdot D
+$$
+
+**数値例**: $H = W = 32$（512px 画像の VAE Latent）、$T = 25$ フレーム、$D = 768$ 次元として計算する。
+
+$$
+\text{FLOPs}_\text{2D} = 4 \times 1024^2 \times 768 \approx 3.2 \times 10^9 \quad \text{（1 層あたり）}
+$$
+
+$$
+\text{FLOPs}_\text{3D} = 4 \times (1024 \times 25)^2 \times 768 = 4 \times 25600^2 \times 768 \approx 2.0 \times 10^{12} \quad \text{（1 層あたり）}
+$$
+
+比率:
+
+$$
+\frac{\text{FLOPs}_\text{3D}}{\text{FLOPs}_\text{2D}} = T^2 = 25^2 = 625
+$$
+
+1 層あたり **625 倍**の計算量差。20 層のモデルでは 2D Attention 合計 $\approx 64$ GFLOPs に対して 3D Attention は $\approx 40$ TFLOPs。A100 GPU（312 TFLOPs/s）でも非現実的なスケールだ。
+
+これが Spatial Attention と Temporal Attention を**分解（Decomposed）して適用する**根本的な理由だ:
+
+$$
+\text{FLOPs}_\text{Decomposed} = \underbrace{4(HW)^2 D \cdot T}_{\text{Spatial}} + \underbrace{4 \cdot HW \cdot T^2 \cdot D}_{\text{Temporal}} \ll \text{FLOPs}_\text{3D Attention}
+$$
 
 #### 困難③ 物理法則の遵守
 
@@ -406,16 +308,28 @@ graph TD
 
 **Sora 2の挑戦**: 物理シミュレータとしてのDiffusion — まだ完璧ではない。
 
-:::message
-**松尾・岩澤研との差別化**:
+**物理法則違反の確率論的分析**:
 
-| 項目 | 松尾研 | 本シリーズ |
-|:-----|:-------|:-----------|
-| 動画生成 | カバーなし | Sora 2/CogVideoX/HunyuanVideo詳細 |
-| 実装 | なし | 3言語フルスタック |
-| 最新性 | 〜2023 | 2024-2025最前線 |
-| デモ | なし | SmolVLM2+LTX-Video |
-:::
+Diffusion モデルは Gaussian ノイズ事前分布 $p(\mathbf{x}) = \mathcal{N}(0, \mathbf{I})$ から出発し、意味的に正しい（semantically correct）動画を生成する。しかし、**意味的に正しい ≠ 物理的に一貫している**。
+
+運動量保存則 $\sum_i m_i \Delta v_i = 0$ のような制約を Diffusion モデルは陽に課さない。物理的制約違反のエネルギー $E_\text{phys}$（制約方程式の残差二乗和）を用いると、Diffusion モデルが意味的に正しい動画を生成した条件下での物理的一貫性の確率は:
+
+$$
+P(\text{physically consistent} \mid \text{semantically correct}) \approx \exp\!\left(-\frac{E_\text{phys}}{kT}\right) \ll 1
+$$
+
+ここで $k$ は Boltzmann 定数的スケーリング、$T$ は有効温度（モデルのソフトネスに対応）。$E_\text{phys} \gg kT$ の状況——制約違反が大きい場合——では確率は指数的に 0 に近づく。
+
+Sora 2 は大規模動画データから物理法則を**暗黙的に学習**するが、この確率が常に高いとは保証できない。ボールが壁を貫通する例では $E_\text{phys}$ が大きく確率が低い。それでも稀に発生するのは、学習データに類似シーケンスが含まれていた場合に限られる。
+
+> **Note:** **松尾・岩澤研との差別化**:
+>
+> | 項目 | 松尾研 | 本シリーズ |
+> |:-----|:-------|:-----------|
+> | 動画生成 | カバーなし | Sora 2/CogVideoX/HunyuanVideo詳細 |
+> | 実装 | なし | 3言語フルスタック |
+> | 最新性 | 〜2023 | 2024-2025最前線 |
+> | デモ | なし | SmolVLM2+LTX-Video |
 
 ### 2.3 Video生成の3つのパラダイム
 
@@ -463,13 +377,11 @@ graph TD
 | DiT        | Transformer    | 中     | 高   | 高             |
 | Flow Matching | Transformer + FM | 低 | 高   | 高             |
 
-:::message
-**今回学ぶこと**:
-1. **3D U-Net**の限界を理解（Zone 3）
-2. **DiT**がなぜ勝つのか（Sora 2/CogVideoX, Zone 3-4）
-3. **Flow Matching**の高速化手法（LTX-Video, Zone 4）
-4. SmolVLM2で動画を**理解**し、LTX-Videoで**生成**するデモ（Zone 5）
-:::
+> **Note:** **今回学ぶこと**:
+> 1. **3D U-Net**の限界を理解（Zone 3）
+> 2. **DiT**がなぜ勝つのか（Sora 2/CogVideoX, Zone 3-4）
+> 3. **Flow Matching**の高速化手法（LTX-Video, Zone 4）
+> 4. SmolVLM2で動画を**理解**し、LTX-Videoで**生成**するデモ（Zone 5）
 
 ### 2.4 3つの比喩で捉える動画生成
 
@@ -477,14 +389,6 @@ graph TD
 
 静止画が2D空間なら、動画は「2D空間 + 1D時間 = 3D時空間」のデータ。
 
-```
-時空間の立方体:
-    時間軸↑
-         |  □□□□□  ← 各スライス = 1フレーム
-         |  □□□□□
-         |  □□□□□
-         |--□□□□□--> 空間軸(x, y)
-```
 
 3D U-Netは「立方体全体に畳み込み」、DiTは「立方体をTokenに分解してTransformer」。
 
@@ -492,11 +396,6 @@ graph TD
 
 各ピクセル位置$(h, w)$について、「過去・現在・未来のフレーム」を参照してAttentionを計算。
 
-```
-フレーム1: ●
-フレーム2:   ●  ← この位置のピクセルが、フレーム1,3を参照
-フレーム3:     ●
-```
 
 「同じ位置のピクセルが時間軸でどう変化するか」を学習 → オブジェクトの滑らかな動き。
 
@@ -504,16 +403,16 @@ graph TD
 
 各ピクセルが「次のフレームでどこに移動するか」を予測。
 
-```
-フレームt:     ●--→ flow=(+3, +1)
-フレームt+1:      ●
-
-flow lossが小さい = 「引っ越し先」が予測通り
-```
 
 物理的に一貫した動きを保証する暗黙的な制約。
 
 ---
+
+
+> Progress: 20%
+> **理解度チェック**
+> 1. $(h, w)$ の各記号の意味と、この式が表す操作を説明してください。
+> 2. このゾーンで学んだ手法の直感的な意味と、なぜこの定式化が必要なのかを説明してください。
 
 ## 📐 3. 数式修行ゾーン（60分）— Video Diffusionの完全理論
 
@@ -540,6 +439,22 @@ $$
 
 ここで $\mathbf{x}_t = \sqrt{\alpha_t}\mathbf{x}_0 + \sqrt{1-\alpha_t}\boldsymbol{\epsilon}$, $\boldsymbol{\epsilon} \sim \mathcal{N}(0, \mathbf{I})$。
 
+**$\mathcal{L}_\text{simple}$ が ELBO の変分下界になる理由（スケッチ）**:
+
+負の対数尤度 $-\log p_\theta(\mathbf{x}_0)$ を最小化したいが直接計算は不可能。Jensen の不等式を使って:
+
+$$
+-\log p_\theta(\mathbf{x}_0) \leq \mathbb{E}_q\!\left[-\log \frac{p_\theta(\mathbf{x}_{0:T})}{q(\mathbf{x}_{1:T} \mid \mathbf{x}_0)}\right] = \underbrace{\sum_{t=1}^{T} \mathcal{L}_t}_{\text{各ステップの再構成誤差}}
+$$
+
+$\mathcal{L}_t$ を展開すると:
+
+$$
+\mathcal{L}_t = \mathbb{E}_q\!\left[ \frac{1}{2\sigma_t^2} \left\| \tilde{\boldsymbol{\mu}}_t(\mathbf{x}_t, \mathbf{x}_0) - \boldsymbol{\mu}_\theta(\mathbf{x}_t, t) \right\|^2 \right] + C
+$$
+
+ここで $\tilde{\boldsymbol{\mu}}_t$ は posterior mean。$\boldsymbol{\mu}_\theta$ をノイズ予測 $\boldsymbol{\epsilon}_\theta$ で再パラメータ化し、係数を無視すると $\mathcal{L}_\text{simple}$ が得られる。動画版も同じ構造で、フレーム次元が加わるだけ。
+
 #### 3.1.2 動画への拡張 — フレーム次元の追加
 
 動画 $\mathbf{X}_0 = (\mathbf{x}_0^{(1)}, \mathbf{x}_0^{(2)}, \ldots, \mathbf{x}_0^{(T)})$ は $T$ 個のフレームからなる。各フレーム $\mathbf{x}_0^{(f)} \in \mathbb{R}^{H \times W \times 3}$。
@@ -562,9 +477,35 @@ $$
 - $\mathbf{E} = (\boldsymbol{\epsilon}^{(1)}, \ldots, \boldsymbol{\epsilon}^{(T)}) \sim \mathcal{N}(0, \mathbf{I})$ （各フレームにノイズ）
 - $c$: テキスト条件（T5/CLIP埋め込み）
 
-:::message alert
-**引っかかりポイント**: 「ノイズはフレームごとに独立」だが、「ノイズ予測ネットワークは全フレームを見る」。この非対称性がTemporal Coherenceを生む鍵。
-:::
+> **⚠️ Warning:** **引っかかりポイント**: 「ノイズはフレームごとに独立」だが、「ノイズ予測ネットワークは全フレームを見る」。この非対称性がTemporal Coherenceを生む鍵。
+
+**なぜ「全フレームを見るネットワーク」でTemporal Coherenceが生まれるのか — 勾配結合の証明**:
+
+訓練目標を単フレームに展開すると:
+
+$$
+\mathcal{L}_{\text{video}} = \frac{1}{T} \sum_{f=1}^{T} \mathbb{E}\!\left[\left\| \boldsymbol{\epsilon}^{(f)} - \boldsymbol{\epsilon}_\theta^{(f)}(\mathbf{X}_t, t, c) \right\|^2\right]
+$$
+
+ここで $\boldsymbol{\epsilon}_\theta^{(f)}(\mathbf{X}_t, t, c)$ はネットワーク出力の $f$ 番目フレーム成分。ネットワークが Temporal Attention を持つとき、フレーム $f$ の予測は全フレームの入力 $\mathbf{X}_t = (\mathbf{x}_t^{(1)}, \ldots, \mathbf{x}_t^{(T)})$ に依存する。
+
+フレーム $f'$ の損失がフレーム $f$ のパラメータ更新に与える影響:
+
+$$
+\frac{\partial \mathcal{L}^{(f')}}{\partial \theta} = \frac{\partial \mathcal{L}^{(f')}}{\partial \boldsymbol{\epsilon}_\theta^{(f')}} \cdot \underbrace{\frac{\partial \boldsymbol{\epsilon}_\theta^{(f')}}{\partial \theta}}_{\text{全フレームの活性化を含む}}
+$$
+
+Temporal Attention により $\boldsymbol{\epsilon}_\theta^{(f')}$ は $\mathbf{x}_t^{(f)}$（$f \neq f'$）にも依存する。連鎖律を展開すると:
+
+$$
+\frac{\partial \boldsymbol{\epsilon}_\theta^{(f')}}{\partial \mathbf{x}_t^{(f)}} = \frac{\partial \boldsymbol{\epsilon}_\theta^{(f')}}{\partial \text{TempAttn}_{f'}} \cdot \frac{\partial \text{TempAttn}_{f'}}{\partial A_{f',f}} \cdot \frac{\partial A_{f',f}}{\partial \mathbf{x}_t^{(f)}}
+$$
+
+ここで $A_{f',f}$ はフレーム $f'$ からフレーム $f$ への Attention 重み。これが 0 でない限り、フレーム $f$ の情報がフレーム $f'$ の損失勾配を通じてパラメータ更新に寄与する——**フレーム間の勾配結合（Gradient Coupling）**が生じる。
+
+これが Temporal Coherence の数学的根拠だ。Forward Process はフレーム独立でも、Backward Pass で全フレームが協調的に更新される。
+
+**定量的な効果**: 各訓練ステップで全 $T$ フレームが $O(T^2)$ 個の Attention 経路で結合されるため、モデルは「フレーム $f$ に含まれる情報」を「フレーム $f'$ の復元」に利用する術を学習する。
 
 #### 3.1.3 Temporal Attentionの導出
 
@@ -590,7 +531,60 @@ $$
 
 **計算量**: 位置$(h, w)$ごとに $O(T^2 C)$。全体で $O(HWT^2C)$。
 
-:::details Spatial vs Temporal Attentionの計算量比較
+**次元の詳細追跡**:
+
+各位置 $(h, w)$ について線形変換を明示すると:
+
+$$
+Q_{h,w} = \mathbf{z}_{h,w} W_Q \in \mathbb{R}^{T \times d_k}, \quad K_{h,w} = \mathbf{z}_{h,w} W_K \in \mathbb{R}^{T \times d_k}, \quad V_{h,w} = \mathbf{z}_{h,w} W_V \in \mathbb{R}^{T \times d_v}
+$$
+
+$W_Q, W_K \in \mathbb{R}^{C \times d_k}$、$W_V \in \mathbb{R}^{C \times d_v}$ は学習可能な重み行列。$\mathbf{z}_{h,w} \in \mathbb{R}^{T \times C}$ との積で $\mathbb{R}^{T \times d_k}$ の Query / Key が得られる。
+
+**Temporal Attention スコア行列**:
+
+$$
+S_{h,w} = \frac{Q_{h,w} K_{h,w}^\top}{\sqrt{d_k}} \in \mathbb{R}^{T \times T}
+$$
+
+スカラー要素 $S_{h,w}^{(t,t')}$ は「フレーム $t$、位置 $(h,w)$ がフレーム $t'$、同位置をどれだけ参照すべきか」のスコア。$\sqrt{d_k}$ 除算は内積の分散を $O(1)$ に安定化する（第14回参照）。
+
+**出力**:
+
+$$
+\text{TempAttn}_{h,w} = \text{softmax}(S_{h,w}) V_{h,w} \in \mathbb{R}^{T \times d_v}
+$$
+
+行方向 softmax により $T$ 個のフレームへの注意重みが確率分布になる。
+
+**全体の計算量分析**:
+
+- 位置 $(h, w)$ 1 つあたりの Attention: $O(T^2 \cdot d_k)$
+- 全位置 $H \times W$ の独立な Attention 計算: $O(HW \cdot T^2 \cdot d_k)$
+- Full 3D Attention との比較: $O((HWT)^2 \cdot d_k)$
+- **高速化倍率**: $\dfrac{(HWT)^2}{HW \cdot T^2} = HW$
+
+$H = W = 32$ の Latent では $HW = 1024$ 倍の高速化。これが Spatial + Temporal に分解する根本的な動機だ。
+
+**因果的 Temporal Attention（Causal）vs 双方向（Non-causal）**:
+
+全フレームを同時にデノイズする生成モードでは**双方向（Non-causal）Attention** を使う。フレーム $t$ は過去・未来のフレームを参照できる。
+
+自己回帰的な動画延長（既存フレームから新フレームを予測）では**因果的（Causal）Attention** が必要。因果マスク:
+
+$$
+M^{(t,t')} = \begin{cases} 0 & t' \leq t \\ -\infty & t' > t \end{cases}
+$$
+
+マスク適用後のスコア:
+
+$$
+S_\text{causal}^{(t,t')} = S^{(t,t')} + M^{(t,t')}
+$$
+
+$-\infty$ を加算すると softmax 後に 0 になるため、フレーム $t$ は未来フレーム $t' > t$ を完全に無視できる。実装上は上三角部分を $-10^9$ で埋めるだけで等価な効果が得られる。
+
+<details><summary>Spatial vs Temporal Attentionの計算量比較</summary>
 
 | Attention種類 | 計算対象 | 計算量 | ボトルネック |
 |:--------------|:---------|:-------|:-------------|
@@ -600,24 +594,41 @@ $$
 **実用上の対策**:
 - Spatial: FlashAttention（第15回）で高速化
 - Temporal: ローカルAttention（近傍フレームのみ）やStride（数フレームおき）
-:::
+
+</details>
+
+### 3.1.4 Classifier-Free Guidance for Video
+
+Classifier-Free Guidance（CFG、第34回）は動画生成でも中心的な役割を担う。静止画との違いはテキスト条件 $c$ のほかに「時間的強調」も制御できる点だ。
+
+**CFG の基本形（動画版）**:
+
+テキスト条件あり・なし両方でノイズ予測を計算し、線形補外する:
+
+$$
+\tilde{\boldsymbol{\epsilon}}_\theta(\mathbf{X}_t, t, c) = (1 + w)\,\boldsymbol{\epsilon}_\theta(\mathbf{X}_t, t, c) - w\,\boldsymbol{\epsilon}_\theta(\mathbf{X}_t, t, \emptyset)
+$$
+
+ここで $w > 0$ はガイダンス強度、$\emptyset$ は null テキスト（空プロンプト）。$w = 0$ は無条件生成、$w = 7.5$ が CogVideoX の推奨値。
+
+**ガイダンス強度 $w$ と動画品質のトレードオフ**:
+
+$$
+\text{Diversity} \propto \frac{1}{1+w}, \quad \text{Text Alignment} \propto w
+$$
+
+$w$ が大きいほどプロンプトに忠実だが多様性が低下し、ときに「過飽和（oversaturation）」——テクスチャが不自然に鮮明になる——が発生する。動画では静止画より $w$ を小さめに設定するのが経験則（静止画: $w \approx 7.5$、動画: $w \approx 4.5–6.0$）。
+
+**なぜ動画で $w$ を下げるのか**: 各フレームに高強度ガイダンスを適用すると、フレームごとの過飽和が蓄積し、時間方向に不自然な点滅が生じる。CFG は Diffusion Step ごとに適用されるため、$T$ フレーム × $S$ ステップ = $TS$ 回の強調が累積する。
+
+**Guidance のフレーム間整合性**: Temporal Attention により $\boldsymbol{\epsilon}_\theta(\mathbf{X}_t, t, c)$ は全フレームを参照するため、CFG を全フレームに一括適用するだけで時間的に一貫したガイダンスが得られる——フレームごとに CFG を独立に適用する必要がない。
 
 ### 3.2 3D U-Net vs DiT — アーキテクチャ対決
 
 #### 3.2.1 3D U-Netの構造
 
 **基本構成**:
-```
-入力: (B, T, C, H, W)  # バッチ、フレーム、チャネル、高さ、幅
-    ↓ 3D Conv (stride=2, 時空間ダウンサンプリング)
-(B, T/2, 2C, H/2, W/2)
-    ↓ 3D Conv
-(B, T/4, 4C, H/4, W/4)  # ボトルネック
-    ↓ 3D ConvTranspose (アップサンプリング)
-(B, T/2, 2C, H/2, W/2)
-    ↓ 3D ConvTranspose
-(B, T, C, H, W)  # 出力
-```
+
 
 **3D Convの定式化**:
 $$
@@ -639,17 +650,7 @@ $$
 #### 3.2.2 DiT（Diffusion Transformer）の構造
 
 **基本構成**:
-```
-入力: (B, T, H, W, C)
-    ↓ Patchify (patch_size=16) — 16x16のパッチに分割
-(B, T×H/16×W/16, C×16×16)  # Token系列
-    ↓ Linear Projection
-(B, N_tokens, D)  # D=埋め込み次元（例: 768）
-    ↓ Transformer Blocks (L層)
-(B, N_tokens, D)
-    ↓ Linear → Unpatchify
-(B, T, H, W, C)  # 出力
-```
+
 
 **Transformer Blockの数式**:
 $$
@@ -671,9 +672,39 @@ $D=768$、$L=12$層: 約85M パラメータ（U-Netより少ない）。
 2. **可変長対応**: Token数が変わるだけ、アーキテクチャ不変
 3. **長距離依存**: Attentionで全Token参照
 
-:::message
-**ボス戦予告**: Sora 2の「Spacetime DiT」は時空間を統一Tokenとして扱う。3D U-Netとの決定的な違いを完全証明 → 次セクション。
-:::
+> **Note:** **ボス戦予告**: Sora 2の「Spacetime DiT」は時空間を統一Tokenとして扱う。3D U-Netとの決定的な違いを完全証明 → 次セクション。
+
+**Video DiT の AdaLN — フレーム位置を含む条件付け**:
+
+静止画 DiT の AdaLN は Diffusion timestep $t$ のみを条件としていた。Video DiT では**テキスト埋め込み**と**フレーム位置**を条件に加える。
+
+条件ベクトルの結合:
+
+$$
+\mathbf{c} = [\underbrace{\mathbf{e}_t}_{\text{timestep emb}}, \underbrace{\mathbf{e}_\text{text}}_{\text{text emb}}, \underbrace{\mathbf{e}_\text{frame}}_{\text{frame position}}]
+$$
+
+フレーム位置埋め込みは正弦波エンコーディング:
+
+$$
+\mathbf{e}_\text{frame}^{(f)} = \text{sinusoidal}(f) \in \mathbb{R}^{D_\text{frame}}
+$$
+
+具体的には $\mathbf{e}_{\text{frame},2i}^{(f)} = \sin\!\left(f / 10000^{2i/D_\text{frame}}\right)$（偶数次元）、$\mathbf{e}_{\text{frame},2i+1}^{(f)} = \cos\!\left(f / 10000^{2i/D_\text{frame}}\right)$（奇数次元）。これにより、全フレームを同時処理する DiT 内で「これはフレーム 1 か、フレーム 25 か」を区別できる。
+
+**Video 条件付き AdaLN-Zero**:
+
+$$
+\gamma(\mathbf{c}),\, \beta(\mathbf{c}) = \text{MLP}([\mathbf{e}_t, \mathbf{e}_\text{text}, \mathbf{e}_\text{frame}])
+$$
+
+訓練開始時は $\gamma = \mathbf{0}$、$\beta = \mathbf{0}$ に初期化（Zero-init）。残差接続において新しい条件付けブランチが恒等変換から出発することを意味し、訓練初期の勾配爆発を防ぐ。
+
+$$
+\text{AdaLN-Zero}(\mathbf{h}, \mathbf{c}) = \gamma(\mathbf{c}) \odot \frac{\mathbf{h} - \mu(\mathbf{h})}{\sigma(\mathbf{h}) + \varepsilon} + \beta(\mathbf{c})
+$$
+
+$\odot$ は要素積。$\gamma, \beta$ が条件 $\mathbf{c}$ に依存するため、同一の重みでも「timestep × テキスト × フレーム位置」の 3 次元組み合わせで動的にスケール・シフトが変化する。
 
 ### 3.3 Sora 2 Spacetime DiT — 時空間統一の革命
 
@@ -702,6 +733,32 @@ $$
 N_{\text{tokens}} = \frac{120}{4} \times \frac{512}{16} \times \frac{512}{16} = 30 \times 32 \times 32 = 30,720 \text{ tokens}
 $$
 
+**より詳細なトークン予算分析**:
+
+CogVideoX の実際の構成 $H = W = 480$、$T = 49$、空間パッチサイズ $P = 2$、時間パッチサイズ $P_t = 4$ で VAE 圧縮前に計算すると:
+
+$$
+N_\text{raw} = \frac{480}{2} \times \frac{480}{2} \times \frac{49}{4} = 240 \times 240 \times 12.25 \approx 705{,}600
+$$
+
+これは Full Attention では非現実的。CogVideoX は**3D VAE**で先に圧縮する:
+
+$$
+H' = \frac{H}{8} = 60,\quad W' = \frac{W}{8} = 60,\quad T' = \frac{T}{4} = 12 \quad \Rightarrow \quad N = \frac{60}{2} \times \frac{60}{2} \times \frac{12}{1} = 30 \times 30 \times 12 = 10{,}800 \text{ tokens}
+$$
+
+それでも 10K トークン規模 → $N^2 = 1.17 \times 10^8$ の Attention 行列。FlashAttention（IO-aware Attention、第15回）が必須となる。
+
+**各モデルのトークン予算比較**:
+
+| モデル | 解像度 | フレーム数 | 圧縮後トークン数 | Full Attention FLOPs |
+|:-------|:-------|:----------|:----------------|:--------------------|
+| CogVideoX-5B | 480×480 | 49 | ≈ 10,800 | ≈ $1.2 \times 10^{12}$ |
+| Open-Sora 2.0 | 720×1280 | 51 | ≈ 26,880 | ≈ $7.2 \times 10^{12}$ |
+| Sora 2（推定） | 1080×1920 | 120 | ≈ 491,520 | ≈ $2.4 \times 10^{15}$ |
+
+Sora 2 の推定スケールでは Sparse Attention なしには不可能なことが数値から自明だ。
+
 #### 3.3.2 Spacetime Attentionの完全導出
 
 **問題設定**: 時空間Token $\mathbf{z}_{t,i,j} \in \mathbb{R}^D$ について、「他の時空間Tokenをどれだけ参照すべきか」を計算。
@@ -725,14 +782,44 @@ $$
 
 **計算量**: $O(N_{\text{tokens}}^2 \cdot D) = O\left(\left(\frac{THW}{p_t p^2}\right)^2 \cdot D\right)$
 
-:::message alert
-**引っかかりポイント**: Spacetime AttentionはToken数が$T/(p_t)$倍になるため、計算量が爆発する。
+> **⚠️ Warning:** **引っかかりポイント**: Spacetime AttentionはToken数が$T/(p_t)$倍になるため、計算量が爆発する。
+>
+> **Sora 2の対策**:
+> 1. **3D VAEで時空間圧縮**: $T \times H \times W \to T' \times H' \times W'$ （$T' \ll T$）
+> 2. **Sparse Attention**: 全Tokenではなく局所的に参照（第15回 Sparse Attention）
+> 3. **Flash Attention**: SRAM最適化（第15回）
 
-**Sora 2の対策**:
-1. **3D VAEで時空間圧縮**: $T \times H \times W \to T' \times H' \times W'$ （$T' \ll T$）
-2. **Sparse Attention**: 全Tokenではなく局所的に参照（第15回 Sparse Attention）
-3. **Flash Attention**: SRAM最適化（第15回）
-:::
+**3D Rotary Position Encoding（RoPE-3D）— 時空間位置を埋め込む**:
+
+標準的な Transformer は位置情報を加算型埋め込み（Absolute Positional Encoding）で表現するが、動画の時空間 Token には「時間 $t$、高さ $i$、幅 $j$」という 3 次元インデックスがある。RoPE（Rotary Position Encoding）を 3 次元に拡張した RoPE-3D が有効だ。
+
+1D RoPE の復習（第14回）: Query ベクトル $\mathbf{q} \in \mathbb{R}^d$ に位置 $p$ の回転を適用する:
+
+$$
+\text{RoPE}(\mathbf{q}, p)_{2k} = q_{2k} \cos(p \cdot \theta_k) - q_{2k+1} \sin(p \cdot \theta_k)
+$$
+
+$$
+\text{RoPE}(\mathbf{q}, p)_{2k+1} = q_{2k} \sin(p \cdot \theta_k) + q_{2k+1} \cos(p \cdot \theta_k)
+$$
+
+ここで $\theta_k = 10000^{-2k/d}$（周波数スケール）。内積 $\langle \text{RoPE}(\mathbf{q}, p), \text{RoPE}(\mathbf{k}, p') \rangle$ は位置差 $p - p'$ のみに依存する——これが RoPE の本質（相対位置依存性）。
+
+**RoPE-3D への拡張**: 次元 $d$ を 3 分割し、時間 $(t)$、高さ $(i)$、幅 $(j)$ をそれぞれに割り当てる:
+
+$$
+\text{RoPE-3D}(\mathbf{q}, t, i, j) = \text{RoPE}_{t}(\mathbf{q}[0:d/3],\, t) \,\Vert\, \text{RoPE}_{i}(\mathbf{q}[d/3:2d/3],\, i) \,\Vert\, \text{RoPE}_{j}(\mathbf{q}[2d/3:d],\, j)
+$$
+
+$\Vert$ はチャネル方向の連結。これにより Attention スコアは:
+
+$$
+\langle \text{RoPE-3D}(\mathbf{q}, t, i, j),\, \text{RoPE-3D}(\mathbf{k}, t', i', j') \rangle
+$$
+
+が $(t-t', i-i', j-j')$ の 3 次元相対位置のみの関数になる。絶対位置ではなく**相対的な時空間距離**で Attention が決まるため、訓練時より長い動画（多いフレーム数・高い解像度）への外挿が容易になる。
+
+CogVideoX および HunyuanVideo は RoPE-3D を採用し、訓練解像度を超えた推論時スケーリングを実現している。
 
 #### 3.3.3 3D U-Net vs Spacetime DiTの理論的比較
 
@@ -755,7 +842,23 @@ $$
 
 **経験則（Sora 2 System Card）**: DiTは長時間動画（15-25秒）でU-Netを圧倒。
 
-:::details 3D U-Net vs Spacetime DiTの性能比較表
+**パラメータ効率の定量比較**:
+
+$L$ 層の 3D U-Net で各層のチャネル数 $C$、カーネル $3 \times 3 \times 3$ の場合:
+
+$$
+\text{Params}_\text{3D U-Net} = L \times 3^3 \times C^2 = 27LC^2
+$$
+
+同じ $L$ 層の Spacetime DiT で次元 $D = C$:
+
+$$
+\text{Params}_\text{DiT} = L \times (4D^2 + 8D^2) = 12LC^2
+$$
+
+DiT のパラメータ数は 3D U-Net の $12/27 \approx 0.44$ 倍——**同じパラメータで 3D U-Net より表現力が高い**。3D U-Net はフレーム数 $T$ が変わると Padding が変化してアーキテクチャの再調整が必要だが、DiT は Token 数が変わるだけでパラメータ共有は完全に保たれる。
+
+<details><summary>3D U-Net vs Spacetime DiTの性能比較表</summary>
 
 | 指標 | 3D U-Net | Spacetime DiT |
 |:-----|:---------|:--------------|
@@ -766,8 +869,9 @@ $$
 | 実装複雑度 | 中（Conv実装） | 高（Attention最適化） |
 | 品質（VBench） | 70-75点 | 80-85点（Sora 2） |
 
-**VBench**: 動画生成の包括的ベンチマーク（時間的一貫性、物理的正確性、美的品質など16指標）
-:::
+**VBench**: 時間的一貫性・物理的正確性・美的品質など16指標を測る動画生成ベンチマーク
+
+</details>
 
 ### 3.4 CogVideoX 3D VAE — 時空間圧縮の数学
 
@@ -786,14 +890,7 @@ p_\theta(\mathbf{x} \mid \mathbf{z}) = \mathcal{N}(\boldsymbol{\mu}_\theta(\math
 $$
 
 **3D Conv層の例**（Encoder）:
-```
-(T, H, W, 3) → 3D Conv(kernel=3x3x3, stride=2x2x2)
-    → (T/2, H/2, W/2, 64)
-    → 3D Conv(stride=2)
-    → (T/4, H/4, W/4, 128)
-    → ... (合計4-5層)
-    → (T', H', W', C)  # C=4 or 8
-```
+
 
 **圧縮率**:
 $$
@@ -806,6 +903,34 @@ r = \frac{49 \times 768 \times 768 \times 3}{13 \times 96 \times 96 \times 16} =
 $$
 
 ただし、論文では**時空間合わせて192倍圧縮**と記載 → Encoderの複数段階での累積圧縮。
+
+**3D VAE の訓練目標（ELBO）**:
+
+標準 VAE と同じく Evidence Lower BOund（ELBO）を最大化する:
+
+$$
+\mathcal{L}_{\text{3DVAE}} = \underbrace{\mathbb{E}_{q_\phi(\mathbf{z}|\mathbf{x})}\!\left[\log p_\theta(\mathbf{x} \mid \mathbf{z})\right]}_{\text{再構成損失}} - \underbrace{D_{\text{KL}}\!\left(q_\phi(\mathbf{z} \mid \mathbf{x}) \,\|\, p(\mathbf{z})\right)}_{\text{正則化項}}
+$$
+
+再構成損失は動画の全ピクセルについての $L_2$ 誤差:
+
+$$
+\mathcal{L}_{\text{recon}} = \frac{1}{T' H' W' C} \left\| \mathbf{X} - \boldsymbol{\mu}_\theta(\mathbf{z}) \right\|^2
+$$
+
+KL 項は Gaussian 同士の閉形式:
+
+$$
+D_{\text{KL}}(q \| p) = \frac{1}{2} \sum_{i} \left( \sigma_{\phi,i}^2 + \mu_{\phi,i}^2 - 1 - \log \sigma_{\phi,i}^2 \right)
+$$
+
+ここで $i$ は Latent 次元インデックス。KL 項が $q_\phi$ を標準正規分布 $\mathcal{N}(0, \mathbf{I})$ に引き寄せ、Diffusion の事前分布 $p(\mathbf{z}) = \mathcal{N}(0, \mathbf{I})$ と整合させる。**KL 重みが大きすぎると再構成が劣化、小さすぎると Latent 空間が非 Gaussian になり Diffusion が不安定化**——$\beta$-VAE の $\beta$ チューニングが重要だ。
+
+実用的には 3D VAE の訓練に Perceptual Loss（VGG 特徴の $L_2$ 距離）を追加し、人間の知覚と整合する再構成品質を確保する:
+
+$$
+\mathcal{L}_{\text{total}} = \mathcal{L}_{\text{recon}} + \lambda_{\text{KL}} D_{\text{KL}} + \lambda_{\text{perc}} \mathcal{L}_{\text{perceptual}}
+$$
 
 #### 3.4.2 Temporal Compressionの詳細
 
@@ -832,9 +957,47 @@ $$
 
 ここで $k$ はカーネルサイズ（時間方向）。
 
-:::message
-**ボス戦クリア**: 3D VAEの圧縮率は「空間×時間」の積で計算される。CogVideoXは**192倍**という驚異的な圧縮を実現 → Latent空間でDiffusionを行うことで、計算量を$1/192$に削減。
-:::
+**標準 3D VAE vs Causal 3D VAE の形式的比較**:
+
+標準 3D VAE は動画全体を非因果的に符号化する:
+
+$$
+z = \text{Enc}(X) \in \mathbb{R}^{T'/P_t \times H'/P_s \times W'/P_s \times C_z}
+$$
+
+フレーム $t$ を符号化するために過去・未来両方のフレーム $t-k, \ldots, t+k$ を参照する（非因果畳み込み）。訓練時は問題ないが、**推論時にストリーミング処理が不可能**——フレーム $t$ を出力するために未来フレームが必要になるため。
+
+**Causal 3D VAE**（CogVideoX 採用）は因果畳み込みを使う:
+
+$$
+(f * g)(t) = \sum_{k=0}^{K-1} f(k) \cdot g(t-k) \quad \text{（過去フレームのみ参照）}
+$$
+
+インデックス $k \geq 0$ のみが現れるため、フレーム $t$ の符号化には $t-K+1, \ldots, t$ のみが必要。未来フレームを一切参照せず、フレームが届いたその瞬間に符号化できる（オンライン・ストリーミング推論）。
+
+**時間圧縮係数 $P_t$ の効果**:
+
+時間方向に $P_t$ フレームごとに 1 Latent トークンへ圧縮する。デコード時は 1 Latent から $P_t$ フレームを線形補間で復元:
+
+$$
+\hat{x}_{t \cdot P_t + k} = \text{Dec}(z_t) \cdot w_k + \text{Dec}(z_{t+1}) \cdot (1 - w_k), \quad w_k = 1 - \frac{k}{P_t}
+$$
+
+**総圧縮率**（空間 × 時間の積）:
+
+$$
+C = P_s^2 \times P_t
+$$
+
+CogVideoX の $P_s = 8$、$P_t = 4$ の場合:
+
+$$
+C = 8^2 \times 4 = 64 \times 4 = 256
+$$
+
+元動画の 256 ピクセル分の情報が 1 つの Latent 値に圧縮される。この圧縮が DiT の計算コストを $1/256$ に削減する本質的な理由だ。
+
+> **Note:** **ボス戦クリア**: 3D VAEの圧縮率は「空間×時間」の積で計算される。CogVideoXは**192倍**という驚異的な圧縮を実現 → Latent空間でDiffusionを行うことで、計算量を$1/192$に削減。
 
 ### 3.5 Optical Flow LossとWarp関数の完全導出
 
@@ -872,6 +1035,24 @@ $$
 
 これが**Optical Flow制約方程式**（1ピクセルあたり1式、未知数2つ → 不定）。
 
+**Horn-Schunck 法による大域的正則化**:
+
+1 ピクセル 1 式では不定なので、Horn-Schunck 法は**空間的平滑性制約**を追加する:
+
+$$
+\mathcal{L}_{\text{HS}} = \iint \!\left[(I_h u + I_w v + I_t)^2 + \lambda\!\left(\|\nabla u\|^2 + \|\nabla v\|^2\right)\right] dh\, dw
+$$
+
+第1項はデータ適合（輝度一定の仮定との一致）、第2項は滑らかさ制約（隣接ピクセルで Flow が急変しないことを要求）。$\lambda$ はトレードオフパラメータ。
+
+Euler-Lagrange 方程式を適用すると最適 Flow は反復的に求まる:
+
+$$
+u^{(n+1)} = \bar{u}^{(n)} - \frac{I_h \left(I_h \bar{u}^{(n)} + I_w \bar{v}^{(n)} + I_t\right)}{\lambda + I_h^2 + I_w^2}
+$$
+
+ここで $\bar{u}^{(n)}$ は近傍ピクセルの $u$ の平均（ラプラシアン平滑化）。この反復が RAFT の GRU 反復更新の古典的前身だ。
+
 #### 3.5.2 Warp関数の導出
 
 **目的**: フレーム$t$をフロー$\mathbf{f}_{t \to t+1}$に従って変形し、フレーム$t+1$と比較。
@@ -907,13 +1088,7 @@ $$
 **解決策**: CNNでEnd-to-Endに推定（FlowNet / RAFT）。
 
 **FlowNetアーキテクチャ**:
-```
-入力: (フレームt, フレームt+1) ∈ R^(2×H×W×3)
-    ↓ Encoder (CNN)
-Latent: R^(H/4×W/4×C)
-    ↓ Decoder (Transposed Conv)
-出力: Flow ∈ R^(H×W×2)
-```
+
 
 **訓練目標**:
 $$
@@ -922,7 +1097,19 @@ $$
 
 ここで $\mathbf{f}_{\text{gt}}$ はGround Truth Flow（合成データで生成）。
 
-:::details RAFT（Recurrent All-Pairs Field Transforms）の改善
+**Multi-scale Flow Loss**:
+
+実際の FlowNet は複数解像度でフローを予測する Multi-scale 訓練を採用する:
+
+$$
+\mathcal{L}_{\text{MS}} = \sum_{l=1}^{L} \lambda_l \left\| \mathbf{f}_l - \mathbf{f}_{\text{gt}}^{(l)} \right\|^2
+$$
+
+ここで $l$ は解像度レベル（$l=1$: 最低解像度、$l=L$: 原寸）、$\lambda_l$ は解像度重み（粗い解像度を重く）。粗い解像度で大まかな動きを学習し、細かい解像度で詳細を補完する。
+
+Multi-scale 訓練で重要なのは $\lambda_l$ の設定だ。経験的には粗い解像度ほど重みを大きく設定する（例: $\lambda_1 = 0.32, \lambda_2 = 0.08, \ldots, \lambda_L = 0.005$）。粗い解像度での Flow 誤差が大きいと細かい解像度での精緻化が機能しないためだ。
+
+<details><summary>RAFT（Recurrent All-Pairs Field Transforms）の改善</summary>
 
 **RAFT（ECCV 2020）**は「反復的Flow推定」を導入:
 1. 初期Flow $\mathbf{f}^{(0)} = 0$ から開始
@@ -933,7 +1120,8 @@ $$
 3. $\Delta\mathbf{f}^{(k)}$ はGRUで計算（状態を保持）
 
 **利点**: FlowNetより精度が高く、リアルタイム推論が可能（30 FPS）。
-:::
+
+</details>
 
 ### 3.6 ⚔️ Boss Battle: Sora 2のSpacetime DiTを完全読解
 
@@ -1024,9 +1212,82 @@ $$
 
 **物理法則の学習**: 大規模データセット（推定1B動画）で訓練 → 暗黙的に物理法則を学習（重力、慣性、衝突）。
 
-:::message
-**ボス撃破**: Sora 2のSpacetime DiTは、時空間を統一Tokenとして扱い、Cross-AttentionとAdaLNでテキスト条件付け、全フレーム同時処理で時間的一貫性を実現。3D U-Netの「局所畳み込み」から「大域Attention」への革命。
-:::
+> **Note:** **ボス撃破**: Sora 2のSpacetime DiTは、時空間を統一Tokenとして扱い、Cross-AttentionとAdaLNでテキスト条件付け、全フレーム同時処理で時間的一貫性を実現。3D U-Netの「局所畳み込み」から「大域Attention」への革命。
+
+### 3.6b 動画生成モデルの評価指標 — FVD から CLIP-SIM へ
+
+モデルの「良さ」を測る指標なくして研究は進まない。動画生成の評価指標を体系的に整理する。
+
+#### Fréchet Video Distance (FVD)
+
+FVD は FID（Fréchet Inception Distance、静止画評価指標）の動画版。I3D（Inflated 3D ConvNet）特徴を使う:
+
+$$
+\text{FVD} = \|\mu_r - \mu_g\|^2 + \text{Tr}\!\left(\Sigma_r + \Sigma_g - 2(\Sigma_r \Sigma_g)^{1/2}\right)
+$$
+
+ここで $(\mu_r, \Sigma_r)$ は実動画の I3D 特徴の平均・共分散行列、$(\mu_g, \Sigma_g)$ は生成動画の同じ統計量。$(\Sigma_r \Sigma_g)^{1/2}$ は行列の平方根（Cholesky 分解で計算）。
+
+**I3D 特徴**: Kinetics-400 行動認識で訓練した 3D ConvNet。時空間パターン（動きの種類・速度・方向）をキャプチャする。FID の Inception 特徴と異なり、**時間的ダイナミクス**を含む点が本質的な違い。
+
+FVD の**限界**:
+1. Gaussian 分布を仮定（FID と同じバイアス。実際の動画分布は非 Gaussian）
+2. I3D は動きが激しい動画を高く評価する傾向——静止した被写体を撮影した高品質動画でも FVD が悪化する
+3. 人間の知覚的品質（テクスチャの美しさ、光の自然さ）と相関が弱い
+
+FVD を計算するには最低でも 2,048 サンプルが必要（Gaussian 推定の精度確保のため）。少ないサンプルでは推定分散が大きく不安定になる。
+
+#### CLIP-SIM — テキスト・動画整合性
+
+各フレームとプロンプトの CLIP 類似度の平均:
+
+$$
+\text{CLIP-SIM} = \frac{1}{T} \sum_{f=1}^{T} \cos\!\left(\text{CLIP}_\text{img}(x^{(f)}),\, \text{CLIP}_\text{text}(\text{prompt})\right)
+$$
+
+値が高いほどプロンプトの意味が動画に反映されている。ただし時間的一貫性（フレーム間のコヒーレンス）は測定しない点に注意。CLIP-SIM が高くても各フレームがバラバラな動画（スライドショー）を正しく識別できない。
+
+#### CLIP-TC — 時間的一貫性
+
+$$
+\text{CLIP-TC} = \frac{1}{T-1} \sum_{f=1}^{T-1} \cos\!\left(\text{CLIP}_\text{img}(x^{(f)}),\, \text{CLIP}_\text{img}(x^{(f+1)})\right)
+$$
+
+これは 2.2 節で導入した TCS の CLIP 特徴版。隣接フレームの視覚的特徴が似ているほど高くなる。CLIP-TC と TCS の差は特徴抽出器の違いのみで、定式化は同一だ。
+
+**業界標準の合格ライン**（VBench 等のベンチマーク準拠）:
+
+| 指標 | 合格ライン | 意味 |
+|:-----|:----------|:-----|
+| FVD | ≤ 300 | 許容できる品質（UCF-101 実動画基準: ≈ 0） |
+| CLIP-SIM | ≥ 0.30 | テキストと動画が意味的に整合 |
+| CLIP-TC | ≥ 0.95 | フレーム間が安定（チラつきなし） |
+
+**3 指標の相補性**: CLIP-SIM が高くても CLIP-TC が低ければ「テキスト通りだがチラつく」、FVD が低くても CLIP-SIM が低ければ「映像は自然だがプロンプトを無視」——3 指標を同時に満たすことが真の高品質動画生成の条件だ。
+
+#### 評価指標の統計的性質
+
+FVD の分散は Gaussian 近似の誤差に依存する。サンプル数 $N$ のとき、行列平方根の推定誤差は:
+
+$$
+\left\|\hat{\Sigma}^{1/2} - \Sigma^{1/2}\right\|_F = O\!\left(\frac{d}{\sqrt{N}}\right)
+$$
+
+ここで $d$ は I3D 特徴次元（通常 $d = 2048$）。したがって安定した FVD 推定には $N \gg d^2 / \epsilon^2$ サンプルが必要であり、実用上は $N \geq 2048$ が標準とされる。
+
+**CLIP-TC の上界**: 隣接フレーム間の CLIP 特徴のコサイン類似度は以下の分解で上界が与えられる:
+
+$$
+\text{CLIP-TC} \leq 1 - \frac{1}{2}\mathbb{E}\!\left[\left\|\Delta \mathbf{f}_t\right\|^2\right]
+$$
+
+ここで $\Delta \mathbf{f}_t = \mathbf{f}_{t+1} - \mathbf{f}_t$（単位ベクトルの差分）。光学フロー $\mathbf{u}$ が小さいとき:
+
+$$
+\|\Delta \mathbf{f}_t\|^2 \approx \left\|\frac{\partial \mathbf{f}}{\partial \mathbf{x}}\right\|^2_F \cdot \|\mathbf{u}\|^2
+$$
+
+つまり CLIP-TC が高い動画 = フレーム間の光学フローが小さい（穏やかな動き）or CLIP 特徴の局所勾配が小さい（意味的に安定なシーン）のいずれかを意味する。高速な動きのある動画（スポーツ・アクション）では CLIP-TC が構造的に低くなるため、ジャンルに応じた合格ラインの設定が重要だ。
 
 ---
 
@@ -1038,196 +1299,16 @@ $$
 
 Zone 1で学んだ3D Convの数式をRustで実装する。C Pointer Modelに従い、zero-copy設計を徹底する。
 
-```rust
-// src/video_kernels.rs — Rust 3D Convolution (C-ABI対応)
-
-#![deny(clippy::unwrap_used)]
-#![warn(clippy::pedantic, missing_docs)]
-
-/// 3D Convolution: (T, H, W, C_in) * (k_t, k_h, k_w, C_in, C_out) → (T, H, W, C_out)
-/// Rust Pointer Model: flat array + offset計算 = zero-copy
-#[no_mangle]
-pub unsafe extern "C" fn conv3d_forward(
-    input: *const f32,      // (T, H, W, C_in)
-    kernel: *const f32,     // (k_t, k_h, k_w, C_in, C_out)
-    output: *mut f32,       // (T, H, W, C_out) — caller allocates
-    T: usize, H: usize, W: usize,
-    C_in: usize, C_out: usize,
-    k_t: usize, k_h: usize, k_w: usize,
-) {
-    let pad_t = k_t / 2;
-    let pad_h = k_h / 2;
-    let pad_w = k_w / 2;
-
-    for t in 0..T {
-        for h in 0..H {
-            for w in 0..W {
-                for c_out in 0..C_out {
-                    let mut sum = 0.0f32;
-
-                    // 3D Convolution loop
-                    for kt in 0..k_t {
-                        for kh in 0..k_h {
-                            for kw in 0..k_w {
-                                let t_idx = (t + kt).wrapping_sub(pad_t);
-                                let h_idx = (h + kh).wrapping_sub(pad_h);
-                                let w_idx = (w + kw).wrapping_sub(pad_w);
-
-                                // Bounds check
-                                if t_idx >= T || h_idx >= H || w_idx >= W {
-                                    continue;
-                                }
-
-                                for c_in in 0..C_in {
-                                    // Input: (T, H, W, C_in) flat index
-                                    let input_idx = ((t_idx * H + h_idx) * W + w_idx) * C_in + c_in;
-                                    // Kernel: (k_t, k_h, k_w, C_in, C_out) flat index
-                                    let kernel_idx = ((((kt * k_h + kh) * k_w + kw) * C_in + c_in) * C_out + c_out);
-
-                                    sum += *input.add(input_idx) * *kernel.add(kernel_idx);
-                                }
-                            }
-                        }
-                    }
-
-                    // Output: (T, H, W, C_out)
-                    let output_idx = ((t * H + h) * W + w) * C_out + c_out;
-                    *output.add(output_idx) = sum;
-                }
-            }
-        }
-    }
-}
-
-/// Julia → Rust FFI test
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_conv3d() {
-        let T = 4; let H = 8; let W = 8;
-        let C_in = 3; let C_out = 16;
-        let k_t = 3; let k_h = 3; let k_w = 3;
-
-        let mut input = vec![1.0f32; T * H * W * C_in];
-        let kernel = vec![0.01f32; k_t * k_h * k_w * C_in * C_out];
-        let mut output = vec![0.0f32; T * H * W * C_out];
-
-        unsafe {
-            conv3d_forward(
-                input.as_ptr(), kernel.as_ptr(), output.as_mut_ptr(),
-                T, H, W, C_in, C_out, k_t, k_h, k_w,
-            );
-        }
-
-        // 期待値: sum ≈ 3*3*3*3*0.01 = 0.81
-        assert!((output[0] - 0.81).abs() < 0.01);
-    }
-}
-```
 
 ### 4.2 Julia DiT訓練: Lux + Reactant GPU加速
 
 Zone 3のDiT理論をJuliaで実装する。Lux.jl (Flux後継) + Reactant.jl (XLA AOT GPU) でGPU訓練を実現。
 
-```julia
-# julia/dit_video_train.jl — DiT訓練 (Lux + Reactant)
-
-using Lux, Reactant, Optimisers, Random, Statistics, CUDA
-
-# DiT Block: Multi-Head Self-Attention + MLP + AdaLN
-struct DiTBlock{A,M,N1,N2}
-    attn::A
-    mlp::M
-    norm1::N1
-    norm2::N2
-end
-
-function DiTBlock(dim::Int, n_heads::Int)
-    attn = MultiHeadAttention(dim, n_heads=n_heads)
-    mlp = Chain(Dense(dim, 4*dim, gelu), Dense(4*dim, dim))
-    norm1 = LayerNorm(dim)
-    norm2 = LayerNorm(dim)
-    DiTBlock(attn, mlp, norm1, norm2)
-end
-
-function (m::DiTBlock)(x, ps, st)
-    # Residual connection + Layer Norm
-    attn_out, st_attn = m.attn(m.norm1(x, ps.norm1, st.norm1)[1], ps.attn, st.attn)
-    x = x + attn_out[1]
-
-    mlp_out, st_mlp = m.mlp(m.norm2(x, ps.norm2, st.norm2)[1], ps.mlp, st.mlp)
-    x = x + mlp_out[1]
-
-    return x, (attn=st_attn, mlp=st_mlp, norm1=st.norm1, norm2=st.norm2)
-end
-
-# DiT: Patchify → Transformer Blocks → Unpatchify
-function DiT(; patch_size=16, n_layers=12, dim=768, n_heads=12)
-    patchify = Conv((patch_size, patch_size), 3 => dim, stride=patch_size)
-    blocks = [DiTBlock(dim, n_heads) for _ in 1:n_layers]
-    unpatchify = ConvTranspose((patch_size, patch_size), dim => 3, stride=patch_size)
-
-    Chain(patchify, blocks..., unpatchify)
-end
-
-# 訓練ループ (Reactant GPU AOT)
-function train_dit!(model, data_loader, epochs=10)
-    opt_state = Optimisers.setup(Adam(1e-4), model.ps)
-
-    for epoch in 1:epochs
-        total_loss = 0.0
-        for (x_batch,) in data_loader
-            x_batch = x_batch |> gpu  # CUDA.jl GPU転送
-
-            # Forward + Backward
-            loss, grads = Lux.Training.compute_gradients(model, x_batch)
-            total_loss += loss
-
-            # Update
-            Optimisers.update!(opt_state, model.ps, grads)
-        end
-
-        @info "Epoch $epoch: Loss = $(total_loss / length(data_loader))"
-    end
-end
-```
 
 ### 4.3 3言語統合: Julia訓練 → Rust推論 → Elixir配信
 
 Course III第19回の3言語FFIパターンを動画生成に適用する。
 
-```elixir
-# elixir/video_gen_server.ex — Elixir分散配信サーバー
-
-defmodule VideoGenServer do
-  use GenServer
-
-  # Rust FFI: 3D Conv呼び出し
-  @on_load :load_nif
-  def load_nif do
-    :erlang.load_nif('./target/release/libvideo_kernels', 0)
-  end
-
-  def conv3d_forward(_input, _kernel, _output, _dims), do: :erlang.nif_error(:not_loaded)
-
-  # Julia訓練モデル読み込み
-  def load_julia_model(model_path) do
-    # jlrs経由でJuliaモデルロード (第19回参照)
-    Jlrs.call(:load_model, [model_path])
-  end
-
-  # 動画生成API
-  def handle_call({:generate_video, prompt, num_frames}, _from, state) do
-    # 1. Rust: 3D Conv高速推論
-    # 2. Julia: DiT forward pass
-    # 3. Elixir: 分散配信
-    video = generate_with_dit(prompt, num_frames, state.model)
-    {:reply, {:ok, video}, state}
-  end
-end
-```
 
 ---
 
@@ -1239,104 +1320,16 @@ end
 
 SmolVLM2は256Mパラメータの小型VLMだが、動画理解が可能。ローカルGPU (RTX 4090等) で実行可能。
 
-```julia
-# julia/smolvlm2_video.jl — SmolVLM2動画理解
-
-using Transformers, VideoIO
-
-# SmolVLM2モデルロード (256M params)
-smol_vlm = load_model("HuggingFaceTB/SmolVLM2-256M")
-
-# 動画フレーム抽出 (24fps → 1fps サンプリング)
-function extract_frames(video_path::String; fps=1)
-    reader = VideoIO.openvideo(video_path)
-    frames = []
-
-    frame_interval = Int(reader.fps / fps)
-    for (i, frame) in enumerate(reader)
-        if i % frame_interval == 0
-            push!(frames, frame)
-        end
-    end
-
-    return frames
-end
-
-# 動画理解
-video_path = "demo.mp4"
-frames = extract_frames(video_path)  # 10秒動画 → 10フレーム
-
-# SmolVLM2推論
-caption = smol_vlm(frames, prompt="この動画で何が起こっているか詳しく説明してください")
-
-println("SmolVLM2理解: ", caption)
-# 出力例: "カフェで2人の女性が会話している。窓の外には桜の木が見える。春の昼間のシーン。"
-```
 
 ### 5.2 LTX-Video: テキスト→動画生成
 
 LTX-VideoはDiT-based動画生成モデル。Pyramidal Flow Matching (arXiv:2410.05954) の実装例。
 
-```julia
-# julia/ltx_video_gen.jl — LTX-Video動画生成
-
-using Diffusers, VideoIO
-
-# LTX-Videoモデルロード
-ltx_model = load_model("Lightricks/LTX-Video")
-
-# テキストプロンプト → 動画生成
-prompt = "桜の木の下のカフェで2人の女性が会話している、春の昼間、アニメ調"
-generated_video = ltx_model(
-    prompt,
-    num_frames=48,        # 2秒 (24fps)
-    resolution=(768, 768),
-    num_steps=28,         # Rectified Flow: 28ステップ
-    guidance_scale=7.5
-)
-
-# 保存
-save_video(generated_video, "generated_cafe.mp4", framerate=24)
-println("✅ LTX-Video生成完了: generated_cafe.mp4")
-```
 
 ### 5.3 統合デモ: SmolVLM2理解 → プロンプト改善 → LTX-Video生成
 
 動画を入力 → SmolVLM2で理解 → 理解結果をプロンプトに変換 → LTX-Videoで新規動画生成。
 
-```julia
-# julia/integrated_demo.jl — 統合デモ
-
-using Transformers, Diffusers, VideoIO
-
-# 1️⃣ 入力動画を SmolVLM2 で理解
-input_video = "input_cafe.mp4"
-frames = extract_frames(input_video)
-smol_vlm = load_model("HuggingFaceTB/SmolVLM2-256M")
-
-understanding = smol_vlm(frames, prompt="この動画のスタイル、シーン、雰囲気を詳しく説明してください")
-println("SmolVLM2理解:\n", understanding)
-# 出力: "アニメ調のカフェシーン。春の桜が窓の外に見える。明るい昼間。2人の女性が笑顔で会話。"
-
-# 2️⃣ 理解結果からプロンプト生成
-enhanced_prompt = """
-$(understanding)
-さらに、カメラが桜の木にズームインする動きを追加。
-高品質、詳細なアニメーション、シネマティックライティング。
-"""
-
-# 3️⃣ LTX-Videoで新規動画生成
-ltx_model = load_model("Lightricks/LTX-Video")
-new_video = ltx_model(
-    enhanced_prompt,
-    num_frames=96,  # 4秒 (24fps)
-    resolution=(1024, 1024),
-    num_steps=28
-)
-
-save_video(new_video, "enhanced_cafe.mp4", framerate=24)
-println("✅ 統合デモ完了: enhanced_cafe.mp4")
-```
 
 ---
 
@@ -1353,26 +1346,8 @@ println("✅ 統合デモ完了: enhanced_cafe.mp4")
 - **品質保持**: 高速化しつつ品質を維持
 - **手法**: Knowledge distillation + Adaptive sampling + Early stopping
 
-```julia
-# TurboDiffusion風の高速化手法 (疑似コード)
-function turbo_diffusion(model, prompt, num_steps_base=50)
-    # Adaptive sampling: 重要度が低いステップをスキップ
-    important_steps = adaptive_step_selection(num_steps_base)  # 50 → 5-10 steps
 
-    # Early stopping: 品質が閾値を超えたら終了
-    for step in important_steps
-        latent = model.denoise_step(latent, step)
-
-        if quality_score(latent) > threshold
-            break  # Early stopping
-        end
-    end
-
-    return decode_latent(latent)
-end
-```
-
-**結果**: 従来50ステップ → TurboD 5ステップ で同等品質 → 10倍高速化。さらにKD蒸留で100倍達成。
+**結果**: 従来50ステップ → TurboD 5ステップ で同等品質 → 10倍高速化。KD蒸留で100倍も達成。
 
 ### 6.2 Pyramidal Flow Matching (arXiv:2410.05954)
 
@@ -1385,15 +1360,6 @@ end
 
 **アーキテクチャ**:
 
-```
-入力: Text prompt
-  ↓
-Level 1: 256×256 (粗い構造生成)
-  ↓ Upsample
-Level 2: 512×512 (詳細追加)
-  ↓ Upsample
-Level 3: 768×768 (最終品質)
-```
 
 **数式** (Multi-scale Flow Matching):
 
@@ -1444,6 +1410,12 @@ $$
 - **期待**: 物理法則を明示的に保証した動画生成
 
 ---
+
+
+> Progress: 50%
+> **理解度チェック**
+> 1. $ はレベル、$ の各記号の意味と、この式が表す操作を説明してください。
+> 2. このゾーンで学んだ手法の直感的な意味と、なぜこの定式化が必要なのかを説明してください。
 
 ## 🎓 7. 振り返りゾーン (30分) — 全知識の接続
 
@@ -1579,20 +1551,6 @@ graph LR
 
 実装時のトラブルシューティング:
 
-```julia
-# Issue 1: VideoIO.jl installation error
-# Solution: ffmpegをシステムにインストール
-# macOS: brew install ffmpeg
-# Linux: apt install ffmpeg
-
-# Issue 2: CUDA out of memory
-# Solution: Batch sizeを削減 or Gradient checkpointing
-using Lux.Experimental: gradient_checkpointing
-
-# Issue 3: Reactant.jl not found
-# Solution: Julia 1.11+ required
-versioninfo()  # Julia 1.11.0 以上を確認
-```
 
 ## 参考文献
 
@@ -1604,6 +1562,14 @@ versioninfo()  # Julia 1.11.0 以上を確認
 
 
 ---
+
+## 著者リンク
+
+- Blog: https://fumishiki.dev
+- X: https://x.com/fumishiki
+- LinkedIn: https://www.linkedin.com/in/fumitakamurakami
+- GitHub: https://github.com/fumishiki
+- Hugging Face: https://huggingface.co/fumishiki
 
 ## ライセンス
 
@@ -1640,3 +1606,4 @@ versioninfo()  # Julia 1.11.0 以上を確認
 - 利用方法を著者に報告
 
 **無断利用が発覚した場合**、使用料の請求およびSNS等での公表を行う場合があります。
+

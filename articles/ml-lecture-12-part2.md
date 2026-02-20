@@ -4,7 +4,16 @@ emoji: "⚔️"
 type: "tech"
 topics: ["machinelearning", "deeplearning", "gan", "julia", "rust"]
 published: true
+slug: "ml-lecture-12-part2"
+difficulty: "advanced"
+time_estimate: "90 minutes"
+languages: ["Julia", "Rust"]
+keywords: ["機械学習", "深層学習", "生成モデル"]
 ---
+
+# 第12回: GAN: 基礎からStyleGANまで 【後編】実装編
+
+> **📖 この記事は後編（実装編）です** 理論編は [【前編】第12回](/articles/ml-lecture-12-part1) をご覧ください。
 
 ## 💻 4. 実装ゾーン（45分）— Julia訓練 + Rust推論
 
@@ -217,8 +226,8 @@ using LinearAlgebra
 # Latent space interpolation (spherical)
 function slerp(z1, z2, t)
     # Spherical linear interpolation
-    z1_norm = z1 / norm(z1)
-    z2_norm = z2 / norm(z2)
+    z1_norm = normalize(z1)
+    z2_norm = normalize(z2)
 
     θ = acos(clamp(dot(z1_norm, z2_norm), -1, 1))
 
@@ -232,13 +241,13 @@ end
 # Attribute vector discovery
 function find_attribute_vector(G, positive_samples, negative_samples)
     # Encode samples to W space (assume we have encoder)
-    w_pos = [encode_to_w(x) for x in positive_samples]
-    w_neg = [encode_to_w(x) for x in negative_samples]
+    w_pos = encode_to_w.(positive_samples)
+    w_neg = encode_to_w.(negative_samples)
 
     # Attribute direction = mean difference
     attr_vec = mean(w_pos) - mean(w_neg)
 
-    return attr_vec / norm(attr_vec)
+    return normalize(attr_vec)
 end
 
 # Attribute editing
@@ -387,7 +396,7 @@ G_cgan, D_cgan = train_cgan(mnist_loader, 50)
 images_7 = generate_class(G_cgan, 7, 16)
 ```
 
-:::details cGANのTips
+<details><summary>cGANのTips</summary>
 
 **1. ラベル埋め込みの選択肢**:
 
@@ -405,7 +414,8 @@ images_7 = generate_class(G_cgan, 7, 16)
 
 - 各バッチでクラスを均等にサンプリング
 - クラスごとに重み付けした損失を使う
-:::
+
+</details>
 
 ### 4.7 Projection Discriminator実装
 
@@ -560,10 +570,11 @@ impl GANInference {
     /// Generate image from random noise
     pub fn generate(&self, batch_size: usize) -> Result<Array4<f32>, Box<dyn std::error::Error>> {
         // Sample z ~ N(0, I)
-        let z: Array2<f32> = Array2::from_shape_fn((batch_size, self.latent_dim), |_| {
-            use rand::distributions::{Distribution, Standard};
-            Standard.sample(&mut rand::thread_rng())
-        });
+        let mut rng = rand::thread_rng();
+        let z: Array2<f32> = Array2::from_shape_fn(
+            (batch_size, self.latent_dim),
+            |_| rng.gen::<f32>(),
+        );
 
         // Run inference
         let z_value = Value::from_array(self.session.allocator(), &z.view())?;
@@ -580,14 +591,14 @@ impl GANInference {
         assert_eq!(c, 3, "Expected RGB image");
 
         let img_data = tensor.slice(s![idx, .., .., ..]);
+        let to_u8 = |ch: usize, y: usize, x: usize| {
+            ((img_data[[ch, y, x]] * 0.5 + 0.5).clamp(0.0, 1.0) * 255.0) as u8
+        };
         let mut img = ImageBuffer::new(w as u32, h as u32);
 
         for y in 0..h {
             for x in 0..w {
-                let r = ((img_data[[0, y, x]] * 0.5 + 0.5).clamp(0.0, 1.0) * 255.0) as u8;
-                let g = ((img_data[[1, y, x]] * 0.5 + 0.5).clamp(0.0, 1.0) * 255.0) as u8;
-                let b = ((img_data[[2, y, x]] * 0.5 + 0.5).clamp(0.0, 1.0) * 255.0) as u8;
-                img.put_pixel(x as u32, y as u32, Rgb([r, g, b]));
+                img.put_pixel(x as u32, y as u32, Rgb([to_u8(0, y, x), to_u8(1, y, x), to_u8(2, y, x)]));
             }
         }
 
@@ -600,10 +611,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let generator = GANInference::new("generator.onnx", 100)?;
     let images = generator.generate(16)?;
 
-    for i in 0..16 {
-        let img = generator.tensor_to_image(&images, i);
-        img.save(format!("generated_{}.png", i))?;
-    }
+    (0..16usize).try_for_each(|i| {
+        generator.tensor_to_image(&images, i).save(format!("generated_{i}.png"))
+    })?;
 
     println!("Generated 16 images");
     Ok(())
@@ -630,39 +640,9 @@ BenchmarkTools.Trial: 1000 samples with 1 evaluation.
  Time  (mean ± σ):   2.4 ms ± 0.2 ms
 ```
 
-Python (PyTorch) equivalent:
-```python
-import torch
-import time
+**結果**: Julia (Flux) の速度はPyTorch (CUDA) と同等で、コンパイル後のREPL環境で高速イテレーション可能。
 
-G_torch = DCGANGenerator().cuda()
-z_torch = torch.randn(64, 100).cuda()
-
-# Warmup
-for _ in range(10):
-    _ = G_torch(z_torch)
-
-# Benchmark
-torch.cuda.synchronize()
-t0 = time.time()
-for _ in range(1000):
-    _ = G_torch(z_torch)
-torch.cuda.synchronize()
-t1 = time.time()
-
-print(f"PyTorch: {(t1-t0)/1000 * 1000:.1f} ms per batch")
-```
-
-出力:
-```
-PyTorch: 2.8 ms per batch
-```
-
-**結果**: Julia (Flux) とPyTorch (CUDA) は同等の速度。ただしJuliaはコンパイル後のREPL環境で高速イテレーション可能。
-
-:::message
-**進捗: 70% 完了** GANの実装を習得した。次は実験ゾーンで、実際にGANを訓練し、問題点を観察する。
-:::
+> **Note:** **進捗: 70% 完了** GANの実装を習得した。次は実験ゾーンで、実際にGANを訓練し、問題点を観察する。
 
 ---
 
@@ -681,9 +661,9 @@ using Flux, Plots, Distributions
 function generate_8gaussians(n)
     centers = [(cos(θ), sin(θ)) for θ in 0:π/4:2π-π/4]
     cluster = rand(1:8, n)
-    noise = 0.05 * randn(2, n)
-    data = hcat([centers[c] for c in cluster]...) + noise
-    return Float32.(data)
+    noise   = 0.05f0 * randn(Float32, 2, n)
+    data    = Float32.(reduce(hcat, centers[cluster])) .+ noise
+    return data
 end
 
 # Train Vanilla GAN
@@ -721,7 +701,7 @@ end
 
 # Visualize mode collapse
 for (i, samples) in enumerate(history_samples)
-    scatter(samples[1,:], samples[2,:],
+    @views scatter(samples[1,:], samples[2,:],
             title="Epoch $(i*100)",
             xlim=(-2,2), ylim=(-2,2),
             legend=false, markersize=2)
@@ -794,14 +774,13 @@ function (sn::SpectralNorm)(x)
 
     # Power iteration to estimate σ(W)
     u = sn.u
-    for _ in 1:sn.n_iter
-        v = W' * u
-        v = v / (norm(v) + 1e-12)
-        u = W * v
-        u = u / (norm(u) + 1e-12)
+    v = similar(u, size(W, 2))
+    @inbounds for _ in 1:sn.n_iter
+        v = normalize(W' * u)
+        u = normalize(W * v)
     end
 
-    σ = dot(u, W * (W' * u))
+    σ = dot(u, W * v)
 
     # Normalize W by σ
     W_sn = W / σ
@@ -880,7 +859,7 @@ plot!(history_ttur[:fid], label="TTUR", linestyle=:dash)
 
 TTURは、FIDを約20%改善し、Mode Collapseを大幅に削減した。
 
-:::details TTURの理論的正当化（Heusel et al. 2017）
+<details><summary>TTURの理論的正当化（Heusel et al. 2017）</summary>
 
 TTUR論文 [^18] は、Fréchet Inception Distance (FID) という新しい評価指標を導入し、学習率の比率がFIDの収束速度に影響することを示した。
 
@@ -895,7 +874,8 @@ $$
 FIDは、Wasserstein-2距離をガウス近似で評価したもの。低いほど良い。
 
 **実験結果**: CIFAR-10でTTUR適用により、同一学習率に比べてFIDが29.3→21.7に改善（約26%削減）。
-:::
+
+</details>
 
 ### 5.5 Unrolled GAN vs Minibatch Discrimination比較
 
@@ -921,15 +901,9 @@ function (mbd::MinibatchDiscrimination)(x)
     # Transform: M = x^T T -> (batch_size, intermediate_dim, n_kernels)
     M = reshape(mbd.T * x, :, mbd.n_kernels, batch_size)  # Broadcasting magic
 
-    # Compute L1 distances between all pairs
-    dists = zeros(Float32, batch_size, batch_size, mbd.n_kernels)
-    for k in 1:mbd.n_kernels
-        for i in 1:batch_size
-            for j in 1:batch_size
-                dists[i, j, k] = sum(abs, M[:, k, i] - M[:, k, j])
-            end
-        end
-    end
+    # Compute L1 distances between all pairs (array comprehension)
+    dists = [sum(abs, M[:, k, i] - M[:, k, j])
+             for i in 1:batch_size, j in 1:batch_size, k in 1:mbd.n_kernels]
 
     # Sum over batch (excluding self)
     o = sum(exp.(-dists), dims=2) .- 1.0  # Subtract self-distance
@@ -963,24 +937,20 @@ end
 
 ```julia
 # Train 3 variants on 8-Gaussian dataset
-results = Dict()
-
-# 1. Vanilla GAN
-G_vanilla, D_vanilla = train_vanilla_gan(dataloader_8g, 1000)
-results["vanilla"] = evaluate_mode_coverage(G_vanilla, 8)
-
-# 2. Unrolled GAN (k=5)
+G_vanilla,  D_vanilla  = train_vanilla_gan(dataloader_8g, 1000)
 G_unrolled, D_unrolled = train_unrolled_gan(dataloader_8g, 1000, k_unroll=5)
-results["unrolled"] = evaluate_mode_coverage(G_unrolled, 8)
+G_mbd,      D_mbd      = train_mbd_gan(dataloader_8g, 1000)
 
-# 3. Minibatch Discrimination
-G_mbd, D_mbd = train_mbd_gan(dataloader_8g, 1000)
-results["mbd"] = evaluate_mode_coverage(G_mbd, 8)
+coverage = (
+    vanilla  = evaluate_mode_coverage(G_vanilla, 8),
+    unrolled = evaluate_mode_coverage(G_unrolled, 8),
+    mbd      = evaluate_mode_coverage(G_mbd, 8),
+)
 
 # Mode coverage: % of modes with at least 5% of generated samples
 println("Mode Coverage:")
-for (name, coverage) in results
-    println("  $name: $(coverage * 100)%")
+foreach(pairs(coverage)) do (name, cov)
+    println("  $name: $(cov * 100)%")
 end
 ```
 
@@ -1016,19 +986,17 @@ using Flux, Statistics
 
 # Ablation configurations
 configs = [
-    ("Baseline",      Dict(:batchnorm => false, :spectralnorm => false, :ttur => false, :label_smooth => false)),
-    ("+BatchNorm",    Dict(:batchnorm => true,  :spectralnorm => false, :ttur => false, :label_smooth => false)),
-    ("+SpectralNorm", Dict(:batchnorm => true,  :spectralnorm => true,  :ttur => false, :label_smooth => false)),
-    ("+TTUR",         Dict(:batchnorm => true,  :spectralnorm => true,  :ttur => true,  :label_smooth => false)),
-    ("+LabelSmooth",  Dict(:batchnorm => true,  :spectralnorm => true,  :ttur => true,  :label_smooth => true)),
+    ("Baseline",      (batchnorm=false, spectralnorm=false, ttur=false, label_smooth=false)),
+    ("+BatchNorm",    (batchnorm=true,  spectralnorm=false, ttur=false, label_smooth=false)),
+    ("+SpectralNorm", (batchnorm=true,  spectralnorm=true,  ttur=false, label_smooth=false)),
+    ("+TTUR",         (batchnorm=true,  spectralnorm=true,  ttur=true,  label_smooth=false)),
+    ("+LabelSmooth",  (batchnorm=true,  spectralnorm=true,  ttur=true,  label_smooth=true)),
 ]
 
-results = []
-for (name, config) in configs
-    G, D = build_gan(config)
-    metrics = train_and_evaluate(G, D, cifar10_loader, epochs=100, config=config)
-    push!(results, (name, metrics))
-    println("$name: FID=$(metrics[:fid]), IS=$(metrics[:inception_score])")
+results = [(name, train_and_evaluate(build_gan(config)..., cifar10_loader, epochs=100, config=config))
+           for (name, config) in configs]
+foreach(results) do (name, metrics)
+    println("$name: FID=$(metrics.fid), IS=$(metrics.inception_score)")
 end
 ```
 
@@ -1051,7 +1019,7 @@ end
 
 **累積効果**: Baselineから全技術適用で、FID -56% (45.2→19.8)、訓練失敗率 -94% (35%→2%)。各技術は独立に寄与する。
 
-:::details Label Smoothingの実装
+<details><summary>Label Smoothingの実装</summary>
 
 Label Smoothing [^20] は、本物ラベルを1.0ではなく0.9に、偽物ラベルを0.0ではなく0.1にする手法。
 
@@ -1061,8 +1029,8 @@ real_labels = ones(Float32, 1, batch_size)
 fake_labels = zeros(Float32, 1, batch_size)
 
 # Smoothed labels
-real_labels_smooth = 0.9 * ones(Float32, 1, batch_size)
-fake_labels_smooth = 0.1 * ones(Float32, 1, batch_size)
+real_labels_smooth = fill(0.9f0, 1, batch_size)
+fake_labels_smooth = fill(0.1f0, 1, batch_size)
 
 # Loss with smooth labels
 loss_d = -mean(real_labels_smooth .* log.(D(real_x) .+ 1f-8)) -
@@ -1070,7 +1038,8 @@ loss_d = -mean(real_labels_smooth .* log.(D(real_x) .+ 1f-8)) -
 ```
 
 効果: 判別器が過信しなくなり、生成器に有用な勾配を提供し続ける。
-:::
+
+</details>
 
 #### 5.6.3 可視化: 訓練ダイナミクスの追跡
 
@@ -1081,22 +1050,22 @@ using Plots, Statistics
 
 # Training with logging
 function train_gan_with_logging(G, D, dataloader, epochs=100)
-    history = Dict(
-        :d_loss => Float32[],
-        :g_loss => Float32[],
-        :d_real => Float32[],
-        :d_fake => Float32[],
-        :fid => Float32[]
+    history = (
+        d_loss  = Float32[],
+        g_loss  = Float32[],
+        d_real  = Float32[],
+        d_fake  = Float32[],
+        fid     = Float32[],
     )
 
     opt_g = Adam(1e-4, (0.5, 0.999))
     opt_d = Adam(4e-4, (0.5, 0.999))
 
     for epoch in 1:epochs
-        d_losses = []
-        g_losses = []
-        d_real_vals = []
-        d_fake_vals = []
+        d_losses    = Float32[]
+        g_losses    = Float32[]
+        d_real_vals = Float32[]
+        d_fake_vals = Float32[]
 
         for (real_x,) in dataloader
             batch_size = size(real_x, 4)
@@ -1124,15 +1093,15 @@ function train_gan_with_logging(G, D, dataloader, epochs=100)
         end
 
         # Log epoch metrics
-        push!(history[:d_loss], mean(d_losses))
-        push!(history[:g_loss], mean(g_losses))
-        push!(history[:d_real], mean(d_real_vals))
-        push!(history[:d_fake], mean(d_fake_vals))
+        push!(history.d_loss, mean(d_losses))
+        push!(history.g_loss, mean(g_losses))
+        push!(history.d_real, mean(d_real_vals))
+        push!(history.d_fake, mean(d_fake_vals))
 
         # Compute FID every 10 epochs
         if epoch % 10 == 0
             fid = compute_fid(G, real_data_loader, n_samples=1000)
-            push!(history[:fid], fid)
+            push!(history.fid, fid)
             @info "Epoch $epoch: FID=$fid"
         end
     end
@@ -1142,14 +1111,14 @@ end
 
 # Visualization
 function plot_training_dynamics(history)
-    p1 = plot(history[:d_loss], label="D Loss", xlabel="Epoch", ylabel="Loss", title="Losses")
-    plot!(p1, history[:g_loss], label="G Loss")
+    p1 = plot(history.d_loss, label="D Loss", xlabel="Epoch", ylabel="Loss", title="Losses")
+    plot!(p1, history.g_loss, label="G Loss")
 
-    p2 = plot(history[:d_real], label="D(real)", xlabel="Epoch", ylabel="Probability", title="Discriminator Outputs")
-    plot!(p2, history[:d_fake], label="D(fake)")
+    p2 = plot(history.d_real, label="D(real)", xlabel="Epoch", ylabel="Probability", title="Discriminator Outputs")
+    plot!(p2, history.d_fake, label="D(fake)")
     hline!(p2, [0.5], linestyle=:dash, label="Nash Equilibrium", color=:gray)
 
-    p3 = plot(1:10:length(history[:fid])*10, history[:fid], label="FID", xlabel="Epoch", ylabel="FID", title="FID Score")
+    p3 = plot(1:10:length(history.fid)*10, history.fid, label="FID", xlabel="Epoch", ylabel="FID", title="FID Score")
 
     plot(p1, p2, p3, layout=(3,1), size=(800, 900))
 end
@@ -1180,32 +1149,38 @@ plot_training_dynamics(history)
 
 生成器を固定したとき、最適な判別器 $D^*(x)$ は何か？
 
-:::details 解答
+<details><summary>解答</summary>
+
 $$
 D^*(x) = \frac{p_{\text{data}}(x)}{p_{\text{data}}(x) + p_g(x)}
 $$
 
 導出は3.1.2を参照。
-:::
+
+</details>
 
 #### 問題2: WGAN vs Vanilla GAN
 
 WGAN-GPが Vanilla GAN より安定である理由を2つ挙げよ。
 
-:::details 解答
+<details><summary>解答</summary>
+
 1. **Wasserstein距離は常に有用な勾配を提供する**: 支持集合が重ならなくても勾配が消失しない
 2. **Gradient Penaltyが Lipschitz制約を満たす**: 判別器が滑らかになり、訓練が安定する
-:::
+
+</details>
 
 #### 問題3: Mode Collapse対策
 
 Mode Collapseを緩和する手法を3つ挙げよ。
 
-:::details 解答
+<details><summary>解答</summary>
+
 1. **Minibatch Discrimination**: バッチ内の多様性を判別器が評価
 2. **Unrolled GAN**: 判別器の数ステップ先を見越して生成器を更新
 3. **WGAN / Spectral Normalization**: 訓練の安定化によりMode Collapseを間接的に緩和
-:::
+
+</details>
 
 #### 問題4: コード読解
 
@@ -1219,7 +1194,8 @@ gs = gradient(Flux.params(D)) do
 end
 ```
 
-:::details 解答
+<details><summary>解答</summary>
+
 Vanilla GANの判別器損失の勾配。
 
 $$
@@ -1227,13 +1203,15 @@ $$
 $$
 
 最小化するため、負の符号がついている。
-:::
+
+</details>
 
 #### 問題5: f-GAN
 
 f-GAN理論において、Vanilla GANはどのf-divergenceに対応するか？
 
-:::details 解答
+<details><summary>解答</summary>
+
 Jensen-Shannon発散。具体的には:
 
 $$
@@ -1241,11 +1219,15 @@ f(t) = (t+1) \log \frac{t+1}{2} - t \log t
 $$
 
 または同等の形式。導出は3.4を参照。
-:::
 
-:::message
-**進捗: 85% 完了** GANの実験を通じて、Mode Collapseと訓練不安定性を体感した。次は発展トピックへ。
-:::
+</details>
+
+> **Note:** **進捗: 85% 完了** GANの実験を通じて、Mode Collapseと訓練不安定性を体感した。次は発展トピックへ。
+
+> Progress: 85%
+> **理解度チェック**
+> 1. WGAN-GP の Gradient Penalty 実装において、補間点 $\hat{x} = \epsilon x + (1-\epsilon) G(z)$（$\epsilon \sim U[0,1]$）上で勾配ノルム $\|\nabla_{\hat{x}} D(\hat{x})\|_2 = 1$ を要求する。Julia コードで `gradient()` を使ってこの勾配をどのように計算するか説明せよ。
+> 2. Mode Collapse を定量的に検出するために使う指標は何か？8-Gaussian データセット実験において、Vanilla GAN と WGAN-GP でどのような違いが観察されたか？
 
 ---
 
@@ -1326,7 +1308,7 @@ $$
 
 #### 6.3.2 DMD2 (Distribution Matching Distillation)
 
-DMD2 [^11] は、Diffusion2GANをさらに改善:
+DMD2 [^11] は、Diffusion2GANを改善:
 
 - **回帰損失の除去**: Perceptual Lossを使わず、GAN損失のみで蒸留
 - **実データ判別器**: 生成サンプルと実データを直接比較
@@ -1366,9 +1348,7 @@ Does Diffusion Beat GAN? (2024) [^5] の結論:
 | Native Sparse Attention (NSA) | DeepSeek 2025 | ハードウェア最適化スパースAttention判別器 |
 | GAN復活論争 | 複数 | R3GAN以降のGAN再評価 |
 
-:::message
-**進捗: 95% 完了** GANの最新研究を学んだ。最後に全体を振り返ろう。
-:::
+> **Note:** **進捗: 95% 完了** GANの最新研究を学んだ。最後に全体を振り返ろう。
 
 ---
 
@@ -1393,25 +1373,35 @@ Does Diffusion Beat GAN? (2024) [^5] の結論:
 
 ### 7.3 FAQ
 
-:::details Q1: GANは本当に尤度を計算しないのか？
+<details><summary>Q1: GANは本当に尤度を計算しないのか？</summary>
+
 はい。GANは $p_g(x)$ を明示的に定義せず、サンプリング $x = G(z)$ だけを実現する暗黙的生成モデル。尤度 $p_g(x)$ を計算できないため、定量的評価（Perplexity, Bits-per-dim）ができない。代わりに、FID / IS などのサンプル品質指標を使う。
-:::
 
-:::details Q2: なぜMode Collapseは起こるのか？
+</details>
+
+<details><summary>Q2: なぜMode Collapseは起こるのか？</summary>
+
 生成器Gが、判別器Dを騙すために、最も「騙しやすい」モード（データの一部）だけを生成するため。Dは現在の生成サンプルに対してのみフィードバックを与えるため、Gは全データ分布を考慮しない。解決策: Minibatch Discrimination / Unrolled GAN / WGAN-GP / R3GAN など。
-:::
 
-:::details Q3: WGANのWeight Clippingは今も使われている？
+</details>
+
+<details><summary>Q3: WGANのWeight Clippingは今も使われている？</summary>
+
 いいえ。Weight ClippingはWGAN-GP（Gradient Penalty）やSpectral Normalizationに置き換えられた。Weight Clippingは容量制限と勾配の不安定性を引き起こすため、現代のGANでは使われない。
-:::
 
-:::details Q4: StyleGANの $\mathcal{W}$ 空間は何がすごいのか？
+</details>
+
+<details><summary>Q4: StyleGANの $\mathcal{W}$ 空間は何がすごいのか？</summary>
+
 $\mathcal{W}$ 空間は、入力ノイズ空間 $\mathcal{Z}$ より線形性が高く、属性のもつれ（entanglement）が少ない。例: $\mathcal{Z}$ では「笑顔」と「年齢」が絡み合っているが、$\mathcal{W}$ では独立に制御できる。Mapping Network $f: \mathcal{Z} \to \mathcal{W}$ がこの分離を学習する。
-:::
 
-:::details Q5: GANとDiffusionはどちらが優れているか？
+</details>
+
+<details><summary>Q5: GANとDiffusionはどちらが優れているか？</summary>
+
 タスク依存。**推論速度重視ならGAN**（0.05秒 vs 2.3秒）、**品質・制御性重視ならDiffusion**。R3GAN [^4] は品質でも対等になり、Diffusion2GAN [^6] は両者のハイブリッド。「どちらか」ではなく「どう組み合わせるか」が2025年の焦点。
-:::
+
+</details>
 
 ### 7.4 1週間の学習スケジュール
 
@@ -1443,8 +1433,8 @@ checklist = [
 ]
 
 function check_progress()
-    completed = count(ans -> ans, [readline("$(i). $(item) [y/n]: ") == "y" for (i, item) in enumerate(checklist)])
-    progress = completed / length(checklist) * 100
+    completed = sum(readline("$i. $item [y/n]: ") == "y" for (i, item) in enumerate(checklist))
+    progress  = completed / length(checklist) * 100
     println("\n進捗: $(completed)/$(length(checklist)) ($(round(progress, digits=1))%)")
 
     if progress == 100
@@ -1472,9 +1462,7 @@ GANの弱点は「尤度が計算できない」こと。評価指標が定量�
 
 GANは鮮明だが尤度なし。VAEは尤度ありだがぼやける。ARは尤度ありで高品質。だが「逐次生成」という新たな代償を払う。
 
-:::message
-**進捗: 100% 完了** 第12回「GAN」を完走した。敵対的学習の理論から最新研究まで、全てを手に入れた。次は自己回帰へ。
-:::
+> **Note:** **進捗: 100% 完了** 第12回「GAN」を完走した。敵対的学習の理論から最新研究まで、全てを手に入れた。次は自己回帰へ。
 
 ---
 
@@ -1492,7 +1480,8 @@ GANは鮮明だが尤度なし。VAEは尤度ありだがぼやける。ARは尤
 
 「死んだ」のはGANそのものではなく、**古い訓練法と不公平な評価**だった。正しい理論と実装で、GANは現役の最強生成モデルの一角である。
 
-:::details 歴史的背景: なぜ「GANは死んだ」と言われたのか
+<details><summary>歴史的背景: なぜ「GANは死んだ」と言われたのか</summary>
+
 - 2021年: Diffusion Models Beat GANs [^9] が衝撃を与える（DDPM > BigGAN-deep）
 - 2022年: Stable Diffusion / DALL-E 2の成功でDiffusion一色に
 - 2023年: 主要会議でGAN論文が激減（NeurIPS 2023: GAN 3本 vs Diffusion 80本）
@@ -1500,61 +1489,67 @@ GANは鮮明だが尤度なし。VAEは尤度ありだがぼやける。ARは尤
 - 2025年: Diffusion Adversarial Post-Training [^8] でGANとDiffusionの統合へ
 
 「死んだ」のではなく、「統合」されつつある。
-:::
+
+</details>
 
 ---
+
+> Progress: 95%
+> **理解度チェック**
+> 1. R3GAN（正則化相対論的 GAN）が局所収束保証を持つ理論的根拠を、従来の Vanilla GAN との訓練ダイナミクスの違いの観点から説明せよ。
+> 2. StyleGAN2 の Weight Demodulation は StyleGAN の AdaIN と何が根本的に異なるか？どちらが Blob アーティファクトを解決し、その理由は何か？
 
 ## 参考文献
 
 ### 主要論文
 
 [^1]: Goodfellow, I. J., et al. (2014). Generative Adversarial Networks. *NIPS 2014*.
-@[card](https://arxiv.org/abs/1406.2661)
+<https://arxiv.org/abs/1406.2661>
 
 [^2]: Arjovsky, M., Chintala, S., & Bottou, L. (2017). Wasserstein GAN. *ICML 2017*.
-@[card](https://arxiv.org/abs/1701.07875)
+<https://arxiv.org/abs/1701.07875>
 
 [^3]: Karras, T., Laine, S., & Aila, T. (2019). A Style-Based Generator Architecture for Generative Adversarial Networks. *CVPR 2019*.
-@[card](https://arxiv.org/abs/1812.04948)
+<https://arxiv.org/abs/1812.04948>
 
 [^4]: Huang, Y., et al. (2024). The GAN is dead; long live the GAN! A Modern GAN Baseline. *NeurIPS 2024*.
-@[card](https://arxiv.org/abs/2501.05441)
+<https://arxiv.org/abs/2501.05441>
 
-[^5]: Tian, Y., et al. (2024). Does Diffusion Beat GAN in Image Super Resolution? *arXiv*.
-@[card](https://arxiv.org/abs/2405.17261)
+[^5]: Kuznedelev, D., Startsev, V., Shlenskii, D., & Kastryulin, S. (2024). Does Diffusion Beat GAN in Image Super Resolution? *arXiv*.
+<https://arxiv.org/abs/2405.17261>
 
 [^6]: Kang, M., et al. (2024). Distilling Diffusion Models into Conditional GANs. *arXiv*.
-@[card](https://arxiv.org/abs/2405.05967)
+<https://arxiv.org/abs/2405.05967>
 
 [^7]: Miyato, T., et al. (2018). Spectral Normalization for Generative Adversarial Networks. *ICLR 2018*.
-@[card](https://arxiv.org/abs/1802.05957)
+<https://arxiv.org/abs/1802.05957>
 
-[^8]: Gao, H., et al. (2025). Diffusion Adversarial Post-Training for One-Step Video Generation. *arXiv*.
-@[card](https://arxiv.org/abs/2501.08316)
+[^8]: Lin, S., Xia, X., Ren, Y., Yang, C., Xiao, X., & Jiang, L. (2025). Diffusion Adversarial Post-Training for One-Step Video Generation. *arXiv*.
+<https://arxiv.org/abs/2501.08316>
 
 [^9]: Dhariwal, P., & Nichol, A. (2021). Diffusion Models Beat GANs on Image Synthesis. *NeurIPS 2021*.
-@[card](https://arxiv.org/abs/2105.05233)
+<https://arxiv.org/abs/2105.05233>
 
 [^11]: Yin, T., et al. (2024). Improved Distribution Matching Distillation for Fast Image Synthesis. *NeurIPS 2024 Oral*.
-@[card](https://arxiv.org/abs/2405.14867)
+<https://arxiv.org/abs/2405.14867>
 
 [^12]: Gulrajani, I., et al. (2017). Improved Training of Wasserstein GANs. *NIPS 2017*.
-@[card](https://arxiv.org/abs/1704.00028)
+<https://arxiv.org/abs/1704.00028>
 
 [^13]: Nowozin, S., et al. (2016). f-GAN: Training Generative Neural Samplers using Variational Divergence Minimization. *NIPS 2016*.
-@[card](https://arxiv.org/abs/1606.00709)
+<https://arxiv.org/abs/1606.00709>
 
 [^14]: Radford, A., Metz, L., & Chintala, S. (2016). Unsupervised Representation Learning with Deep Convolutional Generative Adversarial Networks. *ICLR 2016*.
-@[card](https://arxiv.org/abs/1511.06434)
+<https://arxiv.org/abs/1511.06434>
 
 [^15]: Karras, T., et al. (2020). Analyzing and Improving the Image Quality of StyleGAN. *CVPR 2020*.
-@[card](https://arxiv.org/abs/1912.04958)
+<https://arxiv.org/abs/1912.04958>
 
 [^16]: Karras, T., et al. (2021). Alias-Free Generative Adversarial Networks. *NeurIPS 2021*.
-@[card](https://arxiv.org/abs/2106.12423)
+<https://arxiv.org/abs/2106.12423>
 
 [^17]: Kang, M., et al. (2023). Scaling up GANs for Text-to-Image Synthesis. *CVPR 2023*.
-@[card](https://arxiv.org/abs/2303.05511)
+<https://arxiv.org/abs/2303.05511>
 
 ### 教科書
 
@@ -1565,6 +1560,14 @@ GANは鮮明だが尤度なし。VAEは尤度ありだがぼやける。ARは尤
 - Villani, C. (2009). *Optimal Transport: Old and New*. Springer. (第11回で推奨した最適輸送理論の教科書 — WGANの理論的基盤)
 
 ---
+
+## 著者リンク
+
+- Blog: https://fumishiki.dev
+- X: https://x.com/fumishiki
+- LinkedIn: https://www.linkedin.com/in/fumitakamurakami
+- GitHub: https://github.com/fumishiki
+- Hugging Face: https://huggingface.co/fumishiki
 
 ## ライセンス
 
@@ -1601,48 +1604,3 @@ GANは鮮明だが尤度なし。VAEは尤度ありだがぼやける。ARは尤
 - 利用方法を著者に報告
 
 **無断利用が発覚した場合**、使用料の請求およびSNS等での公表を行う場合があります。
-
-## 記法規約
-
-本講義で使用した数学記号の統一表。
-
-| 記号 | 読み | 意味 | 初出 |
-|:-----|:-----|:-----|:-----|
-| $G(z)$ | ジー オブ ゼット | 生成器がノイズ $z$ から生成したサンプル | Zone 0 |
-| $D(x)$ | ディー オブ エックス | 判別器がサンプル $x$ を本物と判断する確率 | Zone 0 |
-| $p_{\text{data}}(x)$ | ピー データ | 本物のデータ分布 | Zone 1 |
-| $p_g(x)$ | ピー ジー | 生成器が暗黙的に定義するデータ分布 | Zone 1 |
-| $p_z(z)$ | ピー ゼット | 潜在変数の事前分布（通常 $\mathcal{N}(0, I)$） | Zone 1 |
-| $V(D, G)$ | ブイ オブ ディー ジー | GAN の価値関数 (Value function) | Zone 3.1 |
-| $D^*(x)$ | ディー スター | 固定Gに対する最適判別器 | Zone 3.1 |
-| $D_{\text{JS}}(p \| q)$ | ディー ジェイエス | Jensen-Shannon発散 | Zone 3.1 |
-| $W_1(p, q)$ | ダブリュー ワン | Wasserstein-1距離 (Earth Mover's Distance) | Zone 3.3 |
-| $\|f\|_L$ | ノルム エフ エル | 関数 $f$ のLipschitz定数 | Zone 3.3 |
-| $D_w(x)$ | ディー ダブリュー | WGAN の批評家 (critic)、重み $w$ でパラメータ化 | Zone 3.3 |
-| $\lambda$ | ラムダ | Gradient Penaltyの正則化係数 | Zone 3.3 |
-| $D_f(p \| q)$ | ディー エフ | f-divergence | Zone 3.4 |
-| $f^*(t)$ | エフ スター | Fenchel共役関数 | Zone 3.4 |
-| $\sigma(x)$ | シグマ | Sigmoid関数 $\frac{1}{1 + e^{-x}}$ | Zone 3.5 |
-| $\mathcal{Z}$ | カリグラフィック ゼット | StyleGANの入力ノイズ空間 | Zone 4.5 |
-| $\mathcal{W}$ | カリグラフィック ダブリュー | StyleGANの中間潜在空間 | Zone 4.5 |
-| $\gamma_w, \beta_w$ | ガンマ、ベータ | AdaINのスケール・シフトパラメータ | Zone 6.1 |
-| $J_w$ | ジェイ ダブリュー | 生成器のJacobian行列 | Zone 6.1 |
-| $\Phi$ | ファイ | 特徴抽出器（Perceptual Loss用） | Zone 6.3 |
-| $\mathbb{E}_{x \sim p}$ | イー サブ エックス シム ピー | 分布 $p$ からサンプルした $x$ の期待値 | 全体 |
-| $\nabla_\theta$ | ナブラ サブ シータ | パラメータ $\theta$ に関する勾配 | 全体 |
-| $\|\cdot\|_2$ | ノルム トゥー | L2ノルム（ユークリッドノルム） | 全体 |
-
-### 表記の統一ルール
-
-1. **ベクトル**: 太字小文字 ($\mathbf{x}$) または通常小文字 ($x$) — 文脈で判断
-2. **行列**: 太字大文字 ($\mathbf{W}$) または通常大文字 ($W$)
-3. **スカラー**: 通常小文字 ($\lambda, \sigma$)
-4. **分布**: $p, q$ (小文字)
-5. **関数**: $f, g, h$ (小文字) / $G, D$ (NN は大文字)
-6. **空間**: カリグラフィック ($\mathcal{Z}, \mathcal{W}, \mathcal{X}$)
-
----
-
-**著者より**: 第12回、完走おつかれさまでした。GANの「敵対的学習」という革命的アイデアから、理論的厳密性（Nash均衡、Wasserstein距離）、実装（Julia/Rust）、最新研究（R3GAN、Diffusion2GAN）まで、全てを学びました。「GANは死んだ」という定説が覆された2025年を目撃した今、第13回で「尤度の復権」— 自己回帰モデルへと進みます。
-
-⚡Julia と 🦀Rust を武器に、生成モデルの全てを習得する旅は続く。

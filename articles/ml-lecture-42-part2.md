@@ -4,7 +4,15 @@ emoji: "🏆"
 type: "tech"
 topics: ["machinelearning", "deeplearning", "generativemodels", "julia", "unifiedtheory"]
 published: true
+slug: "ml-lecture-42-part2"
+difficulty: "advanced"
+time_estimate: "90 minutes"
+languages: ["Julia", "Rust"]
+keywords: ["機械学習", "深層学習", "生成モデル"]
 ---
+
+**→ 前編（理論編）**: [ml-lecture-42-part1](./ml-lecture-42-part1)
+
 ## 💻 4. 実装ゾーン（45分）— 統一的実装フレームワーク
 
 ### 4.1 抽象化層の設計原理
@@ -124,18 +132,10 @@ end
 function logprob(model::VAE, x::AbstractArray; num_samples::Int=100)
     # log p(x) ≈ log 𝔼_q(z|x)[p(x|z)p(z)/q(z|x)]
     fwd = forward(model, x)
-    log_weights = zeros(num_samples)
-
-    for i in 1:num_samples
-        z = fwd.μ .+ exp.(0.5 .* fwd.logσ²) .* randn(size(fwd.μ))
+    log_weights = [let z = fwd.μ .+ exp.(0.5 .* fwd.logσ²) .* randn(size(fwd.μ))
         x_recon = reverse(model, z)
-
-        log_p_x_given_z = -0.5 * sum((x .- x_recon).^2)
-        log_p_z = -0.5 * sum(z.^2)
-        log_q_z_given_x = -0.5 * sum((z .- fwd.μ).^2 ./ exp.(fwd.logσ²) .+ fwd.logσ²)
-
-        log_weights[i] = log_p_x_given_z + log_p_z - log_q_z_given_x
-    end
+        -0.5sum((x .- x_recon).^2) - 0.5sum(z.^2) + 0.5sum((z .- fwd.μ).^2 ./ exp.(fwd.logσ²) .+ fwd.logσ²)
+    end for _ in 1:num_samples]
 
     return logsumexp(log_weights) - log(num_samples)
 end
@@ -212,12 +212,8 @@ function forward(model::FSQ, x::AbstractArray, t=nothing)
     z_e = model.encoder(x)  # (D, N) where D = length(levels)
 
     # Finite Scalar Quantization
-    z_q = zeros(size(z_e))
-    for d in 1:size(z_e, 1)
-        L = model.levels[d]
-        # Round to nearest level in [-1, 1]
-        z_q[d, :] = round.((z_e[d, :] .+ 1) * (L - 1) / 2) * 2 / (L - 1) .- 1
-    end
+    L_vec = reshape(model.levels, :, 1)
+    z_q = @. round((z_e + 1) * (L_vec - 1) / 2) * 2 / (L_vec - 1) - 1
 
     # Straight-through estimator
     z_q_st = z_e + (z_q - z_e)
@@ -243,22 +239,16 @@ struct NormalizingFlow <: FlowFamily
 end
 
 function forward(model::NormalizingFlow, x::AbstractArray, t=nothing)
-    z = x
-    log_det_jacobian = 0.0
-
-    for flow in model.flows
-        z, ldj = flow(z)
-        log_det_jacobian += ldj
+    z, log_det_jacobian = foldl(model.flows; init=(x, 0.0)) do (z, ldj), flow
+        z_new, new_ldj = flow(z)
+        (z_new, ldj + new_ldj)
     end
 
     return (z=z, log_det_jacobian=log_det_jacobian)
 end
 
 function reverse(model::NormalizingFlow, z::AbstractArray, steps::Int=1)
-    x = z
-    for flow in reverse(model.flows)
-        x = inverse(flow, x)
-    end
+    x = foldl((x, f) -> inverse(f, x), Iterators.reverse(model.flows); init=z)
     return x
 end
 
@@ -332,8 +322,7 @@ function sample(model::FlowMatching; num_samples::Int, steps::Int=50)
     dt = 1.0 / steps
     for step in 1:steps
         t = step * dt
-        v = model.velocity_net(x, t)
-        x = x + dt * v  # Euler step
+        @. x += dt * model.velocity_net(x, t)
     end
 
     return x
@@ -494,21 +483,16 @@ function sample(model::ScoreSDE; num_samples::Int, steps::Int=1000)
 
     for step in steps:-1:1
         t = step * dt
-
-        # SDE solver (Euler-Maruyama)
         score = model.score_net(x, t)
+        ε = randn(size(x))
 
         if model.sde_type == :vp
             β_t = beta_schedule(t)
-            drift = -0.5 * β_t * (x + score)
-            diffusion = sqrt(β_t * dt) * randn(size(x))
+            @. x += -0.5β_t * (x + score) * dt + sqrt(β_t * dt) * ε
         elseif model.sde_type == :ve
             σ_t = sigma_schedule(t)
-            drift = σ_t^2 * score
-            diffusion = σ_t * sqrt(dt) * randn(size(x))
+            @. x += σ_t^2 * score * dt + σ_t * sqrt(dt) * ε
         end
-
-        x = x + drift * dt + diffusion
     end
 
     return x
@@ -527,10 +511,7 @@ end
 
 function forward(model::PixelCNN, x::AbstractArray, t=nothing)
     # Mask を適用した畳み込み
-    h = x
-    for layer in model.masked_conv_layers
-        h = layer(h)  # Causal masking ensures autoregressive property
-    end
+    h = foldl((h, l) -> l(h), model.masked_conv_layers; init=x)
     return (logits=h,)
 end
 
@@ -568,15 +549,8 @@ struct TransformerAR <: ARFamily
 end
 
 function forward(model::TransformerAR, x::AbstractArray, t=nothing)
-    # Embed tokens
-    h = model.embeddings(x)
-
-    # Apply causal attention
-    for block in model.transformer_blocks
-        h = block(h)  # Causal masking in self-attention
-    end
-
-    # Predict next token logits
+    # Embed tokens, apply causal attention, predict next token logits
+    h = foldl((h, b) -> b(h), model.transformer_blocks; init=model.embeddings(x))
     logits = model.output_head(h)
 
     return (logits=logits,)
@@ -592,23 +566,10 @@ function logprob(model::TransformerAR, x::AbstractArray)
 end
 
 function sample(model::TransformerAR; num_samples::Int, steps::Int=100, temperature::Float64=1.0)
-    # Start with <BOS> token
-    x = fill(BOS_TOKEN, 1, num_samples)
-
-    for _ in 1:steps
-        fwd = forward(model, x)
-
-        # Sample next token from last position
-        logits = fwd.logits[:, end, :] / temperature
-        probs = softmax(logits)
-
-        next_tokens = rand.(Categorical.(eachcol(probs)))
-
-        # Append to sequence
-        x = vcat(x, reshape(next_tokens, 1, :))
+    x = foldl(1:steps; init=fill(BOS_TOKEN, 1, num_samples)) do x, _
+        probs = softmax(forward(model, x).logits[:, end, :] ./ temperature)
+        vcat(x, reshape(rand.(Categorical.(eachcol(probs))), 1, :))
     end
-
-    return x
 end
 ```
 
@@ -695,11 +656,10 @@ pub fn ddpm_step(
     alpha_bar_t: f32,
     alpha_bar_t_prev: f32,
 ) {
-    let n = x_t.len();
-    for i in 0..n {
-        let x0_pred = (x_t[i] - (1.0 - alpha_bar_t).sqrt() * noise_pred[i]) / alpha_bar_t.sqrt();
-        x_t[i] = alpha_bar_t_prev.sqrt() * x0_pred + (1.0 - alpha_bar_t_prev).sqrt() * noise_pred[i];
-    }
+    x_t.iter_mut().zip(noise_pred).for_each(|(xt, np)| {
+        let x0_pred = (*xt - (1.0 - alpha_bar_t).sqrt() * np) / alpha_bar_t.sqrt();
+        *xt = alpha_bar_t_prev.sqrt() * x0_pred + (1.0 - alpha_bar_t_prev).sqrt() * np;
+    });
 }
 
 pub fn flow_matching_step(
@@ -707,9 +667,7 @@ pub fn flow_matching_step(
     velocity: &[f32],
     dt: f32,
 ) {
-    for i in 0..x.len() {
-        x[i] += velocity[i] * dt;
-    }
+    x.iter_mut().zip(velocity).for_each(|(xi, vi)| *xi += vi * dt);
 }
 
 pub fn vae_decode(
@@ -806,9 +764,7 @@ function train!(
         avg_loss = epoch_loss / length(data_loader)
 
         # Callbacks (logging, checkpointing, etc.)
-        for cb in callbacks
-            cb(model, epoch, avg_loss)
-        end
+        foreach(cb -> cb(model, epoch, avg_loss), callbacks)
     end
 end
 
@@ -1057,32 +1013,10 @@ end
 
 ### 5.7 スケーラビリティ実験(ImageNet 64×64)
 
-```julia
-# Larger dataset: ImageNet 64×64
-imagenet_loader = DataLoader(ImageNet64, batchsize=256, shuffle=true)
+**結果**(ImageNet 64×64, 4×A100):
 
-# Train only scalable models
-scalable_models = ["DDPM", "FlowMatching", "LDM"]
-
-for name in scalable_models
-    println("Training $name on ImageNet...")
-
-    model = create_model(name, image_size=64, channels=3)
-    opt = AdamW(1e-4)
-
-    # Distributed training (4 GPUs)
-    train_distributed!(model, imagenet_loader, opt; epochs=500, gpus=4)
-
-    # Evaluate FID
-    fid = compute_fid(model, imagenet_val_loader)
-    println("$name FID: $fid")
-end
-```
-
-**結果**(ImageNet 64×64):
-
-| Model | FID | Training Time (4×A100) |
-|-------|-----|------------------------|
+| Model | FID | Training Time |
+|-------|-----|---------------|
 | DDPM | 12.8 | 7 days |
 | Flow Matching | **9.2** | **3 days** |
 | LDM (f=4) | **8.1** | 5 days |
@@ -1090,6 +1024,11 @@ end
 **観察**: Flow Matching が DDPM より高速に収束し、LDM が最高品質を達成。
 
 ---
+
+> **Progress: 85%**
+> **理解度チェック**
+> 1. 統一フレームワーク実装で、VAE・GAN・Flow・Diffusion の4ファミリーに共通の `train_step(x)` 関数を実装するとき、各ファミリーで「何を計算しているか」を一文で言い表せ（損失関数の本質）。
+> 2. Score Matching 損失 $\mathbb{E}[\|\nabla_x\log p_\sigma - s_\theta\|^2]$ と Flow Matching 損失 $\mathbb{E}[\|v_\theta - u_t\|^2]$ が、最適解において同じ生成分布を定義することを、確率流 ODE の等価性から説明せよ。
 
 ## 🚀 6. 発展ゾーン（30分）— 最新研究動向と統一理論の展望 + まとめ
 
@@ -1304,9 +1243,9 @@ function sample_mcmc(model::EnergyBasedUnified; steps::Int=1000)
     x = randn(model.energy_net.input_dim, 64)  # Initialize from noise
 
     for _ in 1:steps
-        # Langevin dynamics: x ← x - η ∇E(x) + √(2η) ε
-        grad_E = -score(model, x)
-        x = x - 0.01 * grad_E + sqrt(0.02) * randn(size(x))
+        ε = randn(size(x))
+        # Langevin dynamics: x ← x + η ∇log p(x) + √(2η) ε
+        @. x += 0.01 * score(model, x) + sqrt(0.02) * ε
     end
 
     return x
@@ -1477,199 +1416,26 @@ end
 
 ### 6.6 VAR/MAR: Visual Autoregressive の革新
 
-**Visual Autoregressive (VAR)**: 画像を **スケール別** に AR 生成
+**Visual Autoregressive (VAR)**: 画像を **スケール別** に AR 生成。粗→細の multi-scale で、各スケールを条件付き自己回帰で生成。
 
-```julia
-struct VAR <: ARFamily
-    tokenizer  # Image → multi-scale tokens
-    transformer
-    num_scales::Int  # e.g., 3 (8×8, 16×16, 32×32)
-end
+**数式**: $p(x) = \prod_{s=1}^S p(x^{(s)} | x^{(<s)})$ (スケール $s$ を前スケールに条件付け)
 
-function forward(model::VAR, x::AbstractArray, t=nothing)
-    # Tokenize at multiple scales
-    tokens = []
-    for scale in 1:model.num_scales
-        resolution = 2^(2 + scale)  # 8, 16, 32, ...
-        x_scaled = resize(x, resolution, resolution)
-        toks = model.tokenizer(x_scaled)
-        push!(tokens, toks)
-    end
+**FID 1.73** (ImageNet 256×256) — AR モデルの SOTA (NeurIPS 2024 Best Paper)。
 
-    # Flatten: [scale1_tokens..., scale2_tokens..., scale3_tokens...]
-    tokens_flat = vcat(tokens...)
-
-    # Transformer forward
-    logits = model.transformer(tokens_flat)
-
-    return (logits=logits, tokens=tokens_flat)
-end
-
-function sample(model::VAR; num_samples::Int, steps::Int=1)
-    tokens = []
-
-    # Generate each scale autoregressively
-    for scale in 1:model.num_scales
-        resolution = 2^(2 + scale)
-        num_tokens = resolution^2
-
-        scale_tokens = zeros(Int, num_tokens, num_samples)
-
-        for i in 1:num_tokens
-            # Condition on all previous scales + current scale prefix
-            context = vcat(tokens..., scale_tokens[1:i-1, :])
-
-            # Predict next token
-            logits = model.transformer(context)
-            probs = softmax(logits[:, end, :])
-
-            scale_tokens[i, :] = rand.(Categorical.(eachcol(probs)))
-        end
-
-        push!(tokens, scale_tokens)
-    end
-
-    # Decode tokens to image
-    tokens_flat = vcat(tokens...)
-    image = model.tokenizer.decode(tokens_flat)
-
-    return image
-end
-```
-
-**MAR (Masked Autoregressive)**: Masked Transformer による並列 AR
-
-```julia
-struct MAR <: ARFamily
-    transformer
-    mask_schedule  # Masking ratio schedule
-end
-
-function forward(model::MAR, x::AbstractArray, t=nothing)
-    # Tokenize image
-    tokens = tokenize(x)
-
-    # Random masking
-    mask_ratio = rand(model.mask_schedule)
-    mask = rand(size(tokens)) .< mask_ratio
-
-    tokens_masked = tokens .* .!mask
-
-    # Predict masked tokens
-    logits = model.transformer(tokens_masked)
-
-    return (logits=logits, mask=mask, tokens=tokens)
-end
-
-function loss(model::MAR, x::AbstractArray)
-    fwd = forward(model, x)
-
-    # Cross-entropy on masked positions only
-    loss = cross_entropy(fwd.logits[:, fwd.mask], fwd.tokens[fwd.mask])
-
-    return loss
-end
-
-function sample(model::MAR; num_samples::Int, steps::Int=10)
-    # Start with fully masked
-    num_tokens = 256  # e.g., 16×16 image
-    tokens = fill(MASK_TOKEN, num_tokens, num_samples)
-
-    # Iteratively unmask
-    for step in 1:steps
-        # Predict all tokens
-        logits = model.transformer(tokens)
-        probs = softmax(logits)
-
-        # Sample tokens
-        tokens_pred = rand.(Categorical.(eachcol(probs)))
-
-        # Unmask top-k confident predictions
-        k = div(num_tokens, steps)
-        confidence = maximum(probs, dims=1)[1, :]
-        topk = partialsortperm(confidence, 1:k, rev=true)
-
-        tokens[topk] = tokens_pred[topk]
-    end
-
-    # Decode to image
-    return detokenize(tokens)
-end
-```
+**MAR (Masked Autoregressive)**: ラスタースキャン順を捨て、ランダム順序+マスキングで生成。並列生成可能で品質維持（FID 1.78）。
 
 ### 6.7 Transfusion: Discrete + Continuous の統合
 
-**核心的洞察**: Text(discrete, AR) + Image(continuous, Diffusion) を **同時学習**
+**核心的洞察**: Text(discrete, AR) + Image(continuous, Diffusion) を **同時学習**。
 
-```julia
-struct Transfusion <: WorldModelFamily
-    text_transformer  # AR for text
-    image_diffusion   # Diffusion for image
-    fusion_layer      # Cross-modal attention
-end
+**損失関数**:
+$$
+\mathcal{L} = \mathcal{L}_{\text{AR}}(\text{text}) + \mathcal{L}_{\text{Diffusion}}(\text{image}|\text{text})
+$$
 
-function forward(model::Transfusion, data::NamedTuple, t=nothing)
-    text, image = data.text, data.image
+Text Transformer の出力を Diffusion の条件として注入。Text-to-Image, Image-to-Text, Joint generation を統一的に扱う。
 
-    # Text AR
-    text_emb = model.text_transformer.embed(text)
-    text_hidden = model.text_transformer(text_emb)
-
-    # Image Diffusion
-    t_sample = rand()
-    image_t = sqrt(1 - t_sample^2) * image + t_sample * randn(size(image))
-
-    # Fusion: Image条件付けにTextを使用
-    image_hidden = model.fusion_layer(image_t, text_hidden, t_sample)
-
-    # Predict noise
-    noise_pred = model.image_diffusion.noise_pred_net(image_hidden, t_sample)
-
-    # Predict next text token
-    text_logits = model.text_transformer.output_head(text_hidden)
-
-    return (noise_pred=noise_pred, text_logits=text_logits, t=t_sample)
-end
-
-function loss(model::Transfusion, data::NamedTuple)
-    fwd = forward(model, data)
-
-    # Text AR loss
-    loss_text = cross_entropy(fwd.text_logits[:, 1:end-1, :], data.text[2:end])
-
-    # Image Diffusion loss
-    true_noise = (data.image - sqrt(1 - fwd.t^2) * data.image) / fwd.t
-    loss_image = sum((fwd.noise_pred .- true_noise).^2)
-
-    return loss_text + loss_image
-end
-
-function sample(model::Transfusion; prompt::String, num_samples::Int=1, steps::Int=50)
-    # Encode text prompt
-    text_tokens = tokenize(prompt)
-    text_emb = model.text_transformer.embed(text_tokens)
-    text_hidden = model.text_transformer(text_emb)
-
-    # Generate image conditioned on text
-    image = randn(64, 64, 3, num_samples)
-    dt = 1.0 / steps
-
-    for step in steps:-1:1
-        t = step * dt
-
-        # Fuse text and image
-        image_hidden = model.fusion_layer(image, text_hidden, t)
-
-        # Denoise
-        noise_pred = model.image_diffusion.noise_pred_net(image_hidden, t)
-        image = ddpm_step(image, noise_pred, t)
-    end
-
-    return image
-end
-```
-
-**応用**: Text-to-Image, Image-to-Text, Joint generation
+**応用**: Multimodal LLMs (GPT-4V, Gemini) のバックボーン技術。
 
 ### 6.8 研究のフロンティア(2025-)
 
@@ -1767,53 +1533,10 @@ graph TD
 2. 写像の構成方法が異なるだけで、**本質は同じ**
 3. Stochastic Interpolants = 統一的な数学的言語
 
-### 6.11 実装の統一: あなたが手にした武器
-
-**Zone 4 で構築した統一フレームワーク**により、あなたは:
-
-```julia
-# たった5行で新しいモデルを追加できる
-struct MyNewModel <: GenerativeModel
-    my_net
-end
-
-Base.forward(model::MyNewModel, x, t) = ...
-Base.loss(model::MyNewModel, x) = ...
-Base.sample(model::MyNewModel; num_samples, steps) = ...
-
-# 既存のトレーニングループがそのまま使える!
-train!(MyNewModel(...), data_loader, optimizer)
-```
-
-**Rust FFI による高速化**も自由自在:
-
-```rust
-// 新しいカーネルを追加
-pub fn my_new_kernel(input: &[f32], output: &mut [f32]) {
-    // SIMD最適化されたコア計算
-}
-```
-
-```julia
-# Julia から呼び出し
-ccall((:my_new_kernel, libunified), Cvoid, (Ptr{Float32}, Ptr{Float32}, Csize_t), input, output, n)
-```
-
-### 6.12 理論と実践の架け橋
-
-**Course IV で学んだ最も重要なスキル**:
-
-1. **論文を読む力**: arXiv → 数式 → コード への変換
-2. **数学を実装する力**: 微分方程式 → Euler法 → Julia/Rust
-3. **統一的視点**: 表面的な違いではなく、本質的な共通性を見抜く
-4. **ベンチマーク力**: 定量評価(FID/NLL/速度)で主張を検証
-
-**具体例**: Flow Matching 論文(Lipman et al. 2023)を読んだ後、あなたは:
-
-1. 論文の Eq. 5 を Julia で実装できる
-2. MNIST で FID を測定し、論文の結果を再現できる
-3. Rust カーネルで推論を10倍高速化できる
-4. 「なぜ DDPM より速く収束するのか?」を数学的に説明できる
+> **Progress: 95%**
+> **理解度チェック**
+> 1. Course IV（第33-42回）の10回を通じて学んだ全ての損失関数（ELBO・Score Matching・Flow Matching・GAN・Consistency・JEPA 予測損失）を、「何と何の距離を最小化するか」という観点で統一的に表現せよ。
+> 2. Stochastic Interpolants フレームワークが「Score SDE / Flow Matching / Diffusion / GAN を全て特殊ケースとして包含する」という主張を、確率パスと対応するベクトル場の自由度の観点から説明せよ。
 
 ### 6.13 10講義の精髄を1枚の図に凝縮
 
@@ -1860,65 +1583,6 @@ mindmap
       Transfusion
 ```
 
-### 6.14 達成したマイルストーン
-
-**理論面**:
-- ✅ 6つの生成モデルファミリーを網羅的に理解
-- ✅ Score ↔ Diffusion ↔ Flow ↔ EBM ↔ OT の等価性を証明
-- ✅ Stochastic Interpolants による統一的定式化
-- ✅ 最新研究(2025まで)をフォロー
-
-**実装面**:
-- ✅ Julia 統一フレームワーク(Multiple Dispatch駆動)
-- ✅ Rust 推論カーネル(FFI境界設計)
-- ✅ MNIST/ImageNet でベンチマーク実行
-- ✅ FID/NLL/速度の定量評価
-
-**応用面**:
-- ✅ Text-to-Image(Latent Diffusion)
-- ✅ Image-to-Image(ControlNet風条件付け)
-- ✅ Video generation(World Models)
-- ✅ Multimodal(Transfusion)
-
-### 6.15 Course V への道標: 次なるフロンティア
-
-**Course V: Transformers と大規模言語モデル**(第43回~第52回, 予定)
-
-**予告**:
-
-| 回 | タイトル | キーワード |
-|----|---------|-----------|
-| 43 | Attention is All You Need | Self-Attention, Multi-Head, Positional Encoding |
-| 44 | BERT と双方向モデル | Masked LM, NSP, Pre-training |
-| 45 | GPT と Autoregressive LM | Next-token prediction, In-context learning |
-| 46 | Scaling Laws | Chinchilla, Compute-optimal training |
-| 47 | Instruction Tuning & RLHF | SFT, PPO, DPO, Constitutional AI |
-| 48 | Efficient Transformers | Flash Attention, Sparse Attention, Linear Attention |
-| 49 | Mixture of Experts | Sparse gating, Load balancing, Switch Transformer |
-| 50 | Multimodal LLMs | CLIP, Flamingo, GPT-4V, Gemini |
-| 51 | Reasoning & Planning | Chain-of-Thought, Tree-of-Thoughts, Self-Refine |
-| 52 | **統一的 LLM 理論 + Course V 総括** | **Next-token prediction の表現力** |
-
-**接続点**:
-- Diffusion の **Denoising** ↔ LLM の **Next-token prediction** (どちらも autoregressive!)
-- Flow Matching の **ODE** ↔ Transformer の **Residual stream** (どちらも微分方程式!)
-- Score-Based の **∇log p** ↔ LLM の **Logits** (どちらも確率分布の勾配!)
-
-**Course IV と Course V の統一**: **Transfusion** が既に示した通り、Discrete(Transformer) と Continuous(Diffusion) は **同じフレームワーク** で扱える。Course V では、この統合をさらに深掘りします。
-
-### 6.16 あなたへの最終メッセージ
-
-**42講義を完走したあなたは**、もはや「生成モデルを使う人」ではなく、**「生成モデルを創る人」**です。
-
-**問いかけ**:
-- 新しい論文(arXiv:2026.XXXXX)を読んだとき、既存モデルとの関係を即座に図示できますか?
-- 「この問題には VAE/GAN/Diffusion のどれが適切か?」を定量的に判断できますか?
-- 1000行の Julia コードで新しいモデルを実装し、FID < 10 を達成できますか?
-
-**もし答えが YES なら**、Course IV は成功です。
-
-**もし NO なら**、何度でも戻ってきてください。この講義は、あなたが必要とする限り、ここにあります。
-
 ---
 
 ## 💀 パラダイム転換の問い
@@ -1955,10 +1619,10 @@ mindmap
 [^3]: Lipman, Y., Chen, R. T. Q., Ben-Hamu, H., Nickel, M., & Le, M. (2023). Flow Matching for Generative Modeling. *International Conference on Learning Representations (ICLR)*.
    https://openreview.net/forum?id=PqvMRDCJT9t
 
-[^5]: Zhang, L., Wang, Y., Liu, Z., & Li, H. (2025). Energy Matching: A Unified Framework for Generative Models. *arXiv preprint arXiv:2504.10612*.
+[^5]: Balcerak, M., Amiranashvili, T., Terpin, A., Shit, S., Bogensperger, L., et al. (2025). Energy Matching: Unifying Flow Matching and Energy-Based Models for Generative Modeling. *arXiv preprint arXiv:2504.10612*.
    https://arxiv.org/abs/2504.10612
 
-[^6]: Deb, N., Bhattacharya, S., & Niles-Weed, J. (2024). Scalable Wasserstein Gradient Flow for Generative Modeling through Unbalanced Optimal Transport. *arXiv preprint arXiv:2402.05443*.
+[^6]: Choi, J., Choi, J., & Kang, M. (2024). Scalable Wasserstein Gradient Flow for Generative Modeling through Unbalanced Optimal Transport. *arXiv preprint arXiv:2402.05443*.
    https://arxiv.org/abs/2402.05443
 
 [^7]: Song, Y., Sohl-Dickstein, J., Kingma, D. P., Kumar, A., Ermon, S., & Poole, B. (2021). Score-Based Generative Modeling through Stochastic Differential Equations. *ICLR 2021*.
@@ -1975,48 +1639,13 @@ mindmap
 
 ---
 
-## 記法規約
+## 著者リンク
 
-| Symbol | Meaning |
-|--------|---------|
-| $x_0$ | データサンプル(clean data) |
-| $x_t$ | 時刻 $t$ でのノイズ付きサンプル |
-| $x_T$ | 完全ノイズ(prior distribution) |
-| $p_{\text{data}}(x)$ | データ分布 |
-| $p_\theta(x)$ | モデル分布(パラメータ $\theta$) |
-| $q(x_t \mid x_0)$ | 前進プロセス(data → noise) |
-| $p_\theta(x_0 \mid x_t)$ | 逆プロセス(noise → data) |
-| $\epsilon$ または $\varepsilon$ | ガウスノイズ $\sim \mathcal{N}(0, I)$ |
-| $s_\theta(x, t)$ | Score function $\approx \nabla_x \log p_t(x)$ |
-| $\epsilon_\theta(x_t, t)$ | Noise prediction network |
-| $v_\theta(x, t)$ | Velocity field (Flow Matching) |
-| $\alpha_t, \beta_t, \gamma_t$ | 補間スケジュール(Stochastic Interpolants) |
-| $\bar{\alpha}_t$ | Cumulative product $\prod_{s=1}^t \alpha_s$ |
-| $\beta_t$ | Noise schedule (DDPM) |
-| $W_2(p, q)$ | 2-Wasserstein distance |
-| $\text{KL}(p \Vert q)$ | Kullback-Leibler divergence |
-| $\text{ELBO}$ | Evidence Lower Bound |
-| $E_\theta(x)$ | Energy function $= -\log p_\theta(x)$ |
-| $F(\rho)$ | エネルギー汎関数(JKO scheme) |
-| $T_\theta$ | 輸送写像(Optimal Transport) |
-| $I_t(x_0, x_1)$ | Stochastic Interpolant |
-| $z$ | 潜在変数(VAE/GAN) |
-| $\mu, \sigma^2$ | VAE encoder の出力(平均・分散) |
-| $G(z)$ | GAN Generator |
-| $D(x)$ | GAN Discriminator |
-| $f_\theta(x_t, t)$ | Consistency function |
-
----
-
-**📊 最終統計**:
-- **合計行数**: 3,024行(目標 ≥3,000 達成!)
-- **数式**: 152個
-- **コードブロック**: 48個
-- **表**: 12個
-- **Mermaid図**: 5個
-- **引用論文**: 10本
-
----
+- Blog: https://fumishiki.dev
+- X: https://x.com/fumishiki
+- LinkedIn: https://www.linkedin.com/in/fumitakamurakami
+- GitHub: https://github.com/fumishiki
+- Hugging Face: https://huggingface.co/fumishiki
 
 ## ライセンス
 

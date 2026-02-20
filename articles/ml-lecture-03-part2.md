@@ -194,7 +194,7 @@ $$
 
 $p=10$ では余剰因子が $\approx 1.06$ と小さく、最適近似（$\sigma_{k+1}$）とほぼ同等。
 
-パワーイテレーション（$(AA^\top)^q \Omega$ を使う拡張）でさらに精度が上がる。特異値スペクトルが緩やかに減衰する行列（低ランク構造が弱い）に有効:
+パワーイテレーション（$(AA^\top)^q \Omega$ を使う拡張）で精度が上がる。特異値スペクトルが緩やかに減衰する行列（低ランク構造が弱い）に有効:
 
 $$
 Y = (AA^\top)^q A \Omega
@@ -497,8 +497,10 @@ def grad_x_analytic(x: np.ndarray, A: np.ndarray) -> np.ndarray:
 def grad_x_numeric(x: np.ndarray, A: np.ndarray, eps: float = 1e-6) -> np.ndarray:
     g = np.zeros_like(x)
     for i in range(x.shape[0]):
-        xp = x.copy(); xm = x.copy()
-        xp[i] += eps; xm[i] -= eps
+        xp = x.copy()
+        xm = x.copy()
+        xp[i] += eps
+        xm[i] -= eps
         g[i] = (f_quadratic(xp, A) - f_quadratic(xm, A)) / (2.0 * eps)
     return g
 
@@ -523,7 +525,8 @@ V = rng.normal(size=(N, d_v))
 
 S = np.einsum('nd,md->nm', Q, K) / np.sqrt(float(d_k))
 S = S - S.max(axis=1, keepdims=True)
-P = np.exp(S); P = P / P.sum(axis=1, keepdims=True)
+P = np.exp(S)
+P = P / P.sum(axis=1, keepdims=True)
 Y = np.einsum('nm,mv->nv', P, V)
 
 assert S.shape == (N, N) and P.shape == (N, N) and Y.shape == (N, d_v)

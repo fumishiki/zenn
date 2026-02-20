@@ -4,6 +4,11 @@ emoji: "🔄"
 type: "tech"
 topics: ["machinelearning", "deeplearning", "ddpm", "julia", "diffusion"]
 published: true
+slug: "ml-lecture-36-part1"
+difficulty: "advanced"
+time_estimate: "90 minutes"
+languages: ["Julia", "Rust"]
+keywords: ["機械学習", "深層学習", "生成モデル"]
 ---
 
 # 第36回: 拡散モデル基礎 / DDPM & サンプリング — ノイズ除去の反復が生成を実現する
@@ -16,9 +21,7 @@ Jonathan Ho らの DDPM [^1] (2020) が、この枠組みを変分推論 (第9�
 
 本講義は Course IV「拡散モデル編」第4回 — NF(第33回)→EBM(第34回)→Score Matching(第35回) と積み上げてきた理論の核心だ。**Forward Process の閉形式解、Reverse Process のベイズ反転、VLB の完全展開、ε/x₀/v-prediction の3形態、SNR視点、U-Net、DDIM、Score-based 再解釈** を完全導出する。
 
-:::message
-**このシリーズについて**: 東京大学 松尾・岩澤研究室動画講義の**完全上位互換**の全50回シリーズ。理論（論文が書ける）、実装（Production-ready）、最新（2024-2026 SOTA）の3軸で差別化する。
-:::
+> **Note:** **このシリーズについて**: 東京大学 松尾・岩澤研究室動画講義の**完全上位互換**の全50回シリーズ。理論（論文が書ける）、実装（Production-ready）、最新（2024-2026 SOTA）の3軸で差別化する。
 
 ```mermaid
 graph LR
@@ -65,24 +68,23 @@ DDPMのForward Processを3行で動かす。画像にガウスノイズを段階
 ```julia
 using LinearAlgebra, Statistics
 
-# Forward Process: Add Gaussian noise step-by-step
-# x₀ → x₁ → x₂ → ... → x_T ∼ 𝒩(0, I)
-function forward_process(x₀::Vector{Float64}, T::Int, β::Vector{Float64})
-    # β: noise schedule [β₁, β₂, ..., β_T]
-    # α_t = 1 - β_t, ᾱ_t = ∏ᵢ₌₁ᵗ αᵢ
-    α = 1.0 .- β
-    ᾱ = cumprod(α)  # cumulative product: ᾱ_t
+# Forward Process: x₀ → x₁ → ... → x_T ∼ 𝒩(0, I)
+function forward_process(x₀::Vector{Float64}, T::Int, β::AbstractVector)
+    # α_t = 1 - β_t,  ᾱ_t = ∏ᵢ αᵢ
+    α = @. 1.0 - β
+    ᾱ = cumprod(α)
 
-    # Closed-form sampling: q(x_t | x₀) = 𝒩(√ᾱ_t x₀, (1-ᾱ_t)I)
-    x_t = sqrt(ᾱ[T]) * x₀ + sqrt(1 - ᾱ[T]) * randn(length(x₀))
+    # Closed-form: q(x_t | x₀) = 𝒩(√ᾱ_T x₀, (1-ᾱ_T)I)
+    ε  = randn(length(x₀))
+    x_t = @. sqrt(ᾱ[T]) * x₀ + sqrt(1 - ᾱ[T]) * ε
 
-    return x_t, ᾱ
+    x_t, ᾱ
 end
 
 # Test: 2D data point, T=1000 steps, linear noise schedule
 x₀ = [1.0, 2.0]
-T = 1000
-β = range(1e-4, 0.02, length=T)  # linear schedule
+T  = 1000
+β  = collect(range(1e-4, 0.02; length=T))   # linear schedule
 
 x_T, ᾱ = forward_process(x₀, T, β)
 println("Original: $x₀")
@@ -113,9 +115,7 @@ $$
 
 この **Forward + Reverse** の2つのマルコフ連鎖が、DDPMの全てだ。
 
-:::message
-**進捗: 3% 完了** Forward Processの閉形式解を体感した。ここから完全導出へ。
-:::
+> **Note:** **進捗: 3% 完了** Forward Processの閉形式解を体感した。ここから完全導出へ。
 
 ---
 
@@ -152,21 +152,6 @@ $$
 \mathbf{x}_t = \sqrt{1-\beta_t} \mathbf{x}_{t-1} + \sqrt{\beta_t} \boldsymbol{\epsilon}, \quad \boldsymbol{\epsilon} \sim \mathcal{N}(0, \mathbf{I})
 $$
 
-```julia
-# Forward step: x_{t-1} → x_t
-function forward_step(x_prev::Vector{Float64}, β_t::Float64)
-    ε = randn(length(x_prev))
-    x_t = sqrt(1 - β_t) * x_prev + sqrt(β_t) * ε
-    return x_t, ε  # also return noise for later use
-end
-
-x₀ = [1.0, 2.0]
-β₁ = 0.0001  # tiny noise at t=1
-
-x₁, ε₁ = forward_step(x₀, β₁)
-println("x₀ = $x₀")
-println("x₁ = $x₁  (noise added: $ε₁)")
-```
 
 **重要な性質**: Forward Processは**固定**されている。学習するパラメータは一切ない。$\beta_t$ はハイパーパラメータとして事前に決める (Section 3.2で詳述)。
 
@@ -198,22 +183,6 @@ $$
 
 **この閉形式解のおかげで、訓練時に任意の $t$ へ一気にジャンプできる** (毎回 $t$ ステップ繰り返す必要がない)。
 
-```julia
-# Closed-form sampling: x₀ → x_t (any t)
-function sample_x_t(x₀::Vector{Float64}, t::Int, ᾱ::Vector{Float64})
-    ε = randn(length(x₀))
-    x_t = sqrt(ᾱ[t]) * x₀ + sqrt(1 - ᾱ[t]) * ε
-    return x_t, ε
-end
-
-β = range(1e-4, 0.02, length=1000)
-ᾱ = cumprod(1.0 .- β)
-
-x₀ = [1.0, 2.0]
-x₅₀₀, ε₅₀₀ = sample_x_t(x₀, 500, ᾱ)
-println("x₀ = $x₀")
-println("x₅₀₀ = $x₅₀₀  (√ᾱ₅₀₀ = $(sqrt(ᾱ[500])))")
-```
 
 #### 1.1.3 Reverse Process: ノイズを除去する
 
@@ -236,32 +205,6 @@ $$
 
 **ε-prediction** (DDPM [^1] が採用) が最も一般的。ノイズ $\boldsymbol{\epsilon}$ を予測し、それを使って平均を計算する。
 
-```julia
-# Reverse step: x_t → x_{t-1} (using ε-prediction)
-function reverse_step(x_t::Vector{Float64}, ε_θ::Vector{Float64}, t::Int, β::Vector{Float64}, ᾱ::Vector{Float64})
-    α_t = 1 - β[t]
-    # Mean: μ_θ = (1/√α_t) * (x_t - (β_t/√(1-ᾱ_t)) * ε_θ)
-    μ_θ = (1 / sqrt(α_t)) * (x_t - (β[t] / sqrt(1 - ᾱ[t])) * ε_θ)
-
-    # Variance: σ_t² = β_t (simplified)
-    σ_t = sqrt(β[t])
-
-    # Sample: x_{t-1} = μ_θ + σ_t * z, z ~ 𝒩(0, I)
-    z = (t > 1) ? randn(length(x_t)) : zeros(length(x_t))  # no noise at t=1
-    x_prev = μ_θ + σ_t * z
-
-    return x_prev
-end
-
-# Placeholder: ε_θ would be a trained U-Net
-ε_θ = randn(2)  # random for demo
-x_t = [0.5, 0.3]
-t = 500
-
-x_prev = reverse_step(x_t, ε_θ, t, β, ᾱ)
-println("x_t = $x_t")
-println("x_{t-1} = $x_prev  (denoised)")
-```
 
 #### 1.1.4 簡素化損失: ノイズ予測を訓練する
 
@@ -275,42 +218,18 @@ $$
 
 **訓練アルゴリズム** (Algorithm 1 in DDPM [^1]):
 
-```julia
-# Training step (simplified)
-function train_step(x₀::Vector{Float64}, ε_θ::Function, β::Vector{Float64}, ᾱ::Vector{Float64}, T::Int)
-    # 1. Sample t uniformly
-    t = rand(1:T)
-
-    # 2. Sample noise ε ~ 𝒩(0, I)
-    ε = randn(length(x₀))
-
-    # 3. Compute x_t using closed-form
-    x_t = sqrt(ᾱ[t]) * x₀ + sqrt(1 - ᾱ[t]) * ε
-
-    # 4. Predict noise with network
-    ε_pred = ε_θ(x_t, t)
-
-    # 5. Compute loss
-    loss = sum((ε - ε_pred).^2)
-
-    return loss
-end
-
-# Placeholder: ε_θ is a U-Net (Section 4)
-ε_θ(x, t) = randn(length(x))  # random for demo
-
-x₀ = [1.0, 2.0]
-loss = train_step(x₀, ε_θ, β, ᾱ, 1000)
-println("Training loss: $loss")
-```
 
 **この4つの式がDDPMの全てだ。** 残りのゾーンでは、これらを完全導出し、実装する。
 
-:::message
-**進捗: 10% 完了** DDPMの4つの核心式を触った。次は「なぜDDPMか」の直感へ。
-:::
+> **Note:** **進捗: 10% 完了** DDPMの4つの核心式を触った。次は「なぜDDPMか」の直感へ。
 
 ---
+
+
+> Progress: 10%
+> **理解度チェック**
+> 1. $ は、ノイズの多い $ の各記号の意味と、この式が表す操作を説明してください。
+> 2. このゾーンで学んだ手法の直感的な意味と、なぜこの定式化が必要なのかを説明してください。
 
 ## 🧩 2. 直感ゾーン（15分）— なぜDDPMか？
 
@@ -413,9 +332,13 @@ $$
 
 **差別化の本質**: 松尾研が「手法の紹介」にとどまるのに対し、本講義は「論文が書ける理論的深さ + Production実装」を貫く。
 
-:::message alert
-**ここが踏ん張りどころ**: Zone 3は本講義で最も数式が密集するゾーンだ。Forward Processの閉形式解、Reverse Processのベイズ反転、VLBの完全展開を一つ一つ導出する。第4回の条件付きガウス分布、第8回のELBOが総動員される。
-:::
+> **⚠️ Warning:** **ここが踏ん張りどころ**: Zone 3は本講義で最も数式が密集するゾーンだ。Forward Processの閉形式解、Reverse Processのベイズ反転、VLBの完全展開を一つ一つ導出する。第4回の条件付きガウス分布、第8回のELBOが総動員される。
+
+
+> Progress: 20%
+> **理解度チェック**
+> 1. $q(\mathbf{x}_0)$ の各記号の意味と、この式が表す操作を説明してください。
+> 2. このゾーンで学んだ手法の直感的な意味と、なぜこの定式化が必要なのかを説明してください。
 
 ### 2.5 学習戦略 — 数式修行の準備
 
@@ -445,9 +368,7 @@ graph TD
 3. **前提知識の参照**: 第4回 (ガウス分布)、第8回 (ELBO) を手元に置く。
 4. **Boss戦の準備**: 3.4 VLB完全展開、3.9 DDIM完全導出が最難関。
 
-:::message
-**進捗: 20% 完了** DDPMの直感と全体像を把握した。Zone 3で数式の海に飛び込む。
-:::
+> **Note:** **進捗: 20% 完了** DDPMの直感と全体像を把握した。Zone 3で数式の海に飛び込む。
 
 ---
 
@@ -527,47 +448,6 @@ $$
 
 **数値検証**:
 
-```julia
-# Verify closed-form derivation
-using LinearAlgebra, Statistics
-
-function verify_forward_closed_form(x₀::Vector{Float64}, t::Int, β::Vector{Float64}, n_samples::Int=10000)
-    α = 1.0 .- β
-    ᾱ = cumprod(α)
-
-    # Method 1: Iterative forward
-    samples_iterative = zeros(length(x₀), n_samples)
-    for i in 1:n_samples
-        x = copy(x₀)
-        for s in 1:t
-            ε = randn(length(x₀))
-            x = sqrt(α[s]) * x + sqrt(1 - α[s]) * ε
-        end
-        samples_iterative[:, i] = x
-    end
-
-    # Method 2: Closed-form
-    samples_closed = zeros(length(x₀), n_samples)
-    for i in 1:n_samples
-        ε = randn(length(x₀))
-        samples_closed[:, i] = sqrt(ᾱ[t]) * x₀ + sqrt(1 - ᾱ[t]) * ε
-    end
-
-    # Compare statistics
-    mean_iter = vec(mean(samples_iterative, dims=2))
-    std_iter = vec(std(samples_iterative, dims=2))
-    mean_closed = vec(mean(samples_closed, dims=2))
-    std_closed = vec(std(samples_closed, dims=2))
-
-    println("Iterative - Mean: $mean_iter, Std: $std_iter")
-    println("Closed-form - Mean: $mean_closed, Std: $std_closed")
-    println("Theory - Mean: $(sqrt(ᾱ[t]) * x₀), Std: $(sqrt(1 - ᾱ[t]))")
-end
-
-x₀ = [1.0, 2.0]
-β = range(1e-4, 0.02, length=1000)
-verify_forward_closed_form(x₀, 500, β, 10000)
-```
 
 **重要な性質**:
 
@@ -593,18 +473,6 @@ DDPM [^1] では $\beta_{\min} = 10^{-4}$、$\beta_{\max} = 0.02$、$T = 1000$�
 
 **問題点**: $\bar{\alpha}_T > 0$ (Zero Terminal SNR を満たさない) [^5]。
 
-```julia
-# Linear schedule
-function linear_schedule(T::Int, β_min::Float64=1e-4, β_max::Float64=0.02)
-    β = range(β_min, β_max, length=T)
-    α = 1.0 .- β
-    ᾱ = cumprod(α)
-    return β, ᾱ
-end
-
-β_linear, ᾱ_linear = linear_schedule(1000)
-println("Linear schedule: ᾱ_T = $(ᾱ_linear[end])")  # Should be ≈ 0, but > 0
-```
 
 #### 3.2.2 Cosine Schedule (Improved DDPM [^3])
 
@@ -619,19 +487,6 @@ $$
 - SNRが緩やかに減少 → 訓練安定
 - Zero Terminal SNRに近い
 
-```julia
-# Cosine schedule (Improved DDPM)
-function cosine_schedule(T::Int, s::Float64=0.008)
-    t_seq = 0:T
-    f_t = @. cos((t_seq / T + s) / (1 + s) * π / 2)^2
-    ᾱ = f_t[2:end] ./ f_t[1]  # ᾱ_t = f(t) / f(0)
-    β = 1.0 .- (ᾱ ./ [1.0; ᾱ[1:end-1]])  # β_t = 1 - α_t = 1 - ᾱ_t / ᾱ_{t-1}
-    return β, ᾱ
-end
-
-β_cosine, ᾱ_cosine = cosine_schedule(1000)
-println("Cosine schedule: ᾱ_T = $(ᾱ_cosine[end])")
-```
 
 #### 3.2.3 Zero Terminal SNR Rescaling (Lin+ 2023 [^5])
 
@@ -643,17 +498,6 @@ $$
 \tilde{\alpha}_t = \frac{\bar{\alpha}_t - \bar{\alpha}_T}{1 - \bar{\alpha}_T}
 $$
 
-```julia
-# Zero Terminal SNR rescaling
-function rescale_zero_terminal_snr(ᾱ::Vector{Float64})
-    ᾱ_T = ᾱ[end]
-    ᾱ_rescaled = (ᾱ .- ᾱ_T) ./ (1 - ᾱ_T)
-    return ᾱ_rescaled
-end
-
-ᾱ_linear_rescaled = rescale_zero_terminal_snr(ᾱ_linear)
-println("Rescaled linear: ᾱ_T = $(ᾱ_linear_rescaled[end])")  # Now = 0
-```
 
 **Noise Schedule 比較**:
 
@@ -757,6 +601,95 @@ $$
 p_\theta(\mathbf{x}_{t-1} \mid \mathbf{x}_t) = \mathcal{N}(\boldsymbol{\mu}_\theta(\mathbf{x}_t, t), \sigma_t^2 \mathbf{I})
 $$
 
+#### 3.3.4 Reverse Process の正規化定数の消去 — なぜ $q(\mathbf{x}_{t-1}|\mathbf{x}_t, \mathbf{x}_0)$ が扱いやすいか
+
+**問題の核心**から始めよう。本来知りたいのは $q(\mathbf{x}_{t-1}|\mathbf{x}_t)$ だが、これは周辺化積分:
+
+$$
+q(\mathbf{x}_{t-1}|\mathbf{x}_t) = \int q(\mathbf{x}_{t-1}|\mathbf{x}_t, \mathbf{x}_0) \, q(\mathbf{x}_0|\mathbf{x}_t) \, d\mathbf{x}_0
+$$
+
+を含む。右辺の $q(\mathbf{x}_0|\mathbf{x}_t)$ は**データ分布の後験分布**であり、学習なしには評価不可能 (intractable) だ。
+
+一方、$q(\mathbf{x}_{t-1}|\mathbf{x}_t, \mathbf{x}_0)$ は $\mathbf{x}_0$ を固定すれば**解析的に計算できる**。Section 3.3 の結果をまとめると:
+
+$$
+q(\mathbf{x}_{t-1}|\mathbf{x}_t, \mathbf{x}_0) = \mathcal{N}\!\left(\tilde{\boldsymbol{\mu}}_t(\mathbf{x}_t, \mathbf{x}_0),\; \tilde{\beta}_t \mathbf{I}\right)
+$$
+
+**$\tilde{\beta}_t$ の完全導出**（平方完成の出発点から）:
+
+$\mathbf{x}_{t-1}$ について二次形式を整理すると、逆分散は:
+
+$$
+\frac{1}{\tilde{\beta}_t} = \frac{\alpha_t}{1-\alpha_t} + \frac{1}{1-\bar{\alpha}_{t-1}}
+$$
+
+通分:
+
+$$
+\frac{1}{\tilde{\beta}_t} = \frac{\alpha_t(1-\bar{\alpha}_{t-1}) + (1-\alpha_t)}{(1-\alpha_t)(1-\bar{\alpha}_{t-1})}
+$$
+
+分子を整理する。$\bar{\alpha}_t = \alpha_t \bar{\alpha}_{t-1}$ を使えば:
+
+$$
+\alpha_t(1-\bar{\alpha}_{t-1}) + (1-\alpha_t) = \alpha_t - \alpha_t\bar{\alpha}_{t-1} + 1 - \alpha_t = 1 - \alpha_t\bar{\alpha}_{t-1} = 1 - \bar{\alpha}_t
+$$
+
+したがって:
+
+$$
+\boxed{\tilde{\beta}_t = \frac{(1-\alpha_t)(1-\bar{\alpha}_{t-1})}{1-\bar{\alpha}_t} = \frac{1-\bar{\alpha}_{t-1}}{1-\bar{\alpha}_t}\,\beta_t}
+$$
+
+**$\tilde{\boldsymbol{\mu}}_t$ の完全導出**:
+
+一次係数の比較から:
+
+$$
+\frac{\tilde{\boldsymbol{\mu}}_t}{\tilde{\beta}_t} = \frac{\sqrt{\alpha_t}}{1-\alpha_t}\,\mathbf{x}_t + \frac{\sqrt{\bar{\alpha}_{t-1}}}{1-\bar{\alpha}_{t-1}}\,\mathbf{x}_0
+$$
+
+両辺に $\tilde{\beta}_t$ を掛けて整理すると:
+
+$$
+\tilde{\boldsymbol{\mu}}_t = \frac{(1-\alpha_t)(1-\bar{\alpha}_{t-1})}{1-\bar{\alpha}_t} \cdot \frac{\sqrt{\alpha_t}}{1-\alpha_t}\,\mathbf{x}_t
++ \frac{(1-\alpha_t)(1-\bar{\alpha}_{t-1})}{1-\bar{\alpha}_t} \cdot \frac{\sqrt{\bar{\alpha}_{t-1}}}{1-\bar{\alpha}_{t-1}}\,\mathbf{x}_0
+$$
+
+$$
+= \frac{\sqrt{\alpha_t}(1-\bar{\alpha}_{t-1})}{1-\bar{\alpha}_t}\,\mathbf{x}_t + \frac{\sqrt{\bar{\alpha}_{t-1}}\,\beta_t}{1-\bar{\alpha}_t}\,\mathbf{x}_0
+$$
+
+これが Section 3.3 の Box の結果と一致することを確認せよ。
+
+**学習戦略への接続**:
+
+$\mathbf{x}_0$ が既知ならば $\tilde{\boldsymbol{\mu}}_t$ は解析的に得られる。実際には $\mathbf{x}_0$ は未知なので、ネットワーク $f_\theta(\mathbf{x}_t, t)$ で予測する:
+
+$$
+p_\theta(\mathbf{x}_{t-1}|\mathbf{x}_t) \approx q\!\left(\mathbf{x}_{t-1}\,\Big|\,\mathbf{x}_t,\; \mathbf{x}_0 = f_\theta(\mathbf{x}_t, t)\right)
+$$
+
+$\mathbf{x}_0 = f_\theta(\mathbf{x}_t, t)$ を代入すれば $\boldsymbol{\mu}_\theta$ が得られ、Section 3.5 の3形態はすべてこの枠組みの変換版にすぎない。
+
+**数値確認** ($t=1$, $\bar{\alpha}_1 \approx 1$ の極限):
+
+$\bar{\alpha}_0 = 1$ （定義）を使えば:
+
+$$
+\tilde{\beta}_1 = \frac{(1-\alpha_1)(1-\bar{\alpha}_0)}{1-\bar{\alpha}_1} = \frac{(1-\alpha_1)\cdot 0}{1-\alpha_1} = 0
+$$
+
+分散がゼロ → $q(\mathbf{x}_0|\mathbf{x}_1, \mathbf{x}_0) = \delta(\mathbf{x}_0)$。最後のステップは確定的に元画像を復元する。また平均は:
+
+$$
+\tilde{\boldsymbol{\mu}}_1 = \frac{\sqrt{\alpha_1}\cdot 0}{1-\bar{\alpha}_1}\,\mathbf{x}_1 + \frac{\sqrt{1}\cdot\beta_1}{1-\bar{\alpha}_1}\,\mathbf{x}_0 = \mathbf{x}_0
+$$
+
+$t=1$ では $\tilde{\boldsymbol{\mu}}_1 = \mathbf{x}_0$ となり、最後のステップが完全な再構成であることが確認できる。これが $L_0 = -\log p_\theta(\mathbf{x}_0|\mathbf{x}_1)$ を別途扱う理由だ。
+
 ### 3.4 Variational Lower Bound (VLB) 完全展開
 
 **目標**: $\log p_\theta(\mathbf{x}_0)$ を変分推論 (第9回) で下界から評価する。
@@ -833,6 +766,66 @@ $$
 - **$L_0$**: 再構成項 (VAEの再構成損失に対応)
 
 **これがDDPMの理論的基盤 — 変分推論 (第9回) の直接的応用である。**
+
+#### 3.4.3 VLB の各項の物理的意味
+
+各損失項が何を測定しているかを丁寧に整理する。
+
+**$L_T$: 終端ノイズ分布と Prior のズレ**
+
+$$
+L_T = D_\text{KL}\!\left(q(\mathbf{x}_T|\mathbf{x}_0) \;\|\; p(\mathbf{x}_T)\right)
+$$
+
+$q(\mathbf{x}_T|\mathbf{x}_0) = \mathcal{N}(\sqrt{\bar{\alpha}_T}\,\mathbf{x}_0,\,(1-\bar{\alpha}_T)\mathbf{I})$、$p(\mathbf{x}_T) = \mathcal{N}(\mathbf{0}, \mathbf{I})$。Schedule が適切に設計されていれば $\bar{\alpha}_T \approx 0$ なので $q(\mathbf{x}_T|\mathbf{x}_0) \approx \mathcal{N}(\mathbf{0}, \mathbf{I}) = p(\mathbf{x}_T)$ となり、$L_T \approx 0$。**訓練パラメータ $\theta$ を含まないため、$L_T$ は最適化されない定数項**である。
+
+**$L_{t-1}$: 各ステップの逆拡散の学習難易度**
+
+$$
+L_{t-1} = D_\text{KL}\!\left(q(\mathbf{x}_{t-1}|\mathbf{x}_t, \mathbf{x}_0) \;\|\; p_\theta(\mathbf{x}_{t-1}|\mathbf{x}_t)\right)
+$$
+
+$t = 2, \dots, T$ の各ステップで、学習対象の $p_\theta$ が真のベイズ事後分布 $q$ にどれだけ近いかを測る。$T-1$ 個の和 $\sum_{t=2}^T L_{t-1}$ が VLB の主要項であり、**この項を最小化することが DDPM 訓練の本質**だ。
+
+**$L_0$: 最終ステップの再構成誤差**
+
+$$
+L_0 = -\log p_\theta(\mathbf{x}_0|\mathbf{x}_1)
+$$
+
+$\mathbf{x}_1$ から $\mathbf{x}_0$ への最後のステップ。原論文では離散化されたガウス分布を用いて評価するが、実用上は $L_{t-1}$ と同じ形式として扱うことも多い。
+
+**なぜ $L_t$ 項が支配的か**:
+
+$T = 1000$ の場合、$L_T + L_0$ はたかだか2項だが、$\sum_{t=2}^T L_{t-1}$ は 999 項の和となる。しかも各 $L_{t-1}$ のスケールは $O(1/T)$ 程度なので合計は $O(1)$ のオーダーを保つ。これが DDPM 損失の中心だ。
+
+**2つのガウス分布間の KL 公式**:
+
+$p_\theta$ と $q$ がともにガウスの場合、閉形式で評価できる:
+
+$$
+D_\text{KL}\!\left(\mathcal{N}(\boldsymbol{\mu}_1, \sigma_1^2 \mathbf{I}) \;\|\; \mathcal{N}(\boldsymbol{\mu}_2, \sigma_2^2 \mathbf{I})\right)
+= \frac{\|\boldsymbol{\mu}_1 - \boldsymbol{\mu}_2\|^2}{2\sigma_2^2}
++ \frac{d}{2}\!\left(\frac{\sigma_1^2}{\sigma_2^2} - \log\frac{\sigma_1^2}{\sigma_2^2} - 1\right)
+$$
+
+ここで $d$ はデータ次元。右辺第1項は**平均のズレ**、第2項は**分散のズレ**に対応する。
+
+**分散を固定した場合の簡素化**:
+
+$\sigma_1^2 = \sigma_2^2 = \sigma^2$ ならば第2項 $= \frac{d}{2}(1 - \log 1 - 1) = 0$ となり:
+
+$$
+D_\text{KL}\!\left(\mathcal{N}(\boldsymbol{\mu}_1, \sigma^2 \mathbf{I}) \;\|\; \mathcal{N}(\boldsymbol{\mu}_2, \sigma^2 \mathbf{I})\right) = \frac{\|\boldsymbol{\mu}_1 - \boldsymbol{\mu}_2\|^2}{2\sigma^2}
+$$
+
+**KL が平均の MSE に帰着**する。DDPM が最終的にノイズ予測の MSE 損失に行き着く理由がここにある。$q$ の分散 $\tilde{\beta}_t$ と $p_\theta$ の分散 $\sigma_t^2$ を等しいと置けば、$L_{t-1}$ は:
+
+$$
+L_{t-1} = \frac{1}{2\tilde{\beta}_t} \|\tilde{\boldsymbol{\mu}}_t(\mathbf{x}_t, \mathbf{x}_0) - \boldsymbol{\mu}_\theta(\mathbf{x}_t, t)\|^2 + \text{const}
+$$
+
+Section 3.5 のε-prediction はこの式に $\tilde{\boldsymbol{\mu}}_t$ を $\boldsymbol{\epsilon}$ 表示したものを代入した結果にすぎない。
 
 ### 3.5 損失関数の3形態: ε / x₀ / v-prediction
 
@@ -926,39 +919,6 @@ $$
 \end{aligned}
 $$
 
-```julia
-# Conversion between ε, x₀, v predictions
-function predict_ε_from_x₀(x_t::Vector{Float64}, x₀::Vector{Float64}, ᾱ_t::Float64)
-    ε = (x_t - sqrt(ᾱ_t) * x₀) / sqrt(1 - ᾱ_t)
-    return ε
-end
-
-function predict_x₀_from_ε(x_t::Vector{Float64}, ε::Vector{Float64}, ᾱ_t::Float64)
-    x₀ = (x_t - sqrt(1 - ᾱ_t) * ε) / sqrt(ᾱ_t)
-    return x₀
-end
-
-function predict_v(x₀::Vector{Float64}, ε::Vector{Float64}, ᾱ_t::Float64)
-    v = sqrt(ᾱ_t) * ε - sqrt(1 - ᾱ_t) * x₀
-    return v
-end
-
-# Test
-x₀ = [1.0, 2.0]
-ε = randn(2)
-ᾱ_t = 0.5
-x_t = sqrt(ᾱ_t) * x₀ + sqrt(1 - ᾱ_t) * ε
-
-ε_recon = predict_ε_from_x₀(x_t, x₀, ᾱ_t)
-x₀_recon = predict_x₀_from_ε(x_t, ε, ᾱ_t)
-v = predict_v(x₀, ε, ᾱ_t)
-
-println("Original ε: $ε")
-println("Reconstructed ε: $ε_recon")
-println("Original x₀: $x₀")
-println("Reconstructed x₀: $x₀_recon")
-println("v: $v")
-```
 
 **どれを使うべきか？**
 
@@ -1015,26 +975,77 @@ $$
 
 $\gamma = 5$ が推奨。高SNR (低ノイズ) の時刻の重みを制限 → 訓練安定。
 
-```julia
-# SNR computation
-function compute_snr(ᾱ::Vector{Float64})
-    snr = ᾱ ./ (1.0 .- ᾱ)
-    return snr
-end
+### 3.7.2 SNR 単調性の理論的保証
 
-# Min-SNR weighting
-function min_snr_weight(snr::Vector{Float64}, γ::Float64=5.0)
-    λ = min.(snr, γ)
-    return λ
-end
+SNR が単調減少することは直感的に自明に見えるが、**Schedule の選び方次第では保証されない**。ここで厳密に議論する。
 
-β_cosine, ᾱ_cosine = cosine_schedule(1000)
-snr = compute_snr(ᾱ_cosine)
-λ_min_snr = min_snr_weight(snr, 5.0)
+**SNR の定義を再掲**:
 
-println("SNR range: [$(minimum(snr)), $(maximum(snr))]")
-println("Min-SNR weight range: [$(minimum(λ_min_snr)), $(maximum(λ_min_snr))]")
-```
+$$
+\text{SNR}(t) = \frac{\bar{\alpha}_t}{1 - \bar{\alpha}_t}
+$$
+
+$\text{SNR}(t) > \text{SNR}(t+1)$ が成立するための条件は:
+
+$$
+\frac{\bar{\alpha}_t}{1-\bar{\alpha}_t} > \frac{\bar{\alpha}_{t+1}}{1-\bar{\alpha}_{t+1}}
+$$
+
+$x/(1-x)$ は $x \in (0,1)$ で単調増加なので、この不等式は $\bar{\alpha}_t > \bar{\alpha}_{t+1}$ と同値。すなわち:
+
+**定理**: $\bar{\alpha}_t$ が $t$ について**狭義単調減少**であることと、SNR$(t)$ が狭義単調減少であることは等価。
+
+$\bar{\alpha}_t = \prod_{i=1}^t \alpha_i$、$\alpha_i = 1-\beta_i \in (0,1)$ であるから、$\beta_t > 0$ が保証されれば $\bar{\alpha}_t$ は自動的に狭義単調減少となる。**したがって $\beta_t > 0$ がすべての $t$ で成立すれば SNR 単調性は保証される。**
+
+**Linear Schedule での SNR 挙動**:
+
+$\beta_t = \beta_\min + \frac{t-1}{T-1}(\beta_\max - \beta_\min)$（$0 < \beta_\min < \beta_\max < 1$）とおくと:
+
+$$
+\bar{\alpha}_t = \prod_{i=1}^t (1-\beta_i)
+$$
+
+対数を取れば $\log \bar{\alpha}_t = \sum_{i=1}^t \log(1-\beta_i)$ は $t$ とともに厳密に減少する。典型値 ($\beta_\min = 10^{-4}$, $\beta_\max = 0.02$, $T = 1000$) では:
+
+$$
+\bar{\alpha}_T \approx e^{-\sum_{i=1}^{1000} \beta_i} \approx e^{-\frac{1000}{2}(\beta_\min+\beta_\max)} = e^{-10.2} \approx 3.7 \times 10^{-5} > 0
+$$
+
+$\bar{\alpha}_T > 0$ — **Linear Schedule は Zero Terminal SNR を満たさない**。
+
+**Cosine Schedule での SNR 解析的表現**:
+
+Nichol & Dhariwal (2021) の Cosine Schedule は:
+
+$$
+\bar{\alpha}_t = \cos^2\!\left(\frac{\pi t}{2T}\right)
+$$
+
+（$t = 0, 1, \dots, T$、$\bar{\alpha}_0 = 1$ から $\bar{\alpha}_T = 0$ まで滑らかに変化。）
+
+SNR を明示的に計算すると:
+
+$$
+\text{SNR}(t) = \frac{\cos^2\!\left(\frac{\pi t}{2T}\right)}{1 - \cos^2\!\left(\frac{\pi t}{2T}\right)} = \frac{\cos^2\!\left(\frac{\pi t}{2T}\right)}{\sin^2\!\left(\frac{\pi t}{2T}\right)} = \cot^2\!\left(\frac{\pi t}{2T}\right)
+$$
+
+$\cot$ は $(0, \pi/2)$ で狭義単調減少、$t \in \{1,\dots,T\}$ で $\pi t/(2T) \in (0, \pi/2]$ なので SNR 単調性は保証される。さらに $t = T$ で:
+
+$$
+\text{SNR}(T) = \cot^2\!\left(\frac{\pi}{2}\right) = 0
+$$
+
+**Zero Terminal SNR が解析的に成立する。**
+
+**Zero Terminal SNR の必要性**:
+
+$\bar{\alpha}_T > 0$ の場合、$q(\mathbf{x}_T|\mathbf{x}_0) = \mathcal{N}(\sqrt{\bar{\alpha}_T}\,\mathbf{x}_0, (1-\bar{\alpha}_T)\mathbf{I})$ は依然として $\mathbf{x}_0$ の情報を含む。すなわちサンプリング開始点 $\mathbf{x}_T \sim p(\mathbf{x}_T) = \mathcal{N}(\mathbf{0}, \mathbf{I})$ と Forward Process の終端分布の間にズレが生じる。このズレが**推論時のデータ漏洩**となり、生成品質の劣化・訓練と推論の不一致をもたらす。Lin et al. (2023) [^5] はこの問題を「Zero Terminal SNR」として定式化し、既存の Linear Schedule をリスケールする後処理を提案した。
+
+$$
+\bar{\alpha}_t^{\text{rescaled}} = \bar{\alpha}_t \cdot \frac{\bar{\alpha}_T^{\text{target}}}{\bar{\alpha}_T^{\text{original}}}
+$$
+
+$\bar{\alpha}_T^{\text{target}} = 0$ とすれば、リスケール後は Zero Terminal SNR が達成される。
 
 ### 3.8 U-Net Architecture for DDPM
 
@@ -1052,22 +1063,6 @@ $$
 
 $d$ は埋め込み次元 (通常 $d_\text{model} \times 4$)。
 
-```julia
-# Sinusoidal time embedding
-function time_embedding(t::Int, d::Int)
-    half_dim = d ÷ 2
-    emb = log(10000) / (half_dim - 1)
-    emb = exp.(-emb * (0:half_dim-1))
-    emb = t * emb
-    emb = [sin.(emb); cos.(emb)]
-    return emb
-end
-
-t = 500
-d = 128
-t_emb = time_embedding(t, d)
-println("Time embedding shape: $(length(t_emb))")
-```
 
 **統合**: Time Embedding を各 Residual Block に加算 (FiLM: Feature-wise Linear Modulation)。
 
@@ -1087,31 +1082,6 @@ $$
 
 $\mu, \sigma$ はグループごとに計算。通常 $G = 32$。
 
-```julia
-# GroupNorm (simplified)
-function group_norm(x::Matrix{Float64}, G::Int=32)
-    C, N = size(x)  # C: channels, N: spatial
-    @assert C % G == 0
-
-    # Reshape: (C, N) → (G, C/G, N)
-    x_grouped = reshape(x, G, C÷G, N)
-
-    # Normalize per group
-    for g in 1:G
-        μ = mean(x_grouped[g, :, :])
-        σ² = var(x_grouped[g, :, :])
-        x_grouped[g, :, :] = (x_grouped[g, :, :] .- μ) ./ sqrt(σ² + 1e-5)
-    end
-
-    # Reshape back
-    x_norm = reshape(x_grouped, C, N)
-    return x_norm
-end
-
-x = randn(64, 100)  # 64 channels, 100 spatial
-x_norm = group_norm(x, 32)
-println("GroupNorm applied, mean: $(mean(x_norm)), std: $(std(x_norm))")
-```
 
 #### 3.8.3 Self-Attention
 
@@ -1125,31 +1095,6 @@ $$
 
 U-Netでは、**解像度 16×16 以下** でのみ Attention を適用 (計算量 $O(N^2)$ のため)。
 
-```julia
-# Simplified self-attention layer
-function self_attention(x::Matrix{Float64}, d_k::Int)
-    # x: (d_model, seq_len)
-    d_model, seq_len = size(x)
-
-    # Linear projections (simplified: using identity for demo)
-    Q = x
-    K = x
-    V = x
-
-    # Scaled dot-product attention
-    scores = (Q' * K) / sqrt(d_k)  # (seq_len, seq_len)
-    attn = softmax(scores, dims=2)  # row-wise softmax
-    output = V * attn'  # (d_model, seq_len)
-
-    return output
-end
-
-softmax(x; dims) = exp.(x .- maximum(x, dims=dims)) ./ sum(exp.(x .- maximum(x, dims=dims)), dims=dims)
-
-x_feature = randn(256, 16*16)  # 256 channels, 16x16 spatial (flattened)
-x_attn = self_attention(x_feature, 256)
-println("Self-attention output shape: $(size(x_attn))")
-```
 
 #### 3.8.4 U-Net 全体構造
 
@@ -1215,44 +1160,6 @@ $$
 
 **加速**: $T$ を $S$ ステップにスキップ ($\tau_1, \dots, \tau_S \subset \{1, \dots, T\}$)。
 
-```julia
-# DDIM sampling step
-function ddim_step(x_t::Vector{Float64}, ε_θ::Vector{Float64}, t::Int, t_prev::Int, ᾱ::Vector{Float64}, η::Float64=0.0)
-    # η: stochasticity parameter (0 = deterministic, 1 = DDPM-like)
-    ᾱ_t = ᾱ[t]
-    ᾱ_prev = (t_prev > 0) ? ᾱ[t_prev] : 1.0
-
-    # Predicted x₀
-    x₀_pred = (x_t - sqrt(1 - ᾱ_t) * ε_θ) / sqrt(ᾱ_t)
-
-    # Variance
-    σ_t = η * sqrt((1 - ᾱ_prev) / (1 - ᾱ_t)) * sqrt(1 - ᾱ_t / ᾱ_prev)
-
-    # Direction pointing to x_t
-    dir_xt = sqrt(1 - ᾱ_prev - σ_t^2) * ε_θ
-
-    # Random noise (zero if deterministic)
-    noise = (η > 0) ? randn(length(x_t)) : zeros(length(x_t))
-
-    # DDIM step
-    x_prev = sqrt(ᾱ_prev) * x₀_pred + dir_xt + σ_t * noise
-
-    return x_prev
-end
-
-# Test
-x_t = randn(2)
-ε_θ = randn(2)
-β_cosine, ᾱ_cosine = cosine_schedule(1000)
-
-# Deterministic (η=0)
-x_prev_det = ddim_step(x_t, ε_θ, 1000, 500, ᾱ_cosine, 0.0)
-println("Deterministic DDIM: $x_prev_det")
-
-# Stochastic (η=1, DDPM-like)
-x_prev_sto = ddim_step(x_t, ε_θ, 1000, 500, ᾱ_cosine, 1.0)
-println("Stochastic DDIM: $x_prev_sto")
-```
 
 **DDIM の利点**:
 
@@ -1275,6 +1182,66 @@ $$
 $$
 
 **これがDDIM → Flow Matching → OT統一理論への道筋である。**
+
+#### 3.9.4 DDIM の逆変換 — エンコーディング公式
+
+DDIM の決定論的性質 ($\sigma_t = 0$) を利用すると、**時間方向を逆転させる**ことができる。サンプリング（ノイズ → データ）の逆は**エンコーディング**（データ → ノイズ）に相当する。
+
+**DDIM Inversion の導出**:
+
+Section 3.9.2 の決定論的サンプリング式を再掲する:
+
+$$
+\mathbf{x}_{t-1} = \sqrt{\bar{\alpha}_{t-1}} \frac{\mathbf{x}_t - \sqrt{1-\bar{\alpha}_t}\,\boldsymbol{\epsilon}_\theta(\mathbf{x}_t, t)}{\sqrt{\bar{\alpha}_t}} + \sqrt{1-\bar{\alpha}_{t-1}}\,\boldsymbol{\epsilon}_\theta(\mathbf{x}_t, t)
+$$
+
+この式を $\mathbf{x}_{t+1}$ についての式として読み替える（$t \to t+1$, $t-1 \to t$）:
+
+$$
+\mathbf{x}_t = \sqrt{\bar{\alpha}_t} \frac{\mathbf{x}_{t+1} - \sqrt{1-\bar{\alpha}_{t+1}}\,\boldsymbol{\epsilon}_\theta(\mathbf{x}_{t+1}, t+1)}{\sqrt{\bar{\alpha}_{t+1}}} + \sqrt{1-\bar{\alpha}_t}\,\boldsymbol{\epsilon}_\theta(\mathbf{x}_{t+1}, t+1)
+$$
+
+これを $\mathbf{x}_{t+1}$ について解くと**DDIM Forward（エンコーディング）公式**が得られる:
+
+$$
+\boxed{\mathbf{x}_{t+1} = \sqrt{\bar{\alpha}_{t+1}} \frac{\mathbf{x}_t - \sqrt{1-\bar{\alpha}_t}\,\boldsymbol{\epsilon}_\theta(\mathbf{x}_t, t)}{\sqrt{\bar{\alpha}_t}} + \sqrt{1-\bar{\alpha}_{t+1}}\,\boldsymbol{\epsilon}_\theta(\mathbf{x}_t, t)}
+$$
+
+**なぜ $\eta=0$（決定論的）でのみ逆変換が成立するか**:
+
+$\eta > 0$ の確率的サンプリングでは各ステップで $\boldsymbol{\epsilon}_t \sim \mathcal{N}(\mathbf{0},\mathbf{I})$ が加わる。この確率変数を後から除去することは不可能なため、時間逆転は定義できない。$\eta = 0$ の場合に限り、$\mathbf{x}_{t-1} \to \mathbf{x}_t$ の写像が決定論的かつ可逆となる。
+
+数学的には、$\eta = 0$ の DDIM サンプリングは確率的偏微分方程式 (SDE) ではなく**常微分方程式 (Probability Flow ODE)**:
+
+$$
+\frac{d\mathbf{x}}{dt} = \frac{1}{2}\left[\boldsymbol{\epsilon}_\theta(\mathbf{x}, t) - \frac{d\log\bar{\alpha}_t}{dt}\,\mathbf{x}\right]
+$$
+
+に対応し、ODE は時間の向きを逆転させても解が一意に定まる（Picard–Lindelöf の定理）。DDIM Inversion はその離散版だ。
+
+**画像編集への応用**:
+
+エンコーディング: 実画像 $\mathbf{x}_0 \xrightarrow{T \text{ steps}} \hat{\mathbf{x}}_T$ で潜在ノイズを取得。
+
+$$
+\hat{\mathbf{x}}_T = \text{DDIMEncode}(\mathbf{x}_0;\; \boldsymbol{\epsilon}_\theta)
+$$
+
+編集: $\hat{\mathbf{x}}_T$ を条件（テキストプロンプト等）に応じて修正し、$\hat{\mathbf{x}}_T'$ を得る。
+
+デコーディング: $\hat{\mathbf{x}}_T' \xrightarrow{T \text{ steps}} \mathbf{x}_0'$ でデコードして編集済み画像を取得。
+
+この手順が成立するのは、エンコーディングとデコーディングが同じ ODE の正方向・逆方向に対応しているからだ。
+
+**誤差の蓄積**:
+
+各ステップにおける Euler 法の局所打ち切り誤差は $O(h^2)$（$h = 1/T$）。$T$ ステップの累積誤差は:
+
+$$
+\text{Total Error} = O(T \cdot h^2) = O\!\left(T \cdot \frac{1}{T^2}\right) = O\!\left(\frac{1}{T}\right)
+$$
+
+$T$ を増やすほど誤差が減少するため、$T = 50$ 程度でも実用的な精度が得られる。なお高次の ODE ソルバー（DPM-Solver 等）を用いれば $O(1/T^k)$（$k \geq 2$）の精度が実現可能だ。
 
 ### 3.10 Score-based 視点での DDPM 再解釈
 
@@ -1321,6 +1288,95 @@ $$
 
 **結論**: **DDPM = Denoising Score Matching**。DDPMはScore-based Generative Modelsの一形態である。
 
+#### 3.10.3 Song↔Ho 統一定理の完全証明
+
+**2つの流派**の定式化を揃えてから等価性を示す。
+
+**Ho et al. (2020) の枠組み（ε-prediction）**:
+
+ネットワーク $\boldsymbol{\epsilon}_\theta: \mathbb{R}^d \times \{1,\dots,T\} \to \mathbb{R}^d$ が $\mathbf{x}_t$ から加えられたノイズ $\boldsymbol{\epsilon}$ を予測する。損失は:
+
+$$
+L_\text{Ho} = \mathbb{E}_{t,\mathbf{x}_0,\boldsymbol{\epsilon}}\!\left[\|\boldsymbol{\epsilon} - \boldsymbol{\epsilon}_\theta(\mathbf{x}_t, t)\|^2\right]
+$$
+
+**Song et al. (2020) の枠組み（Score Matching）**:
+
+ネットワーク $\mathbf{s}_\theta: \mathbb{R}^d \times [0,T] \to \mathbb{R}^d$ が周辺スコア $\nabla_{\mathbf{x}_t}\log q_t(\mathbf{x}_t)$ を予測する。損失は:
+
+$$
+L_\text{Song} = \mathbb{E}_{t,\mathbf{x}_0,\boldsymbol{\epsilon}}\!\left[\lambda(t)\left\|\nabla_{\mathbf{x}_t}\log q(\mathbf{x}_t|\mathbf{x}_0) - \mathbf{s}_\theta(\mathbf{x}_t, t)\right\|^2\right]
+$$
+
+**等価性の証明**:
+
+Section 3.10 で示したとおり:
+
+$$
+\nabla_{\mathbf{x}_t}\log q(\mathbf{x}_t|\mathbf{x}_0) = -\frac{\boldsymbol{\epsilon}}{\sqrt{1-\bar{\alpha}_t}}
+$$
+
+Score Network の最適解は:
+
+$$
+\mathbf{s}_\theta^*(\mathbf{x}_t, t) = -\frac{\boldsymbol{\epsilon}_\theta^*(\mathbf{x}_t, t)}{\sqrt{1-\bar{\alpha}_t}}
+$$
+
+したがって両者の関係は:
+
+$$
+\boxed{\mathbf{s}_\theta(\mathbf{x}_t, t) = -\frac{\boldsymbol{\epsilon}_\theta(\mathbf{x}_t, t)}{\sqrt{1-\bar{\alpha}_t}}}
+$$
+
+逆方向も同様に $\boldsymbol{\epsilon}_\theta = -\sqrt{1-\bar{\alpha}_t}\,\mathbf{s}_\theta$ と書ける。
+
+$L_\text{Song}$ に $\lambda(t) = (1-\bar{\alpha}_t)$ を代入し、上の関係を使うと:
+
+$$
+L_\text{Song} = \mathbb{E}_{t,\mathbf{x}_0,\boldsymbol{\epsilon}}\!\left[(1-\bar{\alpha}_t)\left\|\frac{-\boldsymbol{\epsilon}}{\sqrt{1-\bar{\alpha}_t}} - \mathbf{s}_\theta\right\|^2\right]
+= \mathbb{E}_{t,\mathbf{x}_0,\boldsymbol{\epsilon}}\!\left[\|\boldsymbol{\epsilon} - \boldsymbol{\epsilon}_\theta\|^2\right] = L_\text{Ho}
+$$
+
+両者は**同一の損失関数**である。■
+
+**Tweedie の公式**:
+
+最適スコア $\mathbf{s}^*(\mathbf{x}_t, t) = \nabla_{\mathbf{x}_t}\log q_t(\mathbf{x}_t)$ を用いると、最適なデノイズ推定 $\hat{\mathbf{x}}_0$ は:
+
+$$
+\hat{\mathbf{x}}_0 = \frac{\mathbf{x}_t + (1-\bar{\alpha}_t)\,\nabla_{\mathbf{x}_t}\log q_t(\mathbf{x}_t)}{\sqrt{\bar{\alpha}_t}}
+$$
+
+この等式は**Tweedie の公式**と呼ばれる（統計的推定論の文脈では「経験ベイズ」）。証明はシンプルだ。$\mathbf{x}_t = \sqrt{\bar{\alpha}_t}\mathbf{x}_0 + \sqrt{1-\bar{\alpha}_t}\boldsymbol{\epsilon}$ の条件付き期待値をとると:
+
+$$
+\mathbb{E}[\mathbf{x}_0|\mathbf{x}_t] = \frac{1}{\sqrt{\bar{\alpha}_t}}\!\left(\mathbf{x}_t + (1-\bar{\alpha}_t)\nabla_{\mathbf{x}_t}\log q_t(\mathbf{x}_t)\right)
+$$
+
+これはスコアが分かれば $\mathbf{x}_0$ の MMSE 推定量が得られることを意味する。ε-prediction との対応は $\nabla \log q = -\boldsymbol{\epsilon}/\sqrt{1-\bar{\alpha}_t}$ を代入すれば:
+
+$$
+\hat{\mathbf{x}}_0 = \frac{\mathbf{x}_t - \sqrt{1-\bar{\alpha}_t}\,\boldsymbol{\epsilon}_\theta(\mathbf{x}_t,t)}{\sqrt{\bar{\alpha}_t}}
+$$
+
+Section 3.9.2 の DDIM サンプリング式に現れる "predicted $\mathbf{x}_0$" はまさにこれだ。
+
+**DDPM の Reverse Step = Langevin step + 補正項**:
+
+DDPM の Reverse Step:
+
+$$
+\mathbf{x}_{t-1} = \frac{1}{\sqrt{\alpha_t}}\!\left(\mathbf{x}_t - \frac{\beta_t}{\sqrt{1-\bar{\alpha}_t}}\boldsymbol{\epsilon}_\theta(\mathbf{x}_t, t)\right) + \sqrt{\tilde{\beta}_t}\,\mathbf{z}, \quad \mathbf{z}\sim\mathcal{N}(\mathbf{0},\mathbf{I})
+$$
+
+スコア表示 $\boldsymbol{\epsilon}_\theta = -\sqrt{1-\bar{\alpha}_t}\,\mathbf{s}_\theta$ を代入すると:
+
+$$
+\mathbf{x}_{t-1} = \frac{1}{\sqrt{\alpha_t}}\!\left(\mathbf{x}_t + \beta_t\,\mathbf{s}_\theta(\mathbf{x}_t, t)\right) + \sqrt{\tilde{\beta}_t}\,\mathbf{z}
+$$
+
+Langevin dynamics の一ステップ $\mathbf{x} \leftarrow \mathbf{x} + \eta\nabla\log p(\mathbf{x}) + \sqrt{2\eta}\,\mathbf{z}$ と比較すると、$1/\sqrt{\alpha_t}$ の係数（$\approx 1 + \beta_t/2$）が補正項に相当する。**DDPM は Langevin dynamics に時刻依存の補正を加えたもの**として解釈できる。
+
 **Song & Ho の統一理論** (第38回で完全証明):
 
 ```mermaid
@@ -1340,9 +1396,7 @@ graph TD
 
 **これで Zone 3 完了 — DDPM の理論を完全導出した。**
 
-:::message
-**進捗: 50% 完了** Forward/Reverse/VLB/3形態/SNR/U-Net/DDIM/Score-based を完全導出した。Boss Battle 撃破。Zone 4 で実装へ。
-:::
+> **Note:** **進捗: 50% 完了** Forward/Reverse/VLB/3形態/SNR/U-Net/DDIM/Score-based を完全導出した。Boss Battle 撃破。Zone 4 で実装へ。
 
 ---
 
@@ -1463,17 +1517,9 @@ Ramasinghe et al. (2024) [^lightweight_ddpm] は、U-Net のエンコーダを *
 
 **Fire Module** (SqueezeNet):
 
-```
-Input → Squeeze (1×1 conv, reduce channels)
-      → Expand (1×1 + 3×3 conv in parallel)
-      → Concat → Output
-```
 
 **Depthwise-separable Conv** (MobileNet):
 
-```
-Depthwise (3×3 per channel) → Pointwise (1×1 cross-channel)
-```
 
 **結果** (CIFAR-10):
 
@@ -1510,15 +1556,6 @@ $$
 
 **統合方法**: 標準 Forward Process の後、Laplacian ステップを追加:
 
-```julia
-# Standard Gaussian noise
-x_t = sqrt(α_bar[t]) * x₀ + sqrt(1 - α_bar[t]) * randn(size(x₀))
-
-# Laplacian refinement
-for _ in 1:num_laplacian_steps
-    x_t += D * Δt * laplacian(x_t) + σ * sqrt(Δt) * randn(size(x_t))
-end
-```
 
 **Reverse Process**: U-Net は Laplacian-augmented ノイズを除去するよう訓練される。
 
@@ -1536,9 +1573,16 @@ end
 
 ---
 
+
+
+> Progress: 50%
+> **理解度チェック**
+> 1. $256 \times 256 \times 3 \approx 200K$ の各記号の意味と、この式が表す操作を説明してください。
+> 2. このゾーンで学んだ手法の直感的な意味と、なぜこの定式化が必要なのかを説明してください。
+
 ## 参考文献
 
-[^optimal_ddpm]: Oko, J., Ullrich, K., & Hoogeboom, E. (2024). "Denoising Diffusion Probabilistic Models are Optimally Adaptive to Unknown Low Dimensionality". *arXiv:2410.18784*.
+[^optimal_ddpm]: Huang, Z., Wei, Y., & Chen, Y. (2024). "Denoising Diffusion Probabilistic Models are Optimally Adaptive to Unknown Low Dimensionality". *arXiv:2410.18784*.
 
 [^improved_ddpm]: Nichol, A., & Dhariwal, P. (2021). "Improved Denoising Diffusion Probabilistic Models". In *Proceedings of ICML 2021*. *arXiv:2102.09672*.
 
@@ -1574,22 +1618,6 @@ $$
 
 各ステップで成分 $k$ をサンプリング（確率 $\pi_k$）:
 
-```julia
-function gm_forward_step(x₀, t, β, K=3)
-    # Sample component
-    k = sample(Categorical([1/K for _ in 1:K]))
-
-    # Component-specific parameters
-    μ_k = component_means[k]  # e.g., [0, 0.1, -0.1]
-    Σ_k = component_vars[k]   # e.g., [1.0, 1.2, 0.8]
-
-    # Noising
-    α_bar = cumprod(1 .- β)[t]
-    x_t = sqrt(α_bar) * x₀ + μ_k + sqrt((1 - α_bar) * Σ_k) * randn(size(x₀))
-
-    return x_t, k
-end
-```
 
 損失関数に成分インデックス $k$ を条件として追加:
 
@@ -1620,6 +1648,14 @@ U-Net の入力に $k$ の one-hot エンコーディングを追加。
 ---
 
 ---
+
+## 著者リンク
+
+- Blog: https://fumishiki.dev
+- X: https://x.com/fumishiki
+- LinkedIn: https://www.linkedin.com/in/fumitakamurakami
+- GitHub: https://github.com/fumishiki
+- Hugging Face: https://huggingface.co/fumishiki
 
 ## ライセンス
 

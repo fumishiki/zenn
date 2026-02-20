@@ -5,7 +5,13 @@ type: "tech"
 topics: ["machinelearning", "mlops", "rust", "julia", "elixir"]
 published: true
 slug: "ml-lecture-31-part1"
+difficulty: "advanced"
+time_estimate: "90 minutes"
+languages: ["Julia", "Rust", "Elixir"]
+keywords: ["機械学習", "深層学習", "生成モデル"]
 ---
+
+> **📖 後編（実装編）**: [第31回後編: MLOps実装編](./ml-lecture-31-part2) | **→ 実装・実験ゾーンへ**
 
 # 第31回: MLOps完全版 — 99.9%可用性は"努力"ではなく"設計"だ
 
@@ -21,9 +27,7 @@ slug: "ml-lecture-31-part1"
 
 本講義はCourse IIIの第13回 — 第19回から始まった実践編の最終盤だ。第32回で統合PJを構築し、Course IIIを完結させる。
 
-:::message
-**このシリーズについて**: 東京大学 松尾・岩澤研究室動画講義の**完全上位互換**の全50回シリーズ。理論（論文が書ける）、実装（Production-ready）、最新（2025-2026 SOTA）の3軸で差別化する。
-:::
+> **Note:** **このシリーズについて**: 東京大学 松尾・岩澤研究室動画講義の**完全上位互換**の全50回シリーズ。理論（論文が書ける）、実装（Production-ready）、最新（2025-2026 SOTA）の3軸で差別化する。
 
 ```mermaid
 graph LR
@@ -122,9 +126,7 @@ $$
 
 **コードだけバージョニングしても再現できない。データもハイパーパラメータも環境もSeedも全て記録する必要がある。** これがMLflowの哲学だ。
 
-:::message
-**進捗: 3% 完了** 実験記録の核心を体感した。ここからMLOps全7領域(Version/Experiment/CI-CD/A-B/Monitor/Drift/RLHF)を網羅していく。
-:::
+> **Note:** **進捗: 3% 完了** 実験記録の核心を体感した。ここからMLOps全7領域(Version/Experiment/CI-CD/A-B/Monitor/Drift/RLHF)を網羅していく。
 
 ---
 
@@ -150,25 +152,6 @@ MLOpsは単一技術ではなく、**7つのシステムの統合**だ。
 
 実験管理の本質 = **「同じコードでもハイパラパラメータが違えば別実験」**。
 
-```python
-import mlflow
-
-# Run 1: lr=0.001
-with mlflow.start_run(run_name="run-lr-0.001"):
-    mlflow.log_param("lr", 0.001)
-    mlflow.log_param("batch_size", 32)
-    mlflow.log_metric("val_acc", 0.952)
-    mlflow.log_metric("val_loss", 0.023)
-
-# Run 2: lr=0.01 (higher LR)
-with mlflow.start_run(run_name="run-lr-0.01"):
-    mlflow.log_param("lr", 0.01)
-    mlflow.log_param("batch_size", 32)
-    mlflow.log_metric("val_acc", 0.968)  # Better!
-    mlflow.log_metric("val_loss", 0.019)
-
-# UI: mlflow ui --backend-store-uri sqlite:///mlflow.db
-```
 
 MLflow UIで2つのrunを横並び比較:
 
@@ -183,23 +166,6 @@ MLflow UIで2つのrunを横並び比較:
 
 大きなデータセット(10GB+)はGitに入らない。DVC [^2] が解決する。
 
-```bash
-# Initialize DVC
-dvc init
-
-# Track large dataset (stores pointer in Git, actual data in remote storage)
-dvc add data/train.csv
-git add data/train.csv.dvc .gitignore
-git commit -m "Track train.csv with DVC"
-
-# Push data to remote (S3/GCS/Azure)
-dvc remote add -d myremote s3://my-bucket/dvc-store
-dvc push
-
-# Checkout data version (like git checkout)
-git checkout experiment-v2
-dvc checkout  # Downloads data/train.csv version from experiment-v2
-```
 
 **Gitはメタファイル `.dvc` を管理し、DVCが実データをS3/GCSから取得する。データもコードと同じくバージョン管理できる。**
 
@@ -207,39 +173,6 @@ dvc checkout  # Downloads data/train.csv version from experiment-v2
 
 CI/CD for MLの基本 = **「コミットごとにモデル性能テスト」**。
 
-```yaml
-# .github/workflows/ml-ci.yml
-name: ML CI/CD
-
-on: [push, pull_request]
-
-jobs:
-  test-model:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.11'
-
-      - name: Install dependencies
-        run: |
-          pip install -r requirements.txt
-
-      - name: Run data validation tests
-        run: pytest tests/test_data_quality.py
-
-      - name: Train model and test performance
-        run: |
-          python train.py --config configs/test.yaml
-          python evaluate.py --threshold 0.95  # Fail if accuracy < 95%
-
-      - name: Test inference latency
-        run: |
-          python benchmark_latency.py --max-p99 100  # Fail if p99 > 100ms
-```
 
 **テストが失敗したら自動的にPRがブロックされる。性能劣化を防ぐゲートキーパー。**
 
@@ -247,51 +180,9 @@ jobs:
 
 本番モデルの健全性 = **RED Metrics (Rate / Errors / Duration)**。
 
-```python
-from prometheus_client import Counter, Histogram, start_http_server
-import time
-
-# Define metrics
-REQUEST_COUNT = Counter('model_requests_total', 'Total requests')
-ERROR_COUNT = Counter('model_errors_total', 'Total errors')
-LATENCY = Histogram('model_latency_seconds', 'Inference latency')
-
-# Expose metrics on :8000/metrics
-start_http_server(8000)
-
-def predict(input_data):
-    REQUEST_COUNT.inc()  # Increment request count
-    start_time = time.time()
-
-    try:
-        # Model inference
-        result = model.predict(input_data)
-        LATENCY.observe(time.time() - start_time)  # Record latency
-        return result
-    except Exception as e:
-        ERROR_COUNT.inc()  # Increment error count
-        raise e
-```
 
 Prometheus scrapes `/metrics` endpoint every 15s:
 
-```
-# HELP model_requests_total Total requests
-# TYPE model_requests_total counter
-model_requests_total 15234.0
-
-# HELP model_errors_total Total errors
-# TYPE model_errors_total counter
-model_errors_total 12.0
-
-# HELP model_latency_seconds Inference latency
-# TYPE model_latency_seconds histogram
-model_latency_seconds_bucket{le="0.05"} 12000.0
-model_latency_seconds_bucket{le="0.1"} 14800.0
-model_latency_seconds_bucket{le="+Inf"} 15234.0
-model_latency_seconds_sum 876.3
-model_latency_seconds_count 15234.0
-```
 
 **Grafanaでダッシュボード化すれば、リアルタイムでエラー率・レイテンシを監視できる。**
 
@@ -299,30 +190,6 @@ model_latency_seconds_count 15234.0
 
 新モデルをいきなり100%のユーザーに適用するのは危険。**1% → 5% → 25% → 100% の段階的ロールアウト** (Canary Deployment)。
 
-```python
-import random
-
-def route_traffic(user_id):
-    # Hash user_id for consistent assignment
-    hash_val = hash(user_id) % 100
-
-    if hash_val < 1:  # 1% to canary (new model)
-        return "model_v2"
-    else:  # 99% to baseline (old model)
-        return "model_v1"
-
-def predict_with_ab(user_id, input_data):
-    model_version = route_traffic(user_id)
-
-    if model_version == "model_v2":
-        result = model_v2.predict(input_data)
-        log_metric("model_v2_requests", 1)
-    else:
-        result = model_v1.predict(input_data)
-        log_metric("model_v1_requests", 1)
-
-    return result
-```
 
 **1%のユーザーでエラー率が上がったら即座にロールバック。問題なければ5%に拡大。**
 
@@ -330,30 +197,9 @@ def predict_with_ab(user_id, input_data):
 
 訓練時と本番データが乖離すると性能が劣化する。**KS検定 / PSI (Population Stability Index)** で自動検出。
 
-```python
-from scipy.stats import ks_2samp
-import numpy as np
-
-# Training data distribution (baseline)
-train_feature = np.random.normal(0, 1, 10000)
-
-# Production data distribution (could drift over time)
-prod_feature = np.random.normal(0.5, 1.2, 1000)  # Mean shift + variance increase
-
-# Kolmogorov-Smirnov test
-statistic, p_value = ks_2samp(train_feature, prod_feature)
-
-if p_value < 0.01:  # Significant drift detected
-    print(f"⚠️ Data drift detected! KS statistic: {statistic:.4f}, p-value: {p_value:.4e}")
-    trigger_retraining()
-else:
-    print(f"✅ No drift. KS statistic: {statistic:.4f}, p-value: {p_value:.4f}")
-```
 
 出力:
-```
-⚠️ Data drift detected! KS statistic: 0.2341, p-value: 3.42e-12
-```
+
 
 **ドリフトを検出したら自動的に再訓練をトリガーする。**
 
@@ -403,11 +249,15 @@ graph TD
 
 **7つのピースが環を成す。これがMLOpsのライフサイクルだ。**
 
-:::message
-**進捗: 10% 完了** MLOps全体像を俯瞰した。Zone 2で「なぜMLOpsが必須か」を掘り下げる。
-:::
+> **Note:** **進捗: 10% 完了** MLOps全体像を俯瞰した。Zone 2で「なぜMLOpsが必須か」を掘り下げる。
 
 ---
+
+
+> Progress: 10%
+> **理解度チェック**
+> 1. $y_w$ の各記号の意味と、この式が表す操作を説明してください。
+> 2. このゾーンで学んだ手法の直感的な意味と、なぜこの定式化が必要なのかを説明してください。
 
 ## 🧩 2. 直感ゾーン（15分）— なぜMLOpsは必須なのか
 
@@ -606,11 +456,15 @@ $$
 
 **2026年の展望**: ユーザーがスライダーで「創造性 vs 正確性」のトレードオフを調整できるLLM。
 
-:::message
-**進捗: 25% 完了** なぜMLOpsが必須か + 最新研究を理解した。Zone 3で7パートの理論を一気に構築する。
-:::
+> **Note:** **進捗: 25% 完了** なぜMLOpsが必須か + 最新研究を理解した。Zone 3で7パートの理論を一気に構築する。
 
 ---
+
+
+> Progress: 20%
+> **理解度チェック**
+> 1. $w_i$ の各記号の意味と、この式が表す操作を説明してください。
+> 2. このゾーンで学んだ手法の直感的な意味と、なぜこの定式化が必要なのかを説明してください。
 
 ## 📐 3. 数式修行ゾーン（90分）— MLOps全7領域の理論
 
@@ -640,6 +494,73 @@ $$
 
 ハッシュ関数 $\text{Hash}: \mathcal{M} \to \{0,1\}^{256}$ (SHA-256) が同じなら、モデルは**完全に再現可能**。
 
+##### セマンティックバージョニングの形式モデル
+
+バージョン識別子 $v$ を3-tupleで定義:
+
+$$
+v = (M, m, p) \in \mathbb{N}_0 \times \mathbb{N}_0 \times \mathbb{N}_0
+$$
+
+- $M$ (Major): 後方互換性のないアーキテクチャ変更
+- $m$ (Minor): 後方互換性のある機能追加 (新しい入力形式など)
+- $p$ (Patch): バグ修正・細かい再訓練
+
+バージョンの全順序 $\prec$:
+
+$$
+v \prec v' \iff M < M' \;\lor\; (M = M' \land m < m') \;\lor\; (M = M' \land m = m' \land p < p')
+$$
+
+MLモデルへの対応: アーキテクチャ変更で $M$ を増やし、同じアーキテクチャで再訓練したら $m$ を増やす。$p$ は再現性バグの修正のみ。バージョン比較の全順序が定まることで、**どのバージョンが「新しいか」が一意に決まる**。
+
+##### 再現性の関数合成モデル
+
+再現性を**4つの関数の合成**として定式化:
+
+$$
+f_{\text{reproduce}} = f_{\text{env}} \circ f_{\text{data}} \circ f_{\text{code}} \circ f_{\text{seed}}
+$$
+
+各関数の役割:
+
+| 関数 | 入力 | 出力 | 固定手段 |
+|:-----|:-----|:-----|:---------|
+| $f_{\text{env}}$ | ハードウェア + OS | 実行環境 $\mathcal{E}$ | Docker image digest |
+| $f_{\text{data}}$ | 生データ | 前処理済みデータ $\mathcal{D}$ | DVC hash (MD5/SHA256) |
+| $f_{\text{code}}$ | ソースコード | 実行バイナリ | Git commit SHA |
+| $f_{\text{seed}}$ | Random seed $s$ | 重み初期化 $\mathbf{w}_0$ | `torch.manual_seed(s)` |
+
+**再現性の充分条件**: 4つの関数が全て同一なら出力も同一:
+
+$$
+f_{\text{env}} = f'_{\text{env}} \;\land\; f_{\text{data}} = f'_{\text{data}} \;\land\; f_{\text{code}} = f'_{\text{code}} \;\land\; f_{\text{seed}} = f'_{\text{seed}} \implies f_{\text{reproduce}} = f'_{\text{reproduce}}
+$$
+
+いずれか1つでも異なればモデルの同一性は保証されない。CUDA `atomicAdd` の非決定性は $f_{\text{env}}$ レベルの問題であり、`torch.use_deterministic_algorithms(True)` で封じる。
+
+##### DVCパイプラインのDAG構造と再現性保証
+
+DVC pipelineは**有向非巡回グラフ (DAG)** $G = (V, E)$ として定義:
+
+$$
+V = \{v_1, v_2, \ldots, v_n\} \quad \text{(ステージ)}, \quad E \subseteq V \times V \quad \text{(依存関係エッジ)}
+$$
+
+**非巡回性** = トポロジカルソート $\sigma: V \to \{1,\ldots,|V|\}$ が存在:
+
+$$
+(u, v) \in E \implies \sigma(u) < \sigma(v)
+$$
+
+各ステージ $v_i$ は出力のハッシュ $h_i = \text{SHA256}(\text{output}_{v_i})$ を保持する。**差分実行のキャッシュ条件**:
+
+$$
+h_{\text{deps}(v_j)} = h'_{\text{deps}(v_j)} \implies \text{skip } v_j \quad \text{(キャッシュヒット)}
+$$
+
+依存ステージのハッシュが変わらない限り、下流ステージの再実行は不要。これがDVCが「変更されたステージのみ再実行する」数学的根拠であり、CIでの無駄な再訓練を排除する。
+
 ##### Git LFSによる大ファイル管理
 
 Gitは小さなテキストファイル向け。モデルファイル (500MB+) はGit LFSで管理。
@@ -649,11 +570,6 @@ Git LFSの仕組み:
 1. 大ファイル `model.safetensors` を `.git/lfs/objects/` に保存
 2. Gitには**ポインタファイル**のみ commit:
 
-```
-version https://git-lfs.github.com/spec/v1
-oid sha256:4d7a214614ab2935c1f0e1c69a0d3e82a5bb9e6e8e1e3a0c9f5d4c3b2a1b0c1d
-size 524288000
-```
 
 3. `git pull` 時、LFSサーバーから実ファイルをダウンロード
 
@@ -667,33 +583,15 @@ DVC [^2] はデータセット版Git LFS。
 
 1. データセット `data/train.csv` (10GB) を追跡:
 
-```bash
-dvc add data/train.csv
-```
 
 2. DVCが `.dvc` メタファイルを生成:
 
-```yaml
-# data/train.csv.dvc
-outs:
-- md5: a3f9c2e1b4d87f3a9c2e1b4d87f3a9c2
-  size: 10737418240
-  path: train.csv
-```
 
 3. Gitは `.dvc` ファイルのみ管理。実データはS3/GCS/Azureに保存:
 
-```bash
-dvc remote add -d myremote s3://my-bucket/dvc-store
-dvc push
-```
 
 4. 他のメンバーは `dvc pull` でデータを取得:
 
-```bash
-git checkout experiment-v2
-dvc checkout  # Downloads data version from experiment-v2
-```
 
 **数学的モデル**:
 
@@ -775,14 +673,6 @@ $$
 
 例: 訓練ループでepochごとに記録:
 
-```python
-for epoch in range(num_epochs):
-    train_loss = train_one_epoch()
-    val_acc = validate()
-
-    mlflow.log_metric("train_loss", train_loss, step=epoch)
-    mlflow.log_metric("val_acc", val_acc, step=epoch)
-```
 
 **メトリクスの時系列をプロットして収束を確認できる。**
 
@@ -844,45 +734,14 @@ $$
 
 **Dockerコンテナ**で環境を凍結:
 
-```dockerfile
-FROM python:3.11-slim
-
-# Pin library versions exactly
-RUN pip install torch==2.1.0 transformers==4.35.0
-
-# Copy code
-COPY . /app
-WORKDIR /app
-
-CMD ["python", "train.py"]
-```
 
 **ベースイメージのダイジェストも固定**:
 
-```dockerfile
-FROM python@sha256:a3f9c2e1b4d87f3a9c2e1b4d87f3a9c2e1b4d87f3a9c2e1b4d87f3a9c2
-```
 
 ##### 3.3.2 Seed固定
 
 全ての乱数生成をseedで制御:
 
-```python
-import torch
-import numpy as np
-import random
-
-def set_seed(seed: int):
-    random.seed(seed)
-    np.random.seed(seed)
-    torch.manual_seed(seed)
-    torch.cuda.manual_seed_all(seed)
-    # Deterministic CUDA operations (slower but reproducible)
-    torch.backends.cudnn.deterministic = True
-    torch.backends.cudnn.benchmark = False
-
-set_seed(42)
-```
 
 **`cudnn.deterministic = True`にすると、cuDNNは決定的アルゴリズムのみ使用 (速度低下あり)。**
 
@@ -930,27 +789,6 @@ $$
 
 例:
 
-```python
-import great_expectations as gx
-
-# Initialize context
-context = gx.get_context()
-
-# Create expectation suite
-suite = context.add_expectation_suite("data_quality_suite")
-
-# Define expectations
-suite.expect_column_values_to_not_be_null("user_id")
-suite.expect_column_values_to_be_between("age", min_value=0, max_value=120)
-suite.expect_column_mean_to_be_between("price", min_value=10, max_value=1000)
-
-# Validate data
-batch = context.get_batch({"path": "data/train.csv"})
-result = context.run_validation(batch, expectation_suite_name="data_quality_suite")
-
-if not result["success"]:
-    raise ValueError("Data validation failed!")
-```
 
 **数学的表現**:
 
@@ -977,23 +815,9 @@ $$
 
 例:
 
-```python
-# train.py
-model = train_model(train_data)
-val_acc = evaluate(model, val_data)
-
-if val_acc < 0.95:
-    raise ValueError(f"Model accuracy {val_acc:.4f} < 0.95")
-```
 
 **GitHub Actions統合**:
 
-```yaml
-- name: Train and test model
-  run: |
-    python train.py --config configs/ci.yaml
-    python test_model.py --threshold 0.95
-```
 
 **テスト失敗 → CI失敗 → PRマージ不可。**
 
@@ -1010,20 +834,6 @@ $$
 
 **ベンチマーク実装**:
 
-```python
-import time
-import numpy as np
-
-latencies = []
-for _ in range(1000):  # 1000 requests
-    start = time.time()
-    model.predict(input_data)
-    latencies.append(time.time() - start)
-
-p99 = np.percentile(latencies, 99)
-if p99 > 0.1:  # 100ms
-    raise ValueError(f"p99 latency {p99*1000:.2f}ms > 100ms")
-```
 
 **p99レイテンシがSLOを超えたらテスト失敗。**
 
@@ -1054,6 +864,96 @@ $$
 - $n$: サンプルサイズ
 
 **$t > t_{0.05, df}$ (5%有意水準) なら$H_0$を棄却 → 新モデルが有意に改善。**
+
+#### 3.8.1 Blue-Green デプロイのマルコフ連鎖モデル
+
+Blue-Greenデプロイを**有限マルコフ連鎖**として定式化。状態空間 $\mathcal{S} = \{\text{Blue}, \text{Green}, \text{Rollback}\}$:
+
+$$
+\mathbf{P} = \begin{pmatrix}
+1-p_d & p_d & 0 \\
+p_r & 1-p_r & 0 \\
+1 & 0 & 0
+\end{pmatrix}
+$$
+
+- $p_d$: デプロイ確率 (単位時間あたりのデプロイ率)
+- $p_r$: Rollback確率 (エラー率超過で遷移)
+- Rollback状態からは必ずBlueへ戻る ($P(\text{R} \to \text{B}) = 1$)
+
+**定常分布** $\boldsymbol{\pi}$ は $\boldsymbol{\pi} \mathbf{P} = \boldsymbol{\pi}$, $\sum_i \pi_i = 1$ から:
+
+$$
+\pi_{\text{Green}} = \frac{p_d}{p_d + p_r}, \quad \pi_{\text{Blue}} = \frac{p_r}{p_d + p_r}, \quad \pi_{\text{Rollback}} = 0
+$$
+
+$p_d \gg p_r$ のとき $\pi_{\text{Green}} \to 1$: 新モデルが常時本番稼働。CI/CD品質向上 = $p_r$ を下げること、と定量化できる。
+
+#### 3.8.2 カナリアデプロイの指数的トラフィックモデル
+
+段階的ロールアウトのトラフィック比率 $p(t)$ を連続時間で:
+
+$$
+p(t) = \min\!\left(1,\; p_0 \cdot e^{\lambda t}\right)
+$$
+
+- $p_0 \in (0,1)$: 初期トラフィック比率 (e.g., $p_0 = 0.01$)
+- $\lambda > 0$: 成長率パラメータ
+- $t \geq 0$: 経過時間 (hours)
+
+ロールアウト完了時刻 $T^*$ は $p(T^*) = 1$ から:
+
+$$
+T^* = \frac{\ln(1/p_0)}{\lambda} = \frac{-\ln p_0}{\lambda}
+$$
+
+例: $p_0 = 0.01$, $\lambda = 0.1$ のとき $T^* = \ln 100 / 0.1 \approx 46$ 時間。異常検知とのカップリング:
+
+$$
+e(t) > e_{\text{baseline}} + \epsilon \implies p(t) \leftarrow 0 \quad \text{(即時Rollback)}
+$$
+
+#### 3.8.3 Shadow デプロイメントの形式定義
+
+Shadow deploymentを**二重実行関数**として定義:
+
+$$
+\text{Shadow}(x) = \Bigl(\underbrace{\pi_{\text{prod}}(x)}_{\text{ユーザーへ返す}},\; \underbrace{\pi_{\text{new}}(x)}_{\text{ログへ記録}}\Bigr)
+$$
+
+ユーザーには $\pi_{\text{prod}}(x)$ のみ返し、$\pi_{\text{new}}(x)$ は完全にオフライン評価に回す。**統計的同等性テスト**: Shadow期間終了後に paired t-test:
+
+$$
+t = \frac{\bar{d}}{s_d / \sqrt{n}}, \quad d_i = m\!\left(\pi_{\text{new}}(x_i)\right) - m\!\left(\pi_{\text{prod}}(x_i)\right)
+$$
+
+$|t| > t_{0.025,\, n-1}$ かつ $\bar{d} > 0$ ならば $\pi_{\text{new}}$ をpromoteする統計的根拠となる。本番トラフィックを使いながらユーザー体験に影響を与えない、という意味でShadowは最もリスクの低い評価手法。
+
+#### 3.8.4 Rollback 決定の逐次尤度比検定
+
+ベルヌーイモデル: リクエスト $i$ のエラー $Z_i \sim \text{Bernoulli}(e)$。$H_0: e = e_0$ (正常), $H_1: e = e_1 > e_0$ (異常)。
+
+**SPRT統計量** (Wald, 1945):
+
+$$
+\Lambda_t = \prod_{i=1}^{t} \frac{P(Z_i \mid e_1)}{P(Z_i \mid e_0)} = \left(\frac{e_1}{e_0}\right)^{k_t} \left(\frac{1-e_1}{1-e_0}\right)^{t-k_t}
+$$
+
+- $k_t = \sum_{i=1}^t Z_i$: 累積エラー数
+
+対数を取ると逐次更新が容易:
+
+$$
+\ln \Lambda_t = k_t \ln\frac{e_1}{e_0} + (t - k_t) \ln\frac{1-e_1}{1-e_0}
+$$
+
+**Rollback 停止則**:
+
+$$
+\ln \Lambda_t \geq \ln\frac{1-\beta}{\alpha} \implies \text{Rollback}
+$$
+
+$\alpha = 0.01$, $\beta = 0.1$ のとき閾値 $= \ln 90 \approx 4.50$。SPRTはType I/II errorを同時に $\alpha, \beta$ 以下に制御することが証明されている。固定サンプル検定より平均で**少ないデータで判断**できる。
 
 ---
 
@@ -1104,6 +1004,56 @@ n &= \frac{(1.96 + 0.84)^2 \cdot 2 \cdot 0.10 \cdot 0.90}{0.02^2} \\
 $$
 
 **各群3,528サンプル必要 = 合計7,056ユーザー。**
+
+##### 3.9.1.1 サンプルサイズの第一原理からの導出
+
+二項分布の正規近似から導出する。各群 $n$ サンプルのコンバージョン率推定量:
+
+$$
+\hat{p}_A \sim \mathcal{N}\!\left(p_A,\, \frac{p_A(1-p_A)}{n}\right), \quad \hat{p}_B \sim \mathcal{N}\!\left(p_B,\, \frac{p_B(1-p_B)}{n}\right)
+$$
+
+差の推定量 $\hat{\delta} = \hat{p}_B - \hat{p}_A$:
+
+$$
+\hat{\delta} \sim \mathcal{N}\!\left(\delta,\; \frac{p_A(1-p_A) + p_B(1-p_B)}{n}\right)
+$$
+
+$H_0: \delta = 0$ の下で分散を $p_A \approx p_B \approx \bar{p}$ と近似し、標準化:
+
+$$
+Z = \frac{\hat{\delta}}{\sqrt{2\bar{p}(1-\bar{p})/n}} \sim \mathcal{N}(0,1) \quad \text{under } H_0
+$$
+
+検出力 $1-\beta$ を達成する条件: 真の効果 $\delta$ のもとで $P(|Z| > z_{1-\alpha/2}) = 1-\beta$。これは $Z$ の非心パラメータが
+
+$$
+\lambda = \delta \cdot \sqrt{\frac{n}{2\bar{p}(1-\bar{p})}} = z_{1-\alpha/2} + z_{1-\beta}
+$$
+
+となるよう $n$ を解くことと等価:
+
+$$
+\boxed{n = \frac{(z_{1-\alpha/2} + z_{1-\beta})^2 \cdot 2\bar{p}(1-\bar{p})}{\delta^2}}
+$$
+
+両側検定 ($\alpha = 0.05$) かつ検出力 $80\%$ ($\beta = 0.2$) では $(z_{0.975} + z_{0.8})^2 = (1.96 + 0.84)^2 = 7.84$。
+
+##### 3.9.1.2 MDE (Minimum Detectable Effect)
+
+固定サンプルサイズ $n$ で検出可能な最小効果量 (MDE) は、上式を $\delta$ について解いた:
+
+$$
+\delta_{\min} = (z_{1-\alpha/2} + z_{1-\beta}) \cdot \sqrt{\frac{2\bar{p}(1-\bar{p})}{n}}
+$$
+
+例: $n = 10{,}000$, $\bar{p} = 0.1$:
+
+$$
+\delta_{\min} = 2.80 \times \sqrt{\frac{2 \times 0.09}{10000}} = 2.80 \times 0.00424 \approx 0.012
+$$
+
+デイリーUUが少ないほど MDEが大きくなり、検出精度が落ちる。**サービスの規模がA/Bテストの解像度を決める。**
 
 ##### 3.9.2 Sequential Testing
 
@@ -1176,25 +1126,48 @@ $$
 
 カナリアリリースをコードレベルで制御。
 
-```python
-from feature_flags import is_enabled
-
-def predict(input_data, user_id):
-    if is_enabled("use_model_v2", user_id):
-        return model_v2.predict(input_data)
-    else:
-        return model_v1.predict(input_data)
-```
 
 **`is_enabled`の実装** (consistent hashing):
 
-```python
-def is_enabled(flag_name, user_id, rollout_percentage=0.01):
-    hash_val = hash(f"{flag_name}:{user_id}") % 100
-    return hash_val < rollout_percentage * 100
-```
 
 **1%ロールアウト = ハッシュ値0-0のユーザーのみ有効化。**
+
+#### 3.10.2 多群比較の多重検定補正
+
+複数バリアントの同時テスト (A/B/C/D/...) では**Family-Wise Error Rate (FWER)** が膨張する。
+
+$m$ 個の独立な帰無仮説を各々有意水準 $\alpha$ で検定すると:
+
+$$
+\text{FWER} = P(\text{少なくとも1つFP}) = 1 - (1-\alpha)^m
+$$
+
+$m = 10$, $\alpha = 0.05$ では FWER $= 1 - 0.95^{10} \approx 0.40$: 40%もの確率で偽陽性を報告してしまう。
+
+**Bonferroni補正**: 各テストの有意水準を $\alpha/m$ に下げる:
+
+$$
+\alpha_{\text{adj}} = \frac{\alpha}{m}, \quad \Rightarrow \text{FWER} \leq m \cdot \frac{\alpha}{m} = \alpha
+$$
+
+FWER $\leq \alpha$ を保証するが保守的すぎる — $m$ が増えるほど検出力が低下する。
+
+**Benjamini-Hochberg (BH) 補正**: FWERではなく **False Discovery Rate (FDR)** を制御:
+
+$$
+\text{FDR} = \mathbb{E}\!\left[\frac{V}{R \vee 1}\right]
+$$
+
+- $V$: 偽陽性 (False Positive) 数
+- $R$: 棄却総数
+
+BHアルゴリズム: $m$ 個のp値を昇順ソート $p_{(1)} \leq p_{(2)} \leq \cdots \leq p_{(m)}$ し、最大の $k^*$ を求める:
+
+$$
+k^* = \max\!\left\{i : p_{(i)} \leq \frac{i}{m}\,\alpha\right\}
+$$
+
+$p_{(1)}, \ldots, p_{(k^*)}$ に対応する仮説を棄却。BH補正はFDR $\leq \alpha$ を保証し、Bonferroniより検出力が高い。MLOps実務では多群A/BテストにBH補正を適用し、FDR 5%以下を維持する。
 
 ---
 
@@ -1218,26 +1191,6 @@ $$
 
 **Prometheus exporterの実装**:
 
-```python
-from prometheus_client import Counter, Histogram
-
-REQUEST_COUNT = Counter('model_requests_total', 'Total requests')
-ERROR_COUNT = Counter('model_errors_total', 'Total errors')
-LATENCY = Histogram('model_latency_seconds', 'Latency',
-                    buckets=[0.01, 0.05, 0.1, 0.5, 1.0, 5.0])
-
-def predict_with_metrics(input_data):
-    REQUEST_COUNT.inc()
-    start = time.time()
-
-    try:
-        result = model.predict(input_data)
-        LATENCY.observe(time.time() - start)
-        return result
-    except Exception:
-        ERROR_COUNT.inc()
-        raise
-```
 
 **Prometheusがこれらをscrapeして時系列DBに保存。**
 
@@ -1310,20 +1263,24 @@ $$
 
 - $n = \frac{n_{\text{train}} \cdot n_{\text{prod}}}{n_{\text{train}} + n_{\text{prod}}}$
 
+**KS統計量の漸近分布**:
+
+有効サンプルサイズ $n_{\text{eff}} = n_{\text{train}} n_{\text{prod}} / (n_{\text{train}} + n_{\text{prod}})$ のもとで、$H_0$ の下:
+
+$$
+\sqrt{n_{\text{eff}}} \cdot D_{n_{\text{train}},\, n_{\text{prod}}} \xrightarrow{d} K
+$$
+
+$K$ は**Kolmogorov分布**に従い、その分布関数:
+
+$$
+P(K \leq z) = 1 - 2\sum_{k=1}^{\infty}(-1)^{k-1}e^{-2k^2z^2}
+$$
+
+有意水準 $\alpha = 0.05$ の臨界値は $z_{0.05} \approx 1.358$。実用的には $D > 1.358 / \sqrt{n_{\text{eff}}}$ のときドリフトありと判定する。$n_{\text{eff}}$ が大きいほど閾値が小さくなり、微細なドリフトも検出可能になる。
+
 **実装**:
 
-```python
-from scipy.stats import ks_2samp
-
-train_feature = train_data["feature_1"]
-prod_feature = prod_data["feature_1"]
-
-statistic, p_value = ks_2samp(train_feature, prod_feature)
-
-if p_value < 0.01:  # 1% significance level
-    print("⚠️ Data drift detected!")
-    trigger_retraining()
-```
 
 ##### 3.13.2 Population Stability Index (PSI)
 
@@ -1345,36 +1302,29 @@ $$
 | 0.1 - 0.25 | 軽微なドリフト (監視継続) |
 | > 0.25 | 重大なドリフト (再訓練必要) |
 
+**PSI とKL Divergenceの等価関係**:
+
+PSIは**Jeffreys Divergence** (双方向対称KL) に厳密に等しい:
+
+$$
+\text{PSI} = \sum_{i=1}^{B} (p_i - q_i)\ln\frac{p_i}{q_i} = D_{\text{KL}}(p \| q) + D_{\text{KL}}(q \| p)
+$$
+
+**証明**:
+
+$$
+D_{\text{KL}}(p \| q) + D_{\text{KL}}(q \| p)
+= \sum_i p_i \ln\frac{p_i}{q_i} + \sum_i q_i \ln\frac{q_i}{p_i}
+= \sum_i p_i \ln\frac{p_i}{q_i} - \sum_i q_i \ln\frac{p_i}{q_i}
+= \sum_i (p_i - q_i)\ln\frac{p_i}{q_i}
+$$
+
+各項 $(p_i - q_i)\ln(p_i/q_i) \geq 0$ は符号一致 ($p_i > q_i \Rightarrow \ln(p_i/q_i) > 0$) から明らか。よって PSI $\geq 0$、等号は全ビンで $p_i = q_i$ のときのみ。
+
+**JSDとの関係**: JSD $= \frac{1}{2}D_{\text{KL}}(p \| M) + \frac{1}{2}D_{\text{KL}}(q \| M)$ ($M = (p+q)/2$) は $[0, \ln 2]$ に有界。PSIは無界 (発散し得る) だが、JSDは常に比較可能。PSI > 0.25 という閾値はJSDでは $\sqrt{\text{JSD}} > 0.3$ 程度に対応する。
+
 **実装**:
 
-```python
-import numpy as np
-
-def calculate_psi(train_data, prod_data, bins=10):
-    # Bin data
-    min_val = min(train_data.min(), prod_data.min())
-    max_val = max(train_data.max(), prod_data.max())
-    bin_edges = np.linspace(min_val, max_val, bins+1)
-
-    train_hist, _ = np.histogram(train_data, bins=bin_edges)
-    prod_hist, _ = np.histogram(prod_data, bins=bin_edges)
-
-    # Normalize
-    p_train = train_hist / train_hist.sum()
-    p_prod = prod_hist / prod_hist.sum()
-
-    # Avoid log(0)
-    p_train = np.where(p_train == 0, 0.0001, p_train)
-    p_prod = np.where(p_prod == 0, 0.0001, p_prod)
-
-    # Calculate PSI
-    psi = np.sum((p_prod - p_train) * np.log(p_prod / p_train))
-    return psi
-
-psi = calculate_psi(train_feature, prod_feature)
-if psi > 0.25:
-    print(f"⚠️ Significant drift detected! PSI = {psi:.4f}")
-```
 
 ##### 3.13.3 Jensen-Shannon Divergence
 
@@ -1393,16 +1343,6 @@ $$
 
 **実装** (離散分布):
 
-```python
-from scipy.spatial.distance import jensenshannon
-
-p = np.histogram(train_feature, bins=20, density=True)[0]
-q = np.histogram(prod_feature, bins=20, density=True)[0]
-
-js_div = jensenshannon(p, q)
-if js_div > 0.3:  # Threshold (0-1 range after sqrt)
-    print(f"⚠️ Drift detected! JSD = {js_div:.4f}")
-```
 
 ---
 
@@ -1440,18 +1380,6 @@ $$
 
 **Reward modelの訓練**:
 
-```python
-def reward_model_loss(r_win, r_lose):
-    return -torch.log(torch.sigmoid(r_win - r_lose)).mean()
-
-# Training loop
-for x, y_win, y_lose in dataloader:
-    r_win = reward_model(x, y_win)
-    r_lose = reward_model(x, y_lose)
-    loss = reward_model_loss(r_win, r_lose)
-    loss.backward()
-    optimizer.step()
-```
 
 
 ##### 3.14.2 PPO (Proximal Policy Optimization)
@@ -1526,14 +1454,6 @@ $$
 
 **実装**:
 
-```python
-def dpo_loss(pi_theta, pi_ref, x, y_win, y_lose, beta=0.1):
-    log_ratio_win = pi_theta.log_prob(y_win, x) - pi_ref.log_prob(y_win, x)
-    log_ratio_lose = pi_theta.log_prob(y_lose, x) - pi_ref.log_prob(y_lose, x)
-
-    loss = -torch.log(torch.sigmoid(beta * (log_ratio_win - log_ratio_lose)))
-    return loss.mean()
-```
 
 **DPOの利点**:
 
@@ -1661,25 +1581,30 @@ $$
 
 **このループが自動化されていれば、MLシステムは "self-healing" になる。**
 
-:::message
-**進捗: 50% 完了** MLOps全7領域の理論を完全網羅した。Zone 4で⚡Julia + 🦀Rust + 🔮Elixir実装へ。
-:::
+> **Note:** **進捗: 50% 完了** MLOps全7領域の理論を完全網羅した。Zone 4で⚡Julia + 🦀Rust + 🔮Elixir実装へ。
 
 ---
 
+
+
+
+> Progress: 50%
+> **理解度チェック**
+> 1. $A_t$ の各記号の意味と、この式が表す操作を説明してください。
+> 2. このゾーンで学んだ手法の直感的な意味と、なぜこの定式化が必要なのかを説明してください。
 
 ## 参考文献
 
 ### 主要論文
 
 [^1]: Rafailov, R., Sharma, A., Mitchell, E., Ermon, S., Manning, C. D., & Finn, C. (2023). Direct Preference Optimization: Your Language Model is Secretly a Reward Model. *NeurIPS 2023*.
-@[card](https://arxiv.org/abs/2305.18290)
+<https://arxiv.org/abs/2305.18290>
 
 [^2]: DVC: Data Version Control.
-@[card](https://dvc.org/)
+<https://dvc.org/>
 
 [^3]: Great Expectations: Data validation framework.
-@[card](https://greatexpectations.io/)
+<https://greatexpectations.io/>
 
 ### 教科書
 
@@ -1690,38 +1615,13 @@ $$
 
 ---
 
-## 記法規約
+## 著者リンク
 
-| 記法 | 意味 |
-|:-----|:-----|
-| $\mathcal{M}_t$ | 時刻$t$のモデル状態 (5-tuple) |
-| $\mathbf{w}_t$ | パラメータベクトル |
-| $\mathcal{D}_t$ | データセット |
-| $\mathcal{H}_t$ | ハイパーパラメータ集合 |
-| $\mathcal{E}_t$ | 環境 (Python/CUDA version) |
-| $s_t$ | Random seed |
-| $e_i$ | 実験 $i$ (4-tuple: $\mathbf{h}, \mathcal{D}, \mathbf{m}, \mathcal{A}$) |
-| $\text{SLI}$ | Service Level Indicator (測定可能なメトリクス) |
-| $\text{SLO}$ | Service Level Objective (SLIの目標値) |
-| $\text{Error Budget}$ | $1 - \text{SLO}$ (許容される失敗の量) |
-| $D_{\text{KL}}(P \| Q)$ | Kullback-Leibler divergence |
-| $\text{JSD}(P \| Q)$ | Jensen-Shannon Divergence |
-| $D_{\text{KS}}$ | Kolmogorov-Smirnov統計量 |
-| $\text{PSI}$ | Population Stability Index |
-| $r(x, y)$ | Reward model |
-| $\pi_\theta(y \mid x)$ | Policy (LLM) |
-| $\pi_{\text{ref}}(y \mid x)$ | Reference policy |
-| $\beta$ | KL正則化係数 |
-| $y_w$ | 好ましい応答 (win) |
-| $y_l$ | 好ましくない応答 (lose) |
-| $\mathcal{L}_{\text{DPO}}$ | Direct Preference Optimization loss |
-| $\mathcal{L}_{\text{RM}}$ | Reward Modeling loss (Bradley-Terry) |
-| $\alpha$ | 有意水準 (Type I error rate, 通常0.05) |
-| $\beta$ | Type II error rate (通常0.2 → power = 0.8) |
-| $\delta$ | Minimum Detectable Effect (MDE) |
-| $n$ | サンプルサイズ |
-
----
+- Blog: https://fumishiki.dev
+- X: https://x.com/fumishiki
+- LinkedIn: https://www.linkedin.com/in/fumitakamurakami
+- GitHub: https://github.com/fumishiki
+- Hugging Face: https://huggingface.co/fumishiki
 
 ## ライセンス
 

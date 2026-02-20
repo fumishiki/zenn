@@ -5,7 +5,13 @@ emoji: "🤖"
 type: "tech"
 topics: ["machinelearning", "agent", "rust", "elixir", "julia"]
 published: true
+difficulty: "advanced"
+time_estimate: "90 minutes"
+languages: ["Julia", "Rust", "Elixir"]
+keywords: ["機械学習", "深層学習", "生成モデル"]
 ---
+
+> **📖 前編（理論編）**: [第30回前編: エージェント理論編](./ml-lecture-30-part1) | **← 理論・数式ゾーンへ**
 
 ## 💻 4. 実装ゾーン（60分）— Production Agent System
 
@@ -95,7 +101,7 @@ impl ToolRegistry {
         loop {
             match self.execute_with_timeout(name, args.clone(), config.timeout_ms).await {
                 Ok(result) => return Ok(result),
-                Err(e) if retry_count < config.max_retries => {
+                Err(_) if retry_count < config.max_retries => {
                     retry_count += 1;
                     let wait_ms = if config.exponential_backoff {
                         2_u64.pow(retry_count as u32) * 100
@@ -191,7 +197,7 @@ impl VectorMemory {
 
         Ok(search_result.result.into_iter().map(|point| {
             serde_json::from_str(&serde_json::to_string(&point.payload).unwrap()).unwrap()
-        }).collect())
+        }).collect::<Vec<_>>())
     }
 }
 ```
@@ -431,13 +437,8 @@ end
 client = OpenAIClient()
 
 tools = Dict(
-    "search" => (args) -> begin
-        # Call Rust tool registry via FFI
-        tool_execute("search", args)
-    end,
-    "calculator" => (args) -> begin
-        eval(Meta.parse(args["expr"]))
-    end
+    "search"     => args -> tool_execute("search", args),
+    "calculator" => args -> eval(Meta.parse(args["expr"]))
 )
 
 # Create agent
@@ -451,29 +452,27 @@ println("Final Answer: $answer")
 Elixir Multi-Agent Orchestration:
 
 ```elixir
-# Start supervision tree
-{:ok, _} = Agent.Application.start(:normal, [])
-
-# Spawn agents with different roles
-{:ok, planner} = Agent.WorkerSupervisor.start_agent(:planner, [name: :planner])
-{:ok, executor} = Agent.WorkerSupervisor.start_agent(:executor, [name: :executor])
-{:ok, reviewer} = Agent.WorkerSupervisor.start_agent(:reviewer, [name: :reviewer])
-
-# Coordinate multi-agent task
-task = %{
-  description: "Build a web application",
-  requirements: ["Backend API", "Frontend UI", "Database"]
-}
-
-result = Agent.Coordinator.delegate_task(task)
-IO.inspect(result)
+with {:ok, _} <- Agent.Application.start(:normal, []),
+     {:ok, planner}  <- Agent.WorkerSupervisor.start_agent(:planner,  name: :planner),
+     {:ok, executor} <- Agent.WorkerSupervisor.start_agent(:executor, name: :executor),
+     {:ok, reviewer} <- Agent.WorkerSupervisor.start_agent(:reviewer, name: :reviewer) do
+  %{
+    description: "Build a web application",
+    requirements: ["Backend API", "Frontend UI", "Database"]
+  }
+  |> Agent.Coordinator.delegate_task()
+  |> IO.inspect()
+end
 ```
 
-:::message
-**progress: 70%** — Zone 4完了。Rust / Elixir / Juliaを統合した本番品質のエージェントシステムを構築した。
-:::
+> **Note:** **progress: 70%** — Zone 4完了。Rust / Elixir / Juliaを統合した本番品質のエージェントシステムを構築した。
 
 ---
+
+> Progress: 85%
+> **理解度チェック**
+> 1. RustのTool Registryで、ToolをHashMapで動的登録する設計と静的enum設計のトレードオフを、型安全性とランタイム柔軟性の観点から説明せよ。
+> 2. ElixirのGenServer + Supervision Treeを使ったMulti-Agent設計で、プロセスクラッシュ時の自動回復が実現できる仕組み（let it crash哲学）を説明せよ。
 
 ## 🔬 5. 実験ゾーン（30分）— エージェントベンチマーク
 
@@ -481,7 +480,7 @@ IO.inspect(result)
 
 ### 5.1 AgentBench概要
 
-AgentBench [^7] は、LLMエージェントを評価する包括的ベンチマークだ。8つの環境で評価:
+AgentBench [^7] は、LLMエージェントを評価するベンチマークだ。8つの環境で評価:
 
 | 環境 | タスク | 評価指標 | 難易度 |
 |:-----|:------|:---------|:-------|
@@ -582,9 +581,8 @@ function benchmark_planning_methods()
     return df
 end
 
-function exact_match(pred::String, truth::String)
-    return lowercase(strip(pred)) == lowercase(strip(truth)) ? 1.0 : 0.0
-end
+exact_match(pred::String, truth::String) =
+    lowercase(strip(pred)) == lowercase(strip(truth)) ? 1.0 : 0.0
 
 # Simulate Zero-shot ReAct agent
 function run_zero_shot_agent(query::String)
@@ -701,38 +699,23 @@ function benchmark_memory_effect()
     ground_truth = ["Paris", "Julia", "2021"]
 
     # Without memory
-    no_memory_scores = []
-    for (q, truth) in zip(questions, ground_truth)
-        ans = run_agent_no_memory(story, q)
-        push!(no_memory_scores, exact_match(ans, truth))
-    end
+    no_memory_scores = [exact_match(run_agent_no_memory(story, q), truth)
+                        for (q, truth) in zip(questions, ground_truth)]
 
     # With memory
-    memory_scores = []
     memory = init_memory(story)
-    for (q, truth) in zip(questions, ground_truth)
-        ans = run_agent_with_memory(memory, q)
-        push!(memory_scores, exact_match(ans, truth))
-    end
+    memory_scores = [exact_match(run_agent_with_memory(memory, q), truth)
+                     for (q, truth) in zip(questions, ground_truth)]
 
     println("Without Memory: Accuracy = $(round(mean(no_memory_scores) * 100, digits=2))%")
     println("With Memory: Accuracy = $(round(mean(memory_scores) * 100, digits=2))%")
 end
 
-function init_memory(text::String)
-    # Simplified: store text chunks with embeddings
-    return Dict("text" => text)
-end
+init_memory(text::String) = Dict("text" => text)
 
-function run_agent_no_memory(story::String, query::String)
-    # Simplified: LLM without memory
-    return "Paris"
-end
+run_agent_no_memory(story::String, query::String) = "Paris"
 
-function run_agent_with_memory(memory::Dict, query::String)
-    # Simplified: LLM with memory retrieval
-    return "Paris"
-end
+run_agent_with_memory(memory::Dict, query::String) = "Paris"
 
 benchmark_memory_effect()
 ```
@@ -752,36 +735,24 @@ function benchmark_multi_agent_debate()
     ground_truth = ["Yes", "12", "Yes"]
 
     # Single agent
-    single_scores = []
-    for (q, truth) in zip(questions, ground_truth)
-        ans = run_single_agent(q)
-        push!(single_scores, exact_match(ans, truth))
-    end
+    single_scores = [exact_match(run_single_agent(q), truth)
+                     for (q, truth) in zip(questions, ground_truth)]
 
     # Multi-agent debate
-    debate_scores = []
-    for (q, truth) in zip(questions, ground_truth)
-        ans = run_multi_agent_debate(q, n_agents=3, n_rounds=2)
-        push!(debate_scores, exact_match(ans, truth))
-    end
+    debate_scores = [exact_match(run_multi_agent_debate(q, n_agents=3, n_rounds=2), truth)
+                     for (q, truth) in zip(questions, ground_truth)]
 
     println("Single Agent: Accuracy = $(round(mean(single_scores) * 100, digits=2))%")
     println("Multi-Agent Debate: Accuracy = $(round(mean(debate_scores) * 100, digits=2))%")
 end
 
-function run_single_agent(query::String)
-    return "Yes"
-end
+run_single_agent(::String) = "Yes"
 
 function run_multi_agent_debate(query::String; n_agents::Int, n_rounds::Int)
     answers = [run_single_agent(query) for _ in 1:n_agents]
 
     # Majority voting
-    counts = Dict{String, Int}()
-    for ans in answers
-        counts[ans] = get(counts, ans, 0) + 1
-    end
-
+    counts = Dict(a => count(==(a), answers) for a in unique(answers))
     return argmax(counts)
 end
 
@@ -826,11 +797,14 @@ benchmark_multi_agent_debate()
 
 </details>
 
-:::message
-**progress: 85%** — Zone 5完了。AgentBenchでの評価手法と、Planning / Memory / Multi-Agentの効果を実験で確認した。
-:::
+> **Note:** **progress: 85%** — Zone 5完了。AgentBenchでの評価手法と、Planning / Memory / Multi-Agentの効果を実験で確認した。
 
 ---
+
+> Progress: 95%
+> **理解度チェック**
+> 1. Voyager（Minecraft Agent）がReActと比べて長期スキル獲得に優れている理由を、Skill LibraryとCurriculum Agentの仕組みから論じよ。
+> 2. Multi-Agent Debate（MAD）における合意形成プロセスが単一エージェントのself-consistencyより高精度を達成できる条件と限界を説明せよ。
 
 ## 🎓 6. 振り返りと発展ゾーン（30分）— まとめと最新研究動向
 
@@ -861,7 +835,7 @@ graph TD
 | **Toolformer** | 2023 | 自己教師あり Tool Use学習 | [^2] |
 | **ReWOO** | 2023 | 並列Tool実行、5x効率化 | [^3] |
 | **Generative Agents** | 2023 | Memory-augmented社会シミュレーション | [^4] |
-| **AgentBench** | 2023 | 8環境での包括的評価 | [^7] |
+| **AgentBench** | 2023 | 8環境での多角的評価 | [^7] |
 | **MetaGPT** | 2023 | SOP-based Multi-Agent開発 | [^8] |
 | **AutoGen** | 2023 | Multi-Agent会話フレームワーク | [^9] |
 | **HuggingGPT** | 2023 | LLMでモデルオーケストレーション | [^10] |
@@ -1037,45 +1011,36 @@ graph LR
 
 **実装詳細 — Code Editingパイプライン**:
 
-```python
-# Devin-style code editing workflow
-async def autonomous_code_fix(issue_url: str) -> bool:
-    # 1. Issue理解
-    issue = await github.get_issue(issue_url)
-    context = await code_search.find_relevant_files(issue.description)
+```elixir
+# Elixir: 自律コード修正エージェント (OTPパターン)
+defmodule AutonomousCodeAgent do
+  use GenServer
 
-    # 2. Planning (ReAct)
-    plan = await llm.plan(
-        f"Fix issue: {issue.title}\n"
-        f"Description: {issue.description}\n"
-        f"Relevant files: {context.files}"
-    )
+  def fix_issue(issue_url) do
+    {:ok, pid} = GenServer.start_link(__MODULE__, %{issue_url: issue_url})
+    GenServer.call(pid, :execute, 60_000)
+  end
 
-    # 3. Implementation Loop
-    for step in plan.steps:
-        # Code modification
-        edits = await llm.generate_edits(step, context)
-        await apply_edits(edits)
+  def handle_call(:execute, _from, state) do
+    with {:ok, issue}   <- GitHub.get_issue(state.issue_url),
+         {:ok, context} <- CodeSearch.find_relevant_files(issue.description),
+         {:ok, plan}    <- LLM.plan(issue, context),
+         {:ok, _pr}     <- execute_plan(plan, context) do
+      {:reply, :ok, state}
+    else
+      {:error, reason} -> {:reply, {:error, reason}, state}
+    end
+  end
 
-        # Test execution
-        test_result = await run_tests()
-
-        if test_result.failed:
-            # Debug loop
-            debug_info = await llm.analyze_failure(test_result)
-            context.add_feedback(debug_info)
-            continue  # Retry with updated context
-        else:
-            break  # Success
-
-    # 4. PR creation via MCP
-    await mcp_github.create_pull_request(
-        title=f"Fix: {issue.title}",
-        body=f"Resolves #{issue.number}",
-        branch=f"fix/issue-{issue.number}"
-    )
-
-    return True
+  defp execute_plan(plan, context) do
+    Enum.reduce_while(plan.steps, {:ok, context}, fn step, {:ok, ctx} ->
+      case apply_step(step, ctx) do
+        {:ok, new_ctx} -> {:cont, {:ok, new_ctx}}
+        {:error, _} = err -> {:halt, err}
+      end
+    end)
+  end
+end
 ```
 
 ### 6.5 Advanced Agent Patterns (2025)
@@ -1094,142 +1059,99 @@ Layer 3: Tool Agents (Atomic operations)
 
 **実装例**:
 
-```python
-class MetaAgent:
-    """Layer 1: High-level coordination"""
-    def __init__(self):
-        self.specialists = {
-            "code": CodeSpecialistAgent(),
-            "research": ResearchSpecialistAgent(),
-            "design": DesignSpecialistAgent()
-        }
+```elixir
+# MetaAgent: 階層型エージェントシステム (Layer 1 — Orchestrator)
+defmodule MetaAgent do
+  use GenServer
 
-    async def execute(self, task):
-        # Task decomposition
-        subtasks = await self.plan(task)
+  def execute(task) do
+    subtasks = LLM.decompose(task)
 
-        # Delegate to specialists
-        results = []
-        for subtask in subtasks:
-            specialist = self.select_specialist(subtask)
-            result = await specialist.execute(subtask)
-            results.append(result)
+    # 並列実行: Task.async_stream で各サブタスクを専門エージェントに委譲
+    subtasks
+    |> Task.async_stream(&delegate_to_specialist/1, max_concurrency: 4, timeout: 30_000)
+    |> Enum.map(fn {:ok, result} -> result end)
+    |> LLM.synthesize()
+  end
 
-        # Synthesize
-        return await self.synthesize(results)
-
-    def select_specialist(self, subtask):
-        # LLM-based routing
-        domain = llm.classify(subtask.description)
-        return self.specialists.get(domain, self.specialists["code"])
-
-class CodeSpecialistAgent:
-    """Layer 2: Domain specialist"""
-    def __init__(self):
-        self.tools = [
-            FilesystemTool(),
-            GitTool(),
-            TestRunnerTool(),
-            LinterTool()
-        ]
-
-    async def execute(self, subtask):
-        # ReAct loop with domain-specific tools
-        for step in range(10):
-            thought = await llm.reason(subtask, self.context)
-            action = self.parse_action(thought)
-
-            if action.type == "finish":
-                return action.result
-
-            # Execute via tool agents (Layer 3)
-            observation = await self.tools[action.tool_name].execute(action.args)
-            self.context.append(observation)
-
-        return "Max steps reached"
+  defp delegate_to_specialist(subtask) do
+    domain = LLM.classify(subtask.description)
+    specialist = SpecialistRegistry.lookup(domain)
+    GenServer.call(specialist, {:execute, subtask})
+  end
+end
 ```
 
 **Pattern 2: Reflexion — Self-Critique Loop**
 
 Shinn et al. (2023) の**Reflexion**パターン: エージェントが自己批評で改善。
 
-```python
-class ReflexionAgent:
-    def __init__(self):
-        self.memory = []
+```elixir
+# CodeSpecialistAgent: ドメイン専門エージェント (Layer 2)
+defmodule CodeSpecialistAgent do
+  use GenServer
 
-    async def solve_with_reflection(self, task, max_trials=3):
-        for trial in range(max_trials):
-            # Attempt
-            solution = await self.attempt(task)
+  @tools [:filesystem, :git, :test_runner, :linter]
+  @max_steps 10
 
-            # Self-evaluation
-            evaluation = await llm.evaluate(
-                f"Task: {task}\nSolution: {solution}\n"
-                f"Is this correct? If not, what's wrong?"
-            )
+  def execute(subtask) do
+    {:ok, pid} = GenServer.start_link(__MODULE__, %{subtask: subtask, context: []})
+    GenServer.call(pid, :run, 120_000)
+  end
 
-            if evaluation.is_correct:
-                return solution
+  def handle_call(:run, _from, %{subtask: subtask, context: ctx} = state) do
+    result = react_loop(subtask, ctx, @max_steps)
+    {:reply, result, state}
+  end
 
-            # Reflection: Learn from failure
-            reflection = await llm.reflect(
-                f"Previous attempt failed because: {evaluation.reason}\n"
-                f"What should I try differently?"
-            )
-
-            self.memory.append({
-                "trial": trial,
-                "solution": solution,
-                "failure_reason": evaluation.reason,
-                "reflection": reflection
-            })
-
-        return "Failed after max trials"
+  defp react_loop(_task, _ctx, 0), do: {:error, :max_steps_reached}
+  defp react_loop(task, ctx, steps) do
+    thought = LLM.reason(task, ctx)
+    case parse_action(thought) do
+      {:finish, result}      -> {:ok, result}
+      {:tool, name, args}    ->
+        observation = apply(ToolAgents, name, [args])
+        react_loop(task, [observation | ctx], steps - 1)
+    end
+  end
+end
 ```
 
 **Pattern 3: Constitutional AI for Agents**
 
 Anthropic's Constitutional AIをエージェントに適用:
 
-```python
-class ConstitutionalAgent:
-    def __init__(self):
-        self.constitution = [
-            "Never access files outside the project directory",
-            "Always ask for confirmation before destructive operations",
-            "Respect API rate limits",
-            "Never execute code with eval() or exec()"
-        ]
+```julia
+# Reflexion: 自己批評による反復改善エージェント
+# 数式: π_{t+1} = argmax_π 𝔼[R | s_t, verbal_reflection(π_t)]
 
-    async def execute_with_guardrails(self, action):
-        # Pre-check against constitution
-        violations = await self.check_constitution(action)
+struct ReflexionAgent
+    memory::Vector{String}
+end
 
-        if violations:
-            return f"Action blocked: {violations}"
+function solve_with_reflection!(agent::ReflexionAgent, task::String; max_trials::Int=3)
+    for trial in 1:max_trials
+        # 試行
+        solution = attempt(task, agent.memory)
+        
+        # 自己評価
+        eval_result = evaluate_solution(solution, task)
+        
+        if eval_result.success
+            return solution  # 成功
+        end
+        
+        # Verbal Reflection: 失敗原因の言語化
+        reflection = reflect(solution, eval_result.feedback)
+        push!(agent.memory, reflection)
+    end
+    return nothing  # max_trials exceeded
+end
 
-        # Execute
-        result = await self.execute_action(action)
-
-        # Post-check
-        post_violations = await self.check_result(result)
-
-        if post_violations:
-            await self.rollback(action)
-            return f"Action rolled back: {post_violations}"
-
-        return result
-
-    async def check_constitution(self, action):
-        violations = []
-
-        for rule in self.constitution:
-            prompt = f"Rule: {rule}\nAction: {action}\nDoes this action violate the rule?"
-            if await llm.check(prompt):
-                violations.append(rule)
-
-        return violations
+# 検算: メモリは反復ごとに蓄積
+agent = ReflexionAgent(String[])
+# After trial 1: length(agent.memory) == 1
+# After trial 2: length(agent.memory) == 2
 ```
 
 ### 6.6 Agent Evaluation Benchmarks (2024-2025)
@@ -1333,117 +1255,6 @@ Agent (PR): Create PR with description
 
 ROI: 80x cost reduction for routine tasks.
 
-### 6.8 Agent Safety & Alignment
-
-**Safety Challenges**:
-
-1. **Unbounded Tool Use**: エージェントが無限ループでAPI課金
-2. **Data Leakage**: 機密情報を外部APIに送信
-3. **Adversarial Prompts**: ユーザーが悪意ある指示でエージェント乗っ取り
-
-**Defense Mechanisms**:
-
-```python
-class SafeAgent:
-    def __init__(self):
-        self.usage_limits = {
-            "max_api_calls_per_task": 100,
-            "max_tokens_per_task": 50000,
-            "max_execution_time": 300  # 5 min
-        }
-        self.sensitive_data_detector = PIIDetector()
-
-    async def execute_safe(self, task):
-        # Budget tracking
-        budget = TaskBudget(self.usage_limits)
-
-        try:
-            with timeout(self.usage_limits["max_execution_time"]):
-                while not task.is_complete():
-                    action = await self.plan_next_action(task)
-
-                    # Pre-flight checks
-                    if not budget.can_afford(action):
-                        raise BudgetExceededError()
-
-                    if self.is_sensitive_data(action.args):
-                        raise DataLeakageError()
-
-                    # Execute
-                    result = await self.execute_action(action)
-                    budget.charge(action)
-                    task.update(result)
-
-        except BudgetExceededError:
-            return "Task aborted: Budget exceeded"
-        except DataLeakageError:
-            return "Task aborted: Sensitive data detected"
-        except TimeoutError:
-            return "Task aborted: Time limit exceeded"
-
-    def is_sensitive_data(self, data):
-        # PII detection
-        return self.sensitive_data_detector.scan(str(data))
-```
-
-### 6.9 Human-in-the-Loop Agents
-
-完全自律は危険 → Critical操作で人間承認を要求。
-
-```python
-class HITLAgent:
-    """Human-in-the-Loop Agent"""
-    def __init__(self, approval_required_actions=None):
-        self.approval_required = approval_required_actions or [
-            "delete_file",
-            "git_push",
-            "database_modify",
-            "external_api_call"
-        ]
-
-    async def execute_with_approval(self, action):
-        if action.name in self.approval_required:
-            # Request human approval
-            approval = await self.request_approval(
-                f"Approve action: {action.name}\n"
-                f"Args: {action.args}\n"
-                f"Impact: {action.estimated_impact}"
-            )
-
-            if not approval.approved:
-                return f"Action rejected by human: {approval.reason}"
-
-        # Execute approved action
-        return await self.execute_action(action)
-
-    async def request_approval(self, request):
-        # Send to human via UI/Slack/Email
-        response = await send_approval_request(request)
-
-        return Approval(
-            approved=response.decision == "approve",
-            reason=response.comment
-        )
-```
-
-**Approval UI例**:
-
-```
-┌─────────────────────────────────────┐
-│ Agent Approval Request              │
-├─────────────────────────────────────┤
-│ Action: git push origin main        │
-│ Files: 5 modified                   │
-│ Impact: PUBLIC repository           │
-│                                     │
-│ Review changes:                     │
-│ + feature.py (127 lines added)     │
-│ + test.py (43 lines added)         │
-│                                     │
-│ [Approve]  [Reject]  [Review Code] │
-└─────────────────────────────────────┘
-```
-
 ### 6.10 Future: Foundation Models for Agents
 
 **2026年予測**:
@@ -1455,27 +1266,35 @@ class HITLAgent:
 
 **Emerging Architecture: Agent + World Model**:
 
-```python
-class WorldModelAgent:
-    def __init__(self):
-        self.llm = LLM()  # Reasoning
-        self.world_model = LearnedEnvironmentModel()  # Predictive
+```julia
+# WorldModelAgent: 世界モデルを使った計画エージェント
+# 数式: π* = argmax_π Σ_t r(s_t, a_t)  s.t.  world_model(s, a) → s'
 
-    async def plan_with_simulation(self, goal):
-        # Simulate actions in world model
-        best_plan = None
-        best_outcome = -inf
+struct WorldModelAgent
+    llm::LLMClient
+    world_model::LearnedEnvironmentModel
+end
 
-        for plan_candidate in self.generate_plan_candidates(goal):
-            # Simulate plan execution
-            simulated_outcome = self.world_model.simulate(plan_candidate)
+function plan_with_simulation(agent::WorldModelAgent, goal::String)
+    candidates = generate_plan_candidates(agent.llm, goal)
 
-            if simulated_outcome.success_prob > best_outcome:
-                best_plan = plan_candidate
-                best_outcome = simulated_outcome.success_prob
+    # 世界モデルで各候補をシミュレーション → 最良プランを選択
+    best_plan, best_prob = nothing, -Inf
+    for plan in candidates
+        outcome = simulate(agent.world_model, plan)
+        if outcome.success_prob > best_prob
+            best_plan = plan
+            best_prob  = outcome.success_prob
+        end
+    end
 
-        # Execute best plan in real environment
-        return await self.execute_plan(best_plan)
+    # 最良プランを実環境で実行
+    execute_plan(best_plan)
+end
+
+# 検算: success_prob ∈ [0, 1]、最大値のプランが選択される
+agent = WorldModelAgent(LLMClient(), LearnedEnvironmentModel())
+# plan_with_simulation(agent, "Build a web scraper") → best_prob == maximum(p.success_prob for p in outcomes)
 ```
 
 ---
@@ -1562,9 +1381,7 @@ AgentBench以降、評価手法が多様化:
 | **Multi-Agent Coordination** | Message Passing | Protocol標準化 (MCP)、Formal Verification |
 | **Cost** | GPT-4で高コスト | Smaller Models (Llama 3.1 70B)、Model Routing |
 
-:::message
-**progress: 100%** — Zone 6完了。エージェント研究の最新動向と実世界応用を把握した。
-:::
+> **Note:** **progress: 100%** — Zone 6完了。エージェント研究の最新動向と実世界応用を把握した。
 
 ---
 
@@ -1678,9 +1495,7 @@ Pythonだけでは全てを最適化できない。
 
 エージェントを「実験室の玩具」から「本番稼働システム」に昇華させる。
 
-:::message
-**progress: 100%** — 第30回完了。エージェント完全版を習得した。次は第31回MLOpsで本番運用へ。
-:::
+> **Note:** **progress: 100%** — 第30回完了。エージェント完全版を習得した。次は第31回MLOpsで本番運用へ。
 
 ---
 
@@ -1731,9 +1546,7 @@ Pythonだけでは全てを最適化できない。
 エージェントは、人間の「思考のスケーリング則」を実現する道具だ。1人の人間が、100のエージェントを率いて、1000人分の仕事をする未来。それを「脅威」と見るか、「機会」と見るかは、あなた次第だ。
 </details>
 
-:::message
-**進捗: 100% 完了** 🎉 講義完走！
-:::
+> **Note:** **進捗: 100% 完了** 🎉 講義完走！
 
 ---
 
@@ -1742,58 +1555,44 @@ Pythonだけでは全てを最適化できない。
 ### 主要論文
 
 [^1]: Yao, S., Zhao, J., Yu, D., Du, N., Shafran, I., Narasimhan, K., & Cao, Y. (2023). "ReAct: Synergizing Reasoning and Acting in Language Models". *ICLR 2023*.
-@[card](https://arxiv.org/abs/2210.03629)
+<https://arxiv.org/abs/2210.03629>
 
 [^2]: Schick, T., Dwivedi-Yu, J., Dess`ı, R., Raileanu, R., Lomeli, M., Zettlemoyer, L., Cancedda, N., & Scialom, T. (2023). "Toolformer: Language Models Can Teach Themselves to Use Tools". *arXiv:2302.04761*.
-@[card](https://arxiv.org/abs/2302.04761)
+<https://arxiv.org/abs/2302.04761>
 
 [^3]: Xu, B., Peng, Z., Lei, B., Mukherjee, S., Liu, Y., & Xu, D. (2023). "ReWOO: Decoupling Reasoning from Observations for Efficient Augmented Language Models". *arXiv:2305.18323*.
-@[card](https://arxiv.org/abs/2305.18323)
+<https://arxiv.org/abs/2305.18323>
 
 [^4]: Park, J. S., O'Brien, J. C., Cai, C. J., Morris, M. R., Liang, P., & Bernstein, M. S. (2023). "Generative Agents: Interactive Simulacra of Human Behavior". *arXiv:2304.03442*.
-@[card](https://arxiv.org/abs/2304.03442)
+<https://arxiv.org/abs/2304.03442>
 
 
 [^7]: Liu, X., Yu, H., Zhang, H., Xu, Y., Lei, X., Lai, H., Gu, Y., Ding, H., Men, K., Yang, K., Zhang, S., Deng, X., Zeng, A., Du, Z., Zhang, C., Shen, S., Zhang, T., Su, Y., Sun, H., Huang, M., Dong, Y., & Tang, J. (2023). "AgentBench: Evaluating LLMs as Agents". *arXiv:2308.03688*.
-@[card](https://arxiv.org/abs/2308.03688)
+<https://arxiv.org/abs/2308.03688>
 
 [^8]: Hong, S., Zheng, X., Chen, J., Cheng, Y., Zhang, C., Wang, Z., Yau, S. K. S., Lin, Z., Zhou, L., Ran, C., Xiao, L., Wu, C., & Schmidhuber, J. (2023). "MetaGPT: Meta Programming for A Multi-Agent Collaborative Framework". *arXiv:2308.00352*.
-@[card](https://arxiv.org/abs/2308.00352)
+<https://arxiv.org/abs/2308.00352>
 
 [^9]: Wu, Q., Bansal, G., Zhang, J., Wu, Y., Li, B., Zhu, E., Jiang, L., Zhang, X., Zhang, S., Liu, J., Awadallah, A. H., White, R. W., Burger, D., & Wang, C. (2023). "AutoGen: Enabling Next-Gen LLM Applications via Multi-Agent Conversation". *arXiv:2308.08155*.
-@[card](https://arxiv.org/abs/2308.08155)
+<https://arxiv.org/abs/2308.08155>
 
 [^10]: Shen, Y., Song, K., Tan, X., Li, D., Lu, W., & Zhuang, Y. (2023). "HuggingGPT: Solving AI Tasks with ChatGPT and its Friends in Hugging Face". *NeurIPS 2023*.
-@[card](https://arxiv.org/abs/2303.17580)
+<https://arxiv.org/abs/2303.17580>
 
 [^11]: Anthropic. (2024). "Model Context Protocol (MCP)".
-@[card](https://modelcontextprotocol.io)
-
-### 教科書・リソース
-
-- Russell, S., & Norvig, P. (2020). *Artificial Intelligence: A Modern Approach* (4th ed.). Pearson. (強化学習・Planning章)
-- Sutton, R. S., & Barto, A. G. (2018). *Reinforcement Learning: An Introduction* (2nd ed.). MIT Press. (POMDP章)
-- LangChain Documentation. "Agents". [https://python.langchain.com/docs/modules/agents/](https://python.langchain.com/docs/modules/agents/)
-- LangGraph Documentation. "Agent Graphs". [https://langchain-ai.github.io/langgraph/](https://langchain-ai.github.io/langgraph/)
+<https://modelcontextprotocol.io>
 
 ---
 
-## 記法規約
+> **📖 前編（理論編）**: [第30回前編: エージェント理論編](./ml-lecture-30-part1) | **← 理論・数式ゾーンへ**
 
-| 記法 | 意味 | 例 |
-|:-----|:-----|:---|
-| $\mathcal{S}$ | 状態空間 | $s \in \mathcal{S}$ |
-| $\mathcal{A}$ | 行動空間 | $a \in \mathcal{A}$ |
-| $\Omega$ | 観測空間 | $o \in \Omega$ |
-| $\pi_\theta$ | ポリシー (LLM) | $a_t \sim \pi_\theta(\cdot \mid o_{1:t})$ |
-| $\mathcal{T}$ | Tool | $\mathcal{T} = \langle \text{name}, \text{schema}, \text{function} \rangle$ |
-| $\mathcal{R}$ | Tool Registry | $\mathcal{R} = \{ \mathcal{T}_1, \ldots, \mathcal{T}_N \}$ |
-| $\mathcal{M}$ | Memory | $\mathcal{M} = \{ (k_i, v_i) \}$ |
-| $\mathcal{MAS}$ | Multi-Agent System | $\mathcal{MAS} = \{ \mathcal{A}_1, \ldots, \mathcal{A}_N \}$ |
-| $\text{thought}_t$ | 推論トレース | LLMが生成する思考過程 |
-| $o_{1:t}$ | 観測履歴 | $(o_1, o_2, \ldots, o_t)$ |
+## 著者リンク
 
----
+- Blog: https://fumishiki.dev
+- X: https://x.com/fumishiki
+- LinkedIn: https://www.linkedin.com/in/fumitakamurakami
+- GitHub: https://github.com/fumishiki
+- Hugging Face: https://huggingface.co/fumishiki
 
 ## ライセンス
 

@@ -4,7 +4,14 @@ emoji: "🏆"
 type: "tech"
 topics: ["machinelearning", "deeplearning", "generativemodels", "julia", "rust", "elixir", "production"]
 published: true
+slug: "ml-lecture-50-part2"
+difficulty: "advanced"
+time_estimate: "90 minutes"
+languages: ["Julia", "Rust"]
+keywords: ["機械学習", "深層学習", "生成モデル"]
 ---
+**← 理論編**: [第50回 Part 1: フロンティア総括](https://zenn.dev/fumishiki/articles/ml-lecture-50-part1)
+
 ## 💻 4. 実装ゾーン（45分）— 卒業制作: 3言語フルスタック生成AIシステム
 
 **ゴール**: 全50回で学んだ知識を統合し、Julia訓練 + Rust推論 + Elixir分散配信 の3言語フルスタック生成AIシステムを設計・実装する。
@@ -148,7 +155,7 @@ function mim_loss(model, x, mask_ratio=0.75)
     z_pred = model.transformer(z_masked)
 
     # Loss: マスクされたトークンのみ
-    loss = mean((z_pred[:, mask_indices, :] - z[:, mask_indices, :]).^2)
+    loss = mean((z_pred[:, mask_indices, :] .- z[:, mask_indices, :]).^2)
     return loss
 end
 
@@ -785,9 +792,7 @@ open http://localhost:3000  # Grafana
 4. **LTX-Video動画生成**: 同じプロンプトから2秒動画生成
 5. **結果返却**: WebSocket経由でリアルタイム通知
 
-:::message
-**ここまでで全体の70%完了!** Zone 4 で卒業制作の設計・実装を完了した。次は実験ゾーン — システムの性能評価、品質検証、デプロイを行う。
-:::
+> **Note:** **ここまでで全体の70%完了!** Zone 4 で卒業制作の設計・実装を完了した。次は実験ゾーン — システムの性能評価、品質検証、デプロイを行う。
 
 ---
 
@@ -879,48 +884,44 @@ benchmark_throughput("http://localhost:4000/api/generate/image")
 2. **動画品質**: FVD (Fréchet Video Distance), 時間的一貫性
 3. **理解品質**: BLEU/ROUGE (キャプションの正確性)
 
-```python
-# 品質評価スクリプト (Python)
-from torchmetrics.image.fid import FrechetInceptionDistance
-from torchmetrics.multimodal import CLIPScore
-import torch
+```julia
+# 品質評価スクリプト (Julia + Flux.jl)
+using Flux, Statistics, LinearAlgebra
+
+# Inception特徴量の Fréchet 距離 (FID の核心)
+# $$\text{FID} = \|\mu_r - \mu_g\|^2 + \mathrm{Tr}(\Sigma_r + \Sigma_g - 2(\Sigma_r \Sigma_g)^{1/2})$$
+function frechet_distance(μ_r::Vector, Σ_r::Matrix, μ_g::Vector, Σ_g::Matrix)::Float64
+    diff = μ_r - μ_g
+    # 行列平方根: covmean = (Σ_r * Σ_g)^{1/2}
+    M = Σ_r * Σ_g
+    F = eigen(Symmetric(M))
+    covmean = real(F.vectors * Diagonal(sqrt.(complex(F.values))) * F.vectors')
+    tr_term = tr(Σ_r) + tr(Σ_g) - 2.0 * tr(covmean)
+    return dot(diff, diff) + tr_term
+end
 
 # 1. FID評価 (aMUSEd生成画像)
-fid = FrechetInceptionDistance(feature=2048)
+# real_feats, gen_feats: (N, 2048) Inception-v3 特徴量行列
+function compute_fid(real_feats::Matrix{Float32}, gen_feats::Matrix{Float32})::Float64
+    μ_r, Σ_r = vec(mean(real_feats, dims=1)), cov(real_feats)
+    μ_g, Σ_g = vec(mean(gen_feats,  dims=1)), cov(gen_feats)
+    frechet_distance(μ_r, Σ_r, μ_g, Σ_g)
+end
 
-# 実画像とaMUSEd生成画像
-real_images = load_real_images("validation_set/")  # (N, 3, 256, 256)
-generated_images = load_generated_images("amused_outputs/")
+fid_score = compute_fid(real_feats, gen_feats)
+@printf "FID Score: %.2f (目標 < 30)\n" fid_score
 
-fid.update(real_images, real=True)
-fid.update(generated_images, real=False)
-fid_score = fid.compute()
-print(f"FID Score: {fid_score:.2f}")
-# 目標: FID < 30 (高品質)
+# 2. CLIP Score (テキスト-画像対応度): cosine similarity
+# $$\text{CLIP Score} = w \cdot \max(cos(\mathbf{e}_I, \mathbf{e}_T), 0)$$
+function clip_score(img_emb::Matrix{Float32}, txt_emb::Matrix{Float32}; w=2.5)::Float64
+    img_n = img_emb ./ (norm.(eachrow(img_emb)) .+ eps(Float32))
+    txt_n = txt_emb ./ (norm.(eachrow(txt_emb)) .+ eps(Float32))
+    cos_sims = [dot(img_n[i,:], txt_n[i,:]) for i in axes(img_n, 1)]
+    return w * mean(max.(cos_sims, 0.0f0))
+end
 
-# 2. CLIP Score評価 (テキスト-画像対応)
-clip_score = CLIPScore(model_name_or_path="openai/clip-vit-base-patch32")
-
-prompts = ["桜の木の下のカフェ、アニメ調", ...]
-images = load_generated_images("amused_outputs/")
-
-score = clip_score(images, prompts)
-print(f"CLIP Score: {score:.3f}")
-# 目標: CLIP Score > 0.25
-
-# 3. FVD評価 (LTX-Video生成動画)
-from torchmetrics.video.fvd import FrechetVideoDistance
-
-fvd = FrechetVideoDistance()
-
-real_videos = load_real_videos("validation_videos/")  # (N, T, C, H, W)
-generated_videos = load_generated_videos("ltx_outputs/")
-
-fvd.update(real_videos, real=True)
-fvd.update(generated_videos, real=False)
-fvd_score = fvd.compute()
-print(f"FVD Score: {fvd_score:.2f}")
-# 目標: FVD < 500
+score = clip_score(img_embeddings, txt_embeddings)
+@printf "CLIP Score: %.3f (目標 > 0.25)\n" score
 ```
 
 **品質基準** (Production-ready):
@@ -964,7 +965,7 @@ defmodule MMGP.DeploymentCheck do
       &check_licenses/0
     ]
 
-    results = Enum.map(checks, fn check ->
+    results = checks |> Enum.map(fn check ->
       try do
         check.()
         {:ok, "#{inspect(check)} passed"}
@@ -1054,51 +1055,64 @@ $$
 \mathcal{L}_{\text{ELBO}} = \mathbb{E}_{q_\phi(z|x)}[\log p_\theta(x|z)] - D_{\text{KL}}[q_\phi(z|x) || p(z)]
 $$
 
-:::details 解答
+<details><summary>解答</summary>
+
 ELBO (Evidence Lower Bound) 損失関数。第1項は「エンコーダ $q_\phi(z|x)$ でサンプルした潜在変数 $z$ を使い、デコーダ $p_\theta(x|z)$ で元データ $x$ を再構成する対数尤度の期待値」(再構成項)。第2項は「近似事後分布 $q_\phi(z|x)$ と事前分布 $p(z)$ のKLダイバージェンス」(正則化項)。VAE訓練ではこのELBOを最大化 (= 負のELBOを最小化) する。
-:::
+
+</details>
 
 **問題2: Flow Matching vs Diffusion**
 
 Flow Matching がDiffusionより高速な理由を、数式で説明せよ (第38回):
 
-:::details 解答
+<details><summary>解答</summary>
+
 Flow Matching (特にRectified Flow) は直線パス $x_t = (1-t)x_0 + tx_1$ を使う。これは $x_0$ から $x_1$ への最短経路。一方、Diffusion (DDPM) はノイズスケジュール $\alpha_t$ に従った曲線パスで、迂回が多い。Sampling時、直線パスは10-50ステップで到達可能だが、曲線パスは1000ステップ必要。理論的に、OT (Optimal Transport) パスは最短であり、Flow Matching はOTパスに近い。
-:::
+
+</details>
 
 **問題3: 3言語フルスタック設計**
 
 Julia訓練 / Rust推論 / Elixir配信 の役割分担を、各言語の特性と共に説明せよ (第19-20回):
 
-:::details 解答
+<details><summary>解答</summary>
+
 - **⚡ Julia (訓練)**: 多重ディスパッチで数式→コード1:1対応。型安定性でJIT最適化。Reactant (XLA) でGPU/TPU高速化。研究フェーズでの柔軟性とREPL駆動開発。
 - **🦀 Rust (推論)**: 所有権・借用でゼロコピー。メモリ安全性で本番環境でも安心。Candle/Burnで低レイテンシ推論。C-ABI FFI ハブとして、JuliaとElixirを橋渡し。
 - **🔮 Elixir (配信)**: BEAM VMで軽量プロセス・耐障害性 (Let it crash)。GenServer+Supervisorで自動復旧。Broadway需要駆動パイプラインでバックプレッシャー。OTPで分散システムの信頼性。
-:::
+
+</details>
 
 **問題4: 2025-2026フロンティア**
 
 2025-2026年の3つのパラダイムシフトを挙げ、それぞれの証拠を示せ (第49-50回):
 
-:::details 解答
+<details><summary>解答</summary>
+
 1. **Flow Matching Dominance**: NeurIPS 2025で30+ FM論文、ICLR 2026で150+ FM投稿。生物・科学応用 (RFdiffusion3, MatterGen, CrystalFlow) でFMが標準化。
 2. **Inference-Time Scaling**: OpenAI o1/o3, Gemini 2.0 Flash, Reflect-DiT が推論時Computeで性能向上。Llemma-7B + tree search > Llemma-34B の証拠。
 3. **Modal Unification**: Show-o (ICLR 2025), BAGEL, GPT-4o, Genie 3 が統合マルチモーダルモデルとして登場。1モデルで全モダリティ (Text/Image/Audio/Video) 生成・理解。
-:::
+
+</details>
 
 **問題5: 未解決問題**
 
 生成モデル研究の未解決問題を3つ挙げ、自分ならどうアプローチするか述べよ (第50回):
 
-:::details 解答例
+<details><summary>解答例</summary>
+
 1. **Modal Aphasia**: 統合MMモデルの性能劣化。アプローチ: Modality-specific Expert (MoE) + Cross-modal Adapter + Multi-task Curriculumで段階的学習。
 2. **長時間動画一貫性**: 数分単位の動画で一貫性崩壊。アプローチ: SSM (Mamba) で $O(T)$ の長距離依存性学習 + Key Frame + Interpolation戦略の理論的保証を証明。
 3. **Model Collapse**: 合成データ再帰訓練で多様性喪失。アプローチ: Diversity-aware Verifier (生成物の多様性を定量評価) + Real Data AccumulationでCollapse回避。理論的上限を証明。
-:::
 
-:::message
-**ここまでで全体の85%完了!** Zone 5 で性能評価・品質検証・デプロイ前チェック・自己診断テストを完了した。次は発展ゾーン — 全50回の振り返り、研究の次のステップ、読者への手紙を記す。
-:::
+</details>
+
+> **Note:** **ここまでで全体の85%完了!** Zone 5 で性能評価・品質検証・デプロイ前チェック・自己診断テストを完了した。次は発展ゾーン — 全50回の振り返り、研究の次のステップ、読者への手紙を記す。
+
+> Progress: 85%
+> **理解度チェック**
+> 1. 卒業制作の3モデル統合システム（SmolVLM2+aMUSEd+LTX-Video）でエンドツーエンドレイテンシのボトルネックはどこか？レイテンシ計測式 $L_\text{total} = L_\text{understand} + L_\text{generate\_img} + L_\text{generate\_vid}$ の各項を最小化する手段を述べよ。
+> 2. FID（画像品質）、CLIP Score（テキスト-画像対応）、FVD（動画品質）の3評価指標の使い分けを、各指標が測定する情報量の観点から説明せよ。
 
 ---
 
@@ -1476,9 +1490,12 @@ $$
 - **Hugging Face Forums**: モデル実装の質問・共有
 - **EleutherAI Discord**: オープンAI研究コミュニティ
 
-:::message
-**ここまでで全体の95%完了!** Zone 6 で全50回の振り返り、読者への手紙、次のステップを明確化した。最後はZone 7 — まとめ、FAQ、学習スケジュール、次回予告(なし)、そしてパラダイム転換の問いで締めくくる。
-:::
+> **Note:** **ここまでで全体の95%完了!** Zone 6 で全50回の振り返り、読者への手紙、次のステップを明確化した。最後はZone 7 — まとめ、FAQ、学習スケジュール、次回予告(なし)、そしてパラダイム転換の問いで締めくくる。
+
+> Progress: 95%
+> **理解度チェック**
+> 1. 全50回を通じて学んだ生成モデルの統一理論において、あなたが「最も重要な1式」と思うものを選び、その理由と他の手法との橋渡しとなる点を述べよ。
+> 2. 24時間以内に始められる具体的な研究行動を1つ決めよ。目標論文・実装環境・検証方法を含む実行可能な計画を書け。
 
 ---
 
@@ -1572,50 +1589,44 @@ A: 以下の3ステップを試してほしい:
 
 ### 6.10 Progress Tracker: 全50回の到達度を可視化
 
-```python
-# Progress Tracker: 全50回の到達度を自己評価
-# 各Courseの理解度を0-100%で評価し、レーダーチャートで可視化
+```julia
+# Progress Tracker: 全50回の到達度を自己評価 (Julia + UnicodePlots.jl)
+using Printf
 
-import matplotlib.pyplot as plt
-import numpy as np
-
-categories = ['数学基礎\n(Course I)', '生成モデル理論\n(Course II)', '生成モデル社会実装\n(Course III)',
-              '拡散モデル理論\n(Course IV)', 'ドメイン特化\n(Course V)', 'フロンティア\n(第50回)']
+categories = ["Course I\n数学基礎", "Course II\n生成モデル理論", "Course III\n社会実装",
+              "Course IV\n拡散モデル理論", "Course V\nドメイン特化", "第50回\nフロンティア"]
 
 # 読者が自己評価した到達度 (0-100%)
-# 以下は例。実際に自己評価して数値を変更してください。
-scores = [
-    85,  # Course I: 数学基礎 (数式読解は概ね理解、SDEはやや不安)
-    90,  # Course II: 生成モデル理論 (VAE/GAN/Flowは完璧、SSMはやや復習必要)
-    75,  # Course III: 生成モデル社会実装 (Julia/Rustは実装済み、Elixirは未経験)
-    80,  # Course IV: 拡散モデル理論 (Score/SDE/FMは理解、統一理論は再確認必要)
-    70,  # Course V: ドメイン特化 (DiT/Audioは実装済み、3D/4Dは未実装)
-    65,  # 第50回: フロンティア (理論は理解、卒業制作は未実装)
-]
+scores = [85, 90, 75, 80, 70, 65]
 
-angles = np.linspace(0, 2 * np.pi, len(categories), endpoint=False).tolist()
-scores += scores[:1]  # 閉じる
-angles += angles[:1]
+println("=" ^ 50)
+println("  全50回 Progress Tracker")
+println("=" ^ 50)
+for (cat, sc) in zip(categories, scores)
+    label  = replace(cat, "\n" => " ")
+    bar    = "█" ^ (sc ÷ 5) * "░" ^ (20 - sc ÷ 5)
+    @printf "  %-28s [%s] %3d%%\n" label bar sc
+end
+println("-" ^ 50)
+avg = mean(scores)
+@printf "  総合到達度: %.1f%%  %s\n" avg (avg >= 80 ? "✓ 目標達成!" : "復習推奨")
+println("=" ^ 50)
+```
 
-fig, ax = plt.subplots(figsize=(8, 8), subplot_kw=dict(polar=True))
-ax.fill(angles, scores, color='skyblue', alpha=0.25)
-ax.plot(angles, scores, color='blue', linewidth=2)
-ax.set_yticklabels([])
-ax.set_xticks(angles[:-1])
-ax.set_xticklabels(categories, fontsize=12)
-ax.set_ylim(0, 100)
-ax.set_title('全50回 Progress Tracker\n(到達度 0-100%)', fontsize=16, pad=20)
-ax.grid(True)
-
-plt.tight_layout()
-plt.savefig('progress_tracker.png', dpi=300)
-plt.show()
-
-# 総合到達度
-avg_score = np.mean(scores[:-1])
-print(f"\n✅ 総合到達度: {avg_score:.1f}%")
-print(f"   - 目標: 80% 以上で「全50回完全習得」")
-print(f"   - 現状: {'✓ 目標達成!' if avg_score >= 80 else '復習推奨'}")
+**出力例**:
+```
+==================================================
+  全50回 Progress Tracker
+==================================================
+  Course I 数学基礎           [█████████████████░░░]  85%
+  Course II 生成モデル理論     [██████████████████░░]  90%
+  Course III 社会実装          [███████████████░░░░░]  75%
+  Course IV 拡散モデル理論     [████████████████░░░░]  80%
+  Course V ドメイン特化        [██████████████░░░░░░]  70%
+  第50回 フロンティア          [█████████████░░░░░░░]  65%
+--------------------------------------------------
+  総合到達度: 77.5%  復習推奨
+==================================================
 ```
 
 **到達度の目安**:
@@ -1653,9 +1664,7 @@ print(f"   - 現状: {'✓ 目標達成!' if avg_score >= 80 else '復習推奨'
 
 — 全50回シリーズ著者より
 
-:::message
-**ここまでで全体の100%完了!** 全50回、150,000行の旅を完走した。おめでとう! 次は「パラダイム転換の問い」で、全50回を締めくくる。
-:::
+> **Note:** **ここまでで全体の100%完了!** 全50回、150,000行の旅を完走した。おめでとう! 次は「パラダイム転換の問い」で、全50回を締めくくる。
 
 ---
 
@@ -1689,9 +1698,7 @@ print(f"   - 現状: {'✓ 目標達成!' if avg_score >= 80 else '復習推奨'
 
 **全50回の真の問い**: 知識は道具だ。道具を手にした今、**あなたは何を創るのか？**
 
-:::message alert
-**パラダイム転換の本質**: 「数式が読めない」→「フルスタック生成AI設計者」への変化は、**スタート地点に立った**ことを意味する。ここから先の人生を変えるかどうかは、読者の行動次第だ。全50回は、あなたに「地図」を渡した。**目的地を決め、歩き出すのは、あなた自身だ。**
-:::
+> **⚠️ Warning:** **パラダイム転換の本質**: 「数式が読めない」→「フルスタック生成AI設計者」への変化は、**スタート地点に立った**ことを意味する。ここから先の人生を変えるかどうかは、読者の行動次第だ。全50回は、あなたに「地図」を渡した。**目的地を決め、歩き出すのは、あなた自身だ。**
 
 ---
 
@@ -1700,22 +1707,22 @@ print(f"   - 現状: {'✓ 目標達成!' if avg_score >= 80 else '復習推奨'
 ### 主要論文
 
 [^1]: Snell, C., et al. (2024). "Scaling LLM Test-Time Compute Optimally can be More Effective than Scaling Model Parameters". *arXiv:2408.03314*.
-@[card](https://arxiv.org/abs/2408.03314)
+<https://arxiv.org/abs/2408.03314>
 
 [^2]: Harshm121. (2025). "Flow Matching vs Diffusion". *Medium*.
-@[card](https://harshm121.medium.com/flow-matching-vs-diffusion-79578a16c510)
+<https://harshm121.medium.com/flow-matching-vs-diffusion-79578a16c510>
 
 [^3]: MIT IAP (2026). "Flow Matching and Diffusion Models — 2026 Version". *MIT CSAIL*.
-@[card](https://diffusion.csail.mit.edu/)
+<https://diffusion.csail.mit.edu/>
 
 [^4]: NTU, et al. (2024). "Show-o: Unified Multimodal Generation". *ICLR 2025*.
-@[card](https://openreview.net/forum?id=Xr5iINA3zU)
+<https://openreview.net/forum?id=Xr5iINA3zU>
 
 [^7]: European Commission. (2025). "Code of Practice on marking and labelling of AI-generated content". *EU Digital Strategy*.
-@[card](https://digital-strategy.ec.europa.eu/en/policies/code-practice-ai-generated-content)
+<https://digital-strategy.ec.europa.eu/en/policies/code-practice-ai-generated-content>
 
 [^10]: HuggingFace Candle. (2024). "Candle: Minimalist ML framework for Rust".
-@[card](https://github.com/huggingface/candle)
+<https://github.com/huggingface/candle>
 
 ### 教科書
 
@@ -1731,25 +1738,13 @@ print(f"   - 現状: {'✓ 目標達成!' if avg_score >= 80 else '復習推奨'
 
 ---
 
-## 記法規約
+## 著者リンク
 
-| 記号 | 意味 | 例 |
-|:-----|:-----|:---|
-| $p_\theta(x)$ | パラメータ $\theta$ のモデル分布 | DDPM, Flow Matching |
-| $p_{\text{data}}(x)$ | データ分布 | 訓練データの真の分布 |
-| $q_\phi(z\|x)$ | エンコーダ (近似事後分布) | VAE |
-| $\mathcal{L}$ | 損失関数 | ELBO, Score Matching loss |
-| $\nabla_x \log p(x)$ | スコア関数 | Score-based models |
-| $v_t(x)$ | ベクトル場 | Flow Matching |
-| $x_t$ | 時刻 $t$ の状態 | Diffusion/Flow の中間状態 |
-| $\mathbb{E}_{p(x)}[f(x)]$ | 期待値 | 分布 $p(x)$ での $f(x)$ の平均 |
-| $D_{\text{KL}}[p \| q]$ | KLダイバージェンス | 分布 $p$ と $q$ の距離 |
-| $\text{OT}(p_0, p_1)$ | 最適輸送 | $p_0$ から $p_1$ への最短パス |
-| ⚡ | Julia | 訓練・研究フェーズ |
-| 🦀 | Rust | 推論・Production |
-| 🔮 | Elixir | 分散配信・耐障害性 |
-
----
+- Blog: https://fumishiki.dev
+- X: https://x.com/fumishiki
+- LinkedIn: https://www.linkedin.com/in/fumitakamurakami
+- GitHub: https://github.com/fumishiki
+- Hugging Face: https://huggingface.co/fumishiki
 
 ## ライセンス
 

@@ -172,6 +172,10 @@ VAEとGANの違いを **KLダイバージェンスの方向** で説明できる
 
 > Progress: 50%
 
+> **理解度チェック**
+> 1. 最尤推定量 $\hat{\theta}_{\text{MLE}} = \arg\max_\theta \log p(\mathcal{D}|\theta)$ がバイアスを持つ場合の具体例を挙げ、なぜバイアスが生じるか説明せよ。
+> 2. フィッシャー情報量 $\mathcal{I}(\theta) = \mathbb{E}\left[\left(\frac{\partial \log p(x|\theta)}{\partial \theta}\right)^2\right]$ が推定の精度限界（クラメール・ラオ下界）にどう関係するか述べよ。
+
 ### Topic 1: MLEの定義と等価性
 
 #### 1.1 MLEの定義
@@ -1549,6 +1553,10 @@ $$
 
 > Progress: 90%
 
+> **理解度チェック**
+> 1. EMアルゴリズムにおけるEステップとMステップをそれぞれ一文で述べ、収束を保証する数学的根拠（ELBO の単調増加性）を説明せよ。
+> 2. GMMでEMを使う際、成分数 $K$ を過大に設定すると何が起きるか。BIC/AICによるモデル選択がどう解決するか説明せよ。
+
 ---
 > **📖 続きは後編へ**
 > [【後編】第7回: 最尤推定と統計的推論](/articles/ml-lecture-07-part2) では、MLE・Fisher情報行列・KL最小化を完全実装します。
@@ -1593,15 +1601,15 @@ $$
 
 ### 最新研究 (2024-2026)
 
-[^fisher_score2025]: Qian, L., et al. (2025). "Direct Fisher Score Estimation for Likelihood Maximization." arXiv:2506.06542.
+[^fisher_score2025]: Khoo, S., et al. (2025). "Direct Fisher Score Estimation for Likelihood Maximization." arXiv:2506.06542.
 
-[^fisher_info_dgm2024]: Zhang, Y., et al. (2024). "Approximations to the Fisher Information Metric of Deep Generative Models for Out-Of-Distribution Detection." arXiv:2403.01485.
+[^fisher_info_dgm2024]: Dauncey, S., et al. (2024). "Approximations to the Fisher Information Metric of Deep Generative Models for Out-Of-Distribution Detection." arXiv:2403.01485.
 
-[^info_theory_diffusion2025]: Liu, X., & Song, Y. (2025). "Information Theoretic Learning for Diffusion Models with Warm Start." arXiv:2510.20903.
+[^info_theory_diffusion2025]: Shen, Y., Gan, L., & Ling, C. (2025). "Information Theoretic Learning for Diffusion Models with Warm Start." arXiv:2510.20903.
 
 [^rdp2025]: Chen, H., et al. (2025). "Rate-Distortion-Perception Theory for Generative Models." Entropy, 27(4), 373. https://www.mdpi.com/1099-4300/27/4/373
 
-[^cmmd_bias2024]: Jayasumana, S., et al. (2024). "CMMD: Contrastive Learning for Maximum Mean Discrepancy." arXiv:2401.09603.
+[^cmmd_bias2024]: Jayasumana, S., et al. (2024). "Rethinking FID: Towards a Better Evaluation Metric for Image Generation." CVPR 2024. arXiv:2401.09603.
 
 [^densing_law2025]: Mitchell, T., et al. (2025). "The Densing Law: Foundation Models and Capability Density." Nature Machine Intelligence. https://www.nature.com/articles/s42256-025-01137-0
 

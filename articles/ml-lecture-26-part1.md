@@ -5,6 +5,10 @@ emoji: "⚡"
 type: "tech"
 topics: ["machinelearning", "optimization", "rust", "elixir", "production"]
 published: true
+difficulty: "advanced"
+time_estimate: "90 minutes"
+languages: ["Julia", "Rust", "Elixir"]
+keywords: ["機械学習", "深層学習", "生成モデル"]
 ---
 
 # 第26回: 推論最適化 & Production品質 — 理論を本番システムとして実装する
@@ -22,9 +26,7 @@ published: true
 - **Part D**: 🔮 Elixir推論分散深掘り ~600行
 - **Part E**: 推論サーバー最適化 ~200行
 
-:::message
-**このシリーズについて**: 東京大学 松尾・岩澤研究室動画講義の**完全上位互換**の全50回シリーズ。理論(論文が書ける)、実装(Production-ready)、最新(2024-2026 SOTA)の3軸で差別化する。
-:::
+> **Note:** **このシリーズについて**: 東京大学 松尾・岩澤研究室動画講義の**完全上位互換**の全50回シリーズ。理論(論文が書ける)、実装(Production-ready)、最新(2024-2026 SOTA)の3軸で差別化する。
 
 ```mermaid
 graph LR
@@ -73,18 +75,18 @@ graph LR
 // 逆量子化: Dequant(q) = q * s
 
 fn quantize_int4(weights: &[f32]) -> (Vec<i8>, f32) {
-    let max_val = weights.iter().map(|w| w.abs()).fold(0.0, f32::max);
+    let max_val = weights.iter().map(|w| w.abs()).fold(0.0f32, f32::max);
     let scale = max_val / 7.0;  // INT4: -7 to 7 (4-bit signed)
 
-    let quantized: Vec<i8> = weights.iter()
+    let quantized = weights.iter()
         .map(|w| (w / scale).round() as i8)
-        .collect();
+        .collect::<Vec<_>>();
 
     (quantized, scale)
 }
 
 fn dequantize_int4(quantized: &[i8], scale: f32) -> Vec<f32> {
-    quantized.iter().map(|q| *q as f32 * scale).collect()
+    quantized.iter().map(|&q| q as f32 * scale).collect::<Vec<_>>()
 }
 
 fn main() {
@@ -128,9 +130,7 @@ Mean abs error: 0.024286
 - QuantSpec [^1] (Apple 2025): INT4 KV-Cache + Self-Speculative → **~2.5倍高速化**
 - 精度劣化: 通常**<1% perplexity増加** (PTQ), QATで**ほぼゼロ劣化**
 
-:::message
-**進捗**: 全体の3%完了 — Part Aへ
-:::
+> **Note:** **進捗**: 全体の3%完了 — Part Aへ
 
 ---
 
@@ -142,51 +142,6 @@ Mean abs error: 0.024286
 
 量子化の本質は**連続値を離散値にマッピング**すること。FP32の範囲$[-3.4 \times 10^{38}, 3.4 \times 10^{38}]$を、INT8の$[-128, 127]$やINT4の$[-7, 7]$に押し込める。
 
-```julia
-using Plots, Statistics
-
-# Quantization precision comparison
-function quantize_range(bits::Int)
-    return 2^bits
-end
-
-# FP32 → INT8/INT4 quantization error
-function quantization_error(values::Vector{Float64}, bits::Int)
-    max_val = maximum(abs.(values))
-    scale = max_val / (2^(bits-1) - 1)
-
-    quantized = round.(values ./ scale)
-    dequantized = quantized .* scale
-
-    return mean(abs.(values .- dequantized))
-end
-
-# Test with normal distribution weights
-weights = randn(10000) .* 0.5
-
-errors = Dict(
-    "FP32" => 0.0,
-    "FP16" => quantization_error(weights, 16),
-    "INT8" => quantization_error(weights, 8),
-    "INT4" => quantization_error(weights, 4),
-    "INT2" => quantization_error(weights, 2)
-)
-
-println("Quantization error comparison:")
-for (fmt, err) in sort(collect(errors), by=x->x[2])
-    println("  $fmt: $(round(err, digits=6))")
-end
-
-# Visualize quantization bins
-p1 = histogram(weights, bins=50, label="Original FP32", alpha=0.6)
-histogram!(p1, round.(weights ./ (maximum(abs.(weights))/7)) .* (maximum(abs.(weights))/7),
-          bins=15, label="INT4 Quantized", alpha=0.6)
-title!(p1, "Quantization Effect on Weight Distribution")
-xlabel!(p1, "Weight Value")
-ylabel!(p1, "Frequency")
-
-display(p1)
-```
 
 **観察**: FP16 (誤差<0.00001), INT8 (~0.004), INT4 (~0.016), INT2 (~0.063)
 
@@ -205,42 +160,6 @@ FP8には2つのフォーマットがある [^2]:
 - **E4M3**: 1 sign + 4 exponent + 3 mantissa → 範囲 $\pm 448$, 精度高
 - **E5M2**: 1 sign + 5 exponent + 2 mantissa → 範囲 $\pm 57344$, 範囲広
 
-```julia
-# FP8 E4M3 simulation (8 exponent values, 8 mantissa values)
-function fp8_e4m3_range()
-    exponents = 0:15  # 4-bit exponent
-    mantissas = 0:7   # 3-bit mantissa
-
-    values = Float64[]
-    for e in exponents, m in mantissas
-        if e == 0
-            # Subnormal
-            val = (m / 8.0) * 2.0^(-6)
-        else
-            # Normal: (1 + m/8) * 2^(e-7)
-            val = (1.0 + m / 8.0) * 2.0^(e - 7)
-        end
-        push!(values, val)
-    end
-
-    return sort(unique(values))
-end
-
-e4m3_vals = fp8_e4m3_range()
-println("FP8-E4M3 unique values: $(length(e4m3_vals))")
-println("  Min: $(minimum(e4m3_vals))")
-println("  Max: $(maximum(e4m3_vals))")
-println("  Max safe value: 448")
-
-# Compare quantization error
-test_vals = [0.1, 1.0, 10.0, 100.0, 1000.0]
-println("\nQuantization to FP8-E4M3:")
-for val in test_vals
-    closest = e4m3_vals[argmin(abs.(e4m3_vals .- val))]
-    error = abs(val - closest)
-    println("  $val → $closest (error: $(round(error/val*100, digits=2))%)")
-end
-```
 
 **出力**: E4M3範囲 [0.015625, 448], 値域128個, 範囲外で誤差増大 (1000→448で55%)
 
@@ -253,61 +172,6 @@ end
 
 Hinton+ 2015 [^3] の核心: Softmaxの温度$T$を上げて**soft targets**を作る。
 
-```julia
-using LinearAlgebra
-
-# Teacher model (large): 100M params
-function teacher_logits(x::Float64)
-    # Simplified: 3-class classification
-    return [2.5, 0.8, 0.3]  # High confidence in class 0
-end
-
-# Student model (small): 10M params
-function student_logits(x::Float64)
-    return [1.2, 0.9, 0.4]  # Less confident
-end
-
-# Softmax with temperature
-function softmax_T(logits::Vector{Float64}, T::Float64=1.0)
-    z = logits ./ T
-    exp_z = exp.(z .- maximum(z))  # numerical stability
-    return exp_z ./ sum(exp_z)
-end
-
-# Distillation loss
-function distillation_loss(teacher_logits::Vector{Float64},
-                          student_logits::Vector{Float64},
-                          T::Float64=3.0, α::Float64=0.7)
-    # Soft target loss (KL divergence)
-    p_teacher = softmax_T(teacher_logits, T)
-    p_student = softmax_T(student_logits, T)
-
-    soft_loss = sum(p_teacher .* log.(p_teacher ./ p_student)) * T^2
-
-    # Hard target loss (true label = 0)
-    hard_loss = -log(softmax_T(student_logits, 1.0)[1])
-
-    return α * soft_loss + (1 - α) * hard_loss
-end
-
-x = 0.5
-t_logits = teacher_logits(x)
-s_logits = student_logits(x)
-
-println("Teacher logits: $t_logits")
-println("Student logits: $s_logits")
-println()
-
-for T in [1.0, 3.0, 10.0]
-    println("Temperature T=$T:")
-    println("  Teacher probs: $(round.(softmax_T(t_logits, T), digits=4))")
-    println("  Student probs: $(round.(softmax_T(s_logits, T), digits=4))")
-end
-println()
-
-loss = distillation_loss(t_logits, s_logits, 3.0, 0.7)
-println("Distillation loss: $(round(loss, digits=4))")
-```
 
 **出力**: T=1で鋭い分布[0.79,0.14,0.07], T=10で平滑化[0.38,0.32,0.30], loss=0.23
 
@@ -325,22 +189,6 @@ $T \to \infty$ で $p_i \to 1/K$ (一様分布), $T=1$で標準Softmax。
 
 自己回帰推論のボトルネック: 1トークンずつ生成 → GPU使用率低。Speculative Decoding [^4] は**並列検証**で解決。
 
-```julia
-# Simplified speculative decoding simulation
-# Draft generates k=3 candidates, Target verifies in parallel
-candidates, log_q = (["the", "a", "this"], [-0.5, -1.2, -1.8])
-log_p = [-0.4, -1.5, -2.0]
-
-accepted = String[]
-for i in 1:length(candidates)
-    acc_prob = min(1.0, exp(log_p[i] - log_q[i]))  # min(1, p_p/p_q)
-    if rand() < acc_prob
-        push!(accepted, candidates[i])
-    else
-        break
-    end
-end
-```
 
 **出力例**: 3候補中1個受理 → 2x高速化 (受理確率1.0→0.74で停止)
 
@@ -356,11 +204,15 @@ end
 | Self-Speculative | 量子化self | 2.0-2.5x | +0% (共有) |
 | QuantSpec [^1] | INT4 self | ~2.5x | -30% (量子化) |
 
-:::message
-**進捗**: 全体の10%完了 — Zone 2へ
-:::
+> **Note:** **進捗**: 全体の10%完了 — Zone 2へ
 
 ---
+
+
+> Progress: 10%
+> **理解度チェック**
+> 1. $T=1$ の各記号の意味と、この式が表す操作を説明してください。
+> 2. このゾーンで学んだ手法の直感的な意味と、なぜこの定式化が必要なのかを説明してください。
 
 ## 🧩 2. 直感ゾーン（20分）— なぜ推論最適化が必要なのか
 
@@ -416,6 +268,41 @@ graph TD
 **メタファー1: 圧縮と解凍のトレードオフ** (情報理論)
 量子化はRate-Distortion理論 (第6回) そのもの。$R$(ビット数) を下げれば $D$(歪み) が上がる。最適動作点は $\min_{Q} \{R(Q) + \lambda D(Q)\}$。
 
+このLagrangian展開を深掘りしておく。目的関数は:
+
+$$
+\mathcal{L}(Q) = R(Q) + \lambda D(Q)
+$$
+
+各項の意味:
+- $R(Q)$: 量子化後の値を表現するのに必要なビット数 — 量子化分布のエントロピー $H(Q(w))$
+- $D(Q)$: 量子化による期待歪み $\mathbb{E}[d(w, Q(w))]$ — 歪み尺度 $d$ は二乗誤差 $(w - Q(w))^2$ が標準
+- $\lambda \geq 0$: Lagrange乗数 — Rate-Distortion曲線上の動作点を選択するハイパーパラメータ
+
+Rate-Distortion関数 $R(D)$ は、歪み $D$ 以下を達成できる最小ビット数を表す:
+
+$$
+R(D) = \min_{Q:\; \mathbb{E}[d(w,Q(w))] \leq D} I(w;\, Q(w))
+$$
+
+ここで $I(w; Q(w))$ は元の重み $w$ と量子化後の値 $Q(w)$ の**相互情報量**。これは情報理論の意味で「量子化から得られる元の重みの情報量」を測る。
+
+**Gaussian源の場合の閉形式解**: 重み $w \sim \mathcal{N}(0, \sigma^2)$ で歪み尺度が二乗誤差のとき、Rate-Distortion関数は:
+
+$$
+R(D) = \frac{1}{2} \log_2 \frac{\sigma^2}{D} \quad \text{(bits)}, \quad D \leq \sigma^2
+$$
+
+これは $D = \sigma^2$ (全歪み = 元の分散、つまり量子化値を無視) で $R = 0$、$D \to 0$ で $R \to \infty$ となる。直感: 完全な精度を求めるには無限ビットが必要。
+
+**INT4の理論限界**: $b = 4$ ビット量子化では、表現できる値の数は $2^b = 16$。Shannon限界として達成可能な最小歪みは:
+
+$$
+D_{\min} = \frac{\sigma^2}{2^{2b}} = \frac{\sigma^2}{2^8} = \frac{\sigma^2}{256}
+$$
+
+これは「$b$ ビットで達成できる最良の歪み」の下界だ。実際のINT4量子化スキーム (GPTQ, AWQ) は、この理論値にどれだけ近づけるかを競っている。$\lambda$ を変化させると Pareto フロントが掃引される — $\lambda$ 大は圧縮優先 (小さい $R$、大きい $D$)、$\lambda$ 小は精度優先 (大きい $R$、小さい $D$)。
+
 **メタファー2: 投機と検証の並列化** (並列計算)
 Speculative Decodingは**楽観的並行制御** (Optimistic Concurrency Control) と同じパターン。Draft = 仮実行, Verify = コミット, Reject = ロールバック。
 
@@ -442,36 +329,10 @@ Course I (第1-8回) は🐍Python 100%だった。Course II (第9-16回) で⚡
 
 Pythonは**いない**。第9回で「Pythonの限界」を体感し、第19回で完全に卒業した。
 
-### 2.5 学習ロードマップ — 本講義を3日で修得する戦略
-
-**Day 1 (3時間)**: Zone 0-3 Part A-B
-- 量子化理論 (対称/非対称/Per-channel)
-- FP8 E4M3/E5M2
-- 蒸留 & Speculative Decoding数式
-- **到達点**: 量子化の数式を自力で導出できる
-
-**Day 2 (3時間)**: Zone 3 Part C-D + Zone 4
-- Rust Production設計 (thiserror/tracing/Prometheus)
-- Elixir分散推論 (Circuit Breaker/Auto-scaling)
-- 全パート実装
-- **到達点**: 本番品質の推論サーバーを設計できる
-
-**Day 3 (2時間)**: Zone 5-7
-- 実験 (量子化精度/Spec受理率測定)
-- 最新研究サーベイ
-- **到達点**: SOTA論文を読んで自分のシステムに適用できる
-
-**前提知識チェック**:
-- ✅ 第16回 Transformer (Attention機構)
-- ✅ 第19回 FFI (Rust↔Julia連携)
-- ✅ 第6回 情報理論 (KLダイバージェンス, エントロピー)
-- ✅ 第4回 確率論 (期待値, 分散)
-
-:::message
-**進捗**: 全体の20%完了 — Zone 3 Part A (量子化完全版) へ
-:::
-
----
+> Progress: 20%
+> **理解度チェック**
+> 1. $(ビット数) を下げれば $ の各記号の意味と、この式が表す操作を説明してください。
+> 2. このゾーンで学んだ手法の直感的な意味と、なぜこの定式化が必要なのかを説明してください。
 
 ## 📐 3. 数式修行ゾーン（90分）— Part A-E 量子化から分散推論まで
 
@@ -505,27 +366,6 @@ $$\hat{w} = q \cdot s$$
 
 **数式↔コード対応 (Rust)**:
 
-```rust
-// Symmetric INT8 quantization
-fn quantize_symmetric_int8(weights: &[f32]) -> (Vec<i8>, f32) {
-    // s = max(|w|) / 127
-    let max_abs = weights.iter().map(|w| w.abs()).fold(0.0, f32::max);
-    let scale = max_abs / 127.0;
-
-    // Q(w) = clip(round(w/s), -128, 127)
-    let quantized = weights.iter().map(|w| {
-        let q = (w / scale).round();
-        q.clamp(-128.0, 127.0) as i8
-    }).collect();
-
-    (quantized, scale)
-}
-
-fn dequantize_symmetric(quantized: &[i8], scale: f32) -> Vec<f32> {
-    // ŵ = q * s
-    quantized.iter().map(|&q| q as f32 * scale).collect()
-}
-```
 
 **量子化誤差の期待値**:
 $$\mathbb{E}[|w - \hat{w}|] \approx \frac{s}{2} = \frac{\max(|w|)}{2(2^{b-1}-1)}$$
@@ -552,32 +392,6 @@ $$\hat{w} = (q - z) \cdot s$$
 
 **数式↔コード対応 (Rust)**:
 
-```rust
-// Asymmetric INT8 quantization (unsigned)
-fn quantize_asymmetric_int8(weights: &[f32]) -> (Vec<u8>, f32, i32) {
-    let w_min = weights.iter().cloned().fold(f32::INFINITY, f32::min);
-    let w_max = weights.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
-
-    // s = (w_max - w_min) / 255
-    let scale = (w_max - w_min) / 255.0;
-
-    // z = -round(w_min / s)
-    let zero_point = -(w_min / scale).round() as i32;
-
-    // Q(w) = clip(round(w/s + z), 0, 255)
-    let quantized = weights.iter().map(|w| {
-        let q = (w / scale).round() + zero_point as f32;
-        q.clamp(0.0, 255.0) as u8
-    }).collect();
-
-    (quantized, scale, zero_point)
-}
-
-fn dequantize_asymmetric(quantized: &[u8], scale: f32, zero_point: i32) -> Vec<f32> {
-    // ŵ = (q - z) * s
-    quantized.iter().map(|&q| (q as i32 - zero_point) as f32 * scale).collect()
-}
-```
 
 ##### Per-Channel vs Per-Tensor 量子化
 
@@ -603,11 +417,9 @@ Activation $X \in \mathbb{R}^{B \times S \times D}$ (Batch × Seq × Dim) に対
 
 $$s_{b,t} = \frac{\max_d |X_{b,t,d}|}{2^{b-1}-1}, \quad t=1,\ldots,S$$
 
-:::message alert
-**落とし穴**: Per-Channelは推論時に追加演算が必要。行列積 $Y = XW^T$ の量子化版:
-$$Y_{ij} = \sum_k (X_{ik} \cdot s_X) (W_{jk}^Q \cdot s_{W,j}) = s_X \sum_k X_{ik} \left(\sum_j W_{jk}^Q s_{W,j}\right)$$
-スケール $s_{W,j}$ がチャネルごとに異なる → 内積後にスケール補正が必要。
-:::
+> **⚠️ Warning:** **落とし穴**: Per-Channelは推論時に追加演算が必要。行列積 $Y = XW^T$ の量子化版:
+> $$Y_{ij} = \sum_k (X_{ik} \cdot s_X) (W_{jk}^Q \cdot s_{W,j}) = s_X \sum_k X_{ik} \left(\sum_j W_{jk}^Q s_{W,j}\right)$$
+> スケール $s_{W,j}$ がチャネルごとに異なる → 内積後にスケール補正が必要。
 
 #### 3.A.2 FP8量子化 — E4M3 vs E5M2
 
@@ -641,67 +453,6 @@ $$\text{value} = (-1)^s \times 2^{e-15} \times (1 + \frac{m}{4})$$
 
 **数式↔コード対応 (Rust)**:
 
-```rust
-// FP8-E4M3 quantization (simplified - no hardware support)
-#[derive(Copy, Clone)]
-struct FP8E4M3 {
-    bits: u8,  // 1-bit sign + 4-bit exp + 3-bit mantissa
-}
-
-impl FP8E4M3 {
-    fn from_f32(val: f32) -> Self {
-        if val == 0.0 {
-            return FP8E4M3 { bits: 0 };
-        }
-
-        let sign = if val < 0.0 { 1u8 << 7 } else { 0 };
-        let abs_val = val.abs();
-
-        // Clamp to E4M3 range [2^-6, 448]
-        let clamped = abs_val.clamp(0.015625, 448.0);
-
-        // Extract exponent: val = 2^e * (1 + m/8)
-        let log2 = clamped.log2();
-        let e_unbiased = log2.floor() as i32;
-        let e = (e_unbiased + 7).clamp(0, 15) as u8;  // Bias = 7
-
-        // Extract mantissa
-        let mantissa_float = clamped / 2f32.powi(e_unbiased) - 1.0;
-        let m = (mantissa_float * 8.0).round().clamp(0.0, 7.0) as u8;
-
-        FP8E4M3 {
-            bits: sign | (e << 3) | m,
-        }
-    }
-
-    fn to_f32(self) -> f32 {
-        let sign_bit = (self.bits >> 7) & 1;
-        let exp = (self.bits >> 3) & 0x0F;
-        let mantissa = self.bits & 0x07;
-
-        if exp == 0 {
-            // Subnormal
-            let val = 2f32.powi(-6) * (mantissa as f32 / 8.0);
-            return if sign_bit == 1 { -val } else { val };
-        }
-
-        // Normal: 2^(e-7) * (1 + m/8)
-        let e_unbiased = exp as i32 - 7;
-        let val = 2f32.powi(e_unbiased) * (1.0 + mantissa as f32 / 8.0);
-
-        if sign_bit == 1 { -val } else { val }
-    }
-}
-
-// Quantize weight tensor to FP8-E4M3
-fn quantize_fp8_e4m3(weights: &[f32]) -> Vec<FP8E4M3> {
-    weights.iter().map(|&w| FP8E4M3::from_f32(w)).collect()
-}
-
-fn dequantize_fp8_e4m3(quantized: &[FP8E4M3]) -> Vec<f32> {
-    quantized.iter().map(|q| q.to_f32()).collect()
-}
-```
 
 **FP8量子化誤差**:
 E4M3の相対誤差 (仮数3-bit):
@@ -740,10 +491,8 @@ $$K_t^{FP8} = \text{FP8-E4M3}(K_t), \quad V_t^{FP8} = \text{FP8-E4M3}(V_t)$$
 
 **精度劣化**: vLLM実測 [^6] で perplexity +0.1-0.3% (ほぼ無視可能)。
 
-:::message
-**QuantSpec [^1]の革新**: KV-CacheをINT4量子化 + Self-Speculative Decodingで、
-**メモリ4倍削減 + 2.5倍高速化** を同時達成。受理率>90%を維持。
-:::
+> **Note:** **QuantSpec [^1]の革新**: KV-CacheをINT4量子化 + Self-Speculative Decodingで、
+> **メモリ4倍削減 + 2.5倍高速化** を同時達成。受理率>90%を維持。
 
 #### 3.A.4 QAT vs PTQ
 
@@ -776,21 +525,6 @@ $$\frac{\partial \text{round}(x)}{\partial x} := 1$$
 
 **QATアルゴリズム**:
 
-```
-for epoch in 1..N:
-    for batch in data:
-        # Forward: quantize weights
-        w_quant = round(w / s) * s
-
-        # Compute loss with quantized weights
-        loss = forward(x, w_quant)
-
-        # Backward: STE gradient
-        grad_w = backward(loss)
-
-        # Update original FP32 weights
-        w = w - lr * grad_w
-```
 
 **利点**: 精度劣化最小 (INT4で<1%)
 **欠点**: 学習コスト (GPU時間×10-20%)
@@ -808,37 +542,10 @@ for epoch in 1..N:
 - INT4: タスククリティカルならQAT, それ以外PTQ
 - INT2: QAT必須 (PTQは破綻)
 
-:::details QATの実装 (PyTorch例)
-```python
-import torch
-import torch.nn as nn
+<details><summary>QATの実装 (PyTorch例)</summary>
 
-class QuantizedLinear(nn.Module):
-    def __init__(self, in_features, out_features, bits=8):
-        super().__init__()
-        self.weight = nn.Parameter(torch.randn(out_features, in_features))
-        self.bits = bits
-        self.register_buffer('scale', torch.ones(1))
 
-    def forward(self, x):
-        # Compute scale
-        max_val = self.weight.abs().max()
-        self.scale = max_val / (2**(self.bits-1) - 1)
-
-        # Fake quantization with STE
-        weight_quant = self.fake_quantize(self.weight, self.scale)
-
-        return nn.functional.linear(x, weight_quant)
-
-    @staticmethod
-    def fake_quantize(x, scale):
-        # Forward: quantize
-        x_quant = torch.round(x / scale) * scale
-
-        # Backward: STE (gradient flows through as-is)
-        return x_quant
-```
-:::
+</details>
 
 #### 3.A.5 ⚔️ Boss Battle: FP8 E4M3量子化の完全分解
 
@@ -891,9 +598,7 @@ $$\Delta \text{PPL} \approx 0.01 \times 4.1 / 10 = 0.0041 = 0.41\%$$
 
 **結論**: FP8-E4M3 Per-Channel量子化で perplexity +0.4% (実測値 [^2] の +0.3-0.5% と一致)。
 
-:::message
-**ボス撃破!** FP8量子化の数式を完全分解し、精度劣化を理論的に予測できた。
-:::
+> **Note:** **ボス撃破!** FP8量子化の数式を完全分解し、精度劣化を理論的に予測できた。
 
 ---
 
@@ -939,62 +644,9 @@ $T$が大きいほど勾配が大きく、学習が安定。
 
 **数式↔コード対応 (Julia)**:
 
-```julia
-using Flux, Statistics
-
-# Softmax with temperature
-function softmax_T(logits::Vector{Float64}, T::Float64=1.0)
-    z = logits ./ T
-    exp_z = exp.(z .- maximum(z))
-    return exp_z ./ sum(exp_z)
-end
-
-# Distillation loss
-function distillation_loss(
-    logits_teacher::Vector{Float64},
-    logits_student::Vector{Float64},
-    y_true::Int,
-    T::Float64=3.0,
-    α::Float64=0.7
-)
-    # Soft target loss: T^2 * KL(p_T(T) || p_S(T))
-    p_T = softmax_T(logits_teacher, T)
-    p_S = softmax_T(logits_student, T)
-
-    soft_loss = T^2 * sum(p_T .* log.(p_T ./ p_S))
-
-    # Hard target loss: CE(y_true, p_S(1))
-    p_S_hard = softmax_T(logits_student, 1.0)
-    hard_loss = -log(p_S_hard[y_true])
-
-    return α * soft_loss + (1 - α) * hard_loss
-end
-
-# Example
-logits_T = [4.2, 1.3, 0.8]  # Teacher: confident in class 1
-logits_S = [2.1, 1.5, 0.9]  # Student: less confident
-y_true = 1
-
-loss = distillation_loss(logits_T, logits_S, y_true, 3.0, 0.7)
-println("Distillation loss: $(round(loss, digits=4))")
-
-# Temperature effect
-println("\nTemperature effect on soft targets:")
-for T in [1.0, 3.0, 10.0]
-    p_T = softmax_T(logits_T, T)
-    println("  T=$T: $(round.(p_T, digits=4))")
-end
-```
 
 出力:
-```
-Distillation loss: 0.8324
 
-Temperature effect on soft targets:
-  T=1.0: [0.8808, 0.0831, 0.0361]
-  T=3.0: [0.5926, 0.2386, 0.1688]
-  T=10.0: [0.4129, 0.3248, 0.2623]
-```
 
 ##### "Dark Knowledge" の正体
 
@@ -1071,70 +723,9 @@ $$p'(x) = \frac{\max(0, p(x) - q(x))}{\sum_y \max(0, p(y) - q(y))}$$
 
 **数式↔コード対応 (Julia)**:
 
-```julia
-using Random, Distributions
-
-# Draft model (simplified: uniform over top-k)
-function draft_model(context::String, k::Int=3, vocab_size::Int=10)
-    # Return k candidate tokens + log probs
-    candidates = rand(1:vocab_size, k)
-    log_probs_q = log.(rand(k) .+ 0.1)  # Simulated log q(x)
-    return candidates, log_probs_q
-end
-
-# Target model
-function target_model(context::String, candidates::Vector{Int})
-    # Return log probs for candidates
-    log_probs_p = log.(rand(length(candidates)) .+ 0.2)  # Simulated log p(x)
-    return log_probs_p
-end
-
-# Speculative decoding: one round
-function speculative_round(context::String, k::Int=3)
-    # 1. Draft: generate k tokens
-    candidates, log_q = draft_model(context, k)
-
-    # 2. Verify: target model computes p(x) for all candidates in parallel
-    log_p = target_model(context, candidates)
-
-    # 3. Accept/Reject
-    accepted = Int[]
-    for i in 1:k
-        α = min(1.0, exp(log_p[i] - log_q[i]))
-
-        if rand() < α
-            push!(accepted, candidates[i])
-        else
-            # Rejection: sample from p'(x) = max(0, p(x) - q(x))
-            # (Simplified: just stop here)
-            break
-        end
-    end
-
-    return accepted
-end
-
-# Simulate multiple rounds
-total_accepted = 0
-total_drafted = 0
-n_rounds = 100
-
-for round in 1:n_rounds
-    accepted = speculative_round("context", 3)
-    total_accepted += length(accepted)
-    total_drafted += 3
-end
-
-avg_accepted = total_accepted / n_rounds
-println("Average accepted tokens per round: $(round(avg_accepted, digits=2))")
-println("Expected speedup: ~$(round(1 + avg_accepted, digits=2))x")
-```
 
 出力例:
-```
-Average accepted tokens per round: 1.47
-Expected speedup: ~2.47x
-```
+
 
 ##### 期待受理長の解析
 
@@ -1171,18 +762,6 @@ QuantSpec:
 
 ##### QuantSpecのアーキテクチャ
 
-```
-         ┌──────────────────┐
-         │  LLaMA-70B FP16  │ ← Target (正確)
-         └──────────────────┘
-                 ↑
-                 │ Verify
-                 │
-         ┌──────────────────┐
-         │ LLaMA-70B INT4   │ ← Draft (高速)
-         │ + INT4 KV-Cache  │
-         └──────────────────┘
-```
 
 **Hierarchical KV-Cache**:
 - Target KV-Cache: FP16
@@ -1294,400 +873,653 @@ $$P_\text{accept} \approx 0.999 \times 1.0 = 99.9\%$$
 
 を考慮した実用値。
 
-:::message
-**ボス撃破!** QuantSpecの受理率>90%を統計的に証明し、INT4量子化がSpeculative Decodingと相性抜群な理由を理解した。
-:::
+> **Note:** **ボス撃破!** QuantSpecの受理率>90%を統計的に証明し、INT4量子化がSpeculative Decodingと相性抜群な理由を理解した。
+
+### Part C: 🦀 Production品質Rust設計
+
+「動く」と「壊れない」は別物だ。研究フェーズでは前者だけで十分だが、Productionでは後者が全てを決める。Rustの型システムは **Production品質** を**コンパイル時に強制する**言語だ。コンパイルを通過した時点でメモリ安全性と基本的な型安全性は保証される。しかしそれはスタートラインに過ぎない。
+
+エラーハンドリング、可観測性 (ログ・メトリクス・トレーシング)、SLO設計、テスト戦略 — これらを**数学的に設計しなければ**、本番環境での障害は避けられない。本セクションではRustのProduction品質の4本柱を代数・情報理論・統計の観点から解析する。
 
 ---
 
-### Part C: 🦀 Production品質Rustライブラリ設計 (~700行)
+#### 3.C.1 エラーハンドリングの代数構造
 
-推論最適化を**本番環境で運用**するには、エラーハンドリング・ログ・メトリクス・テストの4つが不可欠。
+##### `Result<T, E>` はMonadである
 
-#### 3.C.1 エラーハンドリング設計完全版
+Rustの `Result<T, E>` 型は、**Monad**という代数構造を持つ。Monadとは、型コンストラクタ $M$ と2つの演算:
 
-Rustのエラーハンドリングは**型システムで強制**される。
+$$
+\text{return} : a \to M\,a
+$$
 
-##### thiserror vs anyhow
+$$
+(\gg\!=) : M\,a \to (a \to M\,b) \to M\,b
+$$
 
-**thiserror** [^9]: ライブラリ用 (呼び出し側がエラーを処理)
-**anyhow** [^9]: アプリケーション用 (エラーを集約して表示)
+から構成される代数構造で、以下の **Monad則** を満たす。
 
-```rust
-// Library error with thiserror
-use thiserror::Error;
+$$
+\text{(左単位元)} \quad \text{return}\,x \gg\!= f \;=\; f\,x
+$$
 
-#[derive(Error, Debug)]
-pub enum QuantizationError {
-    #[error("Invalid bit width: {0}, must be 2, 4, or 8")]
-    InvalidBitWidth(u8),
-
-    #[error("Empty weight tensor")]
-    EmptyTensor,
-
-    #[error("Scale computation failed: {0}")]
-    ScaleError(String),
+$$
+\text{(右単位元)} \quad m \gg\!= \text{return} \;=\; m
+$$
 
-    #[error("IO error: {0}")]
-    Io(#[from] std::io::Error),
-}
-
-// Application error with anyhow
-use anyhow::{Context, Result};
-
-fn load_and_quantize(path: &str, bits: u8) -> Result<Vec<i8>> {
-    let weights = std::fs::read(path)
-        .context("Failed to read weight file")?;
-
-    let parsed: Vec<f32> = bincode::deserialize(&weights)
-        .context("Failed to parse weights")?;
+$$
+\text{(結合則)} \quad (m \gg\!= f) \gg\!= g \;=\; m \gg\!= (\lambda x.\; f\,x \gg\!= g)
+$$
 
-    quantize_int4(&parsed, bits)
-        .context("Quantization failed")?;
+`Result<T, E>` の場合、$M\,a = \text{Result}\langle a, E\rangle$ として:
 
-    Ok(vec![])
-}
-```
+$$
+\text{return}\,x = \text{Ok}(x)
+$$
 
-**使い分け**:
-- `thiserror`: `pub enum MyError` → 呼び出し側が`match`で処理
-- `anyhow`: `Result<T>` → `?`で伝播, 最終的に`main`でログ出力
+$$
+\text{Ok}(x) \gg\!= f = f(x), \qquad \text{Err}(e) \gg\!= f = \text{Err}(e)
+$$
 
-##### Result型パターン
+Rustでは $\gg\!=$ (bind) が `?` 演算子に対応する。`expr?` の意味論:
+1. `expr` が `Ok(v)` なら `v` を取り出す
+2. `expr` が `Err(e)` なら即座に `return Err(e.into())` する
 
-**Pattern 1: Early Return**
-```rust
-fn quantize_checked(weights: &[f32], bits: u8) -> Result<Vec<i8>, QuantizationError> {
-    if weights.is_empty() {
-        return Err(QuantizationError::EmptyTensor);
-    }
+この**「即座にリターン」**という意味論が、MonadのErr側での自動伝播に相当する。
 
-    if ![2, 4, 8].contains(&bits) {
-        return Err(QuantizationError::InvalidBitWidth(bits));
-    }
+Monad則が保証することは、エラー伝播の**合成則**だ。複数の操作を連鎖するとき:
 
-    // Success path
-    Ok(quantize_symmetric_int8(weights).0)
-}
-```
-
-**Pattern 2: Context Chain**
-```rust
-use anyhow::Context;
+$$
+e_1 \gg\!= e_2 \gg\!= e_3 = e_1 \gg\!= (\lambda x.\; e_2(x) \gg\!= e_3)
+$$
 
-fn load_model(path: &str) -> anyhow::Result<Model> {
-    let config = std::fs::read_to_string(format!("{}/config.json", path))
-        .context("Failed to read config")?;
+左結合でも右結合でも同じ結果になる — これが `?` を安全に連鎖できる数学的根拠だ。
 
-    let model = Model::from_json(&config)
-        .context("Failed to parse model config")?
-        .load_weights(path)
-        .context("Failed to load weights")?;
-
-    Ok(model)
-}
-```
-
-エラー出力:
-```
-Error: Failed to load weights
-Caused by:
-    0: Failed to read config
-    1: No such file or directory (os error 2)
-```
-
-**Pattern 3: Fallible Iterator**
-```rust
-fn quantize_layers(layers: Vec<Vec<f32>>) -> Result<Vec<Vec<i8>>> {
-    layers.into_iter()
-        .map(|weights| quantize_checked(&weights, 8))
-        .collect()  // Short-circuits on first error
-}
-```
-
-##### パニック境界設計
-
-**原則**: ライブラリは**絶対にパニックしない** (caller責任)。
-
-```rust
-// ❌ Bad: panic in library
-pub fn quantize_unchecked(weights: &[f32]) -> Vec<i8> {
-    assert!(!weights.is_empty(), "Empty tensor");  // PANIC!
-    // ...
-}
-
-// ✅ Good: return Result
-pub fn quantize(weights: &[f32]) -> Result<Vec<i8>, QuantizationError> {
-    if weights.is_empty() {
-        return Err(QuantizationError::EmptyTensor);
-    }
-    // ...
-}
-```
-
-**例外**: `unsafe`ブロックの不変条件違反 → パニック許容 (バグなので)。
-
-```rust
-unsafe fn quantize_simd(ptr: *const f32, len: usize) -> Vec<i8> {
-    assert!(!ptr.is_null(), "Null pointer");
-    // SAFETY: caller ensures ptr is valid for len elements
-    // ...
-}
-```
-
-#### 3.C.2 構造化ログ完全版
-
-**tracing** [^10]: Rustの標準的ログフレームワーク。
-
-##### スパン設計
-
-**スパン** (Span): 階層的なコンテキスト。
-
-```rust
-use tracing::{info, warn, instrument, span, Level};
-
-#[instrument]
-fn quantize_model(model_name: &str, bits: u8) -> Result<()> {
-    info!("Starting quantization");
-
-    let _span = span!(Level::INFO, "load_weights").entered();
-    let weights = load_weights(model_name)?;
-    drop(_span);
-
-    let _span = span!(Level::INFO, "quantize", bits = bits).entered();
-    let quantized = quantize(&weights, bits)?;
-    drop(_span);
-
-    info!(num_params = quantized.len(), "Quantization complete");
-    Ok(())
-}
-```
-
-出力:
-```
-INFO quantize_model{model_name="llama-7b" bits=4}: Starting quantization
-INFO quantize_model{model_name="llama-7b" bits=4}:load_weights: Loaded 7B parameters
-INFO quantize_model{model_name="llama-7b" bits=4}:quantize{bits=4}: Quantizing...
-INFO quantize_model{model_name="llama-7b" bits=4}: num_params=7000000000 Quantization complete
-```
-
-##### JSON出力 (本番環境)
-
-```rust
-use tracing_subscriber::{fmt, prelude::*, EnvFilter};
-
-fn init_logging() {
-    tracing_subscriber::registry()
-        .with(fmt::layer().json())
-        .with(EnvFilter::from_default_env())
-        .init();
-}
-```
-
-JSON出力:
-```json
-{
-  "timestamp": "2025-02-13T10:30:45.123Z",
-  "level": "INFO",
-  "fields": {
-    "message": "Quantization complete",
-    "num_params": 7000000000
-  },
-  "target": "my_quantizer",
-  "span": {
-    "model_name": "llama-7b",
-    "bits": 4,
-    "name": "quantize_model"
-  }
-}
-```
-
-##### フィルタリング
-
-環境変数で制御:
-```bash
-RUST_LOG=info,my_quantizer::quantize=debug cargo run
-```
-
-- `info`: 全モジュールINFO以上
-- `my_quantizer::quantize=debug`: 特定モジュールのみDEBUG
-
-#### 3.C.3 メトリクス収集完全版
-
-**Prometheus統合** [^11]: メトリクスを公開しPrometheusがスクレイプ。
-
-```rust
-use prometheus::{Counter, Histogram, IntGauge, Registry, TextEncoder};
-use lazy_static::lazy_static;
-
-lazy_static! {
-    static ref REGISTRY: Registry = Registry::new();
-
-    static ref QUANTIZATION_REQUESTS: Counter = Counter::new(
-        "quantization_requests_total",
-        "Total quantization requests"
-    ).unwrap();
-
-    static ref QUANTIZATION_DURATION: Histogram = Histogram::with_opts(
-        prometheus::HistogramOpts::new(
-            "quantization_duration_seconds",
-            "Quantization duration"
-        ).buckets(vec![0.001, 0.01, 0.1, 1.0, 10.0])
-    ).unwrap();
-
-    static ref ACTIVE_QUANTIZATIONS: IntGauge = IntGauge::new(
-        "active_quantizations",
-        "Currently active quantizations"
-    ).unwrap();
-}
-
-fn init_metrics() {
-    REGISTRY.register(Box::new(QUANTIZATION_REQUESTS.clone())).unwrap();
-    REGISTRY.register(Box::new(QUANTIZATION_DURATION.clone())).unwrap();
-    REGISTRY.register(Box::new(ACTIVE_QUANTIZATIONS.clone())).unwrap();
-}
-
-#[instrument]
-fn quantize_with_metrics(weights: &[f32], bits: u8) -> Result<Vec<i8>> {
-    QUANTIZATION_REQUESTS.inc();
-    ACTIVE_QUANTIZATIONS.inc();
-
-    let timer = QUANTIZATION_DURATION.start_timer();
-    let result = quantize_symmetric_int8(weights);
-    timer.observe_duration();
-
-    ACTIVE_QUANTIZATIONS.dec();
-
-    Ok(result.0)
-}
-
-// HTTP endpoint for Prometheus scraping
-fn metrics_handler() -> String {
-    let encoder = TextEncoder::new();
-    let metric_families = REGISTRY.gather();
-    encoder.encode_to_string(&metric_families).unwrap()
-}
-```
-
-Prometheus出力:
-```
-# HELP quantization_requests_total Total quantization requests
-# TYPE quantization_requests_total counter
-quantization_requests_total 1523
-
-# HELP quantization_duration_seconds Quantization duration
-# TYPE quantization_duration_seconds histogram
-quantization_duration_seconds_bucket{le="0.001"} 0
-quantization_duration_seconds_bucket{le="0.01"} 234
-quantization_duration_seconds_bucket{le="0.1"} 1200
-quantization_duration_seconds_bucket{le="1.0"} 1523
-quantization_duration_seconds_sum 45.67
-quantization_duration_seconds_count 1523
-```
-
-#### 3.C.4 テスト戦略完全版
-
-##### Property-Based Testing (proptest)
-
-**通常の単体テスト**: 固定入力 → 固定出力
-**Property-Based Testing**: ランダム入力 → 性質を検証
-
-```rust
-use proptest::prelude::*;
-
-proptest! {
-    #[test]
-    fn test_quantization_reversibility(
-        weights in prop::collection::vec((-10.0f32..10.0f32), 1..1000)
-    ) {
-        let (quantized, scale) = quantize_symmetric_int8(&weights);
-        let dequantized = dequantize_symmetric(&quantized, scale);
-
-        // Property: quantization error bounded by scale/2
-        for (orig, deq) in weights.iter().zip(&dequantized) {
-            prop_assert!((orig - deq).abs() <= scale / 2.0 + 1e-6);
-        }
-    }
-
-    #[test]
-    fn test_quantization_range(
-        weights in prop::collection::vec((-100.0f32..100.0f32), 1..1000)
-    ) {
-        let (quantized, _scale) = quantize_symmetric_int8(&weights);
-
-        // Property: all quantized values in INT8 range
-        for q in &quantized {
-            prop_assert!(*q >= -128 && *q <= 127);
-        }
-    }
-}
-```
-
-proptest実行: 100-10000個のランダム入力を生成し、性質違反を探す。
-
-##### Fuzz Testing (cargo-fuzz)
-
-**Fuzzing**: 異常入力でクラッシュを探す。
-
-```rust
-// fuzz/fuzz_targets/quantize.rs
-#![no_main]
-use libfuzzer_sys::fuzz_target;
-
-fuzz_target!(|data: &[u8]| {
-    if data.len() % 4 != 0 {
-        return;
-    }
-
-    let weights: Vec<f32> = data.chunks_exact(4)
-        .map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]]))
-        .collect();
-
-    // Should never panic
-    let _ = quantize_symmetric_int8(&weights);
-});
-```
-
-実行:
-```bash
-cargo fuzz run quantize -- -max_total_time=60
-```
-
-##### ベンチマーク (Criterion)
-
-```rust
-use criterion::{black_box, criterion_group, criterion_main, Criterion, BenchmarkId};
-
-fn bench_quantization(c: &mut Criterion) {
-    let mut group = c.benchmark_group("quantization");
-
-    for size in [1000, 10000, 100000].iter() {
-        let weights: Vec<f32> = (0..*size).map(|i| (i as f32) * 0.01).collect();
-
-        group.bench_with_input(BenchmarkId::new("INT8", size), &weights, |b, w| {
-            b.iter(|| quantize_symmetric_int8(black_box(w)));
-        });
-    }
-
-    group.finish();
-}
-
-criterion_group!(benches, bench_quantization);
-criterion_main!(benches);
-```
-
-出力:
-```
-quantization/INT8/1000   time:   [12.345 µs 12.456 µs 12.567 µs]
-quantization/INT8/10000  time:   [123.45 µs 124.56 µs 125.67 µs]
-quantization/INT8/100000 time:   [1.2345 ms 1.2456 ms 1.2567 ms]
-```
+##### `thiserror` vs `anyhow` の型理論的使い分け
+
+エラー型の設計には2つの哲学がある。
+
+**`thiserror`** は「型としてのエラー」を表現する。各エラーケースを列挙型 (`enum`) で明示的に定義し、呼び出し元がパターンマッチで詳細を検査できる。これは**代数的データ型** (Algebraic Data Type) の直和型 (sum type) だ:
+
+$$
+\text{AppError} = \text{IoError}(\text{std::io::Error}) \;+\; \text{ParseError}(\text{String}) \;+\; \text{ModelError}(\text{String}) \;+\; \cdots
+$$
+
+$+$ は直和 (coproduct) を表す。型理論では $A + B$ は「$A$ か $B$ のどちらか一方」を意味し、消去則 (elimination rule) はパターンマッチに対応する。
+
+**`anyhow`** は「文脈としてのエラー」を表現する。`anyhow::Error` は `Box<dyn std::error::Error + Send + Sync>` の薄いラッパーで、動的ディスパッチを使い**任意のエラー型を均質化**する:
+
+$$
+\text{anyhow::Error} \cong \exists E.\; (\text{Error}(E),\, E)
+$$
+
+これは存在型 (existential type) で、具体的なエラー型 $E$ を隠蔽する。呼び出し元は型の詳細を知らずに `.context("失敗した操作の説明")` でスタックトレースを積み上げられる。
+
+**使い分けの原則**:
+
+| 場面 | 選択 | 理由 |
+|:-----|:-----|:-----|
+| ライブラリの公開API | `thiserror` | 呼び出し元が型でエラーを区別できる |
+| アプリケーション内部 | `anyhow` | 文脈情報優先、型の均質化が便利 |
+| FFI境界 | `thiserror` | 外部への型漏れを防ぐ |
+| スクリプト的コード | `anyhow` | 開発速度優先 |
+
+##### Orphan Rule とエラー型変換の制約
+
+Rustの **Orphan Rule** (孤立則) は、`impl Trait for Type` において:
+
+$$
+\text{Orphan Rule}: \;\text{trait} \in \text{local} \;\lor\; \text{Type} \in \text{local}
+$$
+
+つまり、「トレイトが自クレートで定義されているか、型が自クレートで定義されているか」のどちらかでなければ `impl` できない。
+
+エラーハンドリングへの影響: `From<E1> for E2` の実装は、`E1` か `E2` のどちらかが自クレートの型でなければならない。標準ライブラリの型 (`std::io::Error`) から標準ライブラリの型 (`std::fmt::Error`) への直接変換実装は禁止されている。
+
+これが**ニュータイプパターン** (newtype pattern) の動機だ。外部型をラップすることで Orphan Rule を回避する:
+
+$$
+\text{MyIoError}(\text{std::io::Error}) \quad \text{// 自クレートの型}
+$$
+
+$$
+\text{impl From}\langle\text{std::io::Error}\rangle\;\text{for MyIoError} \quad \text{// OK: MyIoError は自クレート}
+$$
+
+##### Fail-fast vs Fail-slow の情報理論的解釈
+
+**Fail-fast** は最初のエラーで即座に処理を中断する戦略。**Fail-slow** (Fail-soft) は全ての処理を完遂してからエラーを集約する戦略だ。
+
+$n$ 個の独立な検証ステップがあり、それぞれのエラー発生確率を $p_i$ とする。全体の成功確率は:
+
+$$
+P(\text{success}) = \prod_{i=1}^{n} (1 - p_i)
+$$
+
+全体の失敗確率は:
+
+$$
+P(\text{fail}) = 1 - \prod_{i=1}^{n} (1 - p_i)
+$$
+
+**Fail-fast の条件付きエントロピー削減**: $i$ 番目のステップでエラーが発覚した場合、ステップ $i+1, \ldots, n$ の実行結果の不確かさ $H(X_{i+1}, \ldots, X_n \mid X_1, \ldots, X_i = \text{fail})$ を評価する必要がなくなる。独立性の仮定のもとで、エラー発覚以降のステップの実行は**ゼロの情報価値**を持つ — 全体の失敗が既に確定しているからだ。したがってFail-fastは**計算コストの期待値を最小化**する。
+
+$$
+\mathbb{E}[\text{steps}]_{\text{fail-fast}} = \sum_{i=1}^{n} i \cdot p_i \cdot \prod_{j=1}^{i-1}(1-p_j) + n \cdot \prod_{j=1}^{n}(1-p_j)
+$$
+
+$$
+\mathbb{E}[\text{steps}]_{\text{fail-slow}} = n
+$$
+
+全ての $p_i > 0$ に対して $\mathbb{E}[\text{steps}]_{\text{fail-fast}} < n$ が成立する。一方、**Fail-slow が優れる場面**はバッチ検証だ — $n$ 件のバリデーションエラーを一括収集することは、$n$ 回の往復通信を $1$ 回に削減する情報転送効率の最大化だ。
+
+$$
+\text{Fail-fast が有利}: \;\text{エラー間に因果依存があるとき}
+$$
+
+$$
+\text{Fail-slow が有利}: \;\text{エラーが独立で全件収集が価値を持つとき}
+$$
+
+##### エラー型の階層設計
+
+Production品質のシステムではエラー型を**3層構造**で設計する:
+
+$$
+\text{ApplicationError} \supset \text{DomainError} \supset \text{InfrastructureError}
+$$
+
+各層は `From` トレイトの連鎖で自動昇格する:
+
+$$
+\text{impl From}\langle\text{InfrastructureError}\rangle\;\text{for DomainError}
+$$
+
+$$
+\text{impl From}\langle\text{DomainError}\rangle\;\text{for ApplicationError}
+$$
+
+`?` 演算子はこの変換を自動的に呼び出し、エラーが下位層から上位層へ自動昇格する。型理論ではこれはコヴァリアント・ファンクタ (covariant functor) の射 (morphism) に相当する:
+
+$$
+f: A \to B \;\Rightarrow\; \text{Result}\langle T, A\rangle \to \text{Result}\langle T, B\rangle
+$$
+
+`Result::map_err(f)` がこの関手マップに対応し、`?` はこれを自動的に呼び出す。
+
+> **Note:** `Box<dyn Error>` vs `enum Error` の選択は「型消去の代償」に帰着する。`Box<dyn Error>` は動的ディスパッチを使い、型情報が失われる — ダウンキャストは `O(1)` だが型安全でない。`enum Error` は静的ディスパッチで型安全、パターンマッチが全ケースを網羅することをコンパイラが保証する。
 
 ---
 
-:::message
-**進捗**: 全体の50%完了 — Part D (Elixir推論分散) へ
-:::
+#### 3.C.2 構造化ログの情報理論
+
+##### 分散トレーシングの数学的基礎
+
+`tracing` クレートのspan/eventモデルは、Googleの Dapper 論文 (Sigelman et al., 2010) に基づく分散トレーシングの数学的基盤を持つ。
+
+**基本構造**: トレース (trace) はDAG $G = (V, E)$ として定式化される:
+
+$$
+G = (V, E), \quad V = \{\text{span}_1, \ldots, \text{span}_n\}, \quad E \subseteq V \times V
+$$
+
+各 span $s_i \in V$ は次のメタデータを持つ:
+
+$$
+s_i = (\text{trace\_id},\; \text{span\_id}_i,\; \text{parent\_span\_id}_i,\; t_{\text{start}},\; t_{\text{end}},\; \text{metadata})
+$$
+
+- $\text{trace\_id}$: 128ビット UUID — リクエスト全体を一意識別
+- $\text{span\_id}_i$: 64ビット — 個々のスパンを識別
+- $\text{parent\_span\_id}_i$: スパン間の親子関係を定義
+
+DAGの根 (root) は $\text{parent\_span\_id} = \text{None}$ のスパンで、リクエストの開始点に対応する。
+
+##### Trace ID の情報エントロピーと衝突確率
+
+trace_id として128ビットのランダム値を使う場合、衝突確率 (birthday problem) は:
+
+$$
+P(\text{collision}) \approx \frac{n^2}{2 \cdot 2^{128}}
+$$
+
+1秒あたり $n = 10^6$ トレースを $10^9$ 秒 (約32年) 生成したとして、総トレース数 $n_{\text{total}} = 10^{15}$。衝突確率は:
+
+$$
+P(\text{collision}) \approx \frac{(10^{15})^2}{2 \cdot 2^{128}} = \frac{10^{30}}{2 \cdot 3.4 \times 10^{38}} \approx 1.5 \times 10^{-9}
+$$
+
+これは無視できる小さな値だ。64ビットの span_id は $n \approx 10^{12}$ スパンで衝突確率が危険域に達するが、同一trace内のスパン数は通常数十〜数百であるため問題ない。
+
+##### サンプリング戦略の期待値計算
+
+全トレースを記録するとストレージコストが爆発する。**サンプリング**でコストを制御する。
+
+**Head-based sampling**: リクエスト開始時点でサンプリング可否を決定する。サンプリング率 $\rho \in [0,1]$ として:
+
+$$
+\text{観測スループット} = \lambda_{\text{total}} \cdot \rho
+$$
+
+$$
+\mathbb{E}[\text{storage (bytes/s)}] = \lambda_{\text{total}} \cdot \rho \cdot \bar{s}
+$$
+
+ここで $\lambda_{\text{total}}$ は総リクエスト率、$\bar{s}$ は1トレースの平均サイズ。
+
+**Head-based の弱点**: サンプリング決定時点では、そのリクエストが「エラー・低速」かどうかが不明。エラーリクエストもランダムに間引かれる:
+
+$$
+P(\text{エラートレース保存}) = \rho \cdot P(\text{エラー}) \ll P(\text{エラー})
+$$
+
+**Tail-based sampling**: リクエスト完了後にサンプリング可否を決定する。全スパンをバッファに保持し、完了後にエラー有無・レイテンシ・重要度でフィルタリングする。
+
+$$
+P(\text{エラートレース保存}\mid\text{tail-based}) = 1.0 \quad \text{(エラー全件保存可)}
+$$
+
+期待ストレージコストは条件付き期待値で評価する:
+
+$$
+\mathbb{E}[\text{storage}] = \lambda_{\text{err}} \cdot \bar{s}_{\text{err}} + \lambda_{\text{slow}} \cdot \bar{s}_{\text{slow}} + \lambda_{\text{normal}} \cdot \rho_{\text{normal}} \cdot \bar{s}_{\text{normal}}
+$$
+
+Tail-based samplingの弱点は、バッファに全スパンを保持するためメモリコストが高いことだ。
+
+##### ログ量最適化: エントロピー最大化の観点
+
+Shannon情報量の観点から、理想的なログは**エントロピーが最大化されたログ**だ:
+
+$$
+H(X) = -\sum_{x} P(X=x) \log_2 P(X=x) \quad \text{(bits)}
+$$
+
+「何も起きていない」状態では全出力が同一のため $P(X=x) = 1$ となり:
+
+$$
+H(X) = -1 \cdot \log_2 1 = 0 \quad \text{bits}
+$$
+
+情報量がゼロ — ログを出力する価値がない。逆に**ログに価値があるとは、エントロピーが高い (予測困難な) イベントを記録すること**だ。稀なイベント ($P \to 0$) の情報量:
+
+$$
+I(x) = -\log_2 P(X=x) \xrightarrow{P \to 0} \infty
+$$
+
+確定的イベント ($P = 1$) は $I(x) = 0$。「INFO: 処理完了」のような確定的ログは情報量ゼロに近い。「WARN: キャッシュヒット率が閾値を下回った (actual=0.62, threshold=0.70)」のような条件付き・数値付きログは高い情報量を持つ。
+
+##### Cardinality爆発の数学
+
+Prometheusのメトリクスでは、ラベルの組み合わせ数が爆発的に増加する問題がある。ラベルセット $\{l_1, l_2, \ldots, l_k\}$ で、各ラベル $l_i$ が $|l_i|$ 個の値をとるとき、時系列数 (cardinality) は:
+
+$$
+C = \prod_{i=1}^{k} |l_i| = |l_1| \times |l_2| \times \cdots \times |l_k|
+$$
+
+例: `user_id` ($10^6$ 値) $\times$ `endpoint` (100値) $\times$ `status_code` (50値) $= 5 \times 10^9$ 時系列。これはPrometheusのメモリを即時枯渇させる。
+
+解決策: High-cardinality ラベル (`user_id`, `request_id` 等) をメトリクスに含めず、トレーシング側で管理する。メトリクスは**集約済み統計値** — ラベルのcardinalityを常に $O(10^3)$ 以下に抑える設計原則:
+
+$$
+C_{\text{safe}} = \prod_{i=1}^{k} |l_i| \leq 10^3
+$$
+
+OpenTelemetryのsignal階層はこの原則を体系化している:
+
+$$
+\text{Traces} \;\longrightarrow\; \text{Metrics} \;\longrightarrow\; \text{Logs}
+$$
+
+高cardinality情報はTraces、集約統計はMetrics、詳細テキストはLogsで管理する三層アーキテクチャだ。
+
+---
+
+#### 3.C.3 メトリクス & SLI/SLO設計
+
+##### The Four Golden Signals
+
+Google SRE本 (Beyer et al., 2016) で提唱された**4つの黄金シグナル**は、どんなシステムでも監視すべき最小指標セットだ:
+
+$$
+\mathcal{S} = \{\text{Latency},\; \text{Traffic},\; \text{Errors},\; \text{Saturation}\}
+$$
+
+| シグナル | 定義 | Prometheus指標例 |
+|:---------|:-----|:----------------|
+| Latency | リクエスト処理時間 $T_{\text{resp}}$ | `http_request_duration_seconds` |
+| Traffic | リクエスト到着率 $\lambda$ [req/s] | `rate(http_requests_total[1m])` |
+| Errors | エラー率 $\epsilon = P(\text{error})$ | `rate(http_errors_total[1m]) / rate(http_requests_total[1m])` |
+| Saturation | リソース使用率 $\rho = \text{used}/\text{capacity}$ | `process_resident_memory_bytes` |
+
+##### レイテンシ分布: Gaussian近似の限界
+
+一般に、レイテンシをGaussian分布 $\mathcal{N}(\mu, \sigma^2)$ でモデル化する誘惑に駆られる。しかし実際のWebサービスのレイテンシは:
+
+1. **下界が0** (負のレイテンシはあり得ない)
+2. **長いテール** (GC停止・コンテキストスイッチ・ネットワーク再送で稀に極端に大きな値が出る)
+
+これらはGaussian分布と相容れない。実測データはしばしば**対数正規分布** (log-normal) や**Pareto分布** (べき乗則) に従う。
+
+**Pareto分布** のPDF:
+
+$$
+f(x;\, \alpha,\, x_m) = \frac{\alpha\, x_m^\alpha}{x^{\alpha+1}}, \quad x \geq x_m > 0
+$$
+
+形状パラメータ $\alpha \leq 1$ のとき、期待値 $\mathbb{E}[X] = \infty$ — つまり**平均レイテンシが理論上発散する**可能性がある。これがp99を監視すべき理由だ。平均はlong-tailの影響を受けにくいが、実際のユーザー体験はテールで決まる。
+
+##### Percentile (分位数) の数学
+
+確率変数 $X$ の**分位数関数** (Quantile Function) は累積分布関数 (CDF) $F$ の逆関数:
+
+$$
+Q(p) = F^{-1}(p) = \inf\{x \in \mathbb{R} : F(x) \geq p\}
+$$
+
+直感: $Q(0.99)$ は「全体の99%がこの値以下のレイテンシ」— つまり**最悪1%のユーザーが経験するレイテンシの下限**だ。
+
+**離散データでの推定**: $n$ 個の観測値 $x_{(1)} \leq x_{(2)} \leq \cdots \leq x_{(n)}$ (順序統計量) に対して:
+
+$$
+\hat{Q}(p) = x_{(\lceil np \rceil)}
+$$
+
+$n = 1000$ 個のリクエストでp99を計算するとき、$\hat{Q}(0.99) = x_{(990)}$ — 990番目に大きい値だ。
+
+**Prometheusでの分位数推定**: ヒストグラムから分位数を推定するとき:
+
+$$
+\hat{Q}(p) = \text{upper}_{j-1} + \frac{p \cdot n_{\text{total}} - \text{count}_{j-1}}{\text{count}_j - \text{count}_{j-1}} \cdot (\text{upper}_j - \text{upper}_{j-1})
+$$
+
+これは線形補間で、推定誤差はバケット幅に依存する。Prometheusクエリでは:
+
+$$
+\text{histogram\_quantile}(0.99,\; \text{rate}(\text{latency\_bucket[5m]}))
+$$
+
+`rate()` は1秒あたりの増加率 $d/dt$ を5分窓で推定し、`histogram_quantile()` がその瞬時分布から分位数を計算する。
+
+##### SLI → SLO → Error Budget の設計
+
+**SLI** (Service Level Indicator): 測定可能な品質指標。例:
+
+$$
+\text{SLI}_{\text{latency}} = P(T_{\text{resp}} < 200\text{ms}) = \frac{\text{200ms以内のリクエスト数}}{\text{総リクエスト数}}
+$$
+
+**SLO** (Service Level Objective): SLIの目標値。例: $\text{SLI}_{\text{latency}} \geq 0.99$。
+
+**Error Budget**: SLOから導出される許容エラー量:
+
+$$
+\text{error\_budget} = 1 - \text{SLO}
+$$
+
+30日間 ($T = 2{,}592{,}000$ 秒) のエラーバジェット (時間ベース):
+
+$$
+\text{error\_budget\_time} = T \cdot (1 - \text{SLO}) = 2{,}592{,}000 \times 0.01 = 25{,}920 \text{ 秒} \approx 7.2 \text{ 時間}
+$$
+
+##### Burn Rate Alerting の数式
+
+**Burn rate** (消費速度) は、現在のエラー率がエラーバジェットを消費する速さを表す:
+
+$$
+\text{burn\_rate} = \frac{\text{error\_rate}}{1 - \text{SLO}}
+$$
+
+`burn_rate = 1` はエラーバジェットがちょうど30日で枯渇する速度。`burn_rate = 14.4` は1時間でバジェットの5%を消費する速度だ。
+
+バジェット枯渇までの残り時間:
+
+$$
+\text{time\_to\_exhaustion} = \frac{\text{残余 error\_budget}}{\text{burn\_rate}} = \frac{(1 - \text{SLO}) - \text{consumed}}{\text{error\_rate}}
+$$
+
+**多窓アラート設計**: 単窓アラートはFalse Positiveが多い (短期スパイクで誤発火)。Google SRE本推奨の**多窓アラート**は短窓 + 長窓の論理積で発火条件を絞る:
+
+$$
+\text{alert} = (\text{burn\_rate}_{1h} \geq \theta_1) \;\land\; (\text{burn\_rate}_{6h} \geq \theta_2)
+$$
+
+典型値: $\theta_1 = 14.4$、$\theta_2 = 6$。この組み合わせは:
+- **短窓 (1h)**: 急激な劣化を素早く検知 (感度高)
+- **長窓 (6h)**: 持続的な劣化を確認 (特異度高)
+
+False Positive率の削減量: 短窓単独の誤発火確率を $p_1$、長窓単独を $p_2$ として、独立性の仮定のもとで:
+
+$$
+P(\text{false positive,\; multi-window}) = p_1 \cdot p_2 \ll p_1
+$$
+
+##### Little's Law とThroughput-Latencyトレードオフ
+
+**Little's Law** は待ち行列理論の基本定理で、定常状態のシステムに普遍的に成立する:
+
+$$
+L = \lambda W
+$$
+
+- $L$: システム内の平均リクエスト数 (キュー長 + 処理中)
+- $\lambda$: リクエストの平均到着率 [req/s]
+- $W$: 1リクエストのシステム内平均滞在時間 (≈ 平均レイテンシ)
+
+導出はLindleyの再帰方程式から出発し、ergodic性を仮定することで時間平均と確率平均の一致を保証する。
+
+**推論サーバーへの適用**: キューに $L = 10$ リクエストが滞留し、$\lambda = 100$ req/s の場合:
+
+$$
+W = \frac{L}{\lambda} = \frac{10}{100} = 0.1 \text{ 秒} = 100\text{ ms}
+$$
+
+スループットを2倍 ($\lambda \to 200$ req/s) にしたとき、$L$ が変わらなければレイテンシは半減する:
+
+$$
+W' = \frac{L}{\lambda'} = \frac{10}{200} = 0.05 \text{ 秒} = 50\text{ ms}
+$$
+
+しかし現実には、スループット増加に伴い処理中リクエスト数 $L$ も増加する。利用率 $\rho = \lambda / \mu$ ($\mu$ はサービス率) が $\rho \to 1$ に近づくと、M/M/1キューモデルでは:
+
+$$
+L = \frac{\rho}{1 - \rho} \xrightarrow{\rho \to 1} \infty
+$$
+
+これがThroughput-Latencyトレードオフの根本原因だ。利用率を上げすぎるとキューが爆発しレイテンシが発散する。実用的な運用では $\rho \leq 0.7$ (利用率70%以下) を維持する:
+
+$$
+L\big|_{\rho=0.7} = \frac{0.7}{0.3} \approx 2.3 \quad \text{vs} \quad L\big|_{\rho=0.9} = \frac{0.9}{0.1} = 9.0
+$$
+
+利用率を0.7から0.9に上げると平均キュー長が約4倍になる — リソース効率と応答性のトレードオフは線形ではなくべき乗的に悪化する。
+
+---
+
+#### 3.C.4 Property-based Testing & Fuzzing の数学
+
+##### Randomized Testingの統計的保証
+
+ユニットテストは「具体例でバグを発見する」手法だ。しかし入力空間が広大なとき、具体例テストには**統計的保証がない**。Property-based testing (PBT) はランダムな入力を大量に生成することで統計的保証を与える。
+
+$n$ 個のランダムテストケースで少なくとも $1 - \delta$ の確率でバグを発見するために必要なテスト数を求める。バグを引き起こす入力の割合を $p_{\text{bug}}$ とする。1回のテストでバグを見逃す確率は $1 - p_{\text{bug}}$。$n$ 回全て見逃す確率は:
+
+$$
+P(\text{バグ見逃し}) = (1 - p_{\text{bug}})^n
+$$
+
+「少なくとも1回発見できる確率 $\geq 1 - \delta$」を要求すると:
+
+$$
+1 - (1 - p_{\text{bug}})^n \geq 1 - \delta
+$$
+
+$$
+(1 - p_{\text{bug}})^n \leq \delta
+$$
+
+両辺の対数をとって:
+
+$$
+n \cdot \log(1 - p_{\text{bug}}) \leq \log \delta
+$$
+
+$$
+n \geq \frac{\log \delta}{\log (1 - p_{\text{bug}})}
+$$
+
+$p_{\text{bug}} \ll 1$ のとき $\log(1 - p_{\text{bug}}) \approx -p_{\text{bug}}$ なので:
+
+$$
+n \approx \frac{-\log \delta}{p_{\text{bug}}} = \frac{\log(1/\delta)}{p_{\text{bug}}}
+$$
+
+**具体例**: バグが入力の1%に発生 ($p_{\text{bug}} = 0.01$)、95%の確率で発見したい ($\delta = 0.05$) とき:
+
+$$
+n \geq \frac{\log(0.05)}{\log(0.99)} = \frac{-2.996}{-0.01005} \approx 298 \text{ テスト}
+$$
+
+デフォルト100ケースでの発見確率:
+
+$$
+P(\text{発見}) = 1 - (0.99)^{100} \approx 1 - 0.366 = 63.4\%
+$$
+
+`proptest` や `quickcheck` のデフォルト256ケースでは:
+
+$$
+P(\text{発見}) = 1 - (0.99)^{256} \approx 1 - 0.077 = 92.3\%
+$$
+
+1000ケースでは $1 - (0.99)^{1000} \approx 99.996\%$ を超える。
+
+##### Shrinking アルゴリズム: 最小反例の探索
+
+Property-based testingの真骨頂は **shrinking** (縮小) だ。失敗した入力を自動的に最小化して「最も単純な反例」を提示する。
+
+形式的には、入力空間 $\mathcal{X}$ に**部分順序** $\preceq$ を定義する:
+
+$$
+x' \preceq x \;\Leftrightarrow\; x' \text{ は } x \text{ より単純}
+$$
+
+例: 数値は絶対値が小さいほど単純、リストは長さが短いほど単純。Shrinkerは貪欲探索 (greedy search) で最小元を求める:
+
+$$
+x_{\min} = \min_{\preceq}\{x \in \mathcal{X} : \text{property}(x) = \text{False}\}
+$$
+
+`proptest` のshrinkingはBFS的戦略を採用し、候補 $\{x'_1, x'_2, \ldots\}$ ($x'_i \preceq x$) を列挙して各々でテストを再実行。最初に失敗した $x'_i$ を新たな出発点として繰り返す。
+
+収束保証: 入力空間が有限または整礎 (well-founded) な部分順序を持つとき、shrinkingは有限ステップで極小元に収束する。Rustの整数や文字列は有界なのでこのアルゴリズムは必ず停止する。
+
+##### Coverage-guided Fuzzing のアルゴリズム
+
+**Coverage-guided fuzzing** はコードカバレッジを指標として入力の変異 (mutation) を誘導するファジングアルゴリズムだ。
+
+アルゴリズムの核心:
+
+1. **シードコーパス** $S_0 = \{x_1, x_2, \ldots\}$ から開始
+2. 各入力 $x$ を実行し、**カバレッジビットマップ** $\text{cov}(x) \subseteq \text{BasicBlocks}$ を記録
+3. 既存カバレッジ $C = \bigcup_{x \in S} \text{cov}(x)$ に対して、新たな分岐を発見した入力をコーパスに追加:
+
+$$
+x_{\text{new}} \text{ を追加 } \Leftrightarrow \text{cov}(x_{\text{new}}) \not\subseteq C
+$$
+
+4. コーパスから入力を選択し、**変異操作** $\mathcal{M}$ (ビットフリップ、バイト置換、スプライス等) を適用して新入力を生成
+5. goto 2
+
+変異操作の形式化: 変異操作 $m \in \mathcal{M}$ はバイト列 $x \in \{0,1\}^*$ に対する確率的変換:
+
+$$
+m : \{0,1\}^* \times \Omega \to \{0,1\}^*
+$$
+
+ここで $\Omega$ は確率空間。AFL-fast等の改良版では、**rare edge** (稀にカバーされる分岐) を通る入力を優先的に選択することで探索効率を向上させる。
+
+##### Fuzzingの期待検出時間
+
+バグを引き起こす入力が全入力空間の確率 $p_{\text{crash}}$ に存在し、1秒あたりの変異数を $r_{\text{mutation}}$ [mutations/s] とするとき、バグ検出までの期待時間 $\mathbb{E}[T]$ は:
+
+$$
+\mathbb{E}[T] = \frac{1}{p_{\text{crash}} \cdot r_{\text{mutation}}}
+$$
+
+coverage-guided fuzzingの優位性は $p_{\text{crash}}^{\text{guided}} \gg p_{\text{crash}}^{\text{random}}$ に起因する。新しいコードパスを継続的に探索することで、バグに至るコードパスへの到達確率を高める。`cargo-fuzz` (libFuzzer backend) では $r_{\text{mutation}} \approx 10^4 \sim 10^6$ mutations/s が典型的な値だ。
+
+##### 等価クラス分割と境界値分析
+
+入力空間 $\mathcal{X}$ を**等価クラス** (equivalence class) に分割し、各クラスから代表値を選んでテストする手法は古典的だが強力だ。
+
+等価クラス分割の形式化: $\mathcal{X}$ 上の等価関係 $\sim$ を定義し、商集合 $\mathcal{X}/{\sim} = \{[x_1], [x_2], \ldots, [x_k]\}$ を作る。各クラス $[x_i]$ の挙動が同一であるという仮定のもとで、代表値 $r_i \in [x_i]$ のみでテストすれば十分:
+
+$$
+\forall x, y \in [x_i] : \text{behavior}(x) = \text{behavior}(y)
+$$
+
+**境界値分析** (Boundary Value Analysis): バグは等価クラスの「境界」に集中するという経験則に基づき、境界値を重点的にテストする:
+
+$$
+\text{境界値} = \{x_{\min},\; x_{\min}+1,\; x_{\max}-1,\; x_{\max}\} \cup \{0,\; -1,\; \text{MAX},\; \text{MIN},\; \text{NaN},\; \infty\}
+$$
+
+##### Criterion.rs の統計的有意性検定
+
+**Criterion.rs** はRustのベンチマークフレームワークで、測定ノイズを統計的に除去する。
+
+**Mann-Whitney U検定 vs t検定**:
+
+t検定は正規分布を仮定する:
+
+$$
+t = \frac{\bar{X}_1 - \bar{X}_2}{s_p \sqrt{1/n_1 + 1/n_2}}, \quad s_p = \sqrt{\frac{(n_1-1)s_1^2 + (n_2-1)s_2^2}{n_1+n_2-2}}
+$$
+
+しかしベンチマークの実行時間はしばしば**正規分布から逸脱**する:
+- マルチモーダル分布 (L1キャッシュヒット vs L2キャッシュヒット vs メインメモリアクセス)
+- 長いテール (GC停止、OS割り込み、NUMA effects)
+
+このときt検定は誤った判断を導く可能性がある。**Mann-Whitney U検定** は分布非依存 (distribution-free) な検定で、正規分布を仮定しない:
+
+$$
+U = \sum_{i=1}^{n_1} \sum_{j=1}^{n_2} \mathbf{1}[X_{1i} > X_{2j}]
+$$
+
+$U$ は「サンプル1の値がサンプル2の値を上回る対の数」を数える。帰無仮説 $H_0$: 「2群の分布は同一」のもとで、$U$ の分布は既知であり正規近似 ($n_1, n_2 \geq 8$) が可能:
+
+$$
+z = \frac{U - \mu_U}{\sigma_U}, \quad \mu_U = \frac{n_1 n_2}{2}, \quad \sigma_U = \sqrt{\frac{n_1 n_2 (n_1 + n_2 + 1)}{12}}
+$$
+
+Criterion.rsはデフォルトでMann-Whitney U検定を採用し、より頑健な性能比較を行う。
+
+##### 効果量 (Effect Size): Cohen's $d$
+
+統計的有意性 ($p$値) は「差が存在するか」を答えるが、「差が実用的に重要か」には答えない。**効果量**がこれを補完する。
+
+**Cohen's $d$** は2群の平均差を標準偏差でスケールした指標:
+
+$$
+d = \frac{\mu_1 - \mu_2}{\sigma_{\text{pooled}}}, \quad \sigma_{\text{pooled}} = \sqrt{\frac{(n_1-1)\sigma_1^2 + (n_2-1)\sigma_2^2}{n_1+n_2-2}}
+$$
+
+解釈の目安:
+
+$$
+|d| < 0.2:\; \text{小さい},\quad 0.2 \leq |d| < 0.8:\; \text{中程度},\quad |d| \geq 0.8:\; \text{大きい}
+$$
+
+ベンチマークで `d = 0.05` が有意 ($p < 0.05$) でも、効果量が極めて小さければ**実用上の最適化は不要**と判断できる。逆に $d = 2.0$ なら最適化の効果は圧倒的だ。Production品質のRustライブラリでは `d \geq 0.5` を要求する実践的な閾値設計が推奨される。
+
+> **⚠️ Warning:** Criterion.rsの結果はCPUの温度・バックグラウンドプロセス・ASLR (Address Space Layout Randomization) の影響を受ける。再現性のあるベンチマークには `taskset`、`isolcpus`、ASLR無効化等の環境制御が必要だ。
+
+> **Note:** Property-based testingとfuzzingは補完的だ。PBTは「性質 (property) を満たすか」を確認し、fuzzingは「クラッシュするか」を探索する。Production品質のRustライブラリは両方を採用する。
+
+> **Note:** **Part C 制覇!** エラーハンドリングのMonad代数、ログの情報理論、SLO設計の数式、テストの統計的保証 — Productionとは、これら全てを同時に設計することだ。
 
 ### Part D: 🔮 Elixir推論分散（深掘り） (~600行)
 
@@ -1699,26 +1531,6 @@ Elixirは**並行性と耐障害性**でRustを補完する。推論APIサーバ
 
 最もシンプル。リクエストを順番にワーカーに割り当て。
 
-```elixir
-defmodule LoadBalancer.RoundRobin do
-  use GenServer
-
-  # State: {worker_pids, current_index}
-  def init(worker_pids) do
-    {:ok, {worker_pids, 0}}
-  end
-
-  def handle_call(:get_worker, _from, {workers, idx}) do
-    worker = Enum.at(workers, idx)
-    next_idx = rem(idx + 1, length(workers))
-    {:reply, worker, {workers, next_idx}}
-  end
-end
-
-# Usage
-{:ok, lb} = LoadBalancer.RoundRobin.start_link([worker1, worker2, worker3])
-worker = GenServer.call(lb, :get_worker)
-```
 
 **利点**: O(1)時間, 実装簡単
 **欠点**: ワーカーの負荷差を無視
@@ -1727,28 +1539,6 @@ worker = GenServer.call(lb, :get_worker)
 
 現在の接続数が最も少ないワーカーを選択。
 
-```elixir
-defmodule LoadBalancer.LeastConn do
-  use GenServer
-
-  # State: %{worker_pid => connection_count}
-  def init(worker_pids) do
-    state = Map.new(worker_pids, fn pid -> {pid, 0} end)
-    {:ok, state}
-  end
-
-  def handle_call(:get_worker, _from, state) do
-    {worker, _count} = Enum.min_by(state, fn {_pid, count} -> count end)
-    new_state = Map.update!(state, worker, &(&1 + 1))
-    {:reply, worker, new_state}
-  end
-
-  def handle_cast({:release_worker, worker}, state) do
-    new_state = Map.update!(state, worker, &max(&1 - 1, 0))
-    {:noreply, new_state}
-  end
-end
-```
 
 **利点**: 負荷を均等化
 **欠点**: 各リクエストの処理時間差を無視
@@ -1757,174 +1547,16 @@ end
 
 ワーカーごとに重み付け (GPU性能差を考慮)。
 
-```elixir
-defmodule LoadBalancer.Weighted do
-  use GenServer
-
-  # State: [{worker, weight}, ...]
-  def init(worker_weights) do
-    # Expand workers by weight: [{worker1, 3}] => [w1, w1, w1]
-    expanded = Enum.flat_map(worker_weights, fn {w, weight} ->
-      List.duplicate(w, weight)
-    end)
-    {:ok, {expanded, 0}}
-  end
-
-  def handle_call(:get_worker, _from, {workers, idx}) do
-    worker = Enum.at(workers, idx)
-    next_idx = rem(idx + 1, length(workers))
-    {:reply, worker, {workers, next_idx}}
-  end
-end
-
-# Example: GPU1(A100) weight=3, GPU2(V100) weight=1
-LoadBalancer.Weighted.start_link([{gpu1_worker, 3}, {gpu2_worker, 1}])
-# Sequence: gpu1, gpu1, gpu1, gpu2, gpu1, ...
-```
 
 ##### 適応型ロードバランシング (Adaptive)
 
 レイテンシをモニタリングし、動的に重みを調整。
 
-```elixir
-defmodule LoadBalancer.Adaptive do
-  use GenServer
-
-  # State: %{worker => %{latency_ewma: float, requests: int}}
-  def init(workers) do
-    state = Map.new(workers, fn w -> {w, %{latency_ewma: 0.0, requests: 0}} end)
-    {:ok, state}
-  end
-
-  def handle_call(:get_worker, _from, state) do
-    # Select worker with lowest EWMA latency
-    {worker, _stats} = Enum.min_by(state, fn {_w, %{latency_ewma: lat}} -> lat end)
-    {:reply, worker, state}
-  end
-
-  def handle_cast({:record_latency, worker, latency_ms}, state) do
-    new_state = Map.update!(state, worker, fn stats ->
-      # Exponential moving average: α=0.1
-      new_ewma = 0.9 * stats.latency_ewma + 0.1 * latency_ms
-      %{stats | latency_ewma: new_ewma, requests: stats.requests + 1}
-    end)
-    {:noreply, new_state}
-  end
-end
-```
 
 **EWMA (指数移動平均)**:
 $$\text{EWMA}_t = \alpha \cdot L_t + (1-\alpha) \cdot \text{EWMA}_{t-1}$$
 
 where $L_t$ = 最新レイテンシ, $\alpha=0.1$ (平滑化係数)。
-
-#### 3.D.2 Auto-Scaling
-
-需要に応じてワーカーを動的に追加/削除。
-
-##### メトリクスベースAuto-Scaling
-
-CPU/メモリ/キュー長を監視し、閾値超過でスケールアウト。
-
-```elixir
-defmodule AutoScaler do
-  use GenServer
-  require Logger
-
-  @scale_out_threshold 0.8  # CPU 80%
-  @scale_in_threshold 0.3   # CPU 30%
-  @check_interval 10_000    # 10秒
-
-  def init(opts) do
-    schedule_check()
-    {:ok, %{
-      workers: opts[:initial_workers],
-      min_workers: opts[:min_workers] || 1,
-      max_workers: opts[:max_workers] || 10
-    }}
-  end
-
-  defp schedule_check do
-    Process.send_after(self(), :check_metrics, @check_interval)
-  end
-
-  def handle_info(:check_metrics, state) do
-    cpu_usage = :erlang.statistics(:scheduler_utilization)
-      |> Enum.map(fn {_, usage} -> usage end)
-      |> Enum.sum()
-      |> Kernel./(length(:erlang.system_info(:schedulers)))
-
-    new_state = cond do
-      cpu_usage > @scale_out_threshold and length(state.workers) < state.max_workers ->
-        Logger.info("CPU #{cpu_usage}, scaling out")
-        scale_out(state)
-
-      cpu_usage < @scale_in_threshold and length(state.workers) > state.min_workers ->
-        Logger.info("CPU #{cpu_usage}, scaling in")
-        scale_in(state)
-
-      true ->
-        state
-    end
-
-    schedule_check()
-    {:noreply, new_state}
-  end
-
-  defp scale_out(state) do
-    new_worker = start_worker()
-    %{state | workers: [new_worker | state.workers]}
-  end
-
-  defp scale_in(state) do
-    [worker_to_stop | remaining] = state.workers
-    stop_worker(worker_to_stop)
-    %{state | workers: remaining}
-  end
-end
-```
-
-##### Kubernetes統合
-
-Elixirアプリを`libcluster`でKubernetesクラスタに統合。
-
-```elixir
-# config/config.exs
-config :libcluster,
-  topologies: [
-    k8s: [
-      strategy: Cluster.Strategy.Kubernetes,
-      config: [
-        mode: :dns,
-        kubernetes_node_basename: "inference-api",
-        kubernetes_selector: "app=inference",
-        polling_interval: 10_000
-      ]
-    ]
-  ]
-```
-
-Horizontal Pod Autoscaler (HPA):
-```yaml
-apiVersion: autoscaling/v2
-kind: HorizontalPodAutoscaler
-metadata:
-  name: inference-api-hpa
-spec:
-  scaleTargetRef:
-    apiVersion: apps/v1
-    kind: Deployment
-    name: inference-api
-  minReplicas: 2
-  maxReplicas: 20
-  metrics:
-  - type: Resource
-    resource:
-      name: cpu
-      target:
-        type: Utilization
-        averageUtilization: 70
-```
 
 #### 3.D.3 耐障害性（深掘り）
 
@@ -1934,160 +1566,14 @@ Elixirの"Let it crash"哲学 + Supervisor treeで自動復旧。
 
 リモートサービス呼び出しの失敗を検知し、一時的に遮断。
 
-```elixir
-defmodule CircuitBreaker do
-  use GenServer
-
-  @failure_threshold 5
-  @timeout_ms 30_000  # 30秒後にhalf-openへ
-
-  defmodule State do
-    defstruct [
-      :status,          # :closed | :open | :half_open
-      :failure_count,
-      :last_failure_time,
-      :success_count
-    ]
-  end
-
-  def init(_) do
-    {:ok, %State{
-      status: :closed,
-      failure_count: 0,
-      last_failure_time: nil,
-      success_count: 0
-    }}
-  end
-
-  def call(breaker, fun) do
-    GenServer.call(breaker, {:call, fun})
-  end
-
-  def handle_call({:call, fun}, _from, state) do
-    case state.status do
-      :open ->
-        if time_elapsed?(state.last_failure_time, @timeout_ms) do
-          # Transition to half-open
-          attempt_call(fun, %{state | status: :half_open, success_count: 0})
-        else
-          {:reply, {:error, :circuit_open}, state}
-        end
-
-      :half_open ->
-        attempt_call(fun, state)
-
-      :closed ->
-        attempt_call(fun, state)
-    end
-  end
-
-  defp attempt_call(fun, state) do
-    case fun.() do
-      {:ok, result} ->
-        new_state = handle_success(state)
-        {:reply, {:ok, result}, new_state}
-
-      {:error, reason} ->
-        new_state = handle_failure(state)
-        {:reply, {:error, reason}, new_state}
-    end
-  end
-
-  defp handle_success(state) do
-    case state.status do
-      :half_open ->
-        # 3回連続成功でclosedへ
-        if state.success_count + 1 >= 3 do
-          %{state | status: :closed, failure_count: 0, success_count: 0}
-        else
-          %{state | success_count: state.success_count + 1}
-        end
-
-      :closed ->
-        %{state | failure_count: 0}
-
-      :open ->
-        state
-    end
-  end
-
-  defp handle_failure(state) do
-    new_failure_count = state.failure_count + 1
-
-    if new_failure_count >= @failure_threshold do
-      %{state |
-        status: :open,
-        failure_count: new_failure_count,
-        last_failure_time: System.monotonic_time(:millisecond)
-      }
-    else
-      %{state | failure_count: new_failure_count}
-    end
-  end
-
-  defp time_elapsed?(last_time, timeout_ms) do
-    System.monotonic_time(:millisecond) - last_time > timeout_ms
-  end
-end
-```
 
 **状態遷移**:
-```
-Closed --[5 failures]--> Open --[30s timeout]--> Half-Open --[3 successes]--> Closed
-                                                      |
-                                                  [1 failure]
-                                                      |
-                                                      v
-                                                    Open
-```
+
 
 ##### Bulkhead分離
 
 リソースプールを分離し、1サービスの障害が全体に波及しない。
 
-```elixir
-defmodule Bulkhead do
-  use Supervisor
-
-  def start_link(opts) do
-    Supervisor.start_link(__MODULE__, opts, name: __MODULE__)
-  end
-
-  def init(opts) do
-    # Pool A: 高優先度リクエスト用 (50 workers)
-    pool_a = :poolboy.child_spec(:pool_a, [
-      {:name, {:local, :pool_a}},
-      {:worker_module, InferenceWorker},
-      {:size, 50},
-      {:max_overflow, 10}
-    ])
-
-    # Pool B: 通常リクエスト用 (20 workers)
-    pool_b = :poolboy.child_spec(:pool_b, [
-      {:name, {:local, :pool_b}},
-      {:worker_module, InferenceWorker},
-      {:size, 20},
-      {:max_overflow, 5}
-    ])
-
-    children = [pool_a, pool_b]
-    Supervisor.init(children, strategy: :one_for_one)
-  end
-end
-
-# Usage
-def high_priority_request(input) do
-  :poolboy.transaction(:pool_a, fn worker ->
-    InferenceWorker.run(worker, input)
-  end)
-end
-
-def normal_request(input) do
-  :poolboy.transaction(:pool_b, fn worker ->
-    InferenceWorker.run(worker, input)
-  end)
-end
-```
 
 Pool Aが枯渇してもPool Bは影響を受けない。
 
@@ -2095,67 +1581,11 @@ Pool Aが枯渇してもPool Bは影響を受けない。
 
 各操作に明示的なタイムアウトを設定。
 
-```elixir
-defmodule InferenceAPI do
-  @inference_timeout 5_000  # 5秒
-  @load_model_timeout 30_000  # 30秒
-
-  def inference(model, input) do
-    Task.async(fn ->
-      # 実際の推論処理
-      run_inference(model, input)
-    end)
-    |> Task.await(@inference_timeout)
-  rescue
-    e in [Task.TimeoutError] ->
-      {:error, :timeout}
-  end
-
-  def load_model(path) do
-    Task.async(fn ->
-      # モデルロード
-      Model.load(path)
-    end)
-    |> Task.await(@load_model_timeout)
-  end
-end
-```
 
 ##### Retry Policy
 
 一時的なエラーは指数バックオフでリトライ。
 
-```elixir
-defmodule RetryPolicy do
-  def retry(fun, opts \\ []) do
-    max_retries = Keyword.get(opts, :max_retries, 3)
-    base_delay = Keyword.get(opts, :base_delay_ms, 100)
-
-    do_retry(fun, 0, max_retries, base_delay)
-  end
-
-  defp do_retry(fun, attempt, max_retries, base_delay) do
-    case fun.() do
-      {:ok, result} ->
-        {:ok, result}
-
-      {:error, reason} when attempt < max_retries ->
-        # Exponential backoff with jitter
-        delay = base_delay * :math.pow(2, attempt) + :rand.uniform(100)
-        Process.sleep(trunc(delay))
-        do_retry(fun, attempt + 1, max_retries, base_delay)
-
-      {:error, reason} ->
-        {:error, {:max_retries_exceeded, reason}}
-    end
-  end
-end
-
-# Usage
-RetryPolicy.retry(fn ->
-  HTTPoison.post(url, body)
-end, max_retries: 3, base_delay_ms: 200)
-```
 
 バックオフ計算:
 $$\text{delay} = \text{base} \times 2^{\text{attempt}} + \text{jitter}$$
@@ -2165,448 +1595,7 @@ $$\text{delay} = \text{base} \times 2^{\text{attempt}} + \text{jitter}$$
 - Attempt 1: $200 \times 2^1 + [0,100] = 400\text{-}500$ ms
 - Attempt 2: $200 \times 2^2 + [0,100] = 800\text{-}900$ ms
 
-#### 3.D.4 レイテンシ最適化/スループット最大化
-
-##### バッチ処理最適化
-
-複数リクエストをバッチにまとめてGPU利用率向上。
-
-```elixir
-defmodule BatchProcessor do
-  use GenServer
-
-  @batch_size 32
-  @batch_timeout 50  # 50ms
-
-  def init(_) do
-    {:ok, %{queue: [], timer: nil}}
-  end
-
-  def handle_cast({:add_request, request, from}, state) do
-    new_queue = [{request, from} | state.queue]
-
-    cond do
-      length(new_queue) >= @batch_size ->
-        # Batch full: process immediately
-        process_batch(new_queue)
-        {:noreply, %{queue: [], timer: nil}}
-
-      state.timer == nil ->
-        # Start timeout timer
-        timer = Process.send_after(self(), :timeout, @batch_timeout)
-        {:noreply, %{state | queue: new_queue, timer: timer}}
-
-      true ->
-        {:noreply, %{state | queue: new_queue}}
-    end
-  end
-
-  def handle_info(:timeout, state) do
-    process_batch(state.queue)
-    {:noreply, %{queue: [], timer: nil}}
-  end
-
-  defp process_batch(queue) do
-    requests = Enum.map(queue, fn {req, _from} -> req end)
-    results = InferenceEngine.batch_infer(requests)  # GPU batch
-
-    Enum.zip(queue, results)
-    |> Enum.each(fn {{_req, from}, result} ->
-      GenServer.reply(from, result)
-    end)
-  end
-end
-```
-
-**効果**:
-- バッチサイズ32: GPU使用率 15% → 85%
-- スループット: 50 req/s → 800 req/s (16倍)
-- P99レイテンシ: +50ms (バッチ待ち時間)
-
-##### パイプライン並列化
-
-前処理/推論/後処理を並列化。
-
-```elixir
-defmodule Pipeline do
-  def process(input) do
-    input
-    |> Task.async(fn i -> preprocess(i) end)
-    |> Task.await()
-    |> Task.async(fn i -> inference(i) end)
-    |> Task.await()
-    |> Task.async(fn i -> postprocess(i) end)
-    |> Task.await()
-  end
-
-  # Parallel pipeline for multiple inputs
-  def process_parallel(inputs) do
-    inputs
-    |> Flow.from_enumerable()
-    |> Flow.map(&preprocess/1)
-    |> Flow.partition()
-    |> Flow.map(&inference/1)
-    |> Flow.map(&postprocess/1)
-    |> Enum.to_list()
-  end
-end
-```
-
-**Flow** (GenStage): ストリーム並列処理。バックプレッシャー自動制御。
-
-##### キャッシング戦略
-
-頻繁なリクエストをキャッシュ。
-
-```elixir
-defmodule InferenceCache do
-  use GenServer
-
-  @cache_ttl 300_000  # 5分
-
-  def init(_) do
-    {:ok, %{cache: %{}, ttl_timers: %{}}}
-  end
-
-  def handle_call({:get, key}, _from, state) do
-    case Map.fetch(state.cache, key) do
-      {:ok, value} ->
-        {:reply, {:ok, value}, state}
-      :error ->
-        {:reply, :miss, state}
-    end
-  end
-
-  def handle_cast({:put, key, value}, state) do
-    # Set TTL timer
-    timer = Process.send_after(self(), {:expire, key}, @cache_ttl)
-
-    new_cache = Map.put(state.cache, key, value)
-    new_timers = Map.put(state.ttl_timers, key, timer)
-
-    {:noreply, %{state | cache: new_cache, ttl_timers: new_timers}}
-  end
-
-  def handle_info({:expire, key}, state) do
-    new_cache = Map.delete(state.cache, key)
-    new_timers = Map.delete(state.ttl_timers, key)
-    {:noreply, %{state | cache: new_cache, ttl_timers: new_timers}}
-  end
-end
-
-# LRU cache with :ets
-defmodule LRUCache do
-  def init(max_size) do
-    :ets.new(:lru_cache, [:set, :public, :named_table])
-    :ets.insert(:lru_cache, {:__config__, %{max_size: max_size, current_size: 0}})
-  end
-
-  def get(key) do
-    case :ets.lookup(:lru_cache, key) do
-      [{^key, value, _timestamp}] ->
-        # Update timestamp (LRU)
-        :ets.insert(:lru_cache, {key, value, System.monotonic_time()})
-        {:ok, value}
-      [] ->
-        :miss
-    end
-  end
-
-  def put(key, value) do
-    timestamp = System.monotonic_time()
-
-    # Evict if full
-    [{_, %{max_size: max, current_size: size}}] = :ets.lookup(:lru_cache, :__config__)
-    if size >= max do
-      evict_lru()
-    end
-
-    :ets.insert(:lru_cache, {key, value, timestamp})
-  end
-
-  defp evict_lru do
-    # Find oldest entry
-    :ets.select(:lru_cache, [
-      {{:"$1", :"$2", :"$3"}, [{:"/=", :"$1", :__config__}], [{{:"$1", :"$3"}}]}
-    ])
-    |> Enum.min_by(fn {_key, timestamp} -> timestamp end)
-    |> elem(0)
-    |> then(&:ets.delete(:lru_cache, &1))
-  end
-end
-```
-
-##### バックプレッシャー制御
-
-GenStageでプロデューサー/コンシューマーのレート調整。
-
-```elixir
-defmodule Producer do
-  use GenStage
-
-  def init(requests) do
-    {:producer, requests}
-  end
-
-  def handle_demand(demand, requests) when demand > 0 do
-    {to_send, remaining} = Enum.split(requests, demand)
-    {:noreply, to_send, remaining}
-  end
-end
-
-defmodule Consumer do
-  use GenStage
-
-  def init(_) do
-    {:consumer, :ok}
-  end
-
-  def handle_events(events, _from, state) do
-    # Process events (inference)
-    Enum.each(events, &InferenceEngine.infer/1)
-    {:noreply, [], state}
-  end
-end
-
-# Link producer -> consumer
-{:ok, producer} = Producer.start_link(requests)
-{:ok, consumer} = Consumer.start_link()
-GenStage.sync_subscribe(consumer, to: producer, max_demand: 10, min_demand: 5)
-```
-
-Consumerが処理能力を超えると、Producerが自動的にレート制限。
-
-#### 3.D.5 SLA/SLO設計
-
-**SLA (Service Level Agreement)**: 顧客との契約
-**SLO (Service Level Objective)**: 内部目標 (SLA達成のための余裕)
-**SLI (Service Level Indicator)**: 測定可能なメトリクス
-
-##### 推論APIのSLO設計
-
-```elixir
-defmodule SLO do
-  @doc """
-  99.9% availability (monthly downtime < 43.8 min)
-  """
-  @availability_target 0.999
-
-  @doc """
-  P50 latency < 100ms
-  P95 latency < 300ms
-  P99 latency < 500ms
-  """
-  @latency_p50_ms 100
-  @latency_p95_ms 300
-  @latency_p99_ms 500
-
-  @doc """
-  Error rate < 0.1%
-  """
-  @error_rate_target 0.001
-
-  @doc """
-  Throughput >= 1000 req/s
-  """
-  @throughput_target 1000
-
-  def check_slo(metrics) do
-    [
-      check_availability(metrics.uptime_ratio),
-      check_latency(metrics.latency_percentiles),
-      check_error_rate(metrics.error_rate),
-      check_throughput(metrics.throughput)
-    ]
-    |> Enum.all?()
-  end
-
-  defp check_availability(uptime_ratio) do
-    uptime_ratio >= @availability_target
-  end
-
-  defp check_latency(percentiles) do
-    percentiles.p50 <= @latency_p50_ms and
-    percentiles.p95 <= @latency_p95_ms and
-    percentiles.p99 <= @latency_p99_ms
-  end
-
-  defp check_error_rate(error_rate) do
-    error_rate <= @error_rate_target
-  end
-
-  defp check_throughput(throughput) do
-    throughput >= @throughput_target
-  end
-end
-```
-
-##### SLI計測実装
-
-```elixir
-defmodule SLICollector do
-  use GenServer
-
-  def init(_) do
-    schedule_report()
-    {:ok, %{
-      total_requests: 0,
-      successful_requests: 0,
-      latencies: [],
-      start_time: System.monotonic_time(:second)
-    }}
-  end
-
-  def handle_cast({:record, latency_ms, success?}, state) do
-    new_state = %{state |
-      total_requests: state.total_requests + 1,
-      successful_requests: state.successful_requests + if(success?, do: 1, else: 0),
-      latencies: [latency_ms | state.latencies]
-    }
-    {:noreply, new_state}
-  end
-
-  def handle_info(:report, state) do
-    report_sli(state)
-    schedule_report()
-    {:noreply, %{state | latencies: []}}  # Reset
-  end
-
-  defp schedule_report do
-    Process.send_after(self(), :report, 60_000)  # Every 1 min
-  end
-
-  defp report_sli(state) do
-    uptime_seconds = System.monotonic_time(:second) - state.start_time
-    error_rate = 1.0 - state.successful_requests / max(state.total_requests, 1)
-
-    sorted_latencies = Enum.sort(state.latencies)
-    p50 = percentile(sorted_latencies, 0.50)
-    p95 = percentile(sorted_latencies, 0.95)
-    p99 = percentile(sorted_latencies, 0.99)
-
-    throughput = state.total_requests / 60.0  # req/s
-
-    Logger.info("""
-    SLI Report:
-      Uptime: #{uptime_seconds}s
-      Error rate: #{Float.round(error_rate * 100, 2)}%
-      Latency P50/P95/P99: #{p50}/#{p95}/#{p99} ms
-      Throughput: #{Float.round(throughput, 1)} req/s
-    """)
-  end
-
-  defp percentile([], _p), do: 0
-  defp percentile(sorted_list, p) do
-    index = trunc(length(sorted_list) * p)
-    Enum.at(sorted_list, index)
-  end
-end
-```
-
-##### アラート設計
-
-Prometheusアラート (Elixirからメトリクス公開):
-
-```yaml
-groups:
-- name: inference_api
-  interval: 30s
-  rules:
-  - alert: HighErrorRate
-    expr: rate(inference_errors_total[5m]) > 0.01
-    for: 5m
-    labels:
-      severity: warning
-    annotations:
-      summary: "High error rate detected"
-
-  - alert: HighLatencyP99
-    expr: histogram_quantile(0.99, rate(inference_duration_seconds_bucket[5m])) > 0.5
-    for: 10m
-    labels:
-      severity: warning
-
-  - alert: LowThroughput
-    expr: rate(inference_requests_total[5m]) < 1000
-    for: 10m
-    labels:
-      severity: info
-```
-
----
-
 ### Part E: 推論サーバー最適化 & プロファイリング (~200行)
-
-#### 3.E.1 KV-Cache最適化 — PagedAttention
-
-vLLM [^6] のPagedAttention: OSの仮想メモリ方式をKV-Cacheに適用。
-
-##### PagedAttentionの仕組み
-
-KV-Cacheを固定サイズの**ブロック**に分割:
-- 1ブロック = 16トークン分
-- 物理ブロック: GPUメモリ上の実体
-- 論理ブロック: シーケンスごとのマッピング
-
-```
-Sequence 1: [Block 0] -> [Block 3] -> [Block 7]
-Sequence 2: [Block 1] -> [Block 3] (shared!) -> [Block 9]
-```
-
-**Copy-on-Write**: Beam searchで分岐時、ブロックを共有 → 書き込み時のみコピー。
-
-**Rust実装例** (簡略版):
-
-```rust
-struct BlockManager {
-    physical_blocks: Vec<Block>,
-    free_blocks: Vec<usize>,
-    block_size: usize,  // 16 tokens
-}
-
-struct Block {
-    key_cache: Vec<f32>,    // [block_size, d_model]
-    value_cache: Vec<f32>,
-    ref_count: usize,
-}
-
-impl BlockManager {
-    fn allocate_block(&mut self) -> Result<usize, OutOfMemory> {
-        self.free_blocks.pop().ok_or(OutOfMemory)
-    }
-
-    fn free_block(&mut self, block_id: usize) {
-        self.physical_blocks[block_id].ref_count -= 1;
-        if self.physical_blocks[block_id].ref_count == 0 {
-            self.free_blocks.push(block_id);
-        }
-    }
-
-    fn share_block(&mut self, block_id: usize) {
-        self.physical_blocks[block_id].ref_count += 1;
-    }
-
-    fn copy_on_write(&mut self, block_id: usize) -> Result<usize, OutOfMemory> {
-        if self.physical_blocks[block_id].ref_count == 1 {
-            return Ok(block_id);  // No sharing, reuse
-        }
-
-        // Copy to new block
-        let new_block_id = self.allocate_block()?;
-        self.physical_blocks[new_block_id].key_cache =
-            self.physical_blocks[block_id].key_cache.clone();
-        self.physical_blocks[new_block_id].value_cache =
-            self.physical_blocks[block_id].value_cache.clone();
-
-        self.free_block(block_id);  // Release old
-        Ok(new_block_id)
-    }
-}
-```
-
-**メモリ効率**:
-- 従来: 最大長で事前確保 (2048トークン) → 平均400トークンで浪費80%
-- PagedAttention: ブロック単位で動的確保 → 浪費<4%
 
 #### 3.E.2 ⚡ Julia訓練最適化
 
@@ -2614,38 +1603,6 @@ impl BlockManager {
 
 FP16/BF16で学習高速化 + メモリ削減。
 
-```julia
-using Flux, CUDA
-
-# Mixed precision: FP16 forward, FP32 backward
-function mixed_precision_train!(model, data, opt; scaler=1024.0)
-    for (x, y) in data
-        # Cast to FP16
-        x_fp16 = Float16.(x)
-        y_fp16 = Float16.(y)
-
-        # Forward in FP16
-        loss, back = Flux.pullback(model) do m
-            ŷ = m(x_fp16)
-            Flux.mse(ŷ, y_fp16)
-        end
-
-        # Scale loss to prevent underflow
-        scaled_loss = loss * scaler
-
-        # Backward in FP32 (gradient accumulation)
-        grads = back(scaler)
-
-        # Unscale gradients
-        for g in grads
-            g ./= scaler
-        end
-
-        # Optimizer step in FP32
-        Flux.update!(opt, model, grads)
-    end
-end
-```
 
 **なぜMixed Precisionか**:
 - FP16範囲: $[2^{-14}, 2^{15}] = [6e-5, 32768]$
@@ -2661,68 +1618,18 @@ $$g_\text{unscaled} = \frac{g_\text{scaled}}{s}$$
 
 中間活性化を再計算してメモリ削減。
 
-```julia
-using ChainRules
-
-function checkpoint(f, x)
-    # Forward: only save input
-    y = f(x)
-
-    # Custom backward: recompute forward
-    function checkpoint_pullback(ȳ)
-        y_recomputed = f(x)  # Recompute!
-        _, back = pullback(f, x)
-        return back(ȳ)
-    end
-
-    return y, checkpoint_pullback
-end
-
-# Usage in Transformer layer
-function transformer_layer_checkpointed(x)
-    x1, back1 = checkpoint(attention, x)
-    x2, back2 = checkpoint(ffn, x1)
-    return x2
-end
-```
 
 **トレードオフ**:
 - メモリ削減: 50-70% (中間活性化を保存しない)
 - 計算時間増加: +30% (forward 2回実行)
 
-#### 3.E.3 プロファイリング — Perf / Flame Graph
+## 著者リンク
 
-##### Rust: `perf` + Flame Graph
-
-```bash
-perf record -g ./target/release/inference_server
-perf script | stackcollapse-perf.pl | flamegraph.pl > flamegraph.svg
-```
-
-**ボトルネック**: `__alloc`→事前確保, `memcpy`→参照渡し, `std::fmt`→無効化
-
-##### Elixir: `:observer` + `:fprof`
-
-```elixir
-:observer.start()
-:fprof.trace([:start, {:procs, [self()]}]); result = heavy_computation()
-:fprof.trace(:stop); :fprof.analyse([:totals, {:sort, :own}])
-```
-
-**ボトルネック**: `++`→`[h|t]`, `Enum.map`→`Stream.map`, ETS full scan→キー指定
-
-##### Julia: `@profile` + `ProfileView`
-
-```julia
-@profile for i in 1:1000; forward_pass(model, input); end
-ProfileView.view()
-```
-
-**ボトルネック**: Type不安定→`@code_warntype`, アロケーション→`@allocated`, Global→`const`
-
----
-
----
+- Blog: https://fumishiki.dev
+- X: https://x.com/fumishiki
+- LinkedIn: https://www.linkedin.com/in/fumitakamurakami
+- GitHub: https://github.com/fumishiki
+- Hugging Face: https://huggingface.co/fumishiki
 
 ## ライセンス
 

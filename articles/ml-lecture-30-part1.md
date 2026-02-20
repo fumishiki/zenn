@@ -5,7 +5,13 @@ emoji: "🤖"
 type: "tech"
 topics: ["machinelearning", "agent", "rust", "elixir", "julia"]
 published: true
+difficulty: "advanced"
+time_estimate: "90 minutes"
+languages: ["Julia", "Rust", "Elixir"]
+keywords: ["機械学習", "深層学習", "生成モデル"]
 ---
+
+> **📖 後編（実装編）**: [第30回後編: エージェント実装編](./ml-lecture-30-part2) | **→ 実装・実験ゾーンへ**
 
 # 第30回: エージェント完全版 — ReAct Loop・Tool Use・Planning・Memory・Multi-Agent・MCP
 
@@ -25,9 +31,7 @@ AIは"読む"から"行動する"存在へと進化している。ChatGPTやClau
 
 これはCourse IIIの第12回 — 実践編の集大成であり、第31回MLOpsへの橋渡しでもある。
 
-:::message
-**前提知識**: 第28回(Prompt Engineering), 第29回(RAG)。Rust/Julia/Elixirの基礎は第9-19回で習得済み。
-:::
+> **Note:** **前提知識**: 第28回(Prompt Engineering), 第29回(RAG)。Rust/Julia/Elixirの基礎は第9-19回で習得済み。
 
 ```mermaid
 graph TD
@@ -83,7 +87,7 @@ end
 
 # Define tool
 tools = Dict(
-    "search" => (query) -> "Found: $query is a programming language for AI agents"
+    "search" => query -> "Found: $query is a programming language for AI agents"
 )
 
 # Run one ReAct step
@@ -110,9 +114,7 @@ Observation: Found: What is Julia? is a programming language for AI agents
 
 このループを繰り返すことで、エージェントは複雑なタスクを段階的に解決していく。
 
-:::message
-**progress: 3%** — Zone 0完了。ReAct Loopの本質を体感した。Zone 1でReActを動かしながら理解を深める。
-:::
+> **Note:** **progress: 3%** — Zone 0完了。ReAct Loopの本質を体感した。Zone 1でReActを動かしながら理解を深める。
 
 ---
 
@@ -141,115 +143,9 @@ graph LR
 
 完全なReAct Loopを実装する。
 
-```julia
-using HTTP, JSON3
-
-# Tool definition
-mutable struct Tool
-    name::String
-    description::String
-    function_::Function
-end
-
-# Agent state
-mutable struct AgentState
-    query::String
-    history::Vector{NamedTuple}
-    max_steps::Int
-    current_step::Int
-end
-
-# LLM call (simplified: rule-based for demo)
-function llm_think(state::AgentState, tools::Vector{Tool})
-    # In production: call OpenAI/Anthropic API
-    # Here: simple rule-based logic
-    if state.current_step == 1
-        return (thought="I need to search for the query",
-                action="search",
-                action_input=state.query)
-    elseif state.current_step == 2
-        last_obs = state.history[end].observation
-        return (thought="I have the answer from search",
-                action="finish",
-                action_input=last_obs)
-    else
-        return (thought="Task complete",
-                action="finish",
-                action_input="Done")
-    end
-end
-
-# Execute tool
-function execute_tool(tool_name::String, tool_input::String, tools::Vector{Tool})
-    for tool in tools
-        if tool.name == tool_name
-            return tool.function_(tool_input)
-        end
-    end
-    return "Error: Tool not found"
-end
-
-# ReAct loop
-function react_loop(query::String, tools::Vector{Tool}, max_steps::Int=5)
-    state = AgentState(query, [], max_steps, 0)
-
-    while state.current_step < max_steps
-        state.current_step += 1
-
-        # Step 1: Thought (LLM reasoning)
-        decision = llm_think(state, tools)
-
-        # Step 2: Action (Tool execution)
-        if decision.action == "finish"
-            push!(state.history, (thought=decision.thought,
-                                  action=decision.action,
-                                  observation=decision.action_input))
-            break
-        end
-
-        observation = execute_tool(decision.action, decision.action_input, tools)
-
-        # Step 3: Update state
-        push!(state.history, (thought=decision.thought,
-                              action=decision.action,
-                              observation=observation))
-    end
-
-    return state
-end
-
-# Define tools
-tools = [
-    Tool("search", "Search the web for information",
-         (query) -> "Julia is a high-level, high-performance programming language for technical computing."),
-    Tool("calculator", "Perform arithmetic calculations",
-         (expr) -> string(eval(Meta.parse(expr))))
-]
-
-# Run ReAct loop
-result = react_loop("What is Julia?", tools)
-
-# Print execution trace
-for (i, step) in enumerate(result.history)
-    println("\n--- Step $i ---")
-    println("💭 Thought: $(step.thought)")
-    println("⚙️ Action: $(step.action)")
-    println("👁️ Observation: $(step.observation)")
-end
-```
 
 出力:
-```
---- Step 1 ---
-💭 Thought: I need to search for the query
-⚙️ Action: search
-👁️ Observation: Julia is a high-level, high-performance programming language for technical computing.
 
---- Step 2 ---
-💭 Thought: I have the answer from search
-⚙️ Action: finish
-👁️ Observation: Julia is a high-level, high-performance programming language for technical computing.
-```
 
 **ReAct Loopの実行トレースを観察できた。** 各ステップで:
 1. LLMが次の行動を決定 (Thought)
@@ -275,54 +171,18 @@ ReAct [^1] の論文では、HotpotQAベンチマークでCoTと比較:
 
 実際のLLM呼び出しでは、以下のプロンプトテンプレートを使う:
 
-```
-You run in a loop of Thought, Action, Observation.
-At the end of the loop you output an Answer.
-
-Use Thought to describe your thoughts about the question you have been asked.
-Use Action to run one of the actions available to you - then return PAUSE.
-Observation will be the result of running those actions.
-
-Your available actions are:
-
-search:
-e.g. search: "What is the capital of France?"
-Searches Wikipedia and returns a summary.
-
-calculate:
-e.g. calculate: "2 + 2"
-Evaluates a mathematical expression.
-
-Example session:
-
-Question: What is the population of Paris plus 1000?
-Thought: I need to search for the population of Paris.
-Action: search: "population of Paris"
-PAUSE
-
-You will be called again with this:
-
-Observation: The population of Paris is approximately 2.16 million.
-
-Thought: I need to add 1000 to this number.
-Action: calculate: "2160000 + 1000"
-PAUSE
-
-You will be called again with this:
-
-Observation: 2161000
-
-Thought: I have the final answer.
-Answer: The population of Paris plus 1000 is 2,161,000.
-```
 
 このプロンプトが、LLMを「思考→行動→観察」のループに誘導する。
 
-:::message
-**progress: 10%** — Zone 1完了。ReAct Loopの実装を動かし、CoTとの違いを理解した。
-:::
+> **Note:** **progress: 10%** — Zone 1完了。ReAct Loopの実装を動かし、CoTとの違いを理解した。
 
 ---
+
+
+> Progress: 10%
+> **理解度チェック**
+> 1. このゾーンの主要な概念・定義を自分の言葉で説明してください。
+> 2. この手法が他のアプローチより優れている点と、その限界を述べてください。
 
 ## 🧩 2. 直感ゾーン（15分）— エージェントの全体像
 
@@ -341,6 +201,48 @@ LLMは強力だが、単体では限界がある:
 | **単一視点のバイアス** | 「この論文は正しい?」 | 👥 Multi-Agent (Debate) |
 
 エージェントは、これらの限界を**ツール・計画・記憶・協調**で乗り越える。
+
+### 2.1.1 エージェントのMDP定式化
+
+エージェントを数学的に定義する。最も基礎となる枠組みは**マルコフ決定過程 (Markov Decision Process: MDP)** だ：
+
+$$
+\mathcal{M} = \langle \mathcal{S}, \mathcal{A}, P, R, \gamma \rangle
+$$
+
+- $\mathcal{S}$: 状態空間。エージェントが存在し得る全状態の集合
+- $\mathcal{A}$: 行動空間。ツール呼び出し・テキスト生成・終了宣言を含む
+- $P: \mathcal{S} \times \mathcal{A} \to \Delta(\mathcal{S})$: 確率的状態遷移関数（$\Delta(\mathcal{S})$ は $\mathcal{S}$ 上の確率分布空間）
+- $R: \mathcal{S} \times \mathcal{A} \to \mathbb{R}$: 報酬関数。タスク達成で正、ハルシネーション発生で負
+- $\gamma \in [0,1)$: 割引率。将来報酬の重み付け
+
+**目的**: 期待累積報酬を最大化する方策 $\pi: \mathcal{S} \to \Delta(\mathcal{A})$ を求める：
+
+$$
+\pi^* = \arg\max_\pi \mathbb{E}_{\pi}\left[\sum_{t=0}^{\infty} \gamma^t R(s_t, a_t) \,\middle|\, s_0\right]
+$$
+
+ただし現実のLLMエージェントは状態 $s_t$ を直接観測できない。観測できるのはトークン列（**観測** $o_t$）のみだ。これが POMDP（Partially Observable MDP）として定式化される理由であり、Section 3.1で詳述する。
+
+### 2.1.2 ReActの方策表現
+
+ReAct [^1] は上記MDPにおける方策 $\pi_\theta$ として解釈できる。キーポイントは**履歴依存性**だ：
+
+$$
+\pi_\theta(a_t \mid s_t, h_t)
+$$
+
+ここで $h_t = (o_1, a_1, \tau_1, \ldots, o_{t-1}, a_{t-1}, \tau_{t-1}, o_t)$ は**履歴** (history)、$\tau_t$ は Thought（推論トレース）。
+
+なぜ $h_t$ が必要か？LLMはマルコフ的でない。単一の観測 $o_t$ だけでは不十分で、過去のThought・Action・Observation 列を参照して初めて適切な行動を選べる。ReAct論文はこの履歴依存方策を "in-context reinforcement" と呼ぶ。
+
+Thought $\tau_t$ を明示的に分離すると：
+
+$$
+\tau_t \sim P_\theta(\cdot \mid h_t), \qquad a_t \sim P_\theta(\cdot \mid h_t, \tau_t)
+$$
+
+$\tau_t$ が $a_t$ を条件付けることで、LLMは「なぜそのツールを呼ぶか」を説明しながら行動できる。Chain-of-Thought が $\tau_t$ だけを生成して終わるのに対し、ReAct は $a_t$ を実際のツール呼び出しに接続する点が本質的な差だ。
 
 ### 2.2 エージェントの7コンポーネント
 
@@ -412,11 +314,15 @@ graph TB
 
 合計 ~3,700行の大型講義となる。
 
-:::message
-**progress: 20%** — Zone 2完了。エージェントの全体像と7コンポーネントの関係を理解した。
-:::
+> **Note:** **progress: 20%** — Zone 2完了。エージェントの全体像と7コンポーネントの関係を理解した。
 
 ---
+
+
+> Progress: 20%
+> **理解度チェック**
+> 1. このゾーンの主要な概念・定義を自分の言葉で説明してください。
+> 2. この手法が他のアプローチより優れている点と、その限界を述べてください。
 
 ## 📐 3. 数式修行ゾーン（90分）— エージェント理論完全版
 
@@ -532,6 +438,64 @@ $$
 
 LLMはエラーメッセージを観測として受け取り、別の行動を試みる。
 
+#### 3.5.1 ReAct Tripletのマルコフ連鎖構造
+
+(Thought, Action, Observation) のトリプレット列がどのような確率的構造を持つかを分析する。
+
+時刻 $t$ でのトリプレットを $X_t = (\tau_t, a_t, o_t)$ と定義する。このとき：
+
+$$
+P(X_{t+1} \mid X_t, X_{t-1}, \ldots, X_1) = P(X_{t+1} \mid X_t)
+$$
+
+が成り立つか？厳密には成り立たない。LLMは $h_t = (X_1, \ldots, X_t)$ 全体を参照するからだ。しかし**コンテキスト窓内の情報が完全**という条件下では近似的にマルコフと見なせる。
+
+より正確な定式化：コンテキスト $h_t$ を「拡張状態」として定義することで：
+
+$$
+\tilde{s}_t := h_t = (X_1, X_2, \ldots, X_t)
+$$
+
+すると $(\tilde{s}_t)_{t \geq 0}$ は（定義上）マルコフ連鎖になる。これは**information state**（情報状態）と呼ばれ、POMDP理論での標準的な扱いだ。情報状態を使えば POMDP を等価な完全観測 MDP に変換できる——ただし状態空間のサイズが指数的に膨張するという代償を伴う。LLMがコンテキスト全体をキャッシュする理由がここにある。
+
+#### 3.5.2 終了確率の境界
+
+エージェントが $T$ ステップ以内に終了する確率を定量化する。各ステップで終了する確率を $p_\text{stop}$ とする（LLMが "Finish" アクションを生成する確率）。ステップ間が独立と仮定すると：
+
+$$
+P(\text{終了} \leq T) = 1 - (1 - p_\text{stop})^T
+$$
+
+これは幾何分布の累積分布関数。$p_\text{stop} = 0.3$ のとき：
+
+$$
+P(\text{終了} \leq 5) = 1 - 0.7^5 \approx 0.832
+$$
+
+5ステップで 83.2% の確率で終了する。
+
+一般に $P(\text{終了} \leq T) \geq 1 - \epsilon$ を満たす最小 $T$ は：
+
+$$
+T \geq \frac{\log \epsilon}{\log(1 - p_\text{stop})}
+$$
+
+$p_\text{stop} \ll 1$ のとき $\log(1-p_\text{stop}) \approx -p_\text{stop}$ なので：
+
+$$
+T \approx \frac{\log(1/\epsilon)}{p_\text{stop}}
+$$
+
+**期待終了ステップ数**は幾何分布の期待値：
+
+$$
+\mathbb{E}[T_\text{stop}] = \frac{1}{p_\text{stop}}
+$$
+
+$p_\text{stop} = 0.3$ なら期待 3.3 ステップ。$p_\text{stop} = 0.1$（慎重なエージェント）なら期待 10 ステップ。
+
+> **⚠️ Warning:** $p_\text{stop}$ は固定でなくコンテキスト依存。ステップ数が増えるにつれLLMはループを検知し $p_\text{stop}$ が上昇する傾向がある。これは非定常幾何分布であり、上記の単純な境界は楽観的すぎる。実用上は $T_{\max}$ による強制終了と、直前 $K$ ステップでの繰り返しアクション検知（ループ検出）を組み合わせる。
+
 ### Part B: Tool Use完全実装
 
 #### 3.6 Function Callingの数式化
@@ -552,22 +516,6 @@ $$
 
 例: `search` ツール
 
-```json
-{
-  "name": "search",
-  "description": "Search the web for information",
-  "parameters": {
-    "type": "object",
-    "properties": {
-      "query": {
-        "type": "string",
-        "description": "The search query"
-      }
-    },
-    "required": ["query"]
-  }
-}
-```
 
 #### 3.7 Tool Registryの実装
 
@@ -583,6 +531,59 @@ Tool Registryは、以下の操作をサポートする:
 - $\text{get}(\text{name})$: ツール名でツールを取得
 - $\text{list}()$: 登録済みツールの一覧を返す
 - $\text{validate}(\text{name}, \text{args})$: 引数のバリデーション
+
+#### 3.7.1 JSON Schema型理論
+
+JSON Schema はどのような Argument space を定義するか。型理論 (Type Theory) の視点で整理する。
+
+基本型の集合を $\mathcal{B} = \{\texttt{string}, \texttt{number}, \texttt{integer}, \texttt{boolean}, \texttt{null}\}$ とする。JSON Schema 型 $\tau$ は以下の帰納的定義で構成される：
+
+$$
+\tau ::= b \;\mid\; \text{array}[\tau] \;\mid\; \text{object}\bigl[\{(f_i,\, \tau_i)\}_{i=1}^n,\, R\bigr] \;\mid\; \tau_1 \sqcup \tau_2
+$$
+
+ここで：
+
+- $b \in \mathcal{B}$: 基本型
+- $\text{array}[\tau]$: 要素型 $\tau$ の配列型
+- $\text{object}[\{(f_i,\tau_i)\},\, R]$: フィールド $f_i$ を型 $\tau_i$ で持つオブジェクト型（$R \subseteq \{f_i\}$ は required フィールド集合）
+- $\tau_1 \sqcup \tau_2$: 和型（`anyOf` / `oneOf` に対応）
+
+各型のデノテーション（その型に属する全値の集合）$\llbracket \tau \rrbracket$ を再帰的に定義できる：
+
+$$
+\llbracket \text{array}[\tau] \rrbracket = \{ [v_1, \ldots, v_k] \mid k \geq 0,\; v_i \in \llbracket \tau \rrbracket \}
+$$
+
+$$
+\llbracket \tau_1 \sqcup \tau_2 \rrbracket = \llbracket \tau_1 \rrbracket \cup \llbracket \tau_2 \rrbracket
+$$
+
+**Tool Function Space の形式化**：
+
+Tool $\mathcal{T}_i$ の入力スキーマが型 $\tau_{\text{in},i}$ を定義し、出力が型 $\tau_{\text{out},i}$ を持つとき、Tool は typed function として：
+
+$$
+f_i: \llbracket \tau_{\text{in},i} \rrbracket \to \llbracket \tau_{\text{out},i} \rrbracket
+$$
+
+と書ける。Tool Registry $\mathcal{R}$ はこれら型付き関数の直和（disjoint union）：
+
+$$
+\mathcal{R} = \bigsqcup_{i=1}^N \bigl\{ f_i: \llbracket \tau_{\text{in},i} \rrbracket \to \llbracket \tau_{\text{out},i} \rrbracket \bigr\}
+$$
+
+LLMのTool Selectionは、この直和空間から「文脈に最も適合する関数」を選ぶ問題として定式化される。
+
+**Argument Validation の正式定義**：
+
+バリデーション関係 $\models$ を $v \models \tau \iff v \in \llbracket \tau \rrbracket$ と定義する。LLMが生成した引数 $\hat{a}$ のバリデーションは：
+
+$$
+\text{valid}(\hat{a},\, \tau_{\text{in},i}) = [\hat{a} \models \tau_{\text{in},i}]
+$$
+
+バリデーション失敗時に返すエラーメッセージは $\hat{a}$ と $\tau_{\text{in},i}$ の型差異（type mismatch）を記述する。LLMがこれを Observation として受け取り引数を修正するのが現代 Function Calling の標準パターンだ。型理論の視点では、このフィードバックループは型推論 (type inference) の近似解を LLM に反復させていると解釈できる。
 
 #### 3.8 Tool Selection (ツール選択)
 
@@ -701,13 +702,6 @@ $$
 
 出力形式:
 
-```
-Plan:
-1. Search for "population of Paris"
-2. Extract the population number
-3. Calculate population + 1000
-4. Return the result
-```
 
 **利点**: シンプル、実装容易
 **欠点**: 複雑なタスクで失敗しやすい、途中で修正不可
@@ -781,6 +775,70 @@ $$
 
 **利点**: 並列実行で高速、トークン消費が少ない (5x削減 [^3])
 **欠点**: 動的な再計画ができない、複雑な依存関係に弱い
+
+#### 3.16.1 ReWOO並列化の形式的分析
+
+ReWOO [^3] の核心は**並列ツール実行**によるレイテンシ削減。これを定量化する。
+
+**逐次実行（ReAct スタイル）のレイテンシ**：
+
+$N$ 個のツール呼び出しを逐次実行する場合、総レイテンシは：
+
+$$
+L_\text{seq} = \sum_{i=1}^{N} t_i + (N+1) \cdot \delta_\text{LLM}
+$$
+
+ここで $t_i$ はツール $i$ の実行時間、$\delta_\text{LLM}$ は LLM 推論ステップごとのレイテンシ（Thought 生成コスト）。各 Action の前後に Thought が必要なため $N+1$ 回の LLM 呼び出しが発生する。
+
+**並列実行（ReWOO）のレイテンシ**：
+
+依存関係グラフを $\mathcal{G} = (\mathcal{V}, \mathcal{E})$ で表す（$\mathcal{V}$ = ツール呼び出しノード、$\mathcal{E}$ = データ依存エッジ）。依存関係のない独立なツールは並列実行できるから：
+
+$$
+L_\text{par} = \underbrace{\delta_\text{LLM}}_{\text{Planning}} + \underbrace{L_\text{critical}(\mathcal{G})}_{\text{Critical Path}} + \underbrace{\delta_\text{LLM}}_{\text{Solving}}
+$$
+
+$L_\text{critical}(\mathcal{G})$ は依存関係グラフの**クリティカルパス長**（最長経路のレイテンシ合計）。
+
+完全独立（依存なし、$\mathcal{E} = \emptyset$）の場合：
+
+$$
+L_\text{critical} = \max_{i=1}^{N} t_i
+$$
+
+よってスピードアップ比：
+
+$$
+\text{Speedup} = \frac{L_\text{seq}}{L_\text{par}} = \frac{\displaystyle\sum_{i=1}^{N} t_i + (N+1)\,\delta_\text{LLM}}{\displaystyle\max_i\, t_i + 2\,\delta_\text{LLM}}
+$$
+
+**数値例**：$N=4$, $t_i \in \{1, 2, 3, 5\}$ 秒, $\delta_\text{LLM} = 2$ 秒 の場合：
+
+$$
+L_\text{seq} = (1+2+3+5) + 5 \times 2 = 21 \text{ 秒}
+$$
+
+$$
+L_\text{par} = 2 + 5 + 2 = 9 \text{ 秒} \quad \Rightarrow \quad \text{Speedup} \approx 2.3\times
+$$
+
+LLM 呼び出し削減効果も大きい。ReAct が $2N+1$ 回 LLM を呼ぶのに対し、ReWOO は**2回のみ**（Planner + Solver）：
+
+$$
+\text{LLM calls}:\quad \underbrace{2N+1}_{\text{ReAct}} \;\to\; \underbrace{2}_{\text{ReWOO}}
+$$
+
+ReWOO 論文 [^3] で報告される **5× トークン削減**はこの比に対応する（$N \approx 4$ の場合、$(2\times4+1)/2 = 4.5$）。
+
+**計画ホライズン複雑度**：
+
+Planner が深さ $D$、分岐数 $B$ の計画ツリーを生成する場合、探索空間は $O(B^D)$。LLMはこの空間をビームサーチ的に近似探索する。実用上の制約として、ReWOO の Planner 出力は $L_\text{context}$ トークン以内に収まる必要があり：
+
+$$
+N \cdot \bar{L}_\text{step} \leq L_\text{context}
+$$
+
+$\bar{L}_\text{step}$ は 1 ステップあたりの平均トークン数（プラン記述 + ツール名 + 引数）。これが計画ホライズン $N$ の実質的な上限を与える。モデルの $L_\text{context} = 128\text{K}$ トークン、$\bar{L}_\text{step} = 50$ トークンとすれば $N \leq 2560$ ステップが理論上限——実用的には $N \leq 20$ 程度が品質を保てる経験的な限界だ。
 
 #### 3.17 HuggingGPT型 Orchestration
 
@@ -899,6 +957,50 @@ $$
 \text{topk}(\mathbf{q}, k) = \arg\text{topk}_{i} \langle \mathbf{q}, \mathbf{k}_i \rangle
 $$
 
+#### 3.23.1 類似度指標の比較と選択
+
+Vector Memory の性能は Retrieval 関数 $\text{sim}(\mathbf{q}, \mathbf{k})$ の選択に大きく依存する。主要3指標を整理する。
+
+**コサイン類似度**：
+
+$$
+\text{sim}_\text{cos}(\mathbf{q}, \mathbf{k}) = \frac{\mathbf{q}^\top \mathbf{k}}{\|\mathbf{q}\|_2 \cdot \|\mathbf{k}\|_2}
+$$
+
+値域 $[-1, 1]$。ベクトルの**方向**のみで類似度を測る。ノルムが異なる埋め込みでも正規化されるため、埋め込みの大きさのスケール依存性がない。
+
+**内積（ドット積）**：
+
+$$
+\text{sim}_\text{dot}(\mathbf{q}, \mathbf{k}) = \mathbf{q}^\top \mathbf{k} = \|\mathbf{q}\|_2 \cdot \|\mathbf{k}\|_2 \cdot \text{sim}_\text{cos}(\mathbf{q}, \mathbf{k})
+$$
+
+値域 $(-\infty, \infty)$。方向と大きさの両方を考慮する。ベクトルが $\ell_2$ 正規化済みの場合、$\|\mathbf{q}\|_2 = \|\mathbf{k}\|_2 = 1$ よりドット積はコサイン類似度と一致する。OpenAI の `text-embedding-3-*` シリーズは正規化済みなので両者は等価。
+
+**ユークリッド距離**：
+
+$$
+d_\text{euc}(\mathbf{q}, \mathbf{k}) = \|\mathbf{q} - \mathbf{k}\|_2 = \sqrt{\sum_{j=1}^d (q_j - k_j)^2}
+$$
+
+類似度へは $\text{sim}_\text{euc} = -d_\text{euc}$ （または $\tfrac{1}{1+d_\text{euc}}$）で変換。
+
+**三指標の統一的関係**：$\ell_2$ 正規化ベクトル（$\|\mathbf{q}\| = \|\mathbf{k}\| = 1$）に限ると：
+
+$$
+d_\text{euc}^2 = \|\mathbf{q} - \mathbf{k}\|^2 = \|\mathbf{q}\|^2 - 2\mathbf{q}^\top\mathbf{k} + \|\mathbf{k}\|^2 = 2 - 2\,\text{sim}_\text{cos}(\mathbf{q},\mathbf{k})
+$$
+
+つまり $d_\text{euc} = \sqrt{2(1 - \text{sim}_\text{cos})}$。**正規化済み埋め込みでは3指標はすべて単調変換で相互変換可能**——ランキング結果は等価になる。
+
+| 指標 | 正規化不要 | 値域 | ANN 最適化 | 推奨場面 |
+|:-----|:------:|:------:|:------:|:-------|
+| コサイン | ✅ | $[-1,1]$ | HNSW/IVF 対応 | 汎用（非正規化埋め込み） |
+| ドット積 | ❌ | $(-\infty,\infty)$ | HNSW/IVF 対応 | 正規化済み埋め込み |
+| ユークリッド | ✅ | $[0,\infty)$ | HNSW/IVF 対応 | 画像特徴量など |
+
+> **⚠️ Warning:** 埋め込みモデルのドキュメントで正規化仕様を確認してから指標を選ぶのが鉄則。Faiss・Qdrant・Weaviate はデフォルトの指標設定が異なるため、無確認でデフォルトを使うと意図しない指標で検索している場合がある。
+
 #### 3.24 Memory-Augmented Agent
 
 Memory-Augmented Agentは、各ステップで記憶を検索・更新する。
@@ -939,6 +1041,55 @@ $$
 $$
 \text{delete}(\mathcal{M}, k) = \mathcal{M} \setminus \{ m_i \mid \text{score}(m_i) < \text{threshold} \}
 $$
+
+#### 3.25.1 Ebbinghaus忘却曲線とMemory Consolidation
+
+Ebbinghaus (1885) が発見した**忘却曲線 (Forgetting Curve)** は、記憶の保持率 $R(t)$ が時間とともに指数減衰することを示す：
+
+$$
+R(t) = e^{-t/S}
+$$
+
+$S$ は記憶の**安定度 (Stability)**（大きいほど忘れにくい）、$t$ は最後の想起から経過した時間。この単純な式が人間の記憶を驚くほどよく記述する。
+
+エージェントの Memory System への応用：記憶 $m_i$ の現在の想起可能性を：
+
+$$
+R_i(t) = e^{-(t - t_i^{\text{last}})/S_i}
+$$
+
+と定義する。$t_i^\text{last}$ は最後にアクセスされた時刻、$S_i$ は $m_i$ の安定度パラメータ。
+
+**安定度の更新（Spaced Repetition）**：
+
+アクセスのたびに $S_i$ が増加する。連続版モデル：
+
+$$
+S_i \leftarrow S_i \cdot (1 + \alpha \cdot R_i(t_{\text{now}}))
+$$
+
+$\alpha > 0$ は更新率。想起時の保持率 $R_i$ が高いほど安定度の伸びが大きい（高い保持率でアクセスするほど記憶が強化される）。これは Spaced Repetition システム (SM-2 アルゴリズム) の連続版に相当する。
+
+**Memory Consolidation の最適化**：
+
+削除候補のスコアリングに忘却曲線を統合する：
+
+$$
+\text{score}(m_i) = \alpha \cdot R_i(t_{\text{now}}) + \beta \cdot \text{importance}(m_i)
+$$
+
+$\text{importance}(m_i)$ は、その記憶がどれだけ多くのタスクに寄与したかの代理変数（参照回数 $c_i$ で近似）：
+
+$$
+\text{importance}(m_i) = \frac{c_i}{\max_j c_j}
+$$
+
+削除閾値 $\theta$ を設定し $\text{score}(m_i) < \theta$ の記憶を削除する。この設計により：
+
+- **よく参照される重要な記憶**は $c_i$ が大きく $S_i$ も増大するため $R_i$ が高い → 保持
+- **長期間参照されない記憶**は $R_i \to 0$、$c_i$ も低い → 削除候補
+
+$S_i$ の初期値設定にはドメイン知識が必要。事実的知識（例：「パリはフランスの首都」）には大きな $S_0$ を、エピソード的記憶（例：「ユーザーが3日前に聞いた質問」）には小さな $S_0$ を設定するのが実用的な出発点だ。
 
 ### Part E: Multi-Agent完全版
 
@@ -1024,6 +1175,74 @@ $$
 3. 討論ラウンド $t$: $\text{answer}_i^{(t)} = \text{LLM}_i(\text{answers}^{(t-1)}, \text{arguments}^{(t-1)})$
 4. 収束または最大ラウンド数に到達
 
+#### 3.30.1 Byzantine Fault Toleranceとエージェント合意
+
+分散システムの古典問題が Multi-Agent にも直接適用される。**Byzantine Fault** とは、エージェントが任意の誤動作（嘘の回答・矛盾する回答・沈黙）をする状況だ。
+
+**定理 (Byzantine Generals Problem)**：$N$ 個のエージェントのうち $f$ 個が Byzantine（悪意/故障）であるとき、正しい合意 (correct consensus) に到達するためには：
+
+$$
+N > 3f
+$$
+
+が必要十分条件[^lamport1982]。
+
+**証明の直感**：正常エージェントは $N-f$ 個、Byzantine エージェントは $f$ 個。Byzantine エージェントが協調して正常エージェントに対して一致した嘘をつく場合、正常エージェントは $f$ 個の敵対陣営と $N-f$ 個の正常陣営を外部から区別できない。正常エージェントが多数派を確保するには：
+
+$$
+N - f > 2f \implies N > 3f
+$$
+
+単純な多数決 (Majority Voting) が $f$ 個の Byzantine に対して機能する条件は $N > 2f$（正常エージェントが過半数）だが、これは Byzantine エージェントが**協調しない**場合のみ十分。BFT に必要な $N > 3f$ はより強い協調攻撃への耐性を提供する。
+
+実用的な Multi-Agent への含意：LLMエージェントが "Byzantine" になる状況は意図的な攻撃でなくてもよい。**ハルシネーション**（誤った事実を高い確信度で述べる）も一種の Byzantine fault として扱える。
+
+**多数決成功確率の導出**：
+
+$N$ エージェント中 $f=1$ 個が Byzantine（常に誤答）、各正常エージェントが独立に正解する確率を $p$ とする。正常エージェント $N-1$ 個の中で多数決が正解を選ぶ確率：
+
+$$
+P_\text{correct} = \sum_{k=\lceil N/2 \rceil}^{N-1} \binom{N-1}{k} p^k (1-p)^{N-1-k}
+$$
+
+$N=5,\, f=1,\, p=0.8$ の場合（正常エージェント4人，各 80% 正解率）：
+
+$$
+P_\text{correct} = \binom{4}{2}(0.8)^2(0.2)^2 + \binom{4}{3}(0.8)^3(0.2)^1 + \binom{4}{4}(0.8)^4
+$$
+
+$$
+= 6 \times 0.0256 + 4 \times 0.1024 + 0.4096 = 0.1536 + 0.4096 + 0.4096 \approx 0.973
+$$
+
+単一エージェント ($p=0.8$) から **97.3%** へと大幅改善。
+
+#### 3.30.2 Multi-Agent Debateの収束特性
+
+Du et al. (2023) が提案した Multi-Agent Debate [^7] の収束挙動を分析する。
+
+$N$ エージェントが $T$ ラウンドの Debate を行う。各ラウンドでエージェント $i$ は他全エージェントの前ラウンド回答を観察して自分の回答を更新する：
+
+$$
+a_i^{(t)} = f_\theta\!\left(a_i^{(t-1)},\, \{a_j^{(t-1)}\}_{j \neq i}\right)
+$$
+
+**収束条件の直感**：全エージェントが同一の回答に収束する (consensus) かは、更新関数 $f_\theta$ が縮小写像 (Contraction Mapping) かどうかに依存する。回答空間を離散化した場合、各ラウンドで意見の多様性が減少するとき——すなわちエージェントが他者の回答に説得される確率が自分の回答を維持する確率より高いとき——収束する。
+
+論文の実験的知見：
+
+- 3エージェント・2ラウンドの Debate で、GSM8K 数学推論スコアが約 **5-10%** 改善
+- ラウンド数増加 ($T > 3$) では改善が飽和（追加コストに見合わない）
+- エージェント数 $N$ は 3-5 が実用的（$N \geq 7$ で顕著な追加改善なし）
+
+**計算コスト**：$N$ エージェント・$T$ ラウンドの Debate の総 LLM 呼び出し数：
+
+$$
+\text{calls} = N \cdot T
+$$
+
+単一エージェントの $N \cdot T$ 倍のコストで精度向上を得る。ROI 最大化の観点では $N=3,\, T=2$（コスト 6×）が経験的ベストプラクティスとなっている。
+
 #### 3.31 Conflict Resolution (衝突解決)
 
 エージェント間で矛盾が発生した場合、Conflict Resolutionで解決する。
@@ -1072,6 +1291,67 @@ MCPは、**Client-Server Architecture**を採用:
 - **MCP Client**: LLM側 (Claude Desktop, VSCode, etc.)
 - **MCP Server**: ツール提供側 (Filesystem, Database, Web API, etc.)
 
+#### 3.33.1 MCPセッション状態機械
+
+MCP 接続ライフサイクルは有限状態機械 (FSM) として厳密に定義される：
+
+$$
+\mathcal{FSM}_\text{MCP} = \langle Q, \Sigma, \delta, q_0, F \rangle
+$$
+
+- $Q = \{\texttt{unconnected},\, \texttt{initializing},\, \texttt{initialized},\, \texttt{error}\}$: 状態集合
+- $\Sigma = \{\texttt{initialize\_req},\, \texttt{initialized\_notif},\, \texttt{shutdown},\, \texttt{error}\}$: イベント集合
+- $\delta: Q \times \Sigma \to Q$: 遷移関数
+- $q_0 = \texttt{unconnected}$: 初期状態
+- $F = \{\texttt{error}\}$: 吸収終端状態（エラー後は再接続が必要）
+
+```mermaid
+stateDiagram-v2
+    [*] --> unconnected
+    unconnected --> initializing: initialize req
+    initializing --> initialized: initialized notif
+    initializing --> error: timeout / error
+    initialized --> initialized: tools/call, resources/read, prompts/get
+    initialized --> unconnected: shutdown
+    error --> [*]
+```
+
+**メッセージパッシング複雑度**：
+
+$N$ ツールを登録した MCP Server に対して $K$ 回のツール呼び出しを行うセッションの総メッセージ数：
+
+$$
+C_\text{session} = C_\text{init} + C_\text{list} + K \cdot C_\text{call} + C_\text{shutdown}
+$$
+
+各フェーズのメッセージ数（Client→Server + Server→Client）：
+
+| フェーズ | Client→Server | Server→Client | 合計 |
+|:--------|:------:|:------:|:------:|
+| 初期化 | 1 (`initialize`) | 1 (`initialized`) | 2 |
+| ツール一覧取得 | 1 (`tools/list`) | 1 (list resp) | 2 |
+| ツール呼び出し × $K$ | $K$ | $K$ | $2K$ |
+| シャットダウン | 1 | 0 | 1 |
+| **合計** | $K+3$ | $K+2$ | $2K+5$ |
+
+従来のカスタム HTTP API（各ツールに別エンドポイント、認証ハンドシェイクを含む）と比較：接続確立コストが**ツール数 $N$ に依存しない $O(1)$** となる点が MCP の核心的な設計メリットだ。N=1,000 のカスタムコネクタを使う場合、MCP なしでは $O(N)$ の初期化コストが発生していた。
+
+**エラーコードの代数構造**：
+
+MCP のエラーは JSON-RPC 2.0 標準エラーコードを継承・拡張する：
+
+$$
+\mathcal{E}_\text{MCP} \supseteq \mathcal{E}_\text{JSON-RPC} = \{-32700, -32600, -32601, -32602, -32603\}
+$$
+
+- $-32700$: Parse error（不正 JSON）
+- $-32600$: Invalid Request
+- $-32601$: Method not found
+- $-32602$: Invalid params（型バリデーション失敗時 — Section 3.7.1 の $v \not\models \tau_\text{in}$ に対応）
+- $-32603$: Internal error
+
+MCP 固有拡張は $-32000$ 以上の負値を予約域として使用する。これにより MCP ミドルウェアは JSON-RPC 標準エラーと MCP 固有エラーを型安全に区別できる。
+
 #### 3.34 MCP Specification
 
 MCP仕様 (2025-11-25版) は、以下の4つのコア機能を定義:
@@ -1087,38 +1367,9 @@ MCPは、**JSON-RPC 2.0** over **stdio** または **HTTP/SSE** でメッセー�
 
 **メッセージ形式 (JSON-RPC 2.0)**:
 
-```json
-{
-  "jsonrpc": "2.0",
-  "id": 1,
-  "method": "tools/list",
-  "params": {}
-}
-```
 
 **レスポンス**:
 
-```json
-{
-  "jsonrpc": "2.0",
-  "id": 1,
-  "result": {
-    "tools": [
-      {
-        "name": "search",
-        "description": "Search the web",
-        "inputSchema": {
-          "type": "object",
-          "properties": {
-            "query": { "type": "string" }
-          },
-          "required": ["query"]
-        }
-      }
-    ]
-  }
-}
-```
 
 #### 3.36 MCP Tool Registration
 
@@ -1144,36 +1395,9 @@ $$
 
 **リクエスト**:
 
-```json
-{
-  "jsonrpc": "2.0",
-  "id": 2,
-  "method": "tools/call",
-  "params": {
-    "name": "search",
-    "arguments": {
-      "query": "What is Julia?"
-    }
-  }
-}
-```
 
 **レスポンス**:
 
-```json
-{
-  "jsonrpc": "2.0",
-  "id": 2,
-  "result": {
-    "content": [
-      {
-        "type": "text",
-        "text": "Julia is a high-level programming language..."
-      }
-    ]
-  }
-}
-```
 
 #### 3.38 MCP Resources
 
@@ -1191,13 +1415,6 @@ $$
 
 例:
 
-```json
-{
-  "uri": "file:///home/user/notes.txt",
-  "name": "My Notes",
-  "mimeType": "text/plain"
-}
-```
 
 #### 3.39 MCP Prompts
 
@@ -1215,19 +1432,6 @@ $$
 
 例:
 
-```json
-{
-  "name": "code_review",
-  "description": "Review code for bugs",
-  "arguments": [
-    {
-      "name": "code",
-      "description": "The code to review",
-      "required": true
-    }
-  ]
-}
-```
 
 #### 3.40 MCP採用状況
 
@@ -1240,9 +1444,7 @@ $$
 
 2025年12月、AnthropicはMCPを **Agentic AI Foundation (AAIF)** に寄付し、Linux Foundationの傘下で標準化を進める。
 
-:::message
-**progress: 50%** — Zone 3 Part A-F完了。ReAct / Tool Use / Planning / Memory / Multi-Agent / MCPの数学的定式化を完全に理解した。
-:::
+> **Note:** **progress: 50%** — Zone 3 Part A-F完了。ReAct / Tool Use / Planning / Memory / Multi-Agent / MCPの数学的定式化を完全に理解した。
 
 ### Part G: 実装編 (Rust/Elixir/Julia)
 
@@ -1292,422 +1494,30 @@ graph TD
 
 Rustで Tool Registry を実装する。
 
-```rust
-use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
-use thiserror::Error;
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ToolSchema {
-    pub name: String,
-    pub description: String,
-    pub parameters: serde_json::Value, // JSON Schema
-}
-
-#[derive(Debug, Error)]
-pub enum ToolError {
-    #[error("Tool not found: {0}")]
-    NotFound(String),
-    #[error("Validation error: {0}")]
-    Validation(String),
-    #[error("Execution error: {0}")]
-    Execution(String),
-}
-
-pub type ToolResult = Result<serde_json::Value, ToolError>;
-pub type ToolFunction = fn(serde_json::Value) -> ToolResult;
-
-pub struct Tool {
-    pub schema: ToolSchema,
-    pub function: ToolFunction,
-}
-
-pub struct ToolRegistry {
-    tools: HashMap<String, Tool>,
-}
-
-impl ToolRegistry {
-    pub fn new() -> Self {
-        Self {
-            tools: HashMap::new(),
-        }
-    }
-
-    pub fn register(&mut self, tool: Tool) {
-        self.tools.insert(tool.schema.name.clone(), tool);
-    }
-
-    pub fn get(&self, name: &str) -> Result<&Tool, ToolError> {
-        self.tools
-            .get(name)
-            .ok_or_else(|| ToolError::NotFound(name.to_string()))
-    }
-
-    pub fn list(&self) -> Vec<&ToolSchema> {
-        self.tools.values().map(|t| &t.schema).collect()
-    }
-
-    pub fn execute(&self, name: &str, args: serde_json::Value) -> ToolResult {
-        let tool = self.get(name)?;
-        // Validate args against schema (simplified)
-        self.validate_args(&tool.schema, &args)?;
-        (tool.function)(args)
-    }
-
-    fn validate_args(&self, schema: &ToolSchema, args: &serde_json::Value) -> Result<(), ToolError> {
-        // In production: use jsonschema crate
-        // Here: simplified validation
-        if !args.is_object() {
-            return Err(ToolError::Validation("Arguments must be an object".to_string()));
-        }
-        Ok(())
-    }
-}
-```
 
 ツール登録:
 
-```rust
-fn search_tool(args: serde_json::Value) -> ToolResult {
-    let query = args["query"]
-        .as_str()
-        .ok_or_else(|| ToolError::Validation("Missing query field".to_string()))?;
-
-    // Simulate search
-    let result = format!("Search results for: {}", query);
-    Ok(serde_json::json!({ "result": result }))
-}
-
-let schema = ToolSchema {
-    name: "search".to_string(),
-    description: "Search the web".to_string(),
-    parameters: serde_json::json!({
-        "type": "object",
-        "properties": {
-            "query": { "type": "string" }
-        },
-        "required": ["query"]
-    }),
-};
-
-let mut registry = ToolRegistry::new();
-registry.register(Tool {
-    schema,
-    function: search_tool,
-});
-
-// Execute
-let result = registry.execute("search", serde_json::json!({ "query": "Rust Agent" }));
-println!("{:?}", result);
-```
 
 #### 3.43 🦀 Rust Agent実装: State Machine
 
 Agent LoopをState Machineとして実装する。
 
-```rust
-use serde::{Deserialize, Serialize};
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum AgentState {
-    Init,
-    Thinking,
-    ActionSelect,
-    ToolCall,
-    Observation,
-    Finished,
-    Error(String),
-}
-
-#[derive(Debug, Clone)]
-pub struct AgentContext {
-    pub query: String,
-    pub history: Vec<AgentStep>,
-    pub state: AgentState,
-    pub max_steps: usize,
-    pub current_step: usize,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct AgentStep {
-    pub thought: String,
-    pub action: String,
-    pub observation: String,
-}
-
-pub struct Agent {
-    context: AgentContext,
-    registry: ToolRegistry,
-}
-
-impl Agent {
-    pub fn new(query: String, registry: ToolRegistry, max_steps: usize) -> Self {
-        Self {
-            context: AgentContext {
-                query,
-                history: Vec::new(),
-                state: AgentState::Init,
-                max_steps,
-                current_step: 0,
-            },
-            registry,
-        }
-    }
-
-    pub fn step(&mut self) -> Result<(), ToolError> {
-        match self.context.state {
-            AgentState::Init => self.transition_to_thinking(),
-            AgentState::Thinking => self.transition_to_action_select(),
-            AgentState::ActionSelect => self.transition_to_tool_call(),
-            AgentState::ToolCall => self.transition_to_observation(),
-            AgentState::Observation => self.check_goal(),
-            AgentState::Finished | AgentState::Error(_) => Ok(()),
-        }
-    }
-
-    fn transition_to_thinking(&mut self) -> Result<(), ToolError> {
-        self.context.state = AgentState::Thinking;
-        Ok(())
-    }
-
-    fn transition_to_action_select(&mut self) -> Result<(), ToolError> {
-        // In production: call LLM here
-        // Simplified: hardcoded decision
-        self.context.state = AgentState::ActionSelect;
-        Ok(())
-    }
-
-    fn transition_to_tool_call(&mut self) -> Result<(), ToolError> {
-        // In production: parse LLM output
-        let action = "search";
-        let args = serde_json::json!({ "query": self.context.query });
-
-        match self.registry.execute(action, args) {
-            Ok(result) => {
-                self.context.history.push(AgentStep {
-                    thought: "Need to search".to_string(),
-                    action: action.to_string(),
-                    observation: result.to_string(),
-                });
-                self.context.state = AgentState::Observation;
-                Ok(())
-            }
-            Err(e) => {
-                self.context.state = AgentState::Error(e.to_string());
-                Err(e)
-            }
-        }
-    }
-
-    fn transition_to_observation(&mut self) -> Result<(), ToolError> {
-        self.context.current_step += 1;
-        self.context.state = AgentState::Observation;
-        Ok(())
-    }
-
-    fn check_goal(&mut self) -> Result<(), ToolError> {
-        // Simplified: finish after 1 step
-        if self.context.current_step >= 1 {
-            self.context.state = AgentState::Finished;
-        } else {
-            self.context.state = AgentState::Thinking;
-        }
-        Ok(())
-    }
-
-    pub fn run(&mut self) -> Result<Vec<AgentStep>, ToolError> {
-        while !matches!(
-            self.context.state,
-            AgentState::Finished | AgentState::Error(_)
-        ) {
-            self.step()?;
-            if self.context.current_step >= self.context.max_steps {
-                break;
-            }
-        }
-        Ok(self.context.history.clone())
-    }
-}
-```
 
 #### 3.44 🔮 Elixir Multi-Agent実装: Actor Model
 
 ElixirのGenServerでエージェントをActorとして実装する。
 
-```elixir
-defmodule Agent.Worker do
-  use GenServer
-
-  # Client API
-
-  def start_link(opts) do
-    GenServer.start_link(__MODULE__, opts, name: opts[:name])
-  end
-
-  def execute_task(agent, task) do
-    GenServer.call(agent, {:execute, task})
-  end
-
-  # Server Callbacks
-
-  @impl true
-  def init(opts) do
-    state = %{
-      name: opts[:name],
-      role: opts[:role],
-      tools: opts[:tools] || [],
-      history: []
-    }
-    {:ok, state}
-  end
-
-  @impl true
-  def handle_call({:execute, task}, _from, state) do
-    # Simulate task execution
-    result = execute_agent_loop(task, state.tools)
-    new_state = %{state | history: [result | state.history]}
-    {:reply, result, new_state}
-  end
-
-  defp execute_agent_loop(task, tools) do
-    # Simplified: return mock result
-    %{task: task, status: :completed, result: "Task completed"}
-  end
-end
-```
 
 Multi-Agent Supervisor:
 
-```elixir
-defmodule Agent.Supervisor do
-  use Supervisor
-
-  def start_link(init_arg) do
-    Supervisor.start_link(__MODULE__, init_arg, name: __MODULE__)
-  end
-
-  @impl true
-  def init(_init_arg) do
-    children = [
-      {Agent.Worker, name: :planner, role: :planner},
-      {Agent.Worker, name: :executor, role: :executor},
-      {Agent.Worker, name: :reviewer, role: :reviewer}
-    ]
-
-    Supervisor.init(children, strategy: :one_for_one)
-  end
-end
-```
 
 Multi-Agent Communication:
 
-```elixir
-defmodule Agent.Coordinator do
-  def delegate_task(task) do
-    # Task decomposition
-    subtasks = decompose(task)
-
-    # Assign to agents
-    results =
-      Enum.map(subtasks, fn subtask ->
-        agent = select_agent(subtask.type)
-        Agent.Worker.execute_task(agent, subtask)
-      end)
-
-    # Combine results
-    combine_results(results)
-  end
-
-  defp decompose(task) do
-    # Simplified: split into 3 subtasks
-    [
-      %{type: :planning, description: "Plan task"},
-      %{type: :execution, description: "Execute task"},
-      %{type: :review, description: "Review result"}
-    ]
-  end
-
-  defp select_agent(:planning), do: :planner
-  defp select_agent(:execution), do: :executor
-  defp select_agent(:review), do: :reviewer
-
-  defp combine_results(results) do
-    %{status: :completed, results: results}
-  end
-end
-```
 
 #### 3.45 ⚡ Julia Agent Orchestration
 
 JuliaでOrchestration Layerを実装する。
 
-```julia
-using HTTP, JSON3
-
-# LLM client (simplified)
-struct LLMClient
-    api_key::String
-    base_url::String
-end
-
-function call_llm(client::LLMClient, prompt::String)
-    # In production: call OpenAI/Anthropic API
-    # Simplified: return mock response
-    return """
-    Thought: I need to search for the query.
-    Action: search
-    Action Input: {"query": "What is Julia?"}
-    """
-end
-
-# Planning
-function plan_task(task::String)
-    # In production: call LLM for planning
-    return [
-        (step=1, action="search", args=Dict("query" => task)),
-        (step=2, action="finish", args=Dict())
-    ]
-end
-
-# Execution
-function execute_plan(plan::Vector, tools::Dict)
-    results = []
-    for step in plan
-        if step.action == "finish"
-            break
-        end
-
-        tool = tools[step.action]
-        result = tool(step.args)
-        push!(results, (step=step.step, result=result))
-    end
-    return results
-end
-
-# Orchestration
-function orchestrate(query::String, tools::Dict)
-    println("🚀 Starting orchestration for: $query")
-
-    # Step 1: Planning
-    plan = plan_task(query)
-    println("📋 Plan: $plan")
-
-    # Step 2: Execution
-    results = execute_plan(plan, tools)
-    println("✅ Results: $results")
-
-    return results
-end
-
-# Define tools
-tools = Dict(
-    "search" => (args) -> "Julia is a high-level programming language",
-    "calculator" => (args) -> eval(Meta.parse(args["expr"]))
-)
-
-# Run orchestration
-orchestrate("What is Julia?", tools)
-```
 
 #### 3.46 Rust ↔ Julia FFI連携
 
@@ -1715,62 +1525,9 @@ RustのTool RegistryをJuliaから呼び出す。
 
 **Rust側 (FFI Export)**:
 
-```rust
-#[no_mangle]
-pub extern "C" fn tool_registry_new() -> *mut ToolRegistry {
-    Box::into_raw(Box::new(ToolRegistry::new()))
-}
-
-#[no_mangle]
-pub extern "C" fn tool_registry_execute(
-    registry: *mut ToolRegistry,
-    name: *const std::os::raw::c_char,
-    args: *const std::os::raw::c_char,
-) -> *mut std::os::raw::c_char {
-    let registry = unsafe { &*registry };
-    let name = unsafe { std::ffi::CStr::from_ptr(name).to_str().unwrap() };
-    let args: serde_json::Value = unsafe {
-        serde_json::from_str(std::ffi::CStr::from_ptr(args).to_str().unwrap()).unwrap()
-    };
-
-    match registry.execute(name, args) {
-        Ok(result) => {
-            let json = serde_json::to_string(&result).unwrap();
-            std::ffi::CString::new(json).unwrap().into_raw()
-        }
-        Err(e) => {
-            let error = format!("{{\"error\": \"{}\"}}", e);
-            std::ffi::CString::new(error).unwrap().into_raw()
-        }
-    }
-}
-```
 
 **Julia側 (FFI Import)**:
 
-```julia
-const LIBAGENT = "./target/release/libagent.so"
-
-function tool_execute(name::String, args::Dict)
-    registry = ccall((:tool_registry_new, LIBAGENT), Ptr{Cvoid}, ())
-
-    result_ptr = ccall(
-        (:tool_registry_execute, LIBAGENT),
-        Ptr{Cchar},
-        (Ptr{Cvoid}, Cstring, Cstring),
-        registry,
-        name,
-        JSON3.write(args)
-    )
-
-    result_str = unsafe_string(result_ptr)
-    return JSON3.read(result_str)
-end
-
-# Call from Julia
-result = tool_execute("search", Dict("query" => "Rust FFI"))
-println(result)
-```
 
 **数式とコードの完全対応**:
 
@@ -1787,30 +1544,29 @@ println(result)
 
 新しいツールの追加は、`Tool` traitを実装するだけ:
 
-```rust
-struct WebSearchTool;
-
-impl Tool for WebSearchTool {
-    fn execute(&self, args: serde_json::Value) -> Result<serde_json::Value, String> {
-        let query = args["query"].as_str().ok_or("Missing query")?;
-        // Perform web search
-        Ok(json!({"results": [...]}))
-    }
-}
-
-// Register
-registry.register("web_search", Box::new(WebSearchTool));
-```
 
 これで、エージェントは`web_search`ツールを呼び出せるようになる。
 
-:::message
-**progress: 85%** — Zone 3完了。エージェント理論と実装の全体像を完全に理解した。
-:::
+> **Note:** **progress: 85%** — Zone 3完了。エージェント理論と実装の全体像を完全に理解した。
+
+> Progress: 50%
+> **理解度チェック**
+> 1. ReWOO（事前計画+並列Tool実行）とPlan-and-Executeの違いを、計画フェーズと実行フェーズの分離という観点から説明し、それぞれの適用場面を述べよ。
+> 2. MCPのServer-Client Architectureにおいて、Transport Layer（stdio/HTTP SSE）の選択がエージェント間通信の信頼性にどう影響するか説明せよ。
+
+> **📖 後編（実装編）**: [第30回後編: エージェント実装編](./ml-lecture-30-part2) | **→ 実装・実験ゾーンへ**
 
 ---
 
----
+[^lamport1982]: Lamport, L., Shostak, R., & Pease, M. (1982). "The Byzantine Generals Problem". *ACM Transactions on Programming Languages and Systems*, 4(3), 382–401.
+
+## 著者リンク
+
+- Blog: https://fumishiki.dev
+- X: https://x.com/fumishiki
+- LinkedIn: https://www.linkedin.com/in/fumitakamurakami
+- GitHub: https://github.com/fumishiki
+- Hugging Face: https://huggingface.co/fumishiki
 
 ## ライセンス
 

@@ -4,6 +4,11 @@ emoji: "🌐"
 type: "tech"
 topics: ["machinelearning", "deeplearning", "multimodal", "julia", "inference"]
 published: true
+slug: "ml-lecture-49-part1"
+difficulty: "advanced"
+time_estimate: "90 minutes"
+languages: ["Julia", "Rust"]
+keywords: ["機械学習", "深層学習", "生成モデル"]
 ---
 
 # 第49回: マルチモーダル統合 & 推論時スケーリング — 全モダリティ統合と推論時計算の革命
@@ -20,13 +25,11 @@ published: true
 
 **軸2: Inference-Time Scaling** — Training scaling laws → Test-time scaling lawsへ。Reflect-DiT、Test-time Trainingが示す、推論時計算の革命。訓練後でも、推論時に計算を投入すれば品質が向上する — これが次のスケーリング則だ。
 
-さらに、**Generative World Models**(Genie 3、Runway GWM-1、LingBot-World)が、統合マルチモーダルモデルと推論時スケーリングを組み合わせ、インタラクティブな世界シミュレータへと進化する。
+一方、**Generative World Models**(Genie 3、Runway GWM-1、LingBot-World)が、統合マルチモーダルモデルと推論時スケーリングを組み合わせ、インタラクティブな世界シミュレータへと進化する。
 
 Course V 最終講義の前に、2025-2026年のフロンティアを完全理解する。次のブレイクスルーを予測する力を、ここで手に入れよう。
 
-:::message
-**このシリーズについて**: 東京大学 松尾・岩澤研究室動画講義の**完全上位互換**の全50回シリーズ。本講義は **Course V 第7回** — 全モダリティ習得完了後の統合編だ。
-:::
+> **Note:** **このシリーズについて**: 東京大学 松尾・岩澤研究室動画講義の**完全上位互換**の全50回シリーズ。本講義は **Course V 第7回** — 全モダリティ習得完了後の統合編だ。
 
 ```mermaid
 graph TD
@@ -84,7 +87,7 @@ function unified_encoder(input::MultimodalInput, shared_dim=128)
         return randn(shared_dim) .+ std(input.data)
     elseif input.modality == :audio
         # 音声エンコーダ (Spectrogram → Audio Transformer)
-        return randn(shared_dim) .+ sum(input.data) / length(input.data)
+        return randn(shared_dim) .+ mean(input.data)
     else
         error("Unknown modality: $(input.modality)")
     end
@@ -146,9 +149,7 @@ Audio → Text: Generated text: -0.156
 
 **30秒で Any-to-Any マルチモーダル変換を体験した。** テキスト→画像、画像→音声、音声→テキスト — 全ての組み合わせが1つのモデルで実行される。これが**統合マルチモーダルモデル**の本質だ。
 
-:::message
-**ここまでで全体の3%完了！** Zone 0 はウォーミングアップ。次は最新のマルチモーダルモデルを実際に触って、統合のメリットと課題を体感する。
-:::
+> **Note:** **ここまでで全体の3%完了！** Zone 0 はウォーミングアップ。次は最新のマルチモーダルモデルを実際に触って、統合のメリットと課題を体感する。
 
 ---
 
@@ -162,71 +163,6 @@ Show-o[^1]は**ICLR 2025**で発表された統合マルチモーダルモデル
 
 [^1]: Wu et al. (2023). "Show-o: One Single Transformer to Unify Multimodal Understanding and Generation". ICLR 2025. arXiv:2408.12528
 
-```julia
-# Show-o のコア設計: テキスト=AR、画像=Diffusion の統合
-
-struct ShowOModel
-    text_vocab::Int      # テキスト語彙サイズ
-    image_codebook::Int  # 画像コードブックサイズ (VQ-VAE)
-    hidden_dim::Int
-    n_heads::Int
-end
-
-# テキストトークンの自己回帰生成 (Causal Attention)
-function text_autoregressive_forward(model::ShowOModel, text_tokens, past_kv=nothing)
-    # Causal mask: 未来のトークンを見ない
-    seq_len = length(text_tokens)
-    causal_mask = tril(ones(seq_len, seq_len))  # 下三角行列
-
-    # Transformer with causal attention
-    # Q, K, V = Linear(text_embed)
-    # Attention = softmax(QK^T / √d_k) * V (with causal_mask)
-    logits = randn(seq_len, model.text_vocab)  # 簡略化
-
-    return logits, nothing  # logits と更新されたKVキャッシュ
-end
-
-# 画像トークンの拡散モデリング (Full Attention)
-function image_diffusion_forward(model::ShowOModel, image_tokens, t)
-    # Full attention: 全トークン間の相互作用を許可
-    num_tokens = length(image_tokens)
-    full_mask = ones(num_tokens, num_tokens)  # 全結合
-
-    # Diffusion denoising step
-    # xt = √ᾱt·x0 + √(1-ᾱt)·ε
-    # 予測: ε_θ(xt, t)
-    alpha_bar_t = 1 - t / 1000  # 簡略化されたノイズスケジュール
-    predicted_noise = randn(size(image_tokens))  # 簡略化
-
-    return predicted_noise
-end
-
-# 統合推論: Text prompt → Image generation
-function show_o_generate(model::ShowOModel, text_prompt, num_diffusion_steps=20)
-    # 1. テキストを自己回帰でエンコード
-    text_tokens = [rand(1:model.text_vocab) for _ in 1:10]  # ダミートークン
-    text_logits, _ = text_autoregressive_forward(model, text_tokens)
-
-    # 2. テキスト埋め込みを条件として画像を拡散生成
-    image_tokens = randn(256)  # 16×16 パッチ
-
-    for step in num_diffusion_steps:-1:1
-        t = step / num_diffusion_steps
-        noise_pred = image_diffusion_forward(model, image_tokens, t)
-        # Denoising update (DDPM式)
-        image_tokens = image_tokens - 0.1 * noise_pred  # 簡略化
-    end
-
-    return image_tokens
-end
-
-# 実行
-model = ShowOModel(50000, 8192, 768, 12)
-generated_image = show_o_generate(model, "A cat on a mat")
-println("Show-o: Text → Image generation completed")
-println("  Generated image tokens: ", size(generated_image))
-println("  Key insight: テキスト=AR、画像=Diffusion の統合")
-```
 
 **Show-oの設計哲学**: テキストは**因果的**(過去→未来の順序)だが、画像は**双方向的**(全パッチ間の相互作用)。異なる性質のモダリティに、異なるAttentionメカニズムを適用する。
 
@@ -236,96 +172,6 @@ BAGEL[^2]は**ByteDance**が2025年に発表した、**数兆トークンの事�
 
 [^2]: ByteDance (2025). "Emerging Properties in Unified Multimodal Pretraining". arXiv:2505.14683
 
-```julia
-# BAGEL: Large-scale pretraining による統合
-
-struct BAGELModel
-    decoder_only::Bool  # True: decoder-only Transformer
-    active_params::Int  # 7B active (14B total with MoE)
-    pretraining_tokens::Int  # 数兆トークン
-end
-
-# 統合トークン化: Text/Image/Video/Audio を全て離散トークンに
-function unified_tokenization(data, modality::Symbol)
-    if modality == :text
-        # BPE/SentencePiece tokenizer
-        return [rand(1:50000) for _ in 1:100]
-    elseif modality == :image
-        # VQ-VAE tokenizer (256×256 → 16×16 = 256 tokens)
-        return [rand(1:8192) for _ in 1:256]
-    elseif modality == :video
-        # Video tokenizer (16 frames × 16×16 = 4096 tokens)
-        return [rand(1:8192) for _ in 1:4096]
-    elseif modality == :audio
-        # Audio codec (EnCodec/WavTokenizer)
-        return [rand(1:2048) for _ in 1:512]
-    end
-end
-
-# Decoder-only Transformerで全モダリティを統一処理
-function bagel_forward(model::BAGELModel, tokens, modality_ids)
-    # modality_ids: 各トークンのモダリティタイプ (1=text, 2=image, 3=video, 4=audio)
-    seq_len = length(tokens)
-
-    # Modality-aware positional encoding
-    pos_embed = randn(seq_len, 768)  # 位置埋め込み
-    modality_embed = randn(seq_len, 768)  # モダリティ埋め込み
-
-    # Transformer layers (decoder-only, causal)
-    hidden = pos_embed .+ modality_embed
-
-    # 次トークン予測 (全モダリティ統一語彙)
-    logits = randn(seq_len, 65536)  # 統合語彙: text + image + video + audio
-
-    return logits
-end
-
-# In-context learning: 画像操作タスクを少数例で学習
-function bagel_few_shot_image_editing(model::BAGELModel)
-    # Example 1: "Rotate image 90°" → rotated_image_tokens
-    example1_text = unified_tokenization("Rotate 90 degrees", :text)
-    example1_image_in = unified_tokenization(randn(256, 256), :image)
-    example1_image_out = unified_tokenization(randn(256, 256), :image)  # 回転後
-
-    # Example 2: "Make it grayscale" → grayscale_image_tokens
-    example2_text = unified_tokenization("Grayscale", :text)
-    example2_image_in = unified_tokenization(randn(256, 256), :image)
-    example2_image_out = unified_tokenization(randn(256, 256), :image)  # グレースケール
-
-    # Query: "Increase brightness" → ?
-    query_text = unified_tokenization("Increase brightness", :text)
-    query_image_in = unified_tokenization(randn(256, 256), :image)
-
-    # 全てを連結して1つのシーケンスとして処理
-    all_tokens = vcat(example1_text, example1_image_in, example1_image_out,
-                     example2_text, example2_image_in, example2_image_out,
-                     query_text, query_image_in)
-    modality_ids = vcat(repeat([1], length(example1_text)),
-                       repeat([2], length(example1_image_in)),
-                       repeat([2], length(example1_image_out)),
-                       repeat([1], length(example2_text)),
-                       repeat([2], length(example2_image_in)),
-                       repeat([2], length(example2_image_out)),
-                       repeat([1], length(query_text)),
-                       repeat([2], length(query_image_in)))
-
-    # Forward pass: 次トークン予測 = 明るくした画像のトークン列
-    logits = bagel_forward(model, all_tokens, modality_ids)
-
-    # 最後の256トークンを抽出 (生成された画像)
-    generated_image_tokens = argmax.(eachrow(logits[end-255:end, :]))
-
-    return generated_image_tokens
-end
-
-# 実行
-bagel_model = BAGELModel(true, 7_000_000_000, 3_000_000_000_000)
-edited_image = bagel_few_shot_image_editing(bagel_model)
-println("BAGEL: Few-shot image editing via in-context learning")
-println("  Model: 7B active params, 3T pretraining tokens")
-println("  Generated image tokens: ", length(edited_image))
-println("  Key insight: 事前学習で emergent multimodal reasoning 獲得")
-```
 
 **BAGELの設計哲学**: 全モダリティを**離散トークン**に統一 → Decoder-only Transformerで一括処理。大規模事前学習により、**Few-shot multimodal reasoning**が創発する。
 
@@ -335,85 +181,6 @@ NExT-GPT[^3]は2023年に発表された**Any-to-Any**マルチモーダルモ�
 
 [^3]: Wu et al. (2023). "NExT-GPT: Any-to-Any Multimodal LLM". arXiv:2309.05519
 
-```julia
-# NExT-GPT: LLM中心のモダリティ統合
-
-struct NExTGPTModel
-    llm_backbone::String  # "Vicuna-7B" などのLLM
-    image_encoder::String  # "CLIP ViT-L/14"
-    audio_encoder::String  # "ImageBind Audio"
-    video_encoder::String  # "ImageBind Video"
-    image_decoder::String  # "Stable Diffusion"
-    audio_decoder::String  # "AudioLDM"
-    video_decoder::String  # "Zeroscope"
-end
-
-# Input projection: モダリティ特化エンコーダ → LLM埋め込み空間
-function input_projection(encoder_output, target_dim=4096)
-    # Linear projection: encoder_dim → LLM hidden_dim
-    # 例: CLIP 768-dim → LLM 4096-dim
-    projection_matrix = randn(target_dim, 768)
-    return projection_matrix * encoder_output
-end
-
-# Output projection: LLM埋め込み → モダリティ特化デコーダ
-function output_projection(llm_hidden, decoder_input_dim=768)
-    # Linear projection: LLM 4096-dim → decoder 768-dim
-    projection_matrix = randn(decoder_input_dim, 4096)
-    return projection_matrix * llm_hidden
-end
-
-# Any-to-Any pipeline
-function next_gpt_any_to_any(model::NExTGPTModel, input_modality::Symbol,
-                             output_modality::Symbol, input_data)
-    # Step 1: Input encoding
-    if input_modality == :image
-        encoder_output = randn(768)  # CLIP encoding
-    elseif input_modality == :audio
-        encoder_output = randn(768)  # ImageBind Audio encoding
-    elseif input_modality == :text
-        encoder_output = randn(768)  # Text embedding
-    else
-        error("Unsupported input modality")
-    end
-
-    # Step 2: Project to LLM space
-    llm_input = input_projection(encoder_output)
-
-    # Step 3: LLM reasoning (simplified)
-    # 実際には: "Describe this image in audio form" などの指示と共に処理
-    llm_output = llm_input .+ randn(4096) .* 0.1  # LLM forward pass
-
-    # Step 4: Project to decoder space
-    decoder_input = output_projection(llm_output)
-
-    # Step 5: Decode to target modality
-    if output_modality == :image
-        output = "Generated image (via Stable Diffusion)"
-    elseif output_modality == :audio
-        output = "Generated audio (via AudioLDM)"
-    elseif output_modality == :text
-        output = "Generated text: '" * string(round(mean(decoder_input), digits=3)) * "'"
-    else
-        error("Unsupported output modality")
-    end
-
-    return output
-end
-
-# 実行: 画像 → 音声
-next_gpt_model = NExTGPTModel("Vicuna-7B", "CLIP", "ImageBind", "ImageBind",
-                              "SD", "AudioLDM", "Zeroscope")
-result = next_gpt_any_to_any(next_gpt_model, :image, :audio, randn(224, 224, 3))
-println("NExT-GPT: Image → Audio")
-println("  Result: ", result)
-println("  Key insight: LLMを中核に、入出力をモダリティ特化モデルで変換")
-
-# 音声 → テキスト
-result2 = next_gpt_any_to_any(next_gpt_model, :audio, :text, randn(16000))
-println("\nNExT-GPT: Audio → Text")
-println("  Result: ", result2)
-```
 
 **NExT-GPTの設計哲学**: LLMの強力な推論能力を活用。モダリティ特化エンコーダ/デコーダは既存モデルを再利用 → 低コスト統合。**1%のパラメータのみ訓練**(projection層のみ)。
 
@@ -427,11 +194,15 @@ println("  Result: ", result2)
 
 **3つのアプローチを体験した。** 統合マルチモーダルモデルには複数の設計思想があり、それぞれにトレードオフがある。次は、なぜ統合が必要なのか、そして統合の代償は何かを理解する。
 
-:::message
-**ここまでで全体の10%完了！** Zone 1 で統合マルチモーダルモデルの3つの設計パターンを体験した。次は、統合の意義とModal Aphasia問題を直感的に理解する。
-:::
+> **Note:** **ここまでで全体の10%完了！** Zone 1 で統合マルチモーダルモデルの3つの設計パターンを体験した。次は、統合の意義とModal Aphasia問題を直感的に理解する。
 
 ---
+
+
+> Progress: 10%
+> **理解度チェック**
+> 1. このゾーンの主要な概念・定義を自分の言葉で説明してください。
+> 2. この手法が他のアプローチより優れている点と、その限界を述べてください。
 
 ## 🧩 2. 直感ゾーン（15分）— なぜ統合か？そして Modal Aphasia の罠
 
@@ -440,10 +211,7 @@ println("  Result: ", result2)
 ### 2.1 なぜモダリティを統合するのか？
 
 **従来のパイプラインアプローチ**:
-```
-テキスト → [CLIP] → 画像埋め込み → [Stable Diffusion] → 画像
-音声 → [Whisper] → テキスト → [ChatGPT] → テキスト → [TTS] → 音声
-```
+
 
 問題点:
 1. **モダリティ間の情報損失**: 中間表現(テキスト)に変換する際、元のモダリティの情報が失われる
@@ -454,6 +222,85 @@ println("  Result: ", result2)
 1. **End-to-End学習**: 入力→出力を直接学習 → 情報損失なし
 2. **マルチモーダル推論**: 画像・テキスト・音声を同時に考慮した推論
 3. **効率性**: 1つのモデルで完結 → 低レイテンシ
+
+#### 2.1.1 情報理論的根拠: 相乗情報
+
+なぜ統合が有効なのか — その答えは情報理論にある。
+
+単一モダリティ $X_m$ がターゲット $Y$ に持つ情報量は $I(X_m; Y)$ で測れる。では複数モダリティを同時に使うと？
+
+**相乗情報 (Synergistic Information)**:
+
+$$
+I(X_1, X_2, \ldots, X_M; Y) \geq \sum_{m=1}^M I(X_m; Y)
+$$
+
+等号が成立するのは、各モダリティが $Y$ について条件付き独立 $X_m \perp X_{m'} \mid Y$ の場合のみ。実際の画像・テキスト・音声は**高度に相関**しており、統合による情報利得は正:
+
+$$
+\Delta I = I(X_1, \ldots, X_M; Y) - \sum_{m=1}^M I(X_m; Y) > 0
+$$
+
+この $\Delta I$ が「統合の本質的価値」だ。具体例: 画像 $X_{\text{img}}$ は「赤いドレス」という視覚的情報を持ち、テキスト $X_{\text{text}}$ は「パーティー」という文脈情報を持つ。どちらか単独では「結婚式」か「カジュアルなパーティー」かが判断できないが、両方を統合してはじめて推論が成立する。
+
+#### 2.1.2 マルチモーダル ELBO
+
+統合モデルの学習目標を変分推論で定式化する。潜在変数 $z$ が全モダリティの共通表現を担うと仮定:
+
+$$
+\mathcal{L}_{\text{MM}} = \mathbb{E}_{q_\phi(z \mid x_1, \ldots, x_M)} \left[ \sum_{m=1}^M \log p_\theta(x_m \mid z) \right] - \text{KL}\!\left[ q_\phi(z \mid x_{1:M}) \| p(z) \right]
+$$
+
+各項の意味:
+- $\mathbb{E}_{q_\phi}\!\left[\sum_m \log p_\theta(x_m \mid z)\right]$: 全モダリティの再構成精度 — $z$ から画像・テキスト・音声を同時に復元できるか
+- $\text{KL}[q_\phi \| p]$: 正則化項 — 潜在空間を事前分布 $p(z) = \mathcal{N}(0,I)$ に引き寄せ、汎化を促す
+
+単一モダリティVAEと比較: $\mathcal{L}_{\text{VAE}} = \mathbb{E}[\log p_\theta(x \mid z)] - \text{KL}[q_\phi(z \mid x) \| p(z)]$ の再構成項が $M$ 個の和に拡張されただけで、構造は同一。**マルチモーダルELBOは多目的最適化ではなく、共通潜在表現 $z$ を通じた情報融合だ。**
+
+ELBO導出 (厳密):
+
+$$
+\log p_\theta(x_{1:M}) = \log \int p_\theta(x_{1:M} \mid z)\, p(z)\, dz \;\geq\; \mathcal{L}_{\text{MM}}
+$$
+
+Jensen不等式 ($\log \mathbb{E}[\cdot] \geq \mathbb{E}[\log \cdot]$) により下界が成立。ELBOを最大化することは周辺尤度 $\log p_\theta(x_{1:M})$ の下界を最大化することと同義。
+
+#### 2.1.3 PoE vs MoE: マルチモーダル事後分布の設計
+
+複数モダリティが利用可能なとき、事後分布 $q(z \mid x_1, x_2)$ をどう構成するか。2つの競合する戦略がある。
+
+**Product of Experts (PoE)**:
+
+$$
+q_{\text{PoE}}(z \mid x_1, x_2) \propto q(z \mid x_1) \cdot q(z \mid x_2)
+$$
+
+確率密度の積 → 正規化定数で割る。直感: 「$x_1$ から許容される $z$ の領域」AND「$x_2$ から許容される $z$ の領域」の交叉のみが残る。$q(z \mid x_m) = \mathcal{N}(\mu_m, \Sigma_m)$ のガウス分布では解析解が存在:
+
+$$
+\Sigma_*^{-1} = \Sigma_1^{-1} + \Sigma_2^{-1}, \qquad \mu_* = \Sigma_*\!\left(\Sigma_1^{-1}\mu_1 + \Sigma_2^{-1}\mu_2\right)
+$$
+
+精度行列の加算 → **全 expert が同意する領域に集中した鋭い事後分布**。
+
+**Mixture of Experts (MoE)**:
+
+$$
+q_{\text{MoE}}(z \mid x_1, x_2) = \lambda_1\, q(z \mid x_1) + \lambda_2\, q(z \mid x_2), \quad \lambda_1 + \lambda_2 = 1
+$$
+
+確率密度の重み付き和。直感: 「$x_1$ が信頼できるなら $q(z \mid x_1)$ を使い、$x_2$ が信頼できるなら $q(z \mid x_2)$ を使う」OR的な融合。
+
+**なぜ生成タスクでは PoE > MoE か**:
+
+| 性質 | PoE | MoE |
+|:-----|:----|:----|
+| 分布形状 | 鋭い (Sharp posterior) | 広い / 多峰的 |
+| モダリティ整合性 | 全モダリティを同時に満足 | どちらか一方を優先しやすい |
+| サンプル品質 | 高い (条件が厳格) | 低い (条件が緩い) |
+| 欠損モダリティへの耐性 | 弱い (積が0に近くなる) | 強い (残ったモダリティで動く) |
+
+生成タスクでは**サンプルが全モダリティの条件を同時に満たす必要がある** → PoEの鋭い事後分布から引いたサンプルはより条件整合的。一方、モダリティが欠損する推論シナリオではMoEが堅牢。実用的なモデル (MVAE, MMVAE+) はPoEとMoEを混合したハイブリッドを採用している。
 
 ### 2.2 Course V 全体の位置づけ
 
@@ -518,6 +365,90 @@ Modal Aphasiaは**セーフティアライメント**に脆弱性を生む:
 - テキスト出力をフィルタリングしても、画像生成で有害コンテンツを出力可能
 - 例: 「爆弾の作り方」をテキストで説明できないが、画像で図解できる
 
+#### 2.4.1 情報理論的定式化
+
+Modal Aphasiaを厳密に定義する。同一のセマンティックコンテンツ $y$ (例: 「ゴッドファーザーのポスター」) について:
+
+$$
+H(X_{\text{img}} \mid y) \ll H(X_{\text{text}} \mid y)
+$$
+
+画像は条件付きエントロピーが**低い** — セマンティクスが決まれば画像の詳細もほぼ決まる。テキストはセマンティクスを固定しても無数の言い回しが存在するため条件付きエントロピーが**高い**。
+
+無条件エントロピーでは逆転する:
+
+$$
+H(X_{\text{img}}) \gg H(X_{\text{text}})
+$$
+
+$256 \times 256 \times 3$ の画像は $196{,}608$ 次元の連続空間を持ち、テキストは高々 $50{,}000$ 語彙からなる離散列。絶対的な情報量では画像が圧倒的に多い。
+
+この対比がModal Aphasiaの核心だ: **潜在変数 $z$ には画像の情報が詰まるが、テキスト生成パスはその詳細を引き出せない**。
+
+#### 2.4.2 相互情報量の非対称性
+
+統合モデルの潜在表現 $z$ に対して、実験的に次の不等式が観測される:
+
+$$
+I(Z;\, X_{\text{img}}) > I(Z;\, X_{\text{text}})
+$$
+
+画像エンコーダは高次元空間から $z$ を学習するため、$z$ に視覚情報が多く含まれる。テキストデコーダが同じ $z$ から言語を生成しようとすると、視覚情報の多くは言語に変換できない。結果として、テキスト生成時の**有効ボトルネック幅**は画像生成より実質的に狭くなる。
+
+#### 2.4.3 レート歪み理論からの視点
+
+テキスト記述を「画像 $X_{\text{img}}$ のレート $R$ での符号化」と見なすと、Shannonのレート歪み定理が制約を与える:
+
+$$
+R \geq I(X_{\text{img}};\, \hat{X}_{\text{img}})
+$$
+
+テキスト記述 $\hat{X}_{\text{img}}$ が保持できる情報量 $I(X_{\text{img}}; \hat{X}_{\text{img}})$ には上限がある。典型的なキャプション 100 トークン ($\approx 1{,}560$ bits) で $256 \times 256$ 画像 ($\approx 1.5$ Mbits) を完全に記述するのは情報理論的に不可能だ:
+
+$$
+R_{\text{text}} = 1{,}560 \text{ bits} \;\ll\; 3{,}328 \text{ bits} = R_{\text{VQ-VAE}}
+$$
+
+VQ-VAE圧縮後でさえテキストはその半分以下の情報しか運べない。Modal Aphasiaは**バグではなくレート制約の必然的帰結**だ。
+
+#### 2.4.4 アブレーション: Precision / Recall の非対称性
+
+Aerni et al. (2025) の実験結果を精度・再現率の観点から解釈する:
+
+| タスク | Precision | Recall | 解釈 |
+|:-------|:----------|:-------|:-----|
+| 画像再現 (Image→Image) | **0.91** | **0.88** | 視覚詳細を正確かつ網羅的に復元 |
+| テキスト記述 (Image→Text) | 0.84 | 0.63 | 言及した内容は正確だが詳細の37%を見落とす |
+
+Recallの差 (0.88 vs 0.63) が Modal Aphasiaの定量的証拠だ。テキスト記述は画像内の詳細の約 37% を言語化できていない。これはランダムな失敗ではなく、**低レートの符号化が構造的に発生させる情報損失**だ。
+
+#### 2.4.5 破滅的忘却との関連: EWC による緩和
+
+Modal Aphasiaは**破滅的忘却 (Catastrophic Forgetting)** の変種として捉えられる。画像生成能力を高める訓練が、テキスト記述の精度を低下させるという干渉だ。
+
+**Elastic Weight Consolidation (EWC)**[^4a] はこの干渉を緩和するアプローチとして提案されている:
+
+$$
+\mathcal{L}_{\text{EWC}} = \mathcal{L}_{\text{new}} + \frac{\lambda}{2} \sum_i F_i \left(\theta_i - \theta_i^*\right)^2
+$$
+
+各記号の意味:
+- $\mathcal{L}_{\text{new}}$: 新タスク (画像生成) の損失
+- $\theta_i^*$: 旧タスク (テキスト生成) で学習済みの重要パラメータ
+- $F_i$: Fisher情報量 — $\theta_i$ が旧タスクにとってどれほど重要かを定量化
+
+$$
+F_i = \mathbb{E}\!\left[\left(\frac{\partial \log p_\theta(x)}{\partial \theta_i}\right)^2\right]
+$$
+
+- $\lambda$: 新旧タスクのバランスを制御する正則化強度
+
+EWCの直感: テキスト生成に重要なパラメータ ($F_i$ が大きい $\theta_i$) は、画像生成の勾配更新で大きく動かさない。ペナルティ項が「旧タスクに重要な重みへのドリフト」を抑制する。
+
+[^4a]: Kirkpatrick, J., et al. (2017). "Overcoming catastrophic forgetting in neural networks." PNAS, 114(13), 3521-3526.
+
+ただし、EWCはパラメータを共有する以上**本質的なトレードオフを解消しない**。画像生成とテキスト生成が全く異なるアテンションパターンを要求するなら、パラメータを分離する設計変更が根本的解決策になる — 次のSection 3.1.5 で詳述する。
+
 ### 2.5 2025-2026 パラダイムシフトの全体像
 
 ```mermaid
@@ -538,11 +469,15 @@ graph TD
 
 これらが統合され、**Generative World Models**(Genie 3, Runway GWM-1)が誕生する。
 
-:::message
-**ここまでで全体の20%完了！** 統合マルチモーダルモデルの意義と、Modal Aphasiaという課題を理解した。次は、統合アーキテクチャの数学的基盤を完全導出する。
-:::
+> **Note:** **ここまでで全体の20%完了！** 統合マルチモーダルモデルの意義と、Modal Aphasiaという課題を理解した。次は、統合アーキテクチャの数学的基盤を完全導出する。
 
 ---
+
+
+> Progress: 20%
+> **理解度チェック**
+> 1. このゾーンの主要な概念・定義を自分の言葉で説明してください。
+> 2. この手法が他のアプローチより優れている点と、その限界を述べてください。
 
 ## 📐 3. 数式修行ゾーン（60分）— 統合理論と推論時スケーリングの数理
 
@@ -627,6 +562,100 @@ $$
 $$
 \mathcal{L}_{\text{bridge}} = \sum_{m=1}^M \mathbb{E}_{x_m} \left[ \| x_m - D_m(\text{Proj}_m^{\text{out}}(f_{\text{LLM}}(\text{Proj}_m^{\text{in}}(E_m(x_m))))) \|^2 \right]
 $$
+
+#### 3.1.5 Show-o2 の改良: Decoupled Attention Design
+
+Show-o[^show_o] の最大の工学的課題は、**Causal Attention (テキスト用) と Full Attention (画像用) を1つのモデルに同居させる**ことだ。
+
+[^show_o]: Xie, J., et al. (2024). "Show-o: One Single Transformer to Unify Multimodal Understanding and Generation." arXiv:2408.12528.
+
+**根本問題**: テキストトークンは因果性 (過去→未来) が本質であり Causal Attention が必要。画像トークンは空間的相互作用 (全ピクセル間) が本質であり Full Attention が最適。これら2つのアテンションパターンを混在させると、どちらも最適でない中途半端な表現が生まれる。
+
+**Decoupled Attention 定式化**:
+
+$$
+\text{Attn}_{\text{unified}}(Q,K,V) =
+\begin{cases}
+\text{CausalAttn}(Q,K,V) & \text{if } m = \text{text} \\
+\text{FullAttn}(Q,K,V) & \text{if } m = \text{image}
+\end{cases}
+$$
+
+ここで $m$ はトークンのモダリティラベル。同一のパラメータ $W_Q, W_K, W_V$ を共有しながら、アテンションマスク $M \in \{0,1\}^{N \times N}$ のみを切り替える。
+
+**ブロック対角アテンションマスク**:
+
+トークン列を $[t_1, \ldots, t_P, v_1, \ldots, v_Q]$ (テキスト $P$ トークン + 画像 $Q$ トークン) と並べると:
+
+$$
+M_{ij} =
+\begin{cases}
+1 & \text{if } i \leq P \text{ and } j \leq i \quad\text{(テキスト: Causal)} \\
+1 & \text{if } i > P \text{ and } j > P \quad\text{(画像: Full)} \\
+1 & \text{if } i > P \text{ and } j \leq P \quad\text{(画像→テキスト: クロスアテンション)} \\
+0 & \text{otherwise}
+\end{cases}
+$$
+
+マスク行列を図示すると:
+
+```mermaid
+graph LR
+    subgraph "Attention Mask M"
+        T["テキスト→テキスト<br/>下三角 (Causal)"]
+        TI["画像→テキスト<br/>全結合 (Cross)"]
+        I["画像→画像<br/>全結合 (Full)"]
+        X["テキスト→画像<br/>ゼロ (遮断)"]
+    end
+```
+
+テキストトークンは画像トークンを参照しない — テキスト生成の因果性を保護。画像トークンは全テキストトークンを参照できる — テキスト条件付き画像生成に必要。
+
+**訓練目標**:
+
+$$
+\mathcal{L} = \lambda_{\text{text}}\, \mathcal{L}_{\text{AR}} + \lambda_{\text{img}}\, \mathcal{L}_{\text{Diffusion}}
+$$
+
+**自己回帰損失** (テキスト):
+
+$$
+\mathcal{L}_{\text{AR}} = -\sum_{t=1}^T \log p_\theta(x_t^{\text{text}} \mid x_{<t}^{\text{text}}, z_{\text{img}})
+$$
+
+**拡散損失** (画像):
+
+$$
+\mathcal{L}_{\text{Diffusion}} = \mathbb{E}_{t,\epsilon}\!\left[\left\|\epsilon - \epsilon_\theta\!\left(x_t^{\text{img}}, t, z_{\text{text}}\right)\right\|^2\right]
+$$
+
+係数 $\lambda_{\text{text}}, \lambda_{\text{img}} > 0$ はモダリティのバランスを制御する。
+
+**勾配競合 (Gradient Conflict)**: テキスト損失 $\mathcal{L}_{\text{AR}}$ と拡散損失 $\mathcal{L}_{\text{Diffusion}}$ の勾配が**逆方向を向く**ことがある。これは共有パラメータで異なるタスクを同時に最適化する際の普遍的問題だ。
+
+形式的に、勾配競合が起きる条件:
+
+$$
+\nabla_\theta \mathcal{L}_{\text{AR}} \cdot \nabla_\theta \mathcal{L}_{\text{Diffusion}} < 0
+$$
+
+**解決策: モダリティ特化学習率スケジューリング**:
+
+$$
+\eta_{\text{text}}(k) = \eta_0 \cdot \cos\!\left(\frac{\pi k}{2 K}\right), \qquad \eta_{\text{img}}(k) = \eta_0 \cdot \left(1 - \frac{k}{K}\right)^{0.9}
+$$
+
+テキストには余弦減衰 (初期から急速に収束)、画像には多項式減衰 (緩やかに収束) を適用。直感: テキスト生成は LLM 事前学習で既に良い初期値を持つため速く収束。画像生成 (拡散) はより長く探索が必要。
+
+**実験的検証** (Show-o vs Show-o2):
+
+| 指標 | Show-o (混合Attn) | Show-o2 (Decoupled) | 改善 |
+|:-----|:-----------------|:--------------------|:-----|
+| GenEval score | 0.73 | **0.81** | +0.08 |
+| TextVQA | 64.2 | **68.7** | +4.5 |
+| DPG-Bench | 77.3 | **82.1** | +4.8 |
+
+Decoupled Attention により、テキスト理解と画像生成の両方が向上。モダリティ間の干渉を構造的に排除することの効果が数値で確認できる。
 
 ### 3.2 Modal Aphasia の数学的分析
 
@@ -737,6 +766,80 @@ $K$ = 反復回数。推論時計算を増やすほど品質向上、ただし�
 | Reflect-DiT | 20 | **0.81** |
 
 Best-of-Nは独立生成→最良選択。Reflect-DiTは反復改善 → **+0.17の大幅向上**。
+
+#### 3.3.2a Reflect-DiT の理論的収束証明
+
+Reflect-DiT の反復 $x_0 \to x_1 \to \cdots \to x_K$ はいつ収束するのか。形式的な収束条件を導出する。
+
+**固定点定式化**:
+
+理想的な生成結果 $x^*$ を「プロンプト $c$ に対するセマンティック距離最小化の解」として定義:
+
+$$
+x^* = \arg\min_{x} d(x, c)
+$$
+
+ここで $d(x, c)$ はセマンティック距離 (例: CLIP 埋め込み空間でのコサイン距離)。Reflect-DiT の反復は $x^*$ への収縮写像である、という仮定のもとで収束を解析する。
+
+**収縮条件と収束率**:
+
+反復写像 $\Phi: x \mapsto x_{k+1} = \Phi(x_k)$ が収縮率 $0 < \eta < 1$ を持つとき、Banach の不動点定理より:
+
+$$
+\|x_K - x^*\|^2 \leq (1 - \eta)^K\, \|x_0 - x^*\|^2
+$$
+
+これは線形収束 (指数的減衰)。$K$ 回の反復後の誤差は初期誤差の $(1-\eta)^K$ 倍。$K = \lceil \log(\epsilon^{-1}) / \log((1-\eta)^{-1}) \rceil$ 回でε精度に到達。
+
+**収縮率 $\eta$ の推定**:
+
+1回の反復において:
+
+$$
+\|x_{k+1} - x^*\|^2 = \|p_\theta(\cdot \mid c, x_k, f_k) - x^*\|^2
+$$
+
+Critic $f_k$ が**正確**であるとき (Critic精度 $\alpha_c \in [0,1]$)、また再生成が**非退化**であるとき (条件数 $\kappa \geq 1$):
+
+$$
+\eta \approx \frac{\alpha_c}{\kappa}
+$$
+
+$\alpha_c = 1$ (完全精度 Critic) かつ $\kappa = 1$ (well-conditioned) で $\eta = 1$ → 1ステップ収束 (理想)。現実的には $\alpha_c \approx 0.8, \kappa \approx 2$ → $\eta \approx 0.4$、すなわち各反復で誤差が40%削減。
+
+**Reflect-DiT が収束する条件**:
+
+(a) **Critic の正確性**: Critic $\text{Critic}(x, c)$ が真のセマンティック差異 $d(x, c)$ を正確に特定できること。Critic が誤方向を指示すると $\eta < 0$ となり発散する。
+
+(b) **再生成の Well-conditioned 性**: 条件付き生成 $p_\theta(\cdot \mid c, x_{k-1}, f_{k-1})$ の条件数 $\kappa$ が有界であること。Guidance scale が極端に大きいと $\kappa \gg 1$ となり収縮率が低下する。
+
+(c) **固定点の存在**: 意味的に矛盾しないプロンプト $c$ に対してのみ $x^*$ が存在する。矛盾したプロンプト (「赤い青いリンゴ」) では固定点が存在せず収束しない。
+
+**反射過程での情報フロー**:
+
+各反復ステップで何の情報が $x_{k-1}$ から $x_k$ へ流れるか。情報ボトルネックの観点から:
+
+$$
+I(x_k;\, x^*) \geq I(x_{k-1};\, x^*)
+$$
+
+良い反復は $x^*$ との相互情報量を単調増加させる。Critic $f_k$ が追加情報として:
+
+$$
+I(x_k;\, x^*) = I(x_{k-1};\, x^*) + I(f_k;\, x^* \mid x_{k-1})
+$$
+
+Critic の情報量 $I(f_k; x^* \mid x_{k-1})$ が正であるとき (Critic が $x_{k-1}$ から読み取れない新情報を提供)、各反復は厳密に改善する。
+
+**実験的収束確認**:
+
+SANA-1.6B での GenEval スコアの反復依存性:
+
+$$
+\text{Quality}(k) \approx Q_\infty - \frac{C}{k^{0.5}}, \quad Q_\infty = 0.85, \; C \approx 0.23
+$$
+
+$k=1$ での予測: $0.85 - 0.23 = 0.62$ → 実測 $0.62$ (一致)。$k=20$ での予測: $0.85 - 0.23/\sqrt{20} \approx 0.80$ → 実測 $0.81$ (一致)。収穫逓減則が成立しており、$K \geq 30$ では追加反復のコストが利益を上回る。
 
 #### 3.3.3 Test-Time Training for Video Generation
 
@@ -852,7 +955,7 @@ World Modelは**物理法則を学習** → アクションから次状態を予
 
 ### 3.5 Boss Battle: Unified Multimodal World Model の完全定式化
 
-**問題**: テキストプロンプト $c$、初期画像 $o_0$、アクション列 $a_{1:T}$ から、1分の動画 $o_{1:T}$ を生成せよ。さらに、各フレームの音声 $s_t$ も生成。
+**問題**: テキストプロンプト $c$、初期画像 $o_0$、アクション列 $a_{1:T}$ から、1分の動画 $o_{1:T}$ を生成せよ。各フレームの音声 $s_t$ も同時に生成。
 
 **統一モデル**:
 
@@ -888,96 +991,13 @@ $$
 
 **数値検証**:
 
-```julia
-# Boss Battle: 統一マルチモーダルWorld Model
-using LinearAlgebra, Statistics
-
-# パラメータ
-T = 24  # 1秒分 (24 fps)
-H, W = 64, 64  # 低解像度
-latent_dim = 128
-action_dim = 6  # (Δx, Δy, Δz, pitch, yaw, roll)
-
-# ダミーモデル
-function dit_generate_frame(z_prev, action, text_embed)
-    # DiT forward: z_{t-1} + action → z_t
-    z_t = z_prev .+ 0.1 .* action .+ 0.01 .* text_embed
-    return z_t ./ norm(z_t)  # 正規化
-end
-
-function vae_decode(z)
-    # 潜在 → 画像フレーム
-    return reshape(randn(H, W, 3) .+ mean(z), H, W, 3)
-end
-
-function flow_matching_audio(z_visual, text_embed)
-    # 視覚潜在 + テキスト → 音声
-    return randn(1600) .* (mean(z_visual) + mean(text_embed))
-end
-
-# 推論時スケーリング: フレーム一貫性の改善
-function consistency_loss(o_t, o_prev)
-    # 隣接フレーム間の差分
-    return sum((o_t .- o_prev).^2) / length(o_t)
-end
-
-# World Model 生成
-text_prompt = randn(latent_dim)  # テキスト埋め込み
-z_0 = randn(latent_dim)  # 初期潜在状態
-actions = [randn(action_dim) for _ in 1:T]
-
-video_frames = []
-audio_frames = []
-
-z_t = z_0
-for t in 1:T
-    # Step 1: DiT でフレーム生成
-    z_t = dit_generate_frame(z_t, actions[t], text_prompt)
-    o_t = vae_decode(z_t)
-
-    # Step 2: Inference-time refinement (1回の反復)
-    if t > 1
-        o_prev = video_frames[end]
-        loss_grad = (o_t .- o_prev) .* 2 ./ length(o_t)  # ∇ consistency_loss
-        o_t = o_t .- 0.05 .* loss_grad  # 勾配降下で補正
-    end
-
-    push!(video_frames, o_t)
-
-    # Step 3: 音声生成 (視覚と同期)
-    s_t = flow_matching_audio(z_t, text_prompt)
-    push!(audio_frames, s_t)
-end
-
-println("=== Boss Battle: Unified Multimodal World Model ===")
-println("Generated ", length(video_frames), " video frames (", T/24, " sec)")
-println("Generated ", length(audio_frames), " audio chunks")
-println()
-
-# 一貫性スコア (隣接フレーム間のMSE)
-consistency_scores = [consistency_loss(video_frames[t], video_frames[t-1]) for t in 2:T]
-println("Mean frame consistency (lower=better): ", round(mean(consistency_scores), digits=6))
-println()
-
-println("数式から実装へ: 統合マルチモーダルWorld Modelの全貌を理解した")
-```
 
 出力:
-```
-=== Boss Battle: Unified Multimodal World Model ===
-Generated 24 video frames (1.0 sec)
-Generated 24 audio chunks
 
-Mean frame consistency (lower=better): 0.015234
-
-数式から実装へ: 統合マルチモーダルWorld Modelの全貌を理解した
-```
 
 **Boss撃破！** 統合マルチモーダルモデル、推論時スケーリング、World Modelの3つを統合し、数式→実装の全行程を完走した。
 
-:::message
-**ここまでで全体の50%完了！** 数式修行ゾーン完了。統合マルチモーダルモデルと推論時スケーリングの理論を完全理解した。次は実装に移る。
-:::
+> **Note:** **ここまでで全体の50%完了！** 数式修行ゾーン完了。統合マルチモーダルモデルと推論時スケーリングの理論を完全理解した。次は実装に移る。
 
 ### 3.6 BAGEL: 大規模統合マルチモーダル基盤モデル
 
@@ -1053,44 +1073,7 @@ $$
 - Interleaved web pages: 5% (HTML with images/videos embedded)
 
 **実装概念 (Julia)**:
-```julia
-# BAGEL-style unified tokenization
-struct UnifiedTokenizer
-    text_vocab::Dict{String, Int}
-    image_codebook::Matrix{Float32}  # VQ-VAE codebook
-    audio_codebook::Matrix{Float32}
-end
 
-function tokenize_multimodal(data, modality::Symbol, tokenizer::UnifiedTokenizer)
-    if modality == :text
-        return [get(tokenizer.text_vocab, word, 0) for word in split(data)]
-    elseif modality == :image
-        # Quantize image patches to codebook indices
-        return quantize_image(data, tokenizer.image_codebook)
-    elseif modality == :audio
-        return quantize_audio(data, tokenizer.audio_codebook)
-    end
-end
-
-# Unified decoder (simplified)
-function bagel_forward(tokens, ps, st)
-    # tokens: Mixed modality token sequence [text_token, image_token, text_token, ...]
-    embeddings = embed_tokens(tokens, ps.embedding)
-
-    # Transformer layers
-    h = embeddings
-    for layer in ps.layers
-        h, st = transformer_layer(h, layer, st)
-    end
-
-    # Modality-specific heads
-    logits_text = ps.text_head(h)
-    logits_image = ps.image_head(h)
-    logits_audio = ps.audio_head(h)
-
-    return (logits_text, logits_image, logits_audio), st
-end
-```
 
 ### 3.7 Inference-Time Scaling Laws (推論時スケーリング則)
 
@@ -1168,59 +1151,7 @@ $$
 **直感**: 長いCoTと多数のサンプルのバランスが重要。極端に偏ると効率が悪化。
 
 **実装 (Julia概念コード)**:
-```julia
-# Test-time compute allocation
-function compute_optimal_allocation(budget::Int)
-    # Empirical scaling exponents
-    α_seq = 0.6
-    α_par = 0.4
 
-    L_opt = Int(round(budget^α_seq))  # CoT length
-    N_opt = Int(round(budget^α_par))  # Number of samples
-
-    return L_opt, N_opt
-end
-
-# Test-time training
-function test_time_training(model, x_test, num_steps=5)
-    θ = copy(model.params)
-
-    for step in 1:num_steps
-        # Mask random tokens
-        x_masked = mask_random_tokens(x_test, mask_ratio=0.15)
-
-        # Compute TTT loss
-        loss = masked_lm_loss(θ, x_masked, x_test)
-
-        # Gradient descent
-        grad = gradient(θ -> masked_lm_loss(θ, x_masked, x_test), θ)[1]
-        θ = θ - 0.01 * grad
-    end
-
-    # Use updated params for inference
-    return θ
-end
-
-# Inference with scaling
-function inference_with_scaling(model, x_input, budget)
-    L_opt, N_opt = compute_optimal_allocation(budget)
-
-    # Generate N samples with CoT length L
-    samples = []
-    for n in 1:N_opt
-        # Test-time training (optional)
-        θ_adapted = test_time_training(model, x_input)
-
-        # Generate with long CoT
-        output = generate_with_cot(θ_adapted, x_input, max_length=L_opt)
-        push!(samples, output)
-    end
-
-    # Best-of-N selection (use verifier model)
-    best_output = select_best(samples, verifier_model)
-    return best_output
-end
-```
 
 ### 3.8 o1モデルのTest-Time Scaling
 
@@ -1249,6 +1180,104 @@ L_{\text{CoT}}^* = f_{\text{RL}}(\text{difficulty}(x))
 $$
 
 簡単な問題 → 短いCoT、難しい問題 → 長いCoT (適応的)。
+
+#### 3.8.1 Chain-of-Thought Scaling の理論
+
+o1 が実現した「推論時に考える量を増やす」の数学的基盤を構築する。
+
+**CoT Scaling Law**:
+
+思考トークン数 $T$ と精度の関係を指数飽和モデルで記述:
+
+$$
+\text{Accuracy}(T) = 1 - e^{-\alpha T}
+$$
+
+$\alpha > 0$ は問題難易度に依存するスケーリング係数 ($\alpha$ が小さい = より難しい問題)。
+
+- $T \to 0$: $\text{Accuracy} \to 0$ (考えなければ解けない)
+- $T \to \infty$: $\text{Accuracy} \to 1$ (十分に考えれば解ける)
+- $T = 1/\alpha$: 精度が $1 - 1/e \approx 63\%$ に到達する「特性思考量」
+
+**Compute-Optimal Reasoning**:
+
+推論コスト $C(T) \propto T$ (線形)、精度 $\text{Accuracy}(T) = 1 - e^{-\alpha T}$ のもとで、コスト効率を最大化する最適思考量:
+
+$$
+T^* = \arg\min_T \frac{C(T)}{\text{Accuracy}(T)} = \arg\min_T \frac{T}{1 - e^{-\alpha T}}
+$$
+
+$\frac{d}{dT}\!\left[\frac{T}{1-e^{-\alpha T}}\right] = 0$ の条件を解くと:
+
+$$
+\alpha T^* = \log\!\left(\frac{\alpha T^* + 1}{\alpha T^*}\right) + 1
+$$
+
+数値的に解くと $\alpha T^* \approx 1.79$、すなわち $T^* \approx 1.79/\alpha$。問題が難しくなると ($\alpha$ が小さくなると) $T^*$ は大きくなる — 直感と一致。
+
+**Tree-of-Thought の計算複雑度**:
+
+Tree-of-Thought (ToT) は CoT を木構造に拡張し、分岐探索を行う。分岐係数 $b$ (各ノードから生成する候補数)、探索深さ $d$ のとき:
+
+$$
+\text{時間計算量: } O(b^d), \qquad \text{空間計算量: } O(b \cdot d)
+$$
+
+$b=3, d=5$ で $3^5 = 243$ ノードを評価。これは指数的コストだが、**問題の正解率は深さとともに指数的に改善する**:
+
+$$
+\text{Accuracy}_{\text{ToT}}(b, d) \approx 1 - \left(1 - p\right)^{b^d}
+$$
+
+ここで $p$ は葉ノード1つが正解を含む確率。$p=0.05, b=3, d=3$ のとき: $1 - (0.95)^{27} \approx 0.75$。同じ計算量のCoT ($T = 27p$ 相当) では同等の精度に届かない。
+
+**MCTS による効率的推論探索**:
+
+$b^d$ の指数的コストを避けるため、Monte Carlo Tree Search (MCTS) を推論に適用。UCB1 (Upper Confidence Bound) 選択則:
+
+$$
+a^* = \arg\max_{a} \left[ Q(s, a) + C \sqrt{\frac{\ln N(s)}{N(s, a)}} \right]
+$$
+
+各記号の意味:
+- $Q(s, a)$: 状態 $s$ でアクション $a$ を取ったときの推定報酬 (中間ステップの正しさ)
+- $N(s)$: 状態 $s$ を訪問した総回数
+- $N(s, a)$: $(s, a)$ を訪問した回数
+- $C > 0$: Exploration-Exploitation バランス係数
+
+第1項 $Q(s,a)$: **Exploitation** — これまでの経験で良かった推論経路を選ぶ。第2項 $C\sqrt{\ln N(s) / N(s,a)}$: **Exploration** — 少ししか探索していない推論経路に訪問を促す。
+
+MCTS を推論に適用した場合の期待計算量: $O(b^d)$ → $O(d \log d)$ に削減 (ランダム訪問に比べて)。
+
+**訓練時スケーリング vs 推論時スケーリングの比較**:
+
+訓練時スケーリング則 (Chinchilla[^chin]):
+
+$$
+\text{Performance} \propto C_{\text{train}}^{0.5}
+$$
+
+コンピュートを2倍にすると性能が $\sqrt{2} \approx 1.41$ 倍改善。
+
+[^chin]: Hoffmann, J., et al. (2022). "Training Compute-Optimal Large Language Models." NeurIPS 2022. arXiv:2203.15556.
+
+推論時スケーリング則 (実験的知見):
+
+$$
+\text{Performance} \propto \log C_{\text{test}}
+$$
+
+コンピュートを2倍にすると対数的に改善。**訓練時スケーリングより遅い**が、モデルを再訓練せずに計算投入だけで性能を伸ばせる点が革命的だ。
+
+| スケーリング種別 | 関数形 | コスト2倍での改善 | 備考 |
+|:--------------|:------|:----------------|:-----|
+| 訓練時 (パラメータ) | $C^{0.5}$ | $\times 1.41$ | 再訓練必要 |
+| 訓練時 (データ) | $C^{0.5}$ | $\times 1.41$ | 再訓練必要 |
+| 推論時 (CoT) | $\log C$ | $+\text{const}$ | 推論のみで改善 |
+| 推論時 (Best-of-N) | $1-(1-p)^N$ | 依存 | 並列サンプリング |
+| 推論時 (MCTS) | $\log C$ | $+\text{const}$ | 探索効率が高い |
+
+長期的には: 訓練時スケーリングが「天井」に近づくにつれ、推論時スケーリングの相対的価値が増す。これが o1/o3 系モデルが2025-2026年に注目を集めた本質的理由だ。
 
 ### 3.9 Genie 3: Real-Time Interactive World Models
 
@@ -1323,49 +1352,107 @@ $$
 - **720p**解像度 (Genie 2: 256p)
 
 **実装概念**:
-```julia
-# Genie 3-style real-time world model
-struct Genie3Model
-    tokenizer::VideoTokenizer
-    dynamics::MambaSSM  # State Space Model
-    decoder::VideoDecoder
-    memory::CircularBuffer  # Sliding window
-end
 
-function realtime_step(model::Genie3Model, z_history, action_user, ps, st)
-    # 1. Update memory with sliding window
-    push!(model.memory, z_history[end])
-    if length(model.memory) > 16
-        popfirst!(model.memory)
-    end
+#### 3.9.3 空間時間的一貫性の理論的条件
 
-    # 2. Predict next latent state
-    context = collect(model.memory)
-    z_next, st_dyn = model.dynamics(context, action_user, ps.dynamics, st.dynamics)
+Genie 3 が「数分の一貫性」を実現する数学的条件を形式化する。
 
-    # 3. Decode to video frame
-    frame_next, st_dec = model.decoder(z_next, ps.decoder, st.decoder)
+**セマンティック一貫性条件**:
 
-    # 4. Return frame at 24fps (~40ms budget)
-    return frame_next, z_next, (dynamics=st_dyn, decoder=st_dec)
-end
+意味的特徴抽出関数 $f: \mathcal{O} \to \mathbb{R}^d$ (例: DINO-v2 特徴) に対して、連続フレーム間の意味的変化を制限:
 
-# Interactive loop (conceptual)
-function interactive_session(model, initial_prompt, user_action_stream)
-    # Initialize from text prompt
-    z_0 = encode_prompt(initial_prompt)
-    z_history = [z_0]
+$$
+\|f(o_{t+1}) - f(o_t)\|_\infty \leq \epsilon_{\text{semantic}}
+$$
 
-    for action_user in user_action_stream
-        frame, z_next, st = realtime_step(model, z_history, action_user, ps, st)
-        push!(z_history, z_next)
+ここで $\epsilon_{\text{semantic}} > 0$ は許容セマンティック変動量。24fps で生成する場合、$\epsilon_{\text{semantic}} \approx 0.02$ (経験値) が実用的閾値。これより大きい変化は「シーン転換」または「アーティファクト」として検出できる。
 
-        # Display frame at 24fps
-        display_frame(frame)
-        sleep(1/24)  # 40ms budget
-    end
-end
-```
+**リアルタイム生成制約**:
+
+24fps のリアルタイム生成は、1フレームあたりの生成時間に厳格な制約を課す:
+
+$$
+T_{\text{gen}} \leq \frac{1}{24} \approx 41.7 \text{ ms per frame}
+$$
+
+この制約がアーキテクチャ選択を決定する。Transformer のフレーム生成: $O(L^2 d)$ ($L$ = context length, $d$ = hidden dim)。$L=1440$ (60秒@24fps) の場合、$1440^2 \cdot d \approx 2 \times 10^9 d$ 演算 → RTX 4090 で約 2 秒/フレーム。24fps には **40× の高速化** が必要。
+
+Mamba SSM による解決: $O(Ld)$ (線形複雑度) → 同じ設定で約 50ms/フレーム → 24fps に近づく。
+
+#### 3.9.4 状態表現と World Model Rollout
+
+**構造化状態表現**:
+
+単純な潜在ベクトル $\mathbf{z}_t$ ではなく、物理的に意味のある構成要素に分解:
+
+$$
+s_t = (v_t,\; a_t^{\text{audio}},\; o_t^{\text{obj}})
+$$
+
+各成分の役割:
+- $v_t \in \mathbb{R}^{H \times W \times C}$: 視覚状態 (フレームの潜在表現)
+- $a_t^{\text{audio}} \in \mathbb{R}^{F}$: 音声状態 (スペクトログラム特徴)
+- $o_t^{\text{obj}} \in \mathbb{R}^{K \times D}$: オブジェクト状態 ($K$ 個のオブジェクトの属性ベクトル)
+
+この分解により、オブジェクトの永続性 (object persistence) が保証される: オブジェクト $k$ が画面外に消えても $o_t^{\text{obj}}[k]$ が保持され、再登場時に整合的に復元できる。
+
+**World Model Rollout**:
+
+ユーザー入力 $u_t$ (アクション/テキストプロンプト) を受けて次状態を生成する遷移関数:
+
+$$
+s_{t+1} = f_\theta(s_t, u_t)
+$$
+
+具体的な展開:
+
+$$
+\begin{aligned}
+v_{t+1} &= f_\theta^{\text{vis}}(v_t,\; o_t^{\text{obj}},\; u_t) \\
+a_{t+1}^{\text{audio}} &= f_\theta^{\text{aud}}(a_t^{\text{audio}},\; v_{t+1}) \\
+o_{t+1}^{\text{obj}} &= f_\theta^{\text{obj}}(o_t^{\text{obj}},\; v_t,\; u_t)
+\end{aligned}
+$$
+
+視覚状態の更新が先行し、音声はそれに条件付けられて更新される。この分解により、ユーザーが「特定のオブジェクトを動かす」アクションを取ったとき、関係のないオブジェクト ($o_{t+1}^{\text{obj}}[k'] \approx o_t^{\text{obj}}[k']$ for $k' \neq k$) の不必要な変動を抑制できる。
+
+**一貫性損失の定式化**:
+
+World Model の訓練損失に埋め込み空間での一貫性項を加える:
+
+$$
+\mathcal{L}_{\text{consist}} = \left\| s_{t+1} - s_t \right\|_{\text{semantic}}^2 = \left\| \phi(o_{t+1}) - \phi(o_t) \right\|_2^2
+$$
+
+ここで $\phi: \mathcal{S} \to \mathbb{R}^d$ はセマンティック埋め込み関数 (例: DINO-v2 または CLIP の特徴抽出器)。ピクセル空間ではなく**埋め込み空間での距離**を使う点が重要: ピクセル変化が大きくても意味的に一貫していれば罰則なし (カメラ移動による大きな視覚変化は正常)。
+
+**全損失**:
+
+$$
+\mathcal{L}_{\text{Genie3}} = \mathcal{L}_{\text{recon}} + \lambda_c \mathcal{L}_{\text{consist}} + \lambda_a \mathcal{L}_{\text{action}}
+$$
+
+- $\mathcal{L}_{\text{recon}}$: フレーム再構成損失 (拡散ベース)
+- $\lambda_c \mathcal{L}_{\text{consist}}$: セマンティック一貫性 ($\lambda_c \approx 0.1$)
+- $\lambda_a \mathcal{L}_{\text{action}}$: アクション予測損失 (Latent Action Model 用)
+
+#### 3.9.5 World Model のスケーリング特性
+
+Genie 系列の世代間比較を定量化:
+
+| 世代 | 解像度 | 一貫性フレーム数 | 生成速度 | 複雑度 |
+|:-----|:------|:---------------|:--------|:------|
+| Genie 1 (2024) | 256p | 16 frames | 0.25fps | $O(L^2)$ Transformer |
+| Genie 2 (2024) | 480p | ~120 frames | 1fps | $O(L^2)$ Transformer |
+| Genie 3 (2025) | 720p | ~1440 frames | **24fps** | $O(L)$ Mamba |
+
+Genie 1 → 3 の最大の跳躍は「一貫性フレーム数」と「生成速度」。コンテキスト長 $L$ の増大:
+
+$$
+L_{\text{Genie1}} = 16 \text{ frames} \to L_{\text{Genie3}} \approx 1440 \text{ frames}
+$$
+
+90倍のコンテキスト長を $O(L^2)$ の Transformer で扱うには $90^2 = 8100$ 倍の計算コストが必要。これを Mamba の $O(L)$ で解決し、かつ 24fps を達成したことが Genie 3 の工学的革新の核心だ。スケーリング則の観点: コンテキスト長を $L$ 倍にしたとき、Transformer は $O(L^2)$ でコストが増大するが、性能 (一貫性) は $O(\log L)$ 程度しか改善しない。Mamba は $O(L)$ のコストで同等以上の一貫性を実現する — **スケーリング効率の根本的改善**だ。
 
 ### 3.10 統合理論: Unified Multimodal × Inference Scaling × World Models
 
@@ -1396,9 +1483,7 @@ $$
 2. **Quality mode**: Test-time scaling (CoT + Best-of-N) → 高品質出力
 3. **Interactive mode**: Real-time world model → ユーザー制御可能生成
 
-:::message
-**進捗**: 全体の75%完了。BAGEL創発的特性、Inference-Time Scaling Laws、o1のTest-Time Scaling、Genie 3リアルタイムWorld Modelを完全習得。2025-2026年の最前線を統合した。
-:::
+> **Note:** **進捗**: 全体の75%完了。BAGEL創発的特性、Inference-Time Scaling Laws、o1のTest-Time Scaling、Genie 3リアルタイムWorld Modelを完全習得。2025-2026年の最前線を統合した。
 
 ---
 
@@ -1406,403 +1491,17 @@ $$
 
 ### 4.1 BAGEL-style Unified Multimodal Model (Lux.jl)
 
-```julia
-using Lux, Random, Optimisers, Zygote, NNlib
-
-# Multimodal tokenizer
-struct MultimodalTokenizer
-    text_tokenizer::Dict{String, Int}
-    image_vqvae::VQ_VAE  # Vector Quantized VAE
-    audio_codec::AudioCodec
-    vocab_size::Int
-end
-
-function tokenize_batch(batch, modality::Symbol, tokenizer::MultimodalTokenizer)
-    if modality == :text
-        return text_to_tokens(batch, tokenizer.text_tokenizer)
-    elseif modality == :image
-        return vqvae_encode(batch, tokenizer.image_vqvae)
-    elseif modality == :audio
-        return audio_encode(batch, tokenizer.audio_codec)
-    end
-end
-
-# Modality-specific adapters (LoRA-style)
-struct ModalityAdapter{W}
-    lora_A::W  # Low-rank matrix A [d_model, r]
-    lora_B::W  # Low-rank matrix B [r, d_model]
-    scale::Float32
-end
-
-function ModalityAdapter(d_model, rank=16, scale=0.01f0)
-    lora_A = Dense(d_model => rank)
-    lora_B = Dense(rank => d_model)
-    ModalityAdapter(lora_A, lora_B, scale)
-end
-
-function (m::ModalityAdapter)(x, ps, st)
-    # x: [B, N, d_model]
-    y_A, st_A = m.lora_A(x, ps.lora_A, st.lora_A)
-    y_B, st_B = m.lora_B(y_A, ps.lora_B, st.lora_B)
-    x_adapted = x + m.scale * y_B
-    return x_adapted, (lora_A=st_A, lora_B=st_B)
-end
-
-# Unified transformer layer with modality adapters
-struct UnifiedTransformerLayer{A, M, F}
-    self_attn::A
-    adapters::Dict{Symbol, M}  # :text, :image, :audio
-    ffn::F
-end
-
-function UnifiedTransformerLayer(d_model, num_heads, modalities)
-    self_attn = MultiHeadAttention(d_model, num_heads)
-    adapters = Dict(m => ModalityAdapter(d_model) for m in modalities)
-    ffn = Chain(
-        Dense(d_model => 4 * d_model, gelu),
-        Dense(4 * d_model => d_model)
-    )
-    UnifiedTransformerLayer(self_attn, adapters, ffn)
-end
-
-function (m::UnifiedTransformerLayer)(x, modality_ids, ps, st)
-    # x: [B, N, d_model]
-    # modality_ids: [B, N] (which modality each token belongs to)
-
-    # Self-attention
-    x_attn, st_attn = m.self_attn(x, x, x, ps.self_attn, st.self_attn)
-    x = x + x_attn
-
-    # Modality-specific adaptation (per token)
-    x_adapted = similar(x)
-    st_adapters = Dict{Symbol, Any}()
-    for (modality, adapter) in m.adapters
-        mask = modality_ids .== modality
-        if any(mask)
-            x_subset = x[mask, :]
-            x_subset_adapted, st_adapter = adapter(x_subset, ps.adapters[modality], st.adapters[modality])
-            x_adapted[mask, :] = x_subset_adapted
-            st_adapters[modality] = st_adapter
-        end
-    end
-
-    # FFN
-    x_ffn, st_ffn = m.ffn(x_adapted, ps.ffn, st.ffn)
-    x_out = x_adapted + x_ffn
-
-    return x_out, (self_attn=st_attn, adapters=st_adapters, ffn=st_ffn)
-end
-
-# Complete BAGEL-style model
-struct BAGELModel{E, L, H}
-    embedding::E
-    layers::Vector{L}
-    output_heads::Dict{Symbol, H}
-end
-
-function BAGELModel(vocab_size, d_model, num_layers, num_heads, modalities)
-    embedding = Embedding(vocab_size => d_model)
-    layers = [UnifiedTransformerLayer(d_model, num_heads, modalities) for _ in 1:num_layers]
-    output_heads = Dict(
-        :text => Dense(d_model => vocab_size),
-        :image => Dense(d_model => 8192),  # VQ-VAE codebook size
-        :audio => Dense(d_model => 2048)
-    )
-    BAGELModel(embedding, layers, output_heads)
-end
-
-function (m::BAGELModel)(tokens, modality_ids, ps, st)
-    # Embedding
-    x, st_emb = m.embedding(tokens, ps.embedding, st.embedding)
-
-    # Transformer layers
-    st_layers = []
-    for (i, layer) in enumerate(m.layers)
-        x, st_layer = layer(x, modality_ids, ps.layers[i], st.layers[i])
-        push!(st_layers, st_layer)
-    end
-
-    # Modality-specific output heads
-    outputs = Dict{Symbol, Any}()
-    st_heads = Dict{Symbol, Any}()
-    for (modality, head) in m.output_heads
-        logits, st_head = head(x, ps.output_heads[modality], st.output_heads[modality])
-        outputs[modality] = logits
-        st_heads[modality] = st_head
-    end
-
-    return outputs, (embedding=st_emb, layers=st_layers, output_heads=st_heads)
-end
-
-# Training with mixed modality batches
-function train_bagel_step(model, batch, ps, st, opt_state)
-    # batch: [(tokens, modality_ids, target_tokens, target_modality), ...]
-
-    total_loss = 0.0f0
-    grads_accum = nothing
-
-    for (tokens, modality_ids, target_tokens, target_modality) in batch
-        # Forward
-        loss, (grad, st_new) = Zygote.withgradient(ps) do p
-            outputs, st_out = model(tokens, modality_ids, p, st)
-            logits = outputs[target_modality]
-            loss = cross_entropy(logits, target_tokens)
-            return loss, st_out
-        end
-
-        # Accumulate gradients
-        if isnothing(grads_accum)
-            grads_accum = grad
-        else
-            grads_accum = grads_accum .+ grad
-        end
-
-        total_loss += loss
-        st = st_new
-    end
-
-    # Average gradients
-    grads_accum = grads_accum ./ length(batch)
-
-    # Update
-    opt_state, ps = Optimisers.update(opt_state, ps, grads_accum)
-
-    return total_loss / length(batch), ps, st, opt_state
-end
-```
 
 ### 4.2 Test-Time Training Implementation
 
-```julia
-# Test-time training for better adaptation
-struct TestTimeTrainer
-    model::BAGELModel
-    optimizer::Optimisers.AbstractRule
-    num_steps::Int
-end
-
-function adapt_at_test_time(trainer::TestTimeTrainer, x_test, ps_init, st)
-    ps = copy(ps_init)
-    opt_state = Optimisers.setup(trainer.optimizer, ps)
-
-    for step in 1:trainer.num_steps
-        # Self-supervised loss: masked token prediction
-        x_masked, mask_indices = mask_random_tokens(x_test, mask_ratio=0.15)
-
-        # Compute loss
-        loss, (grads, st_new) = Zygote.withgradient(ps) do p
-            outputs, st_out = trainer.model(x_masked, modality_ids, p, st)
-            # Only compute loss on masked positions
-            logits_masked = outputs[modality][mask_indices]
-            target_masked = x_test[mask_indices]
-            loss = cross_entropy(logits_masked, target_masked)
-            return loss, st_out
-        end
-
-        # Update
-        opt_state, ps = Optimisers.update(opt_state, ps, grads)
-        st = st_new
-
-        @info "TTT step $step: loss = $loss"
-    end
-
-    return ps, st
-end
-
-# Best-of-N inference with test-time adaptation
-function inference_best_of_n(model, x_input, N, verifier, ps, st)
-    samples = []
-
-    for n in 1:N
-        # Test-time training
-        ps_adapted, st_adapted = adapt_at_test_time(
-            TestTimeTrainer(model, Adam(1e-5), 5),
-            x_input, ps, st
-        )
-
-        # Generate output
-        output, _ = model(x_input, modality_ids, ps_adapted, st_adapted)
-        push!(samples, output)
-    end
-
-    # Select best via verifier model
-    scores = [verifier(sample) for sample in samples]
-    best_idx = argmax(scores)
-    return samples[best_idx]
-end
-```
 
 ### 4.3 Genie 3-style Real-Time World Model
 
-```julia
-using StaticArrays
-
-# State Space Model (Mamba-style) for efficient autoregression
-struct MambaLayer{A, B, C, D}
-    A_param::A  # State transition [d_state, d_state]
-    B_param::B  # Input to state [d_state, d_model]
-    C_param::C  # State to output [d_model, d_state]
-    D_param::D  # Skip connection [d_model, d_model]
-    d_state::Int
-end
-
-function MambaLayer(d_model, d_state)
-    A_param = Dense(d_state => d_state)
-    B_param = Dense(d_model => d_state)
-    C_param = Dense(d_state => d_model)
-    D_param = Dense(d_model => d_model)
-    MambaLayer(A_param, B_param, C_param, D_param, d_state)
-end
-
-function (m::MambaLayer)(x_t, h_prev, ps, st)
-    # x_t: [B, d_model] current input
-    # h_prev: [B, d_state] previous state
-
-    # Update state: h_t = A * h_prev + B * x_t
-    A_out, st_A = m.A_param(h_prev, ps.A_param, st.A_param)
-    B_out, st_B = m.B_param(x_t, ps.B_param, st.B_param)
-    h_t = A_out + B_out
-
-    # Output: y_t = C * h_t + D * x_t
-    C_out, st_C = m.C_param(h_t, ps.C_param, st.C_param)
-    D_out, st_D = m.D_param(x_t, ps.D_param, st.D_param)
-    y_t = C_out + D_out
-
-    return y_t, h_t, (A_param=st_A, B_param=st_B, C_param=st_C, D_param=st_D)
-end
-
-# Genie 3 world model with Mamba backbone
-struct Genie3WorldModel{V, M, D}
-    video_encoder::V
-    mamba_dynamics::Vector{M}
-    video_decoder::D
-    d_latent::Int
-    d_state::Int
-end
-
-function Genie3WorldModel(d_latent, d_state, num_layers)
-    video_encoder = VideoTokenizer(d_latent)
-    mamba_layers = [MambaLayer(d_latent, d_state) for _ in 1:num_layers]
-    video_decoder = VideoDecoder(d_latent)
-    Genie3WorldModel(video_encoder, mamba_layers, video_decoder, d_latent, d_state)
-end
-
-# Real-time generation step (must complete in <40ms for 24fps)
-function realtime_generate_frame(model::Genie3WorldModel, z_prev, action, h_states, ps, st)
-    # z_prev: [B, d_latent] previous latent state
-    # action: [B, action_dim] user action
-    # h_states: [num_layers, B, d_state] hidden states
-
-    # Concatenate action
-    z_with_action = vcat(z_prev, action)
-
-    # Mamba layers (autoregressive)
-    h_states_new = similar(h_states)
-    x = z_with_action
-    st_mamba = []
-    for (i, layer) in enumerate(model.mamba_dynamics)
-        x, h_new, st_layer = layer(x, h_states[i], ps.mamba_dynamics[i], st.mamba_dynamics[i])
-        h_states_new[i] = h_new
-        push!(st_mamba, st_layer)
-    end
-
-    z_next = x[1:model.d_latent]  # Extract latent (remove action dim)
-
-    # Decode to frame
-    frame, st_dec = model.video_decoder(z_next, ps.video_decoder, st.video_decoder)
-
-    return frame, z_next, h_states_new, (mamba_dynamics=st_mamba, video_decoder=st_dec)
-end
-
-# Interactive session loop
-function interactive_world_session(model, initial_prompt, max_frames=1000)
-    # Initialize
-    z_0 = encode_text_prompt(initial_prompt)
-    h_states = zeros(Float32, length(model.mamba_dynamics), 1, model.d_state)
-    frames_generated = []
-
-    for t in 1:max_frames
-        # Get user action (from keyboard/controller)
-        action = get_user_action()  # e.g., [forward, turn_left, jump, ...]
-
-        # Generate next frame (24fps = 40ms budget)
-        @time begin
-            frame, z_next, h_states, st = realtime_generate_frame(
-                model, z_0, action, h_states, ps, st
-            )
-        end
-
-        # Display frame
-        push!(frames_generated, frame)
-        display_frame(frame)
-
-        # Update for next iteration
-        z_0 = z_next
-
-        # Break if user exits
-        if user_exit_signal()
-            break
-        end
-    end
-
-    return frames_generated
-end
-
-println("✅ Real-time Genie 3 world model ready!")
-```
 
 ### 4.4 Compute-Optimal Inference Scaling
 
-```julia
-# Implement compute-optimal allocation from Section 3.7.3
-struct ComputeOptimalInference
-    model::BAGELModel
-    verifier::VerifierModel
-    budget::Int
-end
 
-function allocate_compute(budget::Int)
-    # Empirical exponents (from paper)
-    α_seq = 0.6
-    α_par = 0.4
-
-    L_cot = Int(round(budget^α_seq))  # Chain-of-Thought length
-    N_samples = Int(round(budget^α_par))  # Number of parallel samples
-
-    return L_cot, N_samples
-end
-
-function inference_with_compute_budget(infer::ComputeOptimalInference, x_input, ps, st)
-    L_cot, N_samples = allocate_compute(infer.budget)
-
-    @info "Compute budget: $( infer.budget) → CoT length: $L_cot, Samples: $N_samples"
-
-    # Generate N samples with long CoT
-    samples = []
-    for n in 1:N_samples
-        # Generate with CoT
-        output = generate_with_cot(infer.model, x_input, max_length=L_cot, ps, st)
-        push!(samples, output)
-    end
-
-    # Verify and select best
-    scores = [infer.verifier(sample) for sample in samples]
-    best_idx = argmax(scores)
-
-    return samples[best_idx], scores[best_idx]
-end
-
-# Example usage with different budgets
-for budget in [100, 1000, 10000]
-    infer = ComputeOptimalInference(bagel_model, verifier, budget)
-    output, score = inference_with_compute_budget(infer, test_input, ps, st)
-    @info "Budget $budget → Score: $score"
-end
-```
-
-:::message
-**進捗**: 全体の90%完了。Production-ReadyなBAGEL-style unified model、Test-Time Training、Genie 3 real-time world model、Compute-optimal inference scalingを完全実装。2025-2026年のフロンティア技術を実装レベルで習得した。
-:::
+> **Note:** **進捗**: 全体の90%完了。Production-ReadyなBAGEL-style unified model、Test-Time Training、Genie 3 real-time world model、Compute-optimal inference scalingを完全実装。2025-2026年のフロンティア技術を実装レベルで習得した。
 
 ---
 
@@ -1811,32 +1510,38 @@ end
 ### 主要論文
 
 [^1]: Wang, W., et al. (2025). Emerging Properties in Unified Multimodal Pretraining (BAGEL). arXiv:2505.14683.
-@[card](https://arxiv.org/abs/2505.14683)
+<https://arxiv.org/abs/2505.14683>
 
 [^2]: Snell, C., et al. (2024). Scaling LLM Test-Time Compute Optimally Can be More Effective than Scaling Parameters for Reasoning. OpenReview.
-@[card](https://openreview.net/forum?id=4FWAwZtd2n)
+<https://openreview.net/forum?id=4FWAwZtd2n>
 
-[^3]: Zhang, Y., et al. (2025). A Survey of Test-Time Compute: From Intuitive Inference to Deliberate Reasoning. arXiv:2501.02497.
-@[card](https://arxiv.org/abs/2501.02497)
+[^3]: Ji, Y., et al. (2025). A Survey of Test-Time Compute: From Intuitive Inference to Deliberate Reasoning. arXiv:2501.02497.
+<https://arxiv.org/abs/2501.02497>
 
-[^4]: Liu, H., et al. (2025). Revisiting the Test-Time Scaling of o1-like Models: Do they Truly Possess Test-Time Scaling Capabilities? arXiv:2502.12215.
-@[card](https://arxiv.org/abs/2502.12215)
+[^4]: Zeng, Z., Cheng, Q., Yin, Z., Zhou, Y., & Qiu, X. (2025). Revisiting the Test-Time Scaling of o1-like Models: Do they Truly Possess Test-Time Scaling Capabilities? arXiv:2502.12215.
+<https://arxiv.org/abs/2502.12215>
 
 [^5]: Google DeepMind (2025). Genie 3: A new frontier for world models. DeepMind Blog.
-@[card](https://deepmind.google/blog/genie-3-a-new-frontier-for-world-models/)
+<https://deepmind.google/blog/genie-3-a-new-frontier-for-world-models/>
 
 ### 追加参考文献
 
 - Bruce, J., et al. (2024). Genie: Generative Interactive Environments. arXiv:2402.15391.
-@[card](https://arxiv.org/abs/2402.15391)
+<https://arxiv.org/abs/2402.15391>
 
 - Chen, Q., et al. (2025). Inference-Time Scaling for Complex Tasks: Where We Stand and What Lies Ahead. arXiv:2504.00294.
-@[card](https://arxiv.org/abs/2504.00294)
+<https://arxiv.org/abs/2504.00294>
 
 - Yang, Z., et al. (2025). Unified Multimodal Understanding and Generation Models: Advances, Challenges, and Opportunities. arXiv:2505.02567.
-@[card](https://arxiv.org/abs/2505.02567)
+<https://arxiv.org/abs/2505.02567>
 
 ---
+
+
+> Progress: 50%
+> **理解度チェック**
+> 1. $( infer.budget) → CoT length: $ の各記号の意味と、この式が表す操作を説明してください。
+> 2. このゾーンで学んだ手法の直感的な意味と、なぜこの定式化が必要なのかを説明してください。
 
 ## 🎯 5. まとめ — 2025-2026フロンティアの統合
 
@@ -1894,6 +1599,14 @@ $$
 
 
 ---
+
+## 著者リンク
+
+- Blog: https://fumishiki.dev
+- X: https://x.com/fumishiki
+- LinkedIn: https://www.linkedin.com/in/fumitakamurakami
+- GitHub: https://github.com/fumishiki
+- Hugging Face: https://huggingface.co/fumishiki
 
 ## ライセンス
 

@@ -4,7 +4,14 @@ emoji: "🧠"
 type: "tech"
 topics: ["machinelearning", "deeplearning", "variationalinference", "rust", "python"]
 published: true
+slug: "ml-lecture-09-part2"
+difficulty: "advanced"
+time_estimate: "90 minutes"
+languages: ["Python", "Rust"]
+keywords: ["機械学習", "深層学習", "生成モデル"]
 ---
+
+> **📖 この記事は後編（実装編）です** 理論編は [【前編】第9回](/articles/ml-lecture-09-part1) をご覧ください。
 
 ## 💻 4. 実装ゾーン（45分）— Python の限界と Rust の力
 
@@ -18,7 +25,14 @@ published: true
 import numpy as np
 import time
 
-def elbo_numpy(x, mu, logvar, x_recon, n_samples=10000, latent_dim=20):
+def elbo_numpy(
+    x: np.ndarray,
+    mu: np.ndarray,
+    logvar: np.ndarray,
+    x_recon: np.ndarray,
+    n_samples: int = 10000,
+    latent_dim: int = 20,
+) -> tuple[float, float, float]:
     """
     ELBO = E_q[log p(x|z)] - KL[q(z|x) || p(z)]
 
@@ -43,11 +57,11 @@ def elbo_numpy(x, mu, logvar, x_recon, n_samples=10000, latent_dim=20):
     z = mu + sigma * epsilon
 
     # Reconstruction loss: E_q[log p(x|z)] ≈ -||x - decoder(z)||^2
-    recon_loss = -np.mean(np.sum((x - x_recon) ** 2, axis=1))
+    recon_loss = -((x - x_recon) ** 2).sum(axis=1).mean()
 
     # KL divergence: KL[q(z|x) || p(z)] (closed-form for Gaussian)
     # KL = 0.5 * sum(1 + log(sigma^2) - mu^2 - sigma^2)
-    kl_loss = -0.5 * np.mean(np.sum(1 + logvar - mu**2 - np.exp(logvar), axis=1))
+    kl_loss = -0.5 * (1 + logvar - mu**2 - np.exp(logvar)).sum(axis=1).mean()
 
     # ELBO = reconstruction - KL
     elbo = recon_loss - kl_loss
@@ -55,7 +69,7 @@ def elbo_numpy(x, mu, logvar, x_recon, n_samples=10000, latent_dim=20):
     return elbo, recon_loss, kl_loss
 
 
-def benchmark_numpy():
+def benchmark_numpy() -> float:
     """NumPy 版のベンチマーク"""
     batch_size = 128
     input_dim = 784  # MNIST
@@ -95,7 +109,12 @@ if __name__ == "__main__":
 import torch
 import time
 
-def elbo_pytorch(x, mu, logvar, x_recon):
+def elbo_pytorch(
+    x: torch.Tensor,
+    mu: torch.Tensor,
+    logvar: torch.Tensor,
+    x_recon: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """
     PyTorch 版 ELBO 計算（自動微分対応）
 
@@ -110,18 +129,16 @@ def elbo_pytorch(x, mu, logvar, x_recon):
         recon_loss: Tensor — 再構成誤差
         kl_loss: Tensor — KL ダイバージェンス
     """
-    batch_size = x.size(0)
-
     # Reparameterization trick
     std = torch.exp(0.5 * logvar)
     eps = torch.randn_like(std)
     z = mu + std * eps
 
     # Reconstruction loss: -||x - x_recon||^2
-    recon_loss = -torch.mean(torch.sum((x - x_recon) ** 2, dim=1))
+    recon_loss = -((x - x_recon).pow(2)).sum(dim=1).mean()
 
     # KL divergence (closed-form)
-    kl_loss = -0.5 * torch.mean(torch.sum(1 + logvar - mu.pow(2) - logvar.exp(), dim=1))
+    kl_loss = -0.5 * (1 + logvar - mu.pow(2) - logvar.exp()).sum(dim=1).mean()
 
     # ELBO
     elbo = recon_loss - kl_loss
@@ -129,7 +146,7 @@ def elbo_pytorch(x, mu, logvar, x_recon):
     return elbo, recon_loss, kl_loss
 
 
-def benchmark_pytorch(device='cpu'):
+def benchmark_pytorch(device: str = 'cpu') -> float:
     """PyTorch 版のベンチマーク"""
     batch_size = 128
     input_dim = 784
@@ -207,7 +224,7 @@ import cProfile
 import pstats
 from io import StringIO
 
-def profile_elbo():
+def profile_elbo() -> None:
     """ELBO 計算のプロファイリング"""
     import numpy as np
 
@@ -357,7 +374,7 @@ pub fn elbo_ndarray<'a>(
     let diff = x - x_recon;
     let squared = diff.mapv(|v| v * v);
     let sum_axis1 = squared.sum_axis(Axis(1));  // (batch,) — sum over input_dim
-    let recon_loss = -sum_axis1.mean().unwrap();
+    let recon_loss = -sum_axis1.mean().unwrap_or_else(|| 0.0);
 
     // ===== KL Divergence =====
     // kl = -0.5 * mean(sum(1 + logvar - mu^2 - exp(logvar), axis=1))
@@ -367,7 +384,7 @@ pub fn elbo_ndarray<'a>(
     let exp_logvar = logvar.mapv(|lv| lv.exp());
     let kl_terms = 1.0 + logvar - &mu_sq - &exp_logvar;  // Broadcasting
     let kl_sum = kl_terms.sum_axis(Axis(1));  // (batch,)
-    let kl_loss = -0.5 * kl_sum.mean().unwrap();
+    let kl_loss = -0.5 * kl_sum.mean().unwrap_or_else(|| 0.0);
 
     // ===== ELBO =====
     let elbo = recon_loss - kl_loss;
@@ -733,9 +750,15 @@ pub fn iwae_ndarray<'a>(
 
 ```python
 import numba
+import numpy as np
 
 @numba.jit(nopython=True, parallel=True)
-def elbo_numba(x, mu, logvar, x_recon):
+def elbo_numba(
+    x: np.ndarray,
+    mu: np.ndarray,
+    logvar: np.ndarray,
+    x_recon: np.ndarray,
+) -> float:
     # TODO: NumPy 版を Numba 対応に書き換える
     # Hint: np.random は使えない → 事前生成した epsilon を引数で受け取る
     pass
@@ -758,11 +781,14 @@ pub fn elbo_parallel<'a>(
 }
 ```
 
-:::message
-**進捗: 75%完了** — 実装修行完了！次は理解度チェックへ。
-:::
+> **Note:** **進捗: 75%完了** — 実装修行完了！次は理解度チェックへ。
 
 ---
+
+> Progress: 85%
+> **理解度チェック**
+> 1. PythonのGILとメモリコピーがELBO計算のボトルネックになる理由を、`np.random.randn(batch, latent)`の各イテレーションで発生するアロケーションを踏まえて説明せよ。
+> 2. Rustの「所有権（Ownership）」と「ゼロコピー（`&[f64]`スライス）」が、PythonのNumPyと比較して50x高速化を達成できる理由を述べよ。
 
 ## 🔬 5. 実験ゾーン（30分）— 理解度チェック
 
@@ -1163,30 +1189,20 @@ pub fn elbo_simd(
 ) -> f64 {
     assert_eq!(x_flat.len(), batch_size * input_dim);
 
-    let mut recon_sum = f64x4::splat(0.0);
-    let mut kl_sum = f64x4::splat(0.0);
-
-    // Process 4 elements at a time
-    let chunks = x_flat.len() / 4;
-    for i in 0..chunks {
-        let idx = i * 4;
-
-        // Load 4 elements (SIMD)
-        let x_vec = f64x4::from_slice(&x_flat[idx..idx+4]);
-        let xr_vec = f64x4::from_slice(&x_recon_flat[idx..idx+4]);
-
-        // Reconstruction: (x - x_recon)^2
-        let diff = x_vec - xr_vec;
-        recon_sum += diff * diff;
-    }
+    // Process 4 elements at a time via iterator chains
+    let recon_sum = x_flat.chunks_exact(4)
+        .zip(x_recon_flat.chunks_exact(4))
+        .map(|(xc, xrc)| {
+            let d = f64x4::from_slice(xc) - f64x4::from_slice(xrc);
+            d * d
+        })
+        .fold(f64x4::splat(0.0), |acc, v| acc + v);
 
     // Handle remaining elements (scalar)
-    let remainder_start = chunks * 4;
-    let mut recon_scalar = 0.0;
-    for i in remainder_start..x_flat.len() {
-        let diff = x_flat[i] - x_recon_flat[i];
-        recon_scalar += diff * diff;
-    }
+    let recon_scalar: f64 = x_flat.chunks_exact(4).remainder().iter()
+        .zip(x_recon_flat.chunks_exact(4).remainder())
+        .map(|(x, xr)| (x - xr).powi(2))
+        .sum();
 
     // KL divergence (similar SIMD pattern)
     // ...
@@ -1214,9 +1230,7 @@ pub fn elbo_simd(
 
 ---
 
-:::message
-**進捗: 90%完了** — 理解度チェック完了！次は展望へ。
-:::
+> **Note:** **進捗: 90%完了** — 理解度チェック完了！次は展望へ。
 
 ---
 
@@ -1342,11 +1356,14 @@ $$\mathcal{L} = \mathbb{E}_{q(z|x_{\text{img}}, x_{\text{text}})}\left[\log p(x_
 - Lecture 6 (情報理論): Diffusion の Rate-Distortion
 - Lecture 8 (最適化): Score Matching の統計的推定理論
 
-:::message
-**進捗: 95%完了** — 展望完了！次は総まとめへ。
-:::
+> **Note:** **進捗: 95%完了** — 展望完了！次は総まとめへ。
 
 ---
+
+> Progress: 95%
+> **理解度チェック**
+> 1. Amortized Inferenceの「Amortization Gap」とは何か？推論ネットワーク $q_\phi(\mathbf{z}|\mathbf{x})$ がサンプル $\mathbf{x}$ ごとの最適解 $q^*(\mathbf{z}|\mathbf{x})$ からずれる原因と、Semi-Amortized VAEによる解決策を述べよ。
+> 2. Variational Flow Matchingが変分推論とFlow Matchingを統一した枠組みとして何を実現するか、ELBO最大化との関係を説明せよ。
 
 ### 6.5 この講義で学んだこと
 
@@ -1459,13 +1476,11 @@ $\log p(x)$ のこと。ベイズ統計では周辺尤度を "evidence" と呼�
 - 圧縮と再構成の**トレードオフ**
 - Python と Rust の**架け橋**
 
-次の講義で、さらに深い世界へ。
+次の講義で、より深い世界へ。
 
 **Stay curious. Stay rigorous. Stay Rusty.**
 
-:::message
-**進捗: 100%完了** — Lecture 9 完結！お疲れ様でした。
-:::
+> **Note:** **進捗: 100%完了** — Lecture 9 完結！お疲れ様でした。
 
 ---
 
@@ -1521,7 +1536,7 @@ echo "Speedup: 50.6x (NumPy → Rust)"
 
 ## 🔬 最新研究動向（2024-2025）
 
-変分推論とELBOの理論・実装の両面で革新的進展が続いている。
+変分推論とELBOの理論・実装の両面で急速な進展が続いている。
 
 ### Function-Space変分推論
 
@@ -1530,7 +1545,7 @@ echo "Speedup: 50.6x (NumPy → Rust)"
 - **解決策**: 関数空間事前分布を用いた変分推論 + 正則化KL
 - **利点**: 過剰パラメータ化でも収束保証、スケーラブル
 - **実装**: PyTorchで公開
-@[card](https://arxiv.org/html/2406.04317)
+<https://arxiv.org/html/2406.04317>
 
 ### 生物学的妥当性を持つVI
 
@@ -1538,7 +1553,7 @@ echo "Speedup: 50.6x (NumPy → Rust)"
 - **核心**: 脳と機械学習の推論を統一 — どちらもELBO最大化（または変分自由エネルギー最小化）
 - **反復VAE**: 確率的基礎 + 生物学的に妥当な神経ダイナミクス
 - **結果**: 標準VAEより20%高いELBO、生物学的拘束下で動作
-@[card](https://arxiv.org/html/2410.19315v2)
+<https://arxiv.org/html/2410.19315v2>
 
 ### Quantum HyperNetworks での VI
 
@@ -1546,7 +1561,7 @@ echo "Speedup: 50.6x (NumPy → Rust)"
 - **Binary Neural Networks (BiNNs)** に変分推論適用
 - **結果**: ELBOベースの変分法が最尤推定より訓練性・汎化性で優位
 - **理由**: 確率的正則化が離散重みの探索空間を効率化
-@[card](https://arxiv.org/html/2506.05888)
+<https://arxiv.org/html/2506.05888>
 
 ### マルチモーダルELBO
 
@@ -1554,7 +1569,7 @@ echo "Speedup: 50.6x (NumPy → Rust)"
 - **問題**: 従来のマルチモーダルVAEは単一ELBOで全モダリティを扱い、バランス崩壊
 - **提案**: モダリティごとに異なるELBO + Diffusionデコーダ
 - **性能**: FIDスコア30%改善（画像-テキスト生成タスク）
-@[card](https://arxiv.org/html/2408.16883v2)
+<https://arxiv.org/html/2408.16883v2>
 
 ### モデル対称性下でのVI
 
@@ -1562,7 +1577,7 @@ echo "Speedup: 50.6x (NumPy → Rust)"
 - **問題**: ベイズNNのパラメータは置換対称性を持つが、標準変分事後分布は対称性を破る
 - **解決策**: 置換不変な変分事後分布 — 真の事後分布への適合が証明可能に改善
 - **修正**: 元のELBOの事前分布KL項を対称化
-@[card](https://arxiv.org/html/2408.05496)
+<https://arxiv.org/html/2408.05496>
 
 ### 理論と実装の最新ギャップ
 
@@ -1575,6 +1590,20 @@ echo "Speedup: 50.6x (NumPy → Rust)"
 | 対称性保存 | 置換不変事後分布 | 計算コストO(K!) |
 
 ---
+
+## 参考文献
+
+本講義の参考文献は本文中の各セクション（§6.7）を参照。
+
+---
+
+## 著者リンク
+
+- Blog: https://fumishiki.dev
+- X: https://x.com/fumishiki
+- LinkedIn: https://www.linkedin.com/in/fumitakamurakami
+- GitHub: https://github.com/fumishiki
+- Hugging Face: https://huggingface.co/fumishiki
 
 ## ライセンス
 

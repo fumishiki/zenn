@@ -5,15 +5,13 @@ emoji: "🔍"
 type: "tech"
 topics: ["machinelearning", "rag", "vectordatabase", "julia", "rust"]
 published: true
+difficulty: "advanced"
+time_estimate: "90 minutes"
+languages: ["Julia", "Rust", "Elixir"]
+keywords: ["機械学習", "深層学習", "生成モデル"]
 ---
----
-title: "第29回: RAG (検索増強生成): 30秒の驚き→数式修行→実装マスター【後編】実装編"
-slug: "ml-lecture-29-part2"
-emoji: "🔍"
-type: "tech"
-topics: ["machinelearning", "rag", "vectordatabase", "julia", "rust"]
-published: true
----
+> **📖 前編（理論編）**: [第29回前編: RAG理論編](./ml-lecture-29-part1) | **← 理論・数式ゾーンへ**
+
 
 ## 💻 4. 実装ゾーン（45分）— Rust/Julia/ElixirでRAGを完全実装
 
@@ -410,18 +408,10 @@ async fn qdrant_example() -> Result<(), Box<dyn std::error::Error>> {
 ```rust
 fn fixed_size_chunking(text: &str, chunk_size: usize, overlap: usize) -> Vec<String> {
     let words: Vec<&str> = text.split_whitespace().collect();
-    let mut chunks = Vec::new();
-
-    let mut i = 0;
-    while i < words.len() {
-        let end = (i + chunk_size).min(words.len());
-        let chunk = words[i..end].join(" ");
-        chunks.push(chunk);
-
-        i += chunk_size - overlap;
-    }
-
-    chunks
+    (0..words.len())
+        .step_by(chunk_size - overlap)
+        .map(|i| words[i..(i + chunk_size).min(words.len())].join(" "))
+        .collect()
 }
 
 // Example
@@ -471,20 +461,12 @@ fn semantic_chunking(text: &str, max_chunk_size: usize) -> Vec<String> {
 
 ```rust
 fn sliding_window_chunking(tokens: &[String], window_size: usize, stride: usize) -> Vec<Vec<String>> {
-    let mut chunks = Vec::new();
-
-    for i in (0..tokens.len()).step_by(stride) {
-        let end = (i + window_size).min(tokens.len());
-        if end - i >= window_size / 2 {
-            // At least half window size
-            chunks.push(tokens[i..end].to_vec());
-        }
-        if end >= tokens.len() {
-            break;
-        }
-    }
-
-    chunks
+    (0..tokens.len())
+        .step_by(stride)
+        .map(|i| &tokens[i..(i + window_size).min(tokens.len())])
+        .filter(|chunk| chunk.len() >= window_size / 2)
+        .map(|chunk| chunk.to_vec())
+        .collect()
 }
 ```
 
@@ -541,10 +523,7 @@ function compute_idf(corpus::Vector{Document})
     end
 
     # IDF: log((N - df + 0.5) / (df + 0.5))
-    idf = Dict{String, Float64}()
-    for (term, df) in doc_freq
-        idf[term] = log((n_docs - df + 0.5) / (df + 0.5))
-    end
+    idf = Dict(term => log((n_docs - df + 0.5) / (df + 0.5)) for (term, df) in doc_freq)
 
     return idf
 end
@@ -568,24 +547,13 @@ function bm25_score(
     avg_doc_len::Float64,
     params::BM25Params = DEFAULT_BM25
 )
-    score = 0.0
     doc_len = length(doc.tokens)
-
-    for term in query_tokens
-        # Term frequency in document
-        tf = count(==(term), doc.tokens)
-
-        # IDF
-        term_idf = get(idf, term, 0.0)
-
-        # BM25 formula
-        numerator = tf * (params.k1 + 1.0)
-        denominator = tf + params.k1 * (1.0 - params.b + params.b * (doc_len / avg_doc_len))
-
-        score += term_idf * (numerator / denominator)
+    sum(query_tokens; init = 0.0) do term
+        tf      = count(==(term), doc.tokens)
+        idf_val = get(idf, term, 0.0)
+        idf_val * (tf * (params.k1 + 1.0)) /
+                  (tf + params.k1 * (1.0 - params.b + params.b * (doc_len / avg_doc_len)))
     end
-
-    return score
 end
 
 # BM25 ranking
@@ -620,10 +588,8 @@ function simple_embedding(text::String; dim::Int = 384)
     # TF-IDF based embedding (simplified)
     embedding = zeros(Float32, dim)
 
-    for (i, token) in enumerate(tokens)
-        # Hash token to dimension
-        idx = (hash(token) % dim) + 1
-        embedding[idx] += 1.0f0
+    for token in tokens
+        embedding[(hash(token) % dim) + 1] += 1.0f0
     end
 
     # L2 normalize
@@ -675,9 +641,7 @@ function reciprocal_rank_fusion(
     end
 
     # Sort by RRF score
-    sorted = sort(collect(rrf_scores), by = x -> x[2], rev = true)
-
-    return sorted
+    return sort!(collect(rrf_scores), by = x -> x[2], rev = true)
 end
 
 # Hybrid search pipeline
@@ -706,23 +670,13 @@ end
 ```julia
 # Simplified cross-encoder scoring (in practice, use BERT-based model)
 function cross_encoder_score(query::String, doc_text::String)
-    # Combined text
-    combined = query * " [SEP] " * doc_text
-
-    # Simple scoring based on token overlap + position
     query_tokens = Set(tokenize(query))
-    doc_tokens = tokenize(doc_text)
-
-    score = 0.0
-    for (i, token) in enumerate(doc_tokens)
-        if token ∈ query_tokens
-            # Earlier matches get higher score
-            position_weight = 1.0 / (1.0 + 0.1 * i)
-            score += position_weight
-        end
-    end
-
-    return score
+    doc_tokens   = tokenize(doc_text)
+    sum(
+        1.0 / (1.0 + 0.1 * i)
+        for (i, token) in enumerate(doc_tokens) if token ∈ query_tokens;
+        init = 0.0
+    )
 end
 
 # Rerank top results
@@ -871,9 +825,8 @@ defmodule RAG.Server do
   @impl true
   def handle_cast({:index, documents}, state) do
     # Index documents (compute embeddings, build index)
-    embeddings = Enum.map(documents, fn doc ->
-      {doc.id, compute_embedding(doc.text)}
-    end)
+    embeddings = documents
+    |> Enum.map(&{&1.id, compute_embedding(&1.text)})
     |> Map.new()
 
     new_state = state
@@ -911,13 +864,9 @@ defmodule RAG.Server do
   end
 
   defp cosine_similarity(a, b) do
-    dot_product = Enum.zip(a, b)
-    |> Enum.map(fn {x, y} -> x * y end)
-    |> Enum.sum()
-
-    norm_a = :math.sqrt(Enum.map(a, &(&1 * &1)) |> Enum.sum())
-    norm_b = :math.sqrt(Enum.map(b, &(&1 * &1)) |> Enum.sum())
-
+    dot_product = Enum.zip(a, b) |> Enum.map(fn {x, y} -> x * y end) |> Enum.sum()
+    norm_a = a |> Enum.map(&(&1 * &1)) |> Enum.sum() |> :math.sqrt()
+    norm_b = b |> Enum.map(&(&1 * &1)) |> Enum.sum() |> :math.sqrt()
     dot_product / (norm_a * norm_b + 1.0e-8)
   end
 
@@ -943,18 +892,12 @@ defmodule RAG.DistributedSearch do
   """
 
   def parallel_search(query, shards, opts \\ []) do
-    # Spawn async tasks for each shard
-    tasks = Enum.map(shards, fn shard ->
-      Task.async(fn ->
-        search_shard(query, shard, opts)
-      end)
-    end)
-
-    # Await all results with timeout
     timeout = Keyword.get(opts, :timeout, 5000)
-    results = Task.await_many(tasks, timeout)
-
-    # Merge and rerank
+    results =
+      shards
+      |> Task.async_stream(&search_shard(query, &1, opts),
+           max_concurrency: length(shards), timeout: timeout)
+      |> Enum.map(fn {:ok, r} -> r end)
     merge_results(results, opts)
   end
 
@@ -1082,45 +1025,28 @@ defmodule RAG.Web.SearchController do
 
   def search(conn, %{"query" => query} = params) do
     user_id = get_session(conn, :user_id)
+    top_k   = Map.get(params, "top_k", 10)
 
-    # Rate limiting
-    case RAG.RateLimiter.check_rate(user_id) do
-      :ok ->
-        # Perform search
-        top_k = Map.get(params, "top_k", 10)
-
-        case RAG.Server.search(query, top_k: top_k) do
-          {:ok, results} ->
-            json(conn, %{query: query, results: results})
-
-          {:error, reason} ->
-            conn
-            |> put_status(:internal_server_error)
-            |> json(%{error: reason})
-        end
-
+    with :ok <- RAG.RateLimiter.check_rate(user_id),
+         {:ok, results} <- RAG.Server.search(query, top_k: top_k) do
+      json(conn, %{query: query, results: results})
+    else
       {:error, :rate_limit_exceeded} ->
-        conn
-        |> put_status(:too_many_requests)
-        |> json(%{error: "Rate limit exceeded"})
+        conn |> put_status(:too_many_requests) |> json(%{error: "Rate limit exceeded"})
+      {:error, reason} ->
+        conn |> put_status(:internal_server_error) |> json(%{error: reason})
     end
   end
 end
 ```
 
-:::message
-**進捗: 70% 完了** Zone 4完了。Rust HNSW実装、Julia検索パイプライン、Elixir分散RAGサービングを実装した。次はZone 5で評価手法とSmolVLM2統合実験を行う。
-:::
 
 ---
----
-title: "第29回: RAG (検索増強生成): 30秒の驚き→数式修行→実装マスター【後編】実装編"
-slug: "ml-lecture-29-part2"
-emoji: "🔍"
-type: "tech"
-topics: ["machinelearning", "rag", "vectordatabase", "julia", "rust"]
-published: true
----
+
+> Progress: 85%
+> **理解度チェック**
+> 1. RustのHNSWインデックス実装において、階層グラフ構造がANN（近似最近傍探索）の計算量をO(log N)に抑える仕組みを説明せよ。
+> 2. ElixirのGenStage + Broadwayによる分散RAGサービングで、バックプレッシャー制御がなぜスループット安定化に不可欠か。
 
 ## 🔬 5. 実験ゾーン（30分）— RAG評価とSmolVLM2統合
 
@@ -1164,15 +1090,9 @@ $$
 ```julia
 # Context Relevance Score
 function context_relevance(query::String, contexts::Vector{String})
-    query_tokens = Set(tokenize(query))
-
-    scores = map(contexts) do context
-        context_tokens = Set(tokenize(context))
-        overlap = length(intersect(query_tokens, context_tokens))
-        overlap / (length(query_tokens) + 1e-8)
-    end
-
-    mean(scores)
+    qt = Set(tokenize(query))
+    mean(length(intersect(qt, Set(tokenize(c)))) / (length(qt) + 1e-8)
+         for c in contexts)
 end
 ```
 
@@ -1231,13 +1151,11 @@ function evaluate_query(
     retrieved_ids = Set([doc_id for (doc_id, _) in retrieved])
 
     # Context Precision
-    precision_scores = Float64[]
-    for k in 1:length(retrieved)
-        top_k_ids = Set([retrieved[i][1] for i in 1:k])
-        precision_k = length(intersect(top_k_ids, ground_truth_docs)) / k
-        is_relevant = retrieved[k][1] in ground_truth_docs
-        push!(precision_scores, is_relevant ? precision_k : 0.0)
-    end
+    precision_scores = [begin
+        top_k_ids = Set(retrieved[i][1] for i in 1:k)
+        retrieved[k][1] ∈ ground_truth_docs ?
+            length(intersect(top_k_ids, ground_truth_docs)) / k : 0.0
+    end for k in 1:length(retrieved)]
     context_precision = mean(precision_scores)
 
     # Context Recall
@@ -1268,22 +1186,13 @@ function evaluate_query(
 end
 
 function compute_faithfulness(answer::String, contexts::Vector{String})
-    # Extract claims from answer (simplified: sentences)
-    claims = split(answer, ". ") |> collect
-
-    supported_count = 0
-    for claim in claims
-        # Check if claim is supported by any context
-        for context in contexts
-            if contains(lowercase(context), lowercase(claim)) ||
-               token_overlap(claim, context) > 0.5
-                supported_count += 1
-                break
-            end
+    claims = split(answer, ". ")
+    supported = count(claims) do claim
+        any(contexts) do ctx
+            contains(lowercase(ctx), lowercase(claim)) || token_overlap(claim, ctx) > 0.5
         end
     end
-
-    supported_count / (length(claims) + 1e-8)
+    supported / (length(claims) + 1e-8)
 end
 
 function token_overlap(text1::String, text2::String)
@@ -1353,21 +1262,10 @@ end
 
 # Build multimodal index
 function build_multimodal_index(docs::Vector{Tuple{String, Union{String, Nothing}}})
-    indexed_docs = MultimodalDocument[]
-
-    for (i, (text, image_path)) in enumerate(docs)
-        # Generate embedding (text + image if available)
-        embedding = if !isnothing(image_path)
-            # In practice: encode image + text jointly with SmolVLM2
-            smolvlm2_embed("$text [IMG: $image_path]")
-        else
-            smolvlm2_embed(text)
-        end
-
-        push!(indexed_docs, MultimodalDocument(i, text, image_path, embedding))
-    end
-
-    return indexed_docs
+    [MultimodalDocument(
+        i, text, image_path,
+        isnothing(image_path) ? smolvlm2_embed(text) : smolvlm2_embed("$text [IMG: $image_path]")
+    ) for (i, (text, image_path)) in enumerate(docs)]
 end
 
 # Multimodal search
@@ -1486,7 +1384,7 @@ async fn main() -> std::io::Result<()> {
 
 ### 5.3 自己診断テスト
 
-:::details 記号読解10問
+<details><summary>記号読解10問</summary>
 
 **問1**: BM25の式で $k_1$ パラメータの役割は？
 
@@ -1555,253 +1453,12 @@ b) $\max_{i,j} \mathbf{E}_Q[i] \cdot \mathbf{E}_D[j]$
 c) $\sum_{i,j} \mathbf{E}_Q[i] \cdot \mathbf{E}_D[j]$
 d) $\mathbf{E}_Q \cdot \mathbf{E}_D^\top$
 
-<details><summary>解答</summary>
 
-**a) $\sum_{i} \max_j \mathbf{E}_Q[i] \cdot \mathbf{E}_D[j]$**
 
-各クエリトークンに対し、最も類似する文書トークンをスコア化。
-</details>
-
-**問6**: RAGAS Score の計算方法は？
-
-a) 算術平均
-b) 幾何平均
-c) 調和平均
-d) 最大値
-
-<details><summary>解答</summary>
-
-**b) 幾何平均**
-
-$$
-(\text{Prec} \times \text{Rec} \times \text{Faith} \times \text{Rel})^{1/4}
-$$
-</details>
-
-**問7**: CRAG の Evaluator が **Incorrect** と判定した場合の対応は？
-
-a) そのまま生成
-b) Re-retrieve
-c) Web検索で補強
-d) エラー返す
-
-<details><summary>解答</summary>
-
-**c) Web検索で補強**
-
-不正確な文書は捨て、Web検索で知識補正。
-</details>
-
-**問8**: Dense Retrieval の In-batch Negatives とは？
-
-a) ランダムサンプリングしたnegative
-b) 同一バッチ内の他の文書をnegativeとする
-c) Hard negative mining
-d) 人手でラベル付けしたnegative
-
-<details><summary>解答</summary>
-
-**b) 同一バッチ内の他の文書をnegativeとする**
-
-効率的にcontrastive learning を実現。
-</details>
-
-**問9**: Semantic Chunking の利点は？
-
-a) 固定長で高速
-b) 意味境界を保持
-c) オーバーラップ保証
-d) ベクトル化が簡単
-
-<details><summary>解答</summary>
-
-**b) 意味境界を保持**
-
-文・段落単位で分割 → 文脈を破壊しない。
-</details>
-
-**問10**: MRR (Mean Reciprocal Rank) で最初の関連文書が3位の場合のスコアは？
-
-a) 3
-b) 1/3
-c) 1
-d) 0.5
-
-<details><summary>解答</summary>
-
-**b) 1/3**
-
-$$
-\text{RR} = \frac{1}{\text{rank}} = \frac{1}{3}
-$$
-</details>
-
-:::
-
-:::details 実装5問
-
-**問1**: Rust HNSWで層を決める式 $\text{layer} = \lfloor -\ln(u) \cdot m_L \rfloor$ の $u$ は？
-
-a) 文書ID
-b) $[0, 1]$ の一様乱数
-c) 距離メトリクス
-d) ノード数
-
-<details><summary>解答</summary>
-
-**b) $[0, 1]$ の一様乱数**
-
-```rust
-let uniform = rand::random::<f32>();
-let layer = (-uniform.ln() * self.ml).floor() as usize;
-```
-</details>
-
-**問2**: Julia BM25で `avg_doc_len` が100、文書長が150の場合、$b=0.75$ での正規化項は？
-
-a) 1.0
-b) 1.375
-c) 0.75
-d) 1.125
-
-<details><summary>解答</summary>
-
-**d) 1.125**
-
-$$
-1 - b + b \cdot \frac{|D|}{\text{avgdl}} = 1 - 0.75 + 0.75 \cdot \frac{150}{100} = 0.25 + 1.125 = 1.125
-$$
-
-実際には:
-$$
-1 - 0.75 + 0.75 \cdot 1.5 = 0.25 + 1.125 = 1.375
-$$
-
-**正解: b) 1.375**
-</details>
-
-**問3**: Elixir GenServerで検索リクエストがキャッシュヒットした場合、どの関数で処理される？
-
-a) `handle_call`
-b) `handle_cast`
-c) `handle_info`
-d) `init`
-
-<details><summary>解答</summary>
-
-**a) `handle_call`**
-
-```elixir
-def handle_call({:search, query, opts}, _from, state) do
-  case Map.get(state.cache, query) do
-    cached_results -> {:reply, {:ok, cached_results}, new_state}
-  end
-end
-```
-</details>
-
-**問4**: qdrantでコレクション作成時、`Distance::Cosine` を指定する理由は？
-
-a) L2距離より高速
-b) 正規化されたベクトルで適切
-c) メモリ効率が良い
-d) 整数ベクトル専用
-
-<details><summary>解答</summary>
-
-**b) 正規化されたベクトルで適切**
-
-Embeddingは通常L2正規化 → Cosine類似度が自然。
-</details>
-
-**問5**: Sliding Window Chunkingで `window_size=10`, `stride=5` の場合、100トークンから何チャンクできる？
-
-a) 10
-b) 19
-c) 20
-d) 18
-
-<details><summary>解答</summary>
-
-**b) 19**
-
-$$
-\lceil \frac{100 - 10}{5} \rceil + 1 = \lceil 18 \rceil + 1 = 19
-$$
-
-- Chunk 1: 0-9
-- Chunk 2: 5-14
-- ...
-- Chunk 19: 90-99
-</details>
-
-:::
-
-:::details 概念5問
-
-**問1**: RAG vs Fine-tuning: どちらがリアルタイム知識更新に適しているか、理由とともに述べよ。
-
-<details><summary>解答</summary>
-
-**RAG**
-
-理由:
-- Fine-tuningは再学習が必要（時間・コスト大）
-- RAGは文書追加のみ（即座に反映）
-- 出典明示可能でHallucination抑制
-</details>
-
-**問2**: Bi-Encoder vs Cross-Encoder: それぞれの用途を述べよ。
-
-<details><summary>解答</summary>
-
-**Bi-Encoder**: 大規模検索（Retrieval）
-- 文書を事前Encode → Vector DB
-- クエリのみEncode → 高速
-
-**Cross-Encoder**: 精密Reranking
-- クエリ+文書を一緒にEncode
-- 相互作用あり → 高精度だが遅い
-</details>
-
-**問3**: Agentic RAGが従来RAGより優れている点を3つ挙げよ。
-
-<details><summary>解答</summary>
-
-1. **自律判断**: 検索が必要かを動的判断（無駄な検索を回避）
-2. **自己補正**: 検索結果の品質評価 + 不正確なら再検索
-3. **適応的戦略**: クエリ複雑度に応じた検索戦略選択
-</details>
-
-**問4**: Chunkingで "overlap" を設ける理由は？
-
-<details><summary>解答</summary>
-
-**文脈の連続性保持**
-
-- チャンク境界で情報が分断されるのを防ぐ
-- 例: "Paris is the capital" | "capital of France" → "capital" が重複で両方に含まれる
-- 検索精度向上（境界の情報欠損を回避）
-</details>
-
-**問5**: RAGAS の Faithfulness が低い場合、どの部分に問題があるか？
-
-<details><summary>解答</summary>
-
-**Generation (LLM)** または **検索品質**
-
-- LLMがHallucinationを起こしている
-- 検索されたコンテキストが不十分/無関連
-- 対策: Reranking強化、LLMのtemperature下げる、Self-RAGで反省トークン導入
-</details>
-
-:::
-
-:::message
-**進捗: 85% 完了** Zone 5完了。RAG評価メトリクス、RAGAS実装、SmolVLM2統合、自己診断テストを完成。次はZone 6で研究系譜と発展トピックを解説する。
-:::
-
----
+> Progress: 95%
+> **理解度チェック**
+> 1. GraphRAGがNaive RAGより複雑な多ホップ質問（「エッフェル塔がある国のGDP」）を解決できる理由を、知識グラフのトラバーサルという観点から説明せよ。
+> 2. Long-context LLM（128k token超）の登場により「RAGは不要になるのか」という問いに対し、レイテンシ・コスト・鮮度の3軸で論じよ。
 
 ## 🎓 6. 振り返りと発展ゾーン（30分）— まとめとRAG研究の最前線
 
@@ -1892,64 +1549,6 @@ graph LR
 
 **ハイブリッド戦略**: RAGで絞り込み → Long-contextで精密処理
 
-### 6.5 推薦論文・書籍
-
-#### 必読論文（新→旧）
-
-1. **CRAG** (Yan+ 2024) [^3]: 検索結果の正確性評価+補正
-   [arXiv:2401.15884](https://arxiv.org/abs/2401.15884)
-
-2. **Self-RAG** (Asai+ 2024) [^2]: 反省トークンで自己制御
-   [arXiv:2310.11511](https://arxiv.org/abs/2310.11511)
-
-3. **Adaptive-RAG** (Jeong+ 2024): クエリ複雑度認識
-   [arXiv:2403.14403](https://arxiv.org/abs/2403.14403)
-
-4. **ColBERT** (Khattab & Zaharia 2020): Late Interaction
-   [arXiv:2004.12832](https://arxiv.org/abs/2004.12832)
-
-5. **DPR** (Karpukhin+ 2020): Dense Passage Retrieval
-   [arXiv:2004.04906](https://arxiv.org/abs/2004.04906)
-
-6. **RAG** (Lewis+ 2020) [^1]: 元祖RAG
-   [arXiv:2005.11401](https://arxiv.org/abs/2005.11401)
-
-#### 実装リソース
-
-| リソース | 説明 | リンク |
-|:--------|:-----|:-------|
-| **qdrant** | Rust Vector DB | [GitHub](https://github.com/qdrant/qdrant) [^7] |
-| **FAISS** | Meta ANN library | [GitHub](https://github.com/facebookresearch/faiss) [^9] |
-| **hnswlib-rs** | Rust HNSW実装 | [GitHub](https://github.com/jean-pierreBoth/hnswlib-rs) |
-| **RAGAS** | RAG評価フレームワーク | [GitHub](https://github.com/explodinggradients/ragas) [^8] |
-| **LangChain** | RAG orchestration | [Docs](https://python.langchain.com/docs/use_cases/question_answering/) |
-
-### 6.6 用語集
-
-| 用語 | 英語 | 定義 |
-|:-----|:-----|:-----|
-| **RAG** | Retrieval-Augmented Generation | 検索増強生成。外部知識を検索してLLMに統合 |
-| **Embedding** | Embedding | テキストをベクトル空間に埋め込む |
-| **BM25** | Best Matching 25 | TF-IDFベースのスパース検索アルゴリズム |
-| **HNSW** | Hierarchical Navigable Small World | 階層的近似最近傍探索 |
-| **ANN** | Approximate Nearest Neighbor | 近似最近傍探索 |
-| **Dense Retrieval** | Dense Retrieval | ニューラルEmbeddingベースの検索 |
-| **Sparse Retrieval** | Sparse Retrieval | キーワードベース検索（BM25等） |
-| **Hybrid Retrieval** | Hybrid Retrieval | Sparse + Dense統合 |
-| **RRF** | Reciprocal Rank Fusion | ランキング統合手法 |
-| **Reranking** | Reranking | 検索結果の再順位付け |
-| **Cross-Encoder** | Cross-Encoder | クエリ+文書をjointにEncode |
-| **Bi-Encoder** | Bi-Encoder | クエリと文書を独立にEncode |
-| **ColBERT** | Contextualized Late Interaction over BERT | Token-level Late Interaction |
-| **Self-RAG** | Self-Reflective RAG | 反省トークンで自己制御 |
-| **CRAG** | Corrective RAG | 検索結果の正確性評価+補正 |
-| **RAGAS** | RAG Assessment | RAG評価統合フレームワーク |
-| **Faithfulness** | Faithfulness | 生成がコンテキストに忠実か |
-| **Context Relevance** | Context Relevance | コンテキストがクエリに関連しているか |
-| **Chunking** | Chunking | 長文書を検索可能なチャンクに分割 |
-| **IDF** | Inverse Document Frequency | 逆文書頻度 |
-| **TF** | Term Frequency | 単語出現頻度 |
-
 ### 6.6 本講義で学んだ3つの核心
 
 #### 核心1: RAGは知識の動的拡張
@@ -2025,42 +1624,6 @@ Naive (BM25のみ) → Dense (Embedding) → Hybrid (BM25+Dense) → Agentic (Se
 - CRAG: Evaluator学習（軽量LM）
 - **ROI高**: 検索精度が劇的向上（GPT-4超え）
 
-### 6.8 学習スケジュール（復習込み）
-
-| Day | 内容 | 時間 | チェックリスト |
-|:----|:-----|:-----|:--------------|
-| **Day 1** | Zone 0-2 + Zone 3.1-3.2 | 2h | □ RAG定義 □ BM25式導出 □ Embedding理論 |
-| **Day 2** | Zone 3.3-3.4 | 2h | □ DPR □ HNSW原理 □ RRF実装 |
-| **Day 3** | Zone 3.5-3.6 | 2h | □ ColBERT □ Self-RAG □ CRAG |
-| **Day 4** | Zone 4 Rust実装 | 3h | □ HNSW実装 □ qdrant統合 □ Chunking |
-| **Day 5** | Zone 4 Julia実装 | 2h | □ BM25実装 □ Hybrid search □ Reranking |
-| **Day 6** | Zone 4 Elixir実装 | 2h | □ GenServer □ 分散検索 □ Rate Limiting |
-| **Day 7** | Zone 5-7 + 復習 | 2h | □ RAGAS評価 □ SmolVLM2統合 □ 自己診断 |
-
-### 6.9 進捗トラッカー
-
-```
-RAGマスター進捗
-=====================================
-理論 [████████████████████] 100%
-  ├─ Embedding理論       [████████████████████] 100%
-  ├─ BM25完全導出        [████████████████████] 100%
-  ├─ Dense Retrieval     [████████████████████] 100%
-  ├─ Hybrid + Reranking  [████████████████████] 100%
-  └─ Agentic RAG         [████████████████████] 100%
-
-実装 [████████████████████] 100%
-  ├─ 🦀 Rust HNSW        [████████████████████] 100%
-  ├─ ⚡ Julia BM25       [████████████████████] 100%
-  └─ 🔮 Elixir Serving  [████████████████████] 100%
-
-評価 [████████████████████] 100%
-  ├─ RAGAS実装           [████████████████████] 100%
-  └─ SmolVLM2統合        [████████████████████] 100%
-
-次のステップ: 第30回 エージェント完全版
-```
-
 ### 6.10 次回予告: 第30回 エージェント完全版
 
 **第30回で学ぶこと**:
@@ -2072,92 +1635,10 @@ RAGマスター進捗
 - **Planning**: PDDL/HTN による長期計画
 - **Memory**: エピソード記憶・意味記憶・作業記憶
 
-**RAG → Agent の接続**:
 
-RAGで外部知識を統合した。次は**自律的な行動**を追加する。エージェントはRAGを道具として使い、複雑なタスクを分解・実行・検証する。
-
-```mermaid
-graph LR
-    L28["第28回<br/>Prompt"] --> L29["第29回<br/>RAG"]
-    L29 --> L30["第30回<br/>🤖Agent"]
-    L30 --> L31["第31回<br/>MLOps"]
-
-    L29 -.外部知識.-> L30
-    L30 -.自律実行.-> L31
-
-    style L30 fill:#fff3e0
-```
-
-:::message
-**進捗: 98% 完了** Zone 7完了。3つの核心、FAQ、学習スケジュール、進捗トラッカー、次回予告を整理。最後にパラダイム転換の問いと参考文献を追加する。
-:::
 
 ---
 
-### 6.11 パラダイム転換の問い
-
-> **「モデルの知識は"十分"か？」**
-
-LLMは数千億パラメータで膨大な知識を記憶する。GPT-4は医師国家試験に合格し、法律相談もこなす。では、なぜRAGが必要なのか？
-
-### 知識の3つの限界
-
-**1. 鮮度の限界**: 学習データは過去のスナップショット
-
-- GPT-4の知識カットオフ: 2023年9月
-- 世界は秒単位で変化（ニュース・株価・天気）
-- **RAGの解**: リアルタイム検索
-
-**2. 容量の限界**: 全知識をパラメータに保存は非現実的
-
-- 企業固有知識（社内文書100万件）
-- 個人の会話履歴
-- 専門分野の最新論文
-- **RAGの解**: 外部知識ベース参照
-
-**3. 検証可能性の限界**: モデルの知識は"ブラックボックス"
-
-- 出典不明 → Hallucination リスク
-- 法務・医療では根拠提示が必須
-- **RAGの解**: 検索結果=出典明示
-
-### パラダイム転換
-
-**従来**: モデルに全知識を詰め込む（パラメータ増大）
-
-**新**: モデル=推論エンジン、知識=外部DB（分離）
-
-$$
-\text{Intelligence} = \text{Reasoning (Model)} + \text{Knowledge (RAG)}
-$$
-
-**類推**: 人間の記憶
-
-- **作業記憶** (Working Memory): LLMのコンテキスト
-- **長期記憶** (Long-term Memory): パラメータ知識
-- **外部記憶** (External Memory): ノート・検索 = **RAG**
-
-人間も全てを記憶しない。必要に応じて調べる。RAGはLLMに"調べる能力"を与える。
-
-### 究極の問い
-
-> モデルが全知識を記憶できる日が来ても、RAGは必要か？
-
-**答え**: Yes。
-
-理由:
-1. **検証可能性**: 出典明示は信頼の根幹
-2. **プライバシー**: 知識をモデルに含めない選択肢
-3. **コスト**: パラメータ増大より検索の方が安い
-4. **柔軟性**: 知識の追加・削除が即座
-
-RAGは単なる"知識不足の補完"ではない。**知識管理の新しいアーキテクチャ**である。
-
-:::message
-**進捗: 100% 完了** 🎉 第29回「RAG完全版」完走！
-:::
-
----
 
 ## 📚 参考文献
 
@@ -2175,75 +1656,15 @@ RAGは単なる"知識不足の補完"ではない。**知識管理の新しい�
 
 [^9]: Johnson, J., Douze, M., & Jégou, H. (2019). "Billion-scale similarity search with GPUs." *IEEE Transactions on Big Data*. FAISS [GitHub](https://github.com/facebookresearch/faiss)
 
-### 追加リソース
+> **📖 前編（理論編）**: [第29回前編: RAG理論編](./ml-lecture-29-part1) | **← 理論・数式ゾーンへ**
 
-- **ColBERT**: Khattab, O., & Zaharia, M. (2020). "ColBERT: Efficient and Effective Passage Search via Contextualized Late Interaction over BERT." *SIGIR 2020*. [arXiv:2004.12832](https://arxiv.org/abs/2004.12832)
+## 著者リンク
 
-- **Sentence-BERT**: Reimers, N., & Gurevych, I. (2019). "Sentence-BERT: Sentence Embeddings using Siamese BERT-Networks." *EMNLP 2019*. [arXiv:1908.10084](https://arxiv.org/abs/1908.10084)
-
-- **BM25**: Robertson, S., & Zaragoza, H. (2009). "The Probabilistic Relevance Framework: BM25 and Beyond." *Foundations and Trends in Information Retrieval*.
-
-- **MTEB**: Muennighoff, N., et al. (2022). "MTEB: Massive Text Embedding Benchmark." *arXiv preprint*. [arXiv:2210.07316](https://arxiv.org/abs/2210.07316)
-
----
-
-## 📖 記法規約
-
-本シリーズで使用する数学記法の統一ルール:
-
-| 記号 | 意味 | 例 |
-|:-----|:-----|:---|
-| $\mathbf{x}$ | ベクトル（太字小文字） | $\mathbf{q} \in \mathbb{R}^d$ |
-| $\mathbf{W}$ | 行列（太字大文字） | $\mathbf{W} \in \mathbb{R}^{d \times k}$ |
-| $x_i$ | スカラー添字 | $x_1, x_2, \ldots, x_n$ |
-| $\mathbf{x}^{(i)}$ | サンプル添字 | $i$ 番目のサンプル |
-| $\mathbf{x}_t$ | 時刻添字 | 時刻 $t$ のベクトル |
-| $\hat{y}$ | 推定値（ハット） | $\hat{y} = f(\mathbf{x})$ |
-| $\mathbb{E}[\cdot]$ | 期待値 | $\mathbb{E}_{x \sim p}[f(x)]$ |
-| $\nabla_\theta$ | 勾配 | $\nabla_\theta \mathcal{L}$ |
-| $\mathcal{L}$ | 損失関数（カリグラフィ） | $\mathcal{L}(\theta)$ |
-| $\mathcal{D}$ | データセット | $\mathcal{D} = \{(\mathbf{x}_i, y_i)\}$ |
-| $\sim$ | 分布に従う | $x \sim \mathcal{N}(0, 1)$ |
-| $:=$ | 定義 | $f(x) := x^2$ |
-| $\approx$ | 近似 | $e^x \approx 1 + x$ (小さい $x$) |
-| $\propto$ | 比例 | $p(x) \propto e^{-x^2}$ |
-| $\odot$ | 要素積（Hadamard） | $\mathbf{a} \odot \mathbf{b}$ |
-| $\||\cdot\||$ | ノルム | $\||\mathbf{x}\||_2 = \sqrt{\sum x_i^2}$ |
-| $\langle \cdot, \cdot \rangle$ | 内積 | $\langle \mathbf{a}, \mathbf{b} \rangle = \mathbf{a}^\top \mathbf{b}$ |
-| $\arg\max$ | 最大化する引数 | $\hat{y} = \arg\max_y p(y \mid \mathbf{x})$ |
-| $\mathbb{1}_{\{\cdot\}}$ | 指示関数 | $\mathbb{1}_{\{x > 0\}} = 1$ if $x > 0$ else $0$ |
-
-**関数・演算子**:
-
-| 記法 | 意味 |
-|:-----|:-----|
-| $\log$ | 自然対数（$\ln$） |
-| $\log_2$ | 底2の対数 |
-| $\sigma(\cdot)$ | シグモイド関数 |
-| $\text{softmax}(\cdot)$ | ソフトマックス関数 |
-| $\text{ReLU}(\cdot)$ | ReLU活性化関数 |
-
----
-
-:::message
-**🎉 完全習得達成！**
-
-**本講義の成果**:
-- ✅ RAG理論完全構築（Embedding/BM25/Dense/Hybrid/Reranking/Agentic）
-- ✅ 🦀 Rust HNSW Vector DB実装
-- ✅ ⚡ Julia BM25検索パイプライン実装
-- ✅ 🔮 Elixir 分散RAGサービング実装
-- ✅ RAGAS評価フレームワーク実装
-- ✅ SmolVLM2マルチモーダルRAG統合
-
-**総行数**: 2,800+ 行
-
-**次回**: 第30回「エージェント完全版」でRAGを道具として使う自律エージェントを実装する。
-
-**あなたはProduction-readyなRAGシステムを構築できる。**
-:::
-
----
+- Blog: https://fumishiki.dev
+- X: https://x.com/fumishiki
+- LinkedIn: https://www.linkedin.com/in/fumitakamurakami
+- GitHub: https://github.com/fumishiki
+- Hugging Face: https://huggingface.co/fumishiki
 
 ## ライセンス
 

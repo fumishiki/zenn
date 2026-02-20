@@ -4,6 +4,11 @@ emoji: "🎨"
 type: "tech"
 topics: ["machinelearning", "deeplearning", "vae", "julia"]
 published: true
+slug: "ml-lecture-10-part1"
+difficulty: "advanced"
+time_estimate: "90 minutes"
+languages: ["Julia", "Rust"]
+keywords: ["機械学習", "深層学習", "生成モデル"]
 ---
 
 
@@ -15,11 +20,9 @@ published: true
 
 2013年、Kingma & Welling [^1] が発表したこのアーキテクチャは、変分推論とニューラルネットワークを融合させ、生成モデル研究に革命をもたらした。DALL-E、Stable Diffusion、動画生成AIの基盤となる「画像トークナイザー」の祖先がここにある。
 
-本講義では、VAEの基礎理論から離散表現学習 (VQ-VAE/FSQ) まで一気に駆け抜ける。そして **重要な転機** がある — この回から **Julia** が本格登場する。Pythonでの訓練ループの遅さに絶望した後、Juliaの多重ディスパッチが数式を型に応じて自動最適化する様を目撃することになる。
+VAEの基礎理論から離散表現学習 (VQ-VAE/FSQ) まで一気に駆け抜ける。そして **重要な転機** がある — この回から **Julia** が本格登場する。Pythonでの訓練ループの遅さに絶望した後、Juliaの多重ディスパッチが数式を型に応じて自動最適化する様を目撃することになる。
 
-:::message
-**このシリーズについて**: 東京大学 松尾・岩澤研究室動画講義の**完全上位互換**の全50回シリーズ。理論（論文が書ける）、実装（Production-ready）、最新（2025-2026 SOTA）の3軸で差別化する。本講義はCourse II「生成モデル基礎編」の第2回。
-:::
+> **Note:** **このシリーズについて**: 東京大学 松尾・岩澤研究室動画講義の**完全上位互換**の全50回シリーズ。理論（論文が書ける）、実装（Production-ready）、最新（2025-2026 SOTA）の3軸で差別化する。本講義はCourse II「生成モデル基礎編」の第2回。
 
 ```mermaid
 graph LR
@@ -44,6 +47,8 @@ graph LR
 | Zone 4 | 実装ゾーン | 45分 | ★★★★☆ |
 | Zone 5 | 実験ゾーン | 30分 | ★★★★☆ |
 | Zone 6 | 振り返りゾーン | 30分 | ★★★★★ |
+
+> **📖 この記事は前編（理論編）です** 実装編は [【後編】第10回](/articles/ml-lecture-10-part2) をご覧ください。
 
 ---
 
@@ -87,9 +92,10 @@ x_sample = train_data[0][0].view(-1, 784)
 
 # Run VAE
 vae = TinyVAE()
-x_recon, mu, logvar = vae(x_sample)
+with torch.no_grad():
+    x_recon, mu, logvar = vae(x_sample)
 print(f"Input shape: {x_sample.shape} -> Latent: {mu.shape} -> Output: {x_recon.shape}")
-print(f"Latent code z: μ={mu.detach().numpy().flatten()}, logσ²={logvar.detach().numpy().flatten()}")
+print(f"Latent code z: μ={mu.detach().cpu().numpy().flatten()}, logσ²={logvar.detach().cpu().numpy().flatten()}")
 print(f"Reconstruction MSE: {F.mse_loss(x_recon, x_sample).item():.4f}")
 ```
 
@@ -116,9 +122,7 @@ $$
 
 この2つの項のバランスが、VAEの性能を決める。β-VAEはこのバランスを調整することで、「ぼやけた再構成」vs「意味のある潜在空間」のトレードオフを制御する。
 
-:::message
-**進捗: 3% 完了** VAEが高次元データを低次元潜在空間に圧縮する様を体感した。ここから理論の深みに入っていく。
-:::
+> **Note:** **進捗: 3% 完了** VAEが高次元データを低次元潜在空間に圧縮する様を体感した。ここから理論の深みに入っていく。
 
 ---
 
@@ -140,104 +144,45 @@ $$
 
 実際に試してみよう:
 
-```python
-import torch
-import torch.nn.functional as F
-from torch import nn, optim
-from torchvision import datasets, transforms
-from torch.utils.data import DataLoader
-
-# Tiny VAE (same as Zone 0)
-class TinyVAE(nn.Module):
-    def __init__(self, latent_dim=2):
-        super().__init__()
-        self.enc = nn.Linear(784, 128)
-        self.mu_layer = nn.Linear(128, latent_dim)
-        self.logvar_layer = nn.Linear(128, latent_dim)
-        self.dec = nn.Sequential(
-            nn.Linear(latent_dim, 128), nn.ReLU(),
-            nn.Linear(128, 784), nn.Sigmoid()
-        )
-
-    def encode(self, x):
-        h = F.relu(self.enc(x))
-        return self.mu_layer(h), self.logvar_layer(h)
-
-    def reparameterize(self, mu, logvar):
-        std = torch.exp(0.5 * logvar)
-        eps = torch.randn_like(std)
-        return mu + eps * std
-
-    def forward(self, x):
-        mu, logvar = self.encode(x.view(-1, 784))
-        z = self.reparameterize(mu, logvar)
-        return self.dec(z), mu, logvar
-
-def vae_loss(recon_x, x, mu, logvar, beta=1.0):
-    """VAE loss = Reconstruction + β * KL divergence.
-
-    Corresponds to:
-    L = E_q[log p(x|z)] - β * D_KL(q(z|x) || p(z))
-    """
-    recon_loss = F.binary_cross_entropy(recon_x, x.view(-1, 784), reduction='sum')
-    # KL divergence: -0.5 * Σ(1 + log(σ²) - μ² - σ²)
-    kl_loss = -0.5 * torch.sum(1 + logvar - mu.pow(2) - logvar.exp())
-    return recon_loss + beta * kl_loss
-
-# Train with different β values
-def train_beta_vae(beta, epochs=10):
-    model = TinyVAE(latent_dim=2)
-    optimizer = optim.Adam(model.parameters(), lr=1e-3)
-    train_loader = DataLoader(
-        datasets.MNIST('./data', train=True, download=True,
-                      transform=transforms.ToTensor()),
-        batch_size=128, shuffle=True
-    )
-
-    for epoch in range(epochs):
-        total_loss = 0
-        for x_batch, _ in train_loader:
-            optimizer.zero_grad()
-            recon, mu, logvar = model(x_batch)
-            loss = vae_loss(recon, x_batch, mu, logvar, beta=beta)
-            loss.backward()
-            optimizer.step()
-            total_loss += loss.item()
-
-        if (epoch + 1) % 5 == 0:
-            avg_loss = total_loss / len(train_loader.dataset)
-            print(f"β={beta:.1f}, Epoch {epoch+1}: Loss={avg_loss:.4f}")
-
-    return model
-
-# Compare β = 0.5, 1.0, 4.0
-configs = [(0.5, "Low β (sharp images)"),
-           (1.0, "Standard VAE"),
-           (4.0, "High β (disentangled)")]
-
-for beta, desc in configs:
-    print(f"\n--- {desc} ---")
-    model = train_beta_vae(beta, epochs=10)
-```
 
 期待される出力:
-```
---- Low β (sharp images) ---
-β=0.5, Epoch 5: Loss=108.2341
-β=0.5, Epoch 10: Loss=102.7854
 
---- Standard VAE ---
-β=1.0, Epoch 5: Loss=115.4532
-β=1.0, Epoch 10: Loss=110.2341
-
---- High β (disentangled) ---
-β=4.0, Epoch 5: Loss=145.8921
-β=4.0, Epoch 10: Loss=138.3456
-```
 
 **観察**:
 - $\beta = 0.5$: 低いロスだが、潜在空間が混沌（後述の可視化で確認）
 - $\beta = 4.0$: 高いロスだが、潜在空間の各次元が独立した「意味」を持つ（disentanglement）
+
+#### なぜ $\beta > 1$ でdisentanglementが起きるか — Total Correlation分解
+
+$\beta = 1$ の標準VAEでもKL正則化はかかるが、なぜ $\beta > 1$ で初めて「各次元が独立した意味を持つ」のか。Chen et al. 2018 [^4] のβ-TCVAE論文が与えた答えがKL項のTotal Correlation分解だ。
+
+集約事後分布 (aggregate posterior) を $q(z) = \frac{1}{N}\sum_{i=1}^N q_\phi(z \mid x^{(i)})$ と定義する。KL項は3つの独立した情報量に分解できる:
+
+$$
+D_\text{KL}(q_\phi(z \mid x) \| p(z)) = \underbrace{I_q(x; z)}_{\text{相互情報量}} + \underbrace{D_\text{KL}(q(z) \| \prod_j q(z_j))}_{\text{Total Correlation (TC)}} + \underbrace{\sum_j D_\text{KL}(q(z_j) \| p(z_j))}_{\text{次元単位KL}}
+$$
+
+| 項 | 読み | 意味 |
+|:---|:-----|:-----|
+| $I_q(x; z)$ | 相互情報量 | エンコーダが $x$ から $z$ に流し込む情報量 |
+| $\text{TC}(z) = D_\text{KL}(q(z) \| \prod_j q(z_j))$ | Total Correlation | $z$ の各次元間の統計的依存性の総量 |
+| $\sum_j D_\text{KL}(q(z_j) \| p(z_j))$ | 次元単位KL | 各次元が事前分布からどれだけ乖離しているか |
+
+標準ELBO ($\beta = 1$) を最小化しても、TC項は3項のうちの1つに過ぎず、ELBOは3項の和全体を等しく重み付けして最小化しようとする。$\beta > 1$ にすると、3項すべてに $\beta$ の重みがかかるが、**TC項が最も大きな余剰ペナルティを受ける** という非自明な事実がある。
+
+これを理解するには、ELBO全体の変分目標を書き直す:
+
+$$
+\mathcal{L}_\beta = \mathbb{E}_{q_\phi(z \mid x)}[\log p_\theta(x \mid z)] - \beta \cdot D_\text{KL}(q_\phi(z \mid x) \| p(z))
+$$
+
+$$
+= \mathbb{E}_{q_\phi(z \mid x)}[\log p_\theta(x \mid z)] - \beta \cdot I_q(x; z) - \beta \cdot \text{TC}(z) - \beta \cdot \sum_j D_\text{KL}(q(z_j) \| p(z_j))
+$$
+
+$\beta = 1$ では3項が等重みだが、$\beta > 1$ では相互情報量 $I_q(x; z)$ も余分にペナルティを受ける。本来 $I_q(x; z)$ は「エンコーダがデータを表現する能力」そのものなので、過剰に抑えると再構成が破綻する。モデルが再構成品質を維持しようとすると、**圧力の逃げ場** として TC を最小化する方向に最適化が進む。TC が小さい = $q(z) \approx \prod_j q(z_j)$、つまり潜在次元が統計的に独立、これがdisentanglementの定義そのものだ。
+
+> **Note:** この分解はあくまでβ-VAEの「動作機序の事後的説明」であり、β > 1 が常にdisentanglementを保証するわけではない。Locatello et al. 2019 の定理（3.9節で詳述）は、この「unsupervised disentanglementは原理的に不可能」という衝撃的な結論を厳密に示している。
 
 ### 1.2 連続潜在空間 vs 離散潜在空間 (VQ-VAE preview)
 
@@ -249,55 +194,9 @@ VAEの潜在変数 $z$ は連続値だが、VQ-VAE [^3] では **離散的なコ
 | VQ-VAE | 離散 $z \in \{e_1, \ldots, e_K\}$ | シャープな再構成 | 勾配が流れない（要STE） |
 | FSQ | 離散（固定グリッド） | VQの簡素版、collapse無し | 表現力はVQに劣る |
 
-```python
-import torch
-import torch.nn as nn
-import torch.nn.functional as F
-
-class VectorQuantizer(nn.Module):
-    """VQ-VAE のベクトル量子化層.
-
-    Corresponds to: z_q = argmin_e ||z_e - e_i||²
-    """
-    def __init__(self, num_embeddings=512, embedding_dim=64):
-        super().__init__()
-        self.embedding = nn.Embedding(num_embeddings, embedding_dim)
-        self.embedding.weight.data.uniform_(-1/num_embeddings, 1/num_embeddings)
-
-    def forward(self, z):
-        # z: (B, C, H, W) -> flatten to (B*H*W, C)
-        z_flattened = z.permute(0, 2, 3, 1).contiguous().view(-1, z.shape[1])
-
-        # Distance to codebook: ||z - e||² = ||z||² + ||e||² - 2<z, e>
-        d = torch.sum(z_flattened ** 2, dim=1, keepdim=True) + \
-            torch.sum(self.embedding.weight ** 2, dim=1) - \
-            2 * torch.matmul(z_flattened, self.embedding.weight.t())
-
-        # Nearest codebook entry
-        min_encoding_indices = torch.argmin(d, dim=1)
-        z_q = self.embedding(min_encoding_indices).view(z.shape[0], z.shape[2], z.shape[3], z.shape[1])
-        z_q = z_q.permute(0, 3, 1, 2)
-
-        # Straight-through estimator: forward uses z_q, backward uses z
-        z_q = z + (z_q - z).detach()
-
-        return z_q, min_encoding_indices
-
-# Example
-vq = VectorQuantizer(num_embeddings=512, embedding_dim=64)
-z_continuous = torch.randn(4, 64, 7, 7)  # (batch, channels, height, width)
-z_discrete, indices = vq(z_continuous)
-print(f"Continuous z range: [{z_continuous.min():.2f}, {z_continuous.max():.2f}]")
-print(f"Discrete z (quantized): {z_discrete[0, 0, 0, :5]}")  # first 5 values
-print(f"Codebook indices used: {torch.unique(indices).numel()} out of 512")
-```
 
 出力:
-```
-Continuous z range: [-2.89, 3.12]
-Discrete z (quantized): tensor([-0.0234,  0.0156, -0.0089,  0.0245, -0.0134], grad_fn=<SliceBackward0>)
-Codebook indices used: 196 out of 512
-```
+
 
 **ポイント**: `z_q = z + (z_q - z).detach()` が **Straight-Through Estimator** (STE) — 順伝播では量子化後の値を使い、逆伝播では勾配をそのまま通す。これで離散化の微分不可能性を回避する。
 
@@ -305,43 +204,14 @@ Codebook indices used: 196 out of 512
 
 Zone 4でJuliaを本格導入するが、ここで予告として、PyTorchでのVAE訓練ループのコード量と実行時間を確認しておく:
 
-```python
-import time
-import torch
-from torch.utils.data import DataLoader
-from torchvision import datasets, transforms
-
-# Tiny VAE (defined above)
-model = TinyVAE(latent_dim=10)
-optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
-train_loader = DataLoader(
-    datasets.MNIST('./data', train=True, download=True,
-                  transform=transforms.ToTensor()),
-    batch_size=128, shuffle=True
-)
-
-# Training loop
-start_time = time.time()
-for epoch in range(5):
-    for x_batch, _ in train_loader:
-        optimizer.zero_grad()
-        recon, mu, logvar = model(x_batch)
-        loss = vae_loss(recon, x_batch, mu, logvar, beta=1.0)
-        loss.backward()
-        optimizer.step()
-
-elapsed = time.time() - start_time
-print(f"PyTorch training time (5 epochs): {elapsed:.2f}s")
-```
 
 出力（M2 MacBook Air）:
-```
-PyTorch training time (5 epochs): 12.34s
-```
+
 
 **Zone 4で、このコードとほぼ同じ構造のJulia版が ~1.5秒で走る様を目撃する。** 訓練ループの型不安定性、毎バッチのメモリコピー、Pythonインタプリタのオーバーヘッドが積み重なり、8倍の差が生まれる。
 
-:::details PyTorchの内部で何が起きているか
+<details><summary>PyTorchの内部で何が起きているか</summary>
+
 PyTorchは動的計算グラフ (eager execution) を使うため、各バッチごとに:
 1. Pythonから各op（matmul, relu, etc.）を呼び出し
 2. C++/CUDA kernelを起動
@@ -354,13 +224,17 @@ Juliaは:
 3. 多重ディスパッチで `forward(model, x)` の型が確定すれば、コンパイル済みコードを直接実行
 
 この差が、同じアルゴリズムで8倍の速度差を生む。
-:::
 
-:::message
-**進捗: 10% 完了** β-VAEの挙動、VQ-VAEの離散化、PyTorchとの速度差を体験した。Zone 2で「なぜVAEなのか」「どこへ向かうのか」を俯瞰する。
-:::
+</details>
+
+> **Note:** **進捗: 10% 完了** β-VAEの挙動、VQ-VAEの離散化、PyTorchとの速度差を体験した。Zone 2で「なぜVAEなのか」「どこへ向かうのか」を俯瞰する。
 
 ---
+
+> Progress: 10%
+> **理解度チェック**
+> 1. VAEのEncoder $q_\phi(\mathbf{z}|\mathbf{x})$ とDecoder $p_\theta(\mathbf{x}|\mathbf{z})$ の役割をそれぞれ述べよ。連続潜在変数 $\mathbf{z}$ をサンプリングするためにReparameterization Trick $\mathbf{z} = \mu + \sigma \odot \epsilon$ が必要な理由は？
+> 2. VQ-VAEの「Vector Quantization」とVAEの連続潜在表現の違いを、Codebook $\{e_k\}_{k=1}^K$ の概念を用いて説明せよ。
 
 ## 🧩 2. 直感ゾーン（15分）— なぜVAE、どこへ向かうか
 
@@ -455,14 +329,6 @@ $$
 
 ランダムな $z$ をサンプルして、新しい画像を生成。潜在空間を滑らかに動かせば、「数字の0から1への変形」「笑顔から真顔への遷移」といった **補間** (interpolation) も可能。
 
-```python
-# Latent space interpolation (Zone 5 で実装)
-z_start = torch.tensor([[0.0, 0.0]])  # latent code for "0"
-z_end = torch.tensor([[2.0, 2.0]])    # latent code for "1"
-alphas = torch.linspace(0, 1, 10).unsqueeze(1)
-z_interp = (1 - alphas) * z_start + alphas * z_end  # linear interpolation
-x_interp = decoder(z_interp)  # generate images
-```
 
 この「滑らかさ」が、VAEの強みであり弱みでもある。滑らかすぎて **ぼやけた画像** になる。これがGAN（第12回）への動機となる。
 
@@ -472,13 +338,6 @@ x_interp = decoder(z_interp)  # generate images
 
 **今回、第10回で、Julia が訓練ループに登場する。**
 
-```
-第1-4回    🐍 Python信頼       「NumPyで十分」
-第5-8回    🐍💢 不穏な影       `%timeit` 計測開始「遅くない？」
-第9回      🦀 Rust登場        推論50x速「は？」
-第10回     ⚡ Julia登場       **訓練8x速「Python に戻れない」**
-第11回以降  ⚡🦀🔮 3言語当たり前  Pythonはプロトタイプ専用
-```
 
 **なぜJuliaなのか（Zone 4で詳述）**:
 - **多重ディスパッチ**: 同じ関数名で、型に応じて最適化されたコードを自動選択
@@ -488,58 +347,29 @@ x_interp = decoder(z_interp)  # generate images
 
 Pythonでの訓練ループは、こうなる:
 
-```python
-for epoch in range(100):
-    for x_batch, _ in train_loader:  # ← Pythonオブジェクトのイテレーション
-        optimizer.zero_grad()         # ← C++/CUDA kernel呼び出し
-        recon, mu, logvar = model(x_batch)  # ← 動的計算グラフ構築
-        loss = vae_loss(...)          # ← またkernel呼び出し
-        loss.backward()               # ← 別のkernel
-        optimizer.step()              # ← さらにkernel
-```
 
 **毎バッチごとに、Pythonインタプリタが介入している。** Juliaは違う:
 
-```julia
-for epoch in 1:100
-    for (x_batch,) in train_loader  # ← 型安定なイテレータ
-        gs = gradient(params) do     # ← Zygote.jl（JuliaのAutodiff）
-            recon, mu, logvar = model(x_batch)
-            loss = vae_loss(recon, x_batch, mu, logvar)
-        end
-        Optimisers.update!(opt_state, params, gs)  # ← 全てJuliaネイティブ
-    end
-end
-```
 
 JITコンパイル後、**このループ全体が機械語になる**。Pythonのオーバーヘッドがゼロ。
 
-:::details 「JuliaはPythonより書きにくい？」への反論
+<details><summary>「JuliaはPythonより書きにくい？」への反論</summary>
+
 よく言われる批判: 「Juliaは型を書かなきゃいけないから面倒」
 
 **真実**: Juliaは型推論が強力で、99%の場合型注釈は不要。例:
 
-```julia
-# 型注釈なし（Pythonと同じ感覚）
-function forward(model, x)
-    h = relu.(model.W1 * x .+ model.b1)
-    return sigmoid.(model.W2 * h .+ model.b2)
-end
-
-# 型が自動推論され、最適化される
-```
 
 型注釈が必要なのは、「複数の実装を使い分けたい」ときだけ（多重ディスパッチ）。これはPythonでは不可能な高度な機能。
-:::
 
-:::message alert
-**Python絶望ポイント（Zone 4で測定）**:
-- VAE訓練100エポック: Python 12.3秒 vs Julia 1.5秒（**8.2倍差**）
-- 原因: Pythonインタプリタのオーバーヘッド + 動的型チェック + メモリコピー
-- Rustより速い理由: RustはCPU/GPU分岐が手動、JuliaはJITが自動選択
+</details>
 
-**これが「Pythonに戻れない」転機になる。**
-:::
+> **⚠️ Warning:** **Python絶望ポイント（Zone 4で測定）**:
+> - VAE訓練100エポック: Python 12.3秒 vs Julia 1.5秒（**8.2倍差**）
+> - 原因: Pythonインタプリタのオーバーヘッド + 動的型チェック + メモリコピー
+> - Rustより速い理由: RustはCPU/GPU分岐が手動、JuliaはJITが自動選択
+>
+> **これが「Pythonに戻れない」転機になる。**
 
 ### 2.5 学習戦略 — どう攻略するか
 
@@ -602,11 +432,14 @@ graph TD
 | Cosmos Tokenizer | 2024 | 画像・動画統一エンコーダ | NVIDIA | 次世代統一モデル |
 | SoftVQ-VAE | 2024 | 完全微分可能VQ | 2412.10958 | 訓練安定化 |
 
-:::message
-**進捗: 20% 完了** VAEの位置づけ、松尾研との差分、Julia登場の背景、学習戦略を把握した。Zone 3で数式の海に飛び込む準備が整った。
-:::
+> **Note:** **進捗: 20% 完了** VAEの位置づけ、松尾研との差分、Julia登場の背景、学習戦略を把握した。Zone 3で数式の海に飛び込む準備が整った。
 
 ---
+
+> Progress: 20%
+> **理解度チェック**
+> 1. Posterior Collapse（事後崩壊）とは何か？KL項 $D_\text{KL}(q_\phi(\mathbf{z}|\mathbf{x}) \| p(\mathbf{z}))$ がゼロに収束するときDecoderに何が起きるかを述べよ。
+> 2. β-VAEが通常のVAEと異なる点を、目的関数 $\mathcal{L}_\beta = \mathbb{E}[\log p(\mathbf{x}|\mathbf{z})] - \beta D_\text{KL}(q \| p)$ の $\beta > 1$ の役割から説明せよ。
 
 ## 📐 3. 数式修行ゾーン（60分）— VAE理論の完全導出
 
@@ -704,16 +537,8 @@ $$
 
 PyTorch/Juliaでは、この $\mathcal{L}_\text{loss}$ を最小化する。
 
-```python
-# Corresponds to: L_loss = -E_q[log p(x|z)] + D_KL(q||p)
-recon_loss = F.binary_cross_entropy(recon_x, x, reduction='sum')
-kl_loss = -0.5 * torch.sum(1 + logvar - mu.pow(2) - logvar.exp())
-loss = recon_loss + kl_loss  # minimize this
-```
 
-:::message alert
-**つまずきポイント**: 論文では「ELBOを最大化」と書かれているが、コードでは「負のELBOを最小化」している。同じことだが、符号の混乱に注意。
-:::
+> **⚠️ Warning:** **つまずきポイント**: 論文では「ELBOを最大化」と書かれているが、コードでは「負のELBOを最小化」している。同じことだが、符号の混乱に注意。
 
 ### 3.2 Reparameterization Trick — 微分可能なサンプリング
 
@@ -780,24 +605,12 @@ $$
 
 実装では、$L=1$（single sample）で十分な場合が多い。
 
-```python
-def reparameterize(mu, logvar):
-    """Reparameterization trick: z = μ + σ * ε.
 
-    Corresponds to: z ~ N(μ, σ²) ⟺ z = μ + σ·ε, ε ~ N(0,1)
-    """
-    std = torch.exp(0.5 * logvar)  # σ = exp(0.5 * log(σ²))
-    eps = torch.randn_like(std)     # ε ~ N(0, 1)
-    return mu + eps * std           # z = μ + σ·ε
-```
-
-:::message
-**なぜ `logvar` を使うのか？**
-
-数値安定性のため、$\sigma^2$ の代わりに $\log \sigma^2$ をネットワークに出力させる。理由:
-- $\sigma^2 > 0$ の制約が自動で満たされる（指数関数は常に正）
-- 勾配消失を防ぐ（$\sigma^2 \to 0$ のとき、$\log \sigma^2 \to -\infty$ で勾配が残る）
-:::
+> **Note:** **なぜ `logvar` を使うのか？**
+>
+> 数値安定性のため、$\sigma^2$ の代わりに $\log \sigma^2$ をネットワークに出力させる。理由:
+> - $\sigma^2 > 0$ の制約が自動で満たされる（指数関数は常に正）
+> - 勾配消失を防ぐ（$\sigma^2 \to 0$ のとき、$\log \sigma^2 \to -\infty$ で勾配が残る）
 
 #### 3.2.4 Pathwise推定量としての解釈
 
@@ -909,58 +722,20 @@ $$
 
 実装では、$\log \sigma^2$ を直接扱う:
 
-```python
-def kl_divergence(mu, logvar):
-    """Closed-form KL divergence for Gaussian.
-
-    Corresponds to: D_KL(N(μ,σ²) || N(0,1)) = 0.5 * Σ(μ² + σ² - log(σ²) - 1)
-    """
-    return -0.5 * torch.sum(1 + logvar - mu.pow(2) - logvar.exp())
-```
 
 #### 3.3.3 数値検証
 
 導出が正しいか、具体的な値で確認しよう:
 
-```python
-import torch
-
-mu = torch.tensor([1.0, -0.5])
-logvar = torch.tensor([0.0, -0.693])  # σ² = [1.0, 0.5], log(σ²) = [0, -0.693]
-
-# Closed-form KL
-kl_closed = -0.5 * torch.sum(1 + logvar - mu.pow(2) - logvar.exp())
-print(f"Closed-form KL: {kl_closed.item():.4f}")
-
-# Monte Carlo estimation
-def kl_monte_carlo(mu, logvar, num_samples=100000):
-    std = torch.exp(0.5 * logvar)
-    eps = torch.randn(num_samples, len(mu))
-    z = mu + std * eps  # z ~ N(μ, σ²)
-
-    # q(z) = N(z|μ,σ²), p(z) = N(z|0,1)
-    log_q = -0.5 * torch.sum((z - mu).pow(2) / std.pow(2) + torch.log(2 * torch.pi * std.pow(2)), dim=1)
-    log_p = -0.5 * torch.sum(z.pow(2) + torch.log(2 * torch.pi * torch.ones_like(z)), dim=1)
-
-    return torch.mean(log_q - log_p)
-
-kl_mc = kl_monte_carlo(mu, logvar)
-print(f"Monte Carlo KL:  {kl_mc.item():.4f}")
-```
 
 出力:
-```
-Closed-form KL: 0.9750
-Monte Carlo KL:  0.9758
-```
+
 
 **ほぼ一致！** 閉形式解が正しいことが確認できた。
 
-:::message alert
-**つまずきポイント**: PyTorchの実装で、なぜ `-0.5 * (1 + logvar - mu^2 - exp(logvar))` の符号がマイナスなのか？
-
-理由: ELBOは「最大化」したいが、損失関数は「最小化」する。KL項は元々ELBOで「引かれている」ので、損失関数では「足す」。しかし、式変形で符号を外に出すとマイナスになる。混乱しやすいので、必ず元の式に戻って確認すること。
-:::
+> **⚠️ Warning:** **つまずきポイント**: PyTorchの実装で、なぜ `-0.5 * (1 + logvar - mu^2 - exp(logvar))` の符号がマイナスなのか？
+>
+> 理由: ELBOは「最大化」したいが、損失関数は「最小化」する。KL項は元々ELBOで「引かれている」ので、損失関数では「足す」。しかし、式変形で符号を外に出すとマイナスになる。混乱しやすいので、必ず元の式に戻って確認すること。
 
 ### 3.4 VAEの確率的解釈 — なぜELBOが有効なのか
 
@@ -1017,41 +792,6 @@ $$
 
 **結論**: ELBO を最大化することは、変分分布 $q_\phi$ と真の事後分布 $p_\theta(z \mid x)$ のKL発散を最小化しながら、対数周辺尤度を最大化することに等しい。
 
-```python
-# Numerical verification: ELBO gap = KL(q||p_posterior)
-import torch
-
-def true_posterior_kl_gap(model, x):
-    """Verify: log p(x) - ELBO = KL(q(z|x) || p(z|x))"""
-    # Encode
-    mu, logvar = model.encode(x.view(-1, 784))
-    z = model.reparameterize(mu, logvar)
-
-    # Compute ELBO
-    recon_x = model.decode(z)
-    elbo = -F.binary_cross_entropy(recon_x, x.view(-1, 784), reduction='sum') \
-           + 0.5 * torch.sum(1 + logvar - mu.pow(2) - logvar.exp())
-
-    # Estimate log p(x) via importance sampling (L=1000 samples)
-    L = 1000
-    eps_samples = torch.randn(L, *mu.shape)
-    z_samples = mu + torch.exp(0.5 * logvar) * eps_samples  # (L, batch, latent_dim)
-
-    recon_samples = torch.stack([model.decode(z_samples[i]) for i in range(L)])
-    log_p_x_z = -F.binary_cross_entropy(recon_samples, x.view(-1, 784), reduction='none').sum(dim=-1)  # (L, batch)
-    log_p_z = -0.5 * (z_samples ** 2).sum(dim=-1)  # (L, batch)
-    log_q_z_x = -0.5 * ((z_samples - mu) ** 2 / torch.exp(logvar)).sum(dim=-1) - 0.5 * logvar.sum()
-
-    # log p(x) ≈ log mean_L exp(log p(x,z) - log q(z|x))
-    log_weights = log_p_x_z + log_p_z - log_q_z_x
-    log_p_x_estimate = torch.logsumexp(log_weights, dim=0) - torch.log(torch.tensor(L, dtype=torch.float))
-
-    gap = log_p_x_estimate - elbo
-    print(f"Estimated KL(q||p_posterior): {gap.item():.4f}")
-    return gap
-
-# This gap should be ≥ 0 (equality when q = p_posterior)
-```
 
 #### 3.4.3 Rate-Distortion理論としてのVAE
 
@@ -1099,29 +839,6 @@ VAEのELBOは、この最適化問題の変分近似と見なせる。
 
 **Algorithm 1: VAE Training (Kingma & Welling 2013, Appendix B)**
 
-```
-Input: Dataset D = {x^(1), ..., x^(N)}, hyperparameters (learning rate α, minibatch size M)
-Output: Trained parameters θ (decoder), φ (encoder)
-
-Initialize θ, φ randomly
-
-while not converged do:
-    # Sample minibatch
-    X^M ← random minibatch of M datapoints from D
-
-    # Compute gradients
-    ε^M ← random samples from N(0, I) (M samples, each of dim d_z)
-    g_θ,φ ← ∇_{θ,φ} Σ_{x∈X^M} L(θ, φ; x, ε)
-
-    # Update parameters
-    θ ← θ + α · g_θ
-    φ ← φ + α · g_φ
-end while
-
-where:
-    L(θ, φ; x, ε) = -D_KL(q_φ(z|x) || p(z)) + log p_θ(x | z)
-    z = μ_φ(x) + σ_φ(x) ⊙ ε  (reparameterization trick)
-```
 
 #### 3.4.3 各ステップの詳細展開
 
@@ -1132,10 +849,7 @@ $$
 $$
 
 実装:
-```python
-for x_batch, _ in train_loader:  # x_batch: (M, 784)
-    # ... VAE forward pass
-```
+
 
 **Step 2: エンコード（平均と分散を出力）**
 
@@ -1144,9 +858,7 @@ $$
 $$
 
 実装:
-```python
-mu, logvar = model.encode(x_batch)  # mu, logvar: (M, d_z)
-```
+
 
 **Step 3: Reparameterization**
 
@@ -1155,11 +867,7 @@ $$
 $$
 
 実装:
-```python
-std = torch.exp(0.5 * logvar)
-eps = torch.randn_like(std)
-z = mu + std * eps  # z: (M, d_z)
-```
+
 
 **Step 4: デコード**
 
@@ -1168,9 +876,7 @@ $$
 $$
 
 実装:
-```python
-x_recon = model.decode(z)  # x_recon: (M, 784)
-```
+
 
 **Step 5: 損失計算**
 
@@ -1184,11 +890,7 @@ $$
 $$
 
 実装:
-```python
-recon_loss = F.binary_cross_entropy(x_recon, x_batch, reduction='sum')
-kl_loss = -0.5 * torch.sum(1 + logvar - mu.pow(2) - logvar.exp())
-loss = recon_loss + kl_loss
-```
+
 
 **Step 6: 勾配計算とパラメータ更新**
 
@@ -1197,117 +899,13 @@ $$
 $$
 
 実装:
-```python
-optimizer.zero_grad()
-loss.backward()  # compute ∇_θ, ∇_φ
-optimizer.step()  # θ ← θ - α·∇_θ, φ ← φ - α·∇_φ
-```
+
 
 #### 3.4.4 全コード: Boss Battle完全版
 
-```python
-import torch
-import torch.nn as nn
-import torch.nn.functional as F
-from torch import optim
-from torchvision import datasets, transforms
-from torch.utils.data import DataLoader
-
-# VAE Model
-class VAE(nn.Module):
-    def __init__(self, input_dim=784, hidden_dim=400, latent_dim=20):
-        super().__init__()
-        # Encoder: x -> h -> (μ, log σ²)
-        self.fc1 = nn.Linear(input_dim, hidden_dim)
-        self.fc_mu = nn.Linear(hidden_dim, latent_dim)
-        self.fc_logvar = nn.Linear(hidden_dim, latent_dim)
-        # Decoder: z -> h -> x'
-        self.fc3 = nn.Linear(latent_dim, hidden_dim)
-        self.fc4 = nn.Linear(hidden_dim, input_dim)
-
-    def encode(self, x):
-        """Encoder: q_φ(z|x) = N(μ_φ(x), diag(σ²_φ(x)))"""
-        h = F.relu(self.fc1(x))
-        mu = self.fc_mu(h)
-        logvar = self.fc_logvar(h)
-        return mu, logvar
-
-    def reparameterize(self, mu, logvar):
-        """Reparameterization: z = μ + σ·ε, ε ~ N(0,I)"""
-        std = torch.exp(0.5 * logvar)
-        eps = torch.randn_like(std)
-        return mu + eps * std
-
-    def decode(self, z):
-        """Decoder: p_θ(x|z) = Bernoulli(f_θ(z))"""
-        h = F.relu(self.fc3(z))
-        return torch.sigmoid(self.fc4(h))
-
-    def forward(self, x):
-        mu, logvar = self.encode(x.view(-1, 784))
-        z = self.reparameterize(mu, logvar)
-        return self.decode(z), mu, logvar
-
-def loss_function(recon_x, x, mu, logvar):
-    """VAE loss = Reconstruction + KL.
-
-    Corresponds to Kingma 2013 Appendix B:
-    L_loss = -log p_θ(x|z) + D_KL(q_φ(z|x) || p(z))
-    """
-    BCE = F.binary_cross_entropy(recon_x, x.view(-1, 784), reduction='sum')
-    KLD = -0.5 * torch.sum(1 + logvar - mu.pow(2) - logvar.exp())
-    return BCE + KLD
-
-# Training
-def train_vae(model, train_loader, optimizer, epoch):
-    model.train()
-    train_loss = 0
-    for batch_idx, (data, _) in enumerate(train_loader):
-        optimizer.zero_grad()
-        recon_batch, mu, logvar = model(data)
-        loss = loss_function(recon_batch, data, mu, logvar)
-        loss.backward()
-        train_loss += loss.item()
-        optimizer.step()
-
-        if batch_idx % 100 == 0:
-            print(f'Epoch {epoch} [{batch_idx * len(data)}/{len(train_loader.dataset)}]'
-                  f'\tLoss: {loss.item() / len(data):.4f}')
-
-    print(f'====> Epoch: {epoch} Average loss: {train_loss / len(train_loader.dataset):.4f}')
-
-# Main
-if __name__ == '__main__':
-    # Hyperparameters (from Kingma 2013)
-    batch_size = 128
-    latent_dim = 20
-    learning_rate = 1e-3
-    epochs = 10
-
-    # Data
-    train_loader = DataLoader(
-        datasets.MNIST('./data', train=True, download=True,
-                      transform=transforms.ToTensor()),
-        batch_size=batch_size, shuffle=True
-    )
-
-    # Model
-    model = VAE(input_dim=784, hidden_dim=400, latent_dim=latent_dim)
-    optimizer = optim.Adam(model.parameters(), lr=learning_rate)
-
-    # Train
-    for epoch in range(1, epochs + 1):
-        train_vae(model, train_loader, optimizer, epoch)
-```
 
 期待される出力:
-```
-Epoch 1 [0/60000]       Loss: 548.2341
-Epoch 1 [12800/60000]   Loss: 165.7892
-...
-====> Epoch: 1 Average loss: 158.3456
-====> Epoch: 10 Average loss: 104.2341
-```
+
 
 **Boss撃破！** Kingma 2013のアルゴリズムを完全再現した。
 
@@ -1389,13 +987,6 @@ $$
 
 $D_{\text{KL}}(q_\phi(z|x) \| p(z))$は事後分布$q$を事前分布$p$に近づける**正則化**。これがないと?
 
-```python
-# KL項なし（β=0のβ-VAE）
-loss = -recon_term  # KL項を除去
-
-# 結果: Posterior Collapse
-# q(z|x) が p(z) から大きく離れ、デコーダが z を無視
-```
 
 **Rate-Distortion理論**: KL項=情報圧縮のコスト（Rateが$I(X;Z)$に対応）。
 
@@ -1415,15 +1006,6 @@ $$
 
 **理由**: 訓練初期はデコーダが弱く、潜在変数を有効活用できない。KL項が強いと潜在変数が事前分布に押し付けられ、Posterior Collapseを起こす。
 
-```python
-def kl_weight(epoch, warmup_epochs=10):
-    return min(1.0, epoch / warmup_epochs)
-
-# Training loop
-for epoch in range(num_epochs):
-    beta = kl_weight(epoch)
-    loss = recon_loss + beta * kl_loss
-```
 
 **3.8.2 Free Bits**
 
@@ -1457,19 +1039,6 @@ $$
 
 **安全な使い方**: エンコーダの中間層のみにBN、$\mu, \log\sigma^2$出力前には使わない。
 
-```python
-class Encoder(nn.Module):
-    def __init__(self):
-        super().__init__()
-        self.fc1 = nn.Linear(784, 400)
-        self.bn1 = nn.BatchNorm1d(400)  # OK: 中間層
-        self.fc_mu = nn.Linear(400, 20)  # ❌ BNなし
-        self.fc_logvar = nn.Linear(400, 20)  # ❌ BNなし
-
-    def forward(self, x):
-        h = F.relu(self.bn1(self.fc1(x)))
-        return self.fc_mu(h), self.fc_logvar(h)
-```
 
 **3.8.5 学習率スケジューリング**
 
@@ -1479,20 +1048,476 @@ VAEは学習率に敏感。推奨パターン:
 - **Cosine Decay**: その後cosine減衰
 - **AdamW**: 重み減衰と組み合わせ
 
-```python
-from torch.optim.lr_scheduler import CosineAnnealingLR, LinearLR, SequentialLR
 
-optimizer = torch.optim.AdamW(model.parameters(), lr=1e-3, weight_decay=0.01)
-warmup = LinearLR(optimizer, start_factor=0.1, total_iters=1000)
-cosine = CosineAnnealingLR(optimizer, T_max=num_epochs * steps_per_epoch - 1000)
-scheduler = SequentialLR(optimizer, schedulers=[warmup, cosine], milestones=[1000])
-```
-
-:::message
-**進捗: 50% 完了** VAEの3つの核心（ELBO/Reparameterization/Gaussian KL）を完全導出し、Kingma 2013のBoss Battleをクリアした。Zone 4でJulia実装に進む。
-:::
+> **Note:** **進捗: 50% 完了** VAEの3つの核心（ELBO/Reparameterization/Gaussian KL）を完全導出し、Kingma 2013のBoss Battleをクリアした。Zone 4でJulia実装に進む。
 
 ---
+
+### 3.9 β-VAE & Disentanglement — 全変数分離の理論
+
+#### 3.9.1 ELBO → Total Correlation分解の完全導出
+
+3.1節で導いたELBOを一段深く掘り下げる。なぜ $\beta > 1$ が潜在変数の統計的独立性を促すのか、その答えはKL項のTotal Correlation分解に埋まっている。
+
+データセット $\mathcal{D} = \{x^{(i)}\}_{i=1}^N$ 上の**集約事後分布** (aggregate posterior) を定義する:
+
+$$
+q(z) \triangleq \frac{1}{N}\sum_{i=1}^N q_\phi(z \mid x^{(i)})
+$$
+
+これはエンコーダが「全データを等確率でサンプルしたとき」に得る潜在変数の周辺分布だ。各次元の周辺分布は $q(z_j) = \frac{1}{N}\sum_i q_\phi(z_j \mid x^{(i)})$ と書ける。
+
+KL正則化項 $D_\text{KL}(q_\phi(z \mid x) \| p(z))$ をデータ期待値の下で考える。Chen et al. 2018 [^4] の分解を導こう:
+
+$$
+\mathbb{E}_{p_\text{data}(x)}\left[D_\text{KL}(q_\phi(z \mid x) \| p(z))\right]
+= \mathbb{E}_{q(z,x)}\left[\log \frac{q_\phi(z \mid x)}{p(z)}\right]
+$$
+
+右辺を $q(z)$ で上下に挟む:
+
+$$
+= \mathbb{E}_{q(z,x)}\left[\log \frac{q_\phi(z \mid x)}{q(z)} \cdot \frac{q(z)}{\prod_j q(z_j)} \cdot \frac{\prod_j q(z_j)}{p(z)}\right]
+$$
+
+ログの和に分解すると3項が現れる:
+
+$$
+= \underbrace{\mathbb{E}_{q(z,x)}\left[\log \frac{q_\phi(z \mid x)}{q(z)}\right]}_{I_q(x;z)} + \underbrace{\mathbb{E}_{q(z)}\left[\log \frac{q(z)}{\prod_j q(z_j)}\right]}_{\text{TC}(z)} + \underbrace{\sum_j \mathbb{E}_{q(z_j)}\left[\log \frac{q(z_j)}{p(z_j)}\right]}_{\sum_j D_\text{KL}(q(z_j) \| p(z_j))}
+$$
+
+| 記号 | 読み | 意味 |
+|:-----|:-----|:-----|
+| $I_q(x;z)$ | アイ・キュー・エックス・ゼット | エンコーダの相互情報量。$x$ が $z$ に流し込む情報量 |
+| $\text{TC}(z)$ | Total Correlation | 潜在次元間の統計的依存性の総量。0 ならば完全独立 |
+| $\sum_j D_\text{KL}(q(z_j) \| p(z_j))$ | 次元単位KL | 各次元の周辺分布が事前分布からどれだけ乖離しているか |
+
+$\beta$-VAEの目標関数にこの分解を代入すると:
+
+$$
+\mathcal{L}_{\beta\text{-TCVAE}} = \mathbb{E}_{q_\phi(z \mid x)}[\log p_\theta(x \mid z)] - \alpha \cdot I_q(x;z) - \beta \cdot \text{TC}(z) - \gamma \cdot \sum_j D_\text{KL}(q(z_j) \| p(z_j))
+$$
+
+標準β-VAEは $\alpha = \beta = \gamma$ と置く特殊ケースだ。β-TCVAEはTC項の係数 $\beta$ だけを独立に大きくすることで、**相互情報量を犠牲にせずにdisentanglementを促進**する点が優れている。
+
+#### 3.9.2 Factor-VAE — 密度比によるTC推定
+
+Kim & Mnih 2018 [^5] のFactor-VAEは、TC項を直接推定するために**判別器ネットワーク**を導入する発想で、β-TCVAEとは独立に開発された。
+
+TC項 $D_\text{KL}(q(z) \| \prod_j q(z_j))$ は密度比で書ける:
+
+$$
+\text{TC}(z) = \mathbb{E}_{q(z)}\left[\log \frac{q(z)}{\prod_j q(z_j)}\right]
+$$
+
+$q(z)$ からのサンプルと $\prod_j q(z_j)$ からのサンプル（各次元を独立にシャッフルして作る）を区別する判別器 $D: \mathbb{R}^d \to [0,1]$ を学習すると:
+
+$$
+\frac{q(z)}{\prod_j q(z_j)} \approx \frac{D(z)}{1 - D(z)}
+$$
+
+これはBregman発散の密度比推定と同じ構造だ。Factor-VAEの訓練は2ループ構造を持つ:
+
+1. **VAEステップ**: $\nabla_{\theta,\phi}\left[\mathcal{L}_\text{VAE} - \gamma \cdot \mathbb{E}_{q(z)}\left[\log \frac{D(z)}{1-D(z)}\right]\right]$
+2. **判別器ステップ**: $\nabla_\psi \left[-\mathbb{E}_{q(z)}[\log D(z)] - \mathbb{E}_{\prod_j q(z_j)}[\log(1-D(z))]\right]$
+
+> **⚠️ Warning:** Factor-VAEのシャッフル操作は「バッチ内での次元別シャッフル」によって $\prod_j q(z_j)$ からのサンプルを近似する。これはバッチサイズが十分大きい場合のみ妥当な近似になる。バッチサイズ < 64 では推定が不安定になり、TC推定の偏りが無視できなくなる。
+
+#### 3.9.3 DIP-VAE — 共分散行列の直接マッチング
+
+Kumar et al. 2017 [^5] のDIP-VAE (Disentangled Inferred Prior VAE) は、TC最小化という迂回路を使わず、**集約事後分布の共分散行列を直接事前分布の共分散行列にマッチさせる**というアプローチをとる。
+
+集約事後分布のモーメントを計算する:
+
+$$
+\mathbb{E}_{p(x)}[\mu_\phi(x)] = \bar{\mu}, \quad
+\text{Cov}_{p(x)}[\mu_\phi(x)] = \frac{1}{N}\sum_i (\mu_i - \bar{\mu})(\mu_i - \bar{\mu})^\top \triangleq \Sigma_\mu
+$$
+
+$$
+\mathbb{E}_{p(x)}[q_\phi(z \mid x)] \approx \mathcal{N}\!\left(\bar{\mu},\ \Sigma_\mu + \mathbb{E}[\Sigma_\phi(x)]\right) \triangleq \mathcal{N}(\bar{\mu}, \Sigma_q)
+$$
+
+disentanglementの理想は $\Sigma_q = I$（対角かつ単位行列）。DIP-VAEはこれを正則化項として追加する:
+
+$$
+\mathcal{L}_\text{DIP} = \mathcal{L}_\text{VAE} + \lambda_\text{od} \sum_{i \neq j} [\Sigma_q]_{ij}^2 + \lambda_d \sum_i ([\Sigma_q]_{ii} - 1)^2
+$$
+
+DIP-VAE-I は $\Sigma_q \approx \Sigma_\mu$（平均の共分散のみマッチ）、DIP-VAE-II は完全な $\Sigma_q$ をマッチするより強い制約だ。
+
+#### 3.9.4 Disentanglement評価指標の厳密な定義
+
+disentangledな表現とは何か、を測定するために複数の指標が提案されている。それぞれに異なる「disentanglement」の定義が埋め込まれている。
+
+**MIG (Mutual Information Gap)** — Chen et al. 2018
+
+潜在変数 $z_j$ と生成因子 $v_k$ の相互情報量 $I(z_j; v_k)$ を使う。各因子について、最も相互情報量が高い潜在変数と2番目に高い潜在変数の差 (gap) を計算する:
+
+$$
+\text{MIG} = \frac{1}{K}\sum_{k=1}^K \frac{1}{H(v_k)}\left(I(z_{j^*_k}; v_k) - \max_{j \neq j^*_k} I(z_j; v_k)\right)
+$$
+
+ここで $j^*_k = \arg\max_j I(z_j; v_k)$、$H(v_k)$ は因子 $v_k$ のエントロピー（正規化のため）。MIG = 1 ならば各因子が唯一の潜在変数と対応し、MIG = 0 ならば完全に無差別。
+
+**DCI (Disentanglement-Completeness-Informativeness)** — Eastwood & Williams 2018
+
+線形予測器 $f_k(z) \approx v_k$ を各因子ごとに学習し、その係数の重要度 $W$ (shape: $K \times d$) から3指標を計算する:
+
+$$
+D = \frac{1}{d}\sum_{j=1}^d \left(1 - H\!\left(\frac{W_{\cdot j}}{\|W_{\cdot j}\|_1}\right) / \log K\right), \quad
+C = \frac{1}{K}\sum_{k=1}^K \left(1 - H\!\left(\frac{W_{k \cdot}}{\|W_{k \cdot}\|_1}\right) / \log d\right)
+$$
+
+| 指標 | 読み | 意味 |
+|:-----|:-----|:-----|
+| $D$ (Disentanglement) | 分離性 | 各潜在次元が唯一の因子を担うか |
+| $C$ (Completeness) | 完全性 | 各因子が少数の潜在次元で表現されているか |
+| $I$ (Informativeness) | 情報量 | 潜在表現が因子の予測に有用か（予測誤差で測定） |
+
+**SAP (Separated Attribute Predictability)** — Kumar et al. 2017
+
+各因子について最も予測精度の高い潜在次元と2番目の精度差:
+
+$$
+\text{SAP}_k = \mathcal{E}^{(1)}_k - \mathcal{E}^{(2)}_k
+$$
+
+ここで $\mathcal{E}^{(m)}_k$ は因子 $v_k$ を予測する際の $m$ 番目に精度が高い次元の予測誤差。差が大きいほど「1つの次元が支配的」でdisentangled。
+
+#### 3.9.5 Locatello et al. 2019 — 教師なしdisentanglementは不可能定理
+
+Locatello et al. 2019 [^6] の定理は生成モデル研究に衝撃を与えた。直感的には「帰納的バイアスなしに、観測データだけからdisentanglementは学習できない」という主張だ。
+
+**定理（Locatello et al. 2019, Theorem 1の要旨）**:
+
+$z \sim p(z) = \prod_j p(z_j)$ を真の独立因子の事前分布とし、$x = g(z)$ を単射な生成過程とする。任意のVAEベースのdisentanglementアルゴリズム（目的関数の形によらず）に対して、以下が成立する:
+
+> **定理**: データ分布 $p(x)$ を完全に説明し、かつ disentangled でない潜在表現 $\tilde{z} = h(z)$ が**常に存在する**。ここで $h: \mathbb{R}^d \to \mathbb{R}^d$ は $h(z) = Rz$（$R$ は任意の直交行列）で与えられる。
+
+証明の核心: $p(x) = p_\theta(x)$ を完全に満たすモデルに対して、$\tilde{q}(\tilde{z} \mid x) = q_\phi(R^\top \tilde{z} \mid x)$ を考えると、これも同じELBO値を達成する。しかし $\tilde{z}$ は $z$ の任意の直交回転なので、一般に disentangled ではない。
+
+$$
+\mathcal{L}(\theta, \phi; x) = \mathcal{L}(\tilde{\theta}, \tilde{\phi}; x), \quad \tilde{z} = Rz \text{ for any orthogonal } R
+$$
+
+これはELBOが直交回転に対して不変であることを示している。**教師なしでは、データを完全に説明する潜在表現が無数に存在し、そのうち「disentangled」なものを選択する理由が原理的にない。**
+
+> **⚠️ Warning:** この定理が意味するのは「β-VAEなどのdisentanglement手法は無意味」ではなく、「帰納的バイアス（アーキテクチャの制約、正則化、データ拡張、数少ないラベル）なしにdisentanglementを保証することは不可能」という点だ。実際、Locatello et al. 2020の後続研究では、ごく少数のラベル（10〜100サンプル）があれば教師ありdisentanglementが成立することを示している。
+
+#### 3.9.6 情報ボトルネックとの接続
+
+Tishby et al. 2000の情報ボトルネック (IB) フレームワークとVAEは深くつながっている。IBの目標関数:
+
+$$
+\mathcal{L}_\text{IB} = I(Z; Y) - \beta \cdot I(X; Z)
+$$
+
+ここで $Y$ はラベル、$X$ は入力、$Z$ は潜在表現。$\beta$ がボトルネックの強さを制御する。
+
+VAEのELBO（再構成 = $I(X;Z)$ の下界、KL = $I(X;Z)$ の上界の制約）は、実はIBの特殊ケースとして解釈できる。VAE-IBの目標:
+
+$$
+\max_\phi \left[\mathbb{E}_{q_\phi(z \mid x)}[\log p(y \mid z)] - \beta \cdot I_q(X; Z)\right]
+$$
+
+$\beta = 1$ で制約なし（全情報保持）、$\beta \to \infty$ でボトルネック（最小限の情報のみ保持）。
+
+**数値例**: $d = 2$ の潜在空間、$\mu = [0.5, -0.3]$、$\sigma = [1.2, 0.8]$ のガウス変数の TC を計算する。独立なガウス変数のTCは0（各次元が独立なら $q(z) = \prod_j q(z_j)$ が成立）。相関行列 $\rho = 0.7$ を導入すると:
+
+$$
+\text{TC}_\text{Gaussian} = D_\text{KL}\!\left(\mathcal{N}(0, \Sigma) \,\|\, \mathcal{N}(0, \text{diag}(\Sigma))\right) = -\frac{1}{2}\log\det(\Sigma \cdot \text{diag}(\Sigma)^{-1})
+= -\frac{1}{2}\log(1 - \rho^2)
+$$
+
+$\rho = 0.7$ を代入: $\text{TC} = -\frac{1}{2}\log(1 - 0.49) = -\frac{1}{2}\log(0.51) \approx 0.338$ nats。$\rho = 0$ なら TC = 0、$\rho \to 1$ なら TC → ∞。β-VAEは訓練中にこの値を0に近づけるよう圧力をかける。
+
+---
+
+### 3.10 VQ-VAE — 離散表現の完全理論
+
+#### 3.10.1 Vector Quantizationの定義と幾何学
+
+Van den Oord et al. 2017 [^3] のVQ-VAEは、連続潜在空間の「ぼやけ問題」を根本から解決した。アイデアは単純: 潜在変数を連続値ではなく、事前に定義した**コードブック**の中のベクトルに量子化する。
+
+**コードブック**: $K$ 個の $D$ 次元ベクトル $\{e_k\}_{k=1}^K \subset \mathbb{R}^D$ の集合。これらはモデルのパラメータとして学習される。
+
+エンコーダ出力 $z_e = f_\phi(x) \in \mathbb{R}^D$ に対して、量子化写像は最近傍探索として定義される:
+
+$$
+k^* = \arg\min_{k \in \{1,\ldots,K\}} \|z_e - e_k\|_2
+$$
+
+$$
+z_q = e_{k^*}
+$$
+
+| 記号 | 読み | 意味 |
+|:-----|:-----|:-----|
+| $K$ | ケー | コードブックのサイズ（語彙数） |
+| $D$ | ディー | 各コードブックベクトルの次元数 |
+| $e_k \in \mathbb{R}^D$ | イー・ケー | $k$ 番目のコードブックベクトル（エントリ） |
+| $z_e$ | ゼット・イー | エンコーダの連続出力（encoder output） |
+| $z_q$ | ゼット・キュー | 量子化後の潜在ベクトル（quantized） |
+| $k^*$ | ケー・スター | 最近傍コードブックインデックス |
+
+幾何学的に見ると、コードブックは $\mathbb{R}^D$ 空間内の $K$ 個の点を定義し、空間をボロノイ分割する。各セル内のすべての $z_e$ が同じ $z_q$ にマッピングされる。
+
+#### 3.10.2 VQ目的関数と停止勾配演算子
+
+量子化操作 $z_q = e_{k^*}$ は $\arg\min$ を含むため、$z_e$ や $e_k$ について微分できない。VQ-VAEの損失関数は、停止勾配演算子 $\text{sg}[\cdot]$（stop gradient: 順伝播では恒等写像、逆伝播では勾配を0にする）を使って3項に分解される:
+
+$$
+\mathcal{L}_\text{VQ-VAE} = \underbrace{\|\text{sg}[z_e] - e\|_2^2}_{\text{コードブック更新項}} + \underbrace{\beta_c \|z_e - \text{sg}[e]\|_2^2}_{\text{コミットメント損失}} + \underbrace{\mathcal{L}_\text{recon}}_{\text{再構成損失}}
+$$
+
+各項の役割:
+
+- **コードブック更新項** $\|\text{sg}[z_e] - e\|^2$: コードブックエントリ $e$ をエンコーダ出力 $z_e$ の近傍に引き寄せる。$z_e$ は固定（`sg`）なのでコードブックのみ更新される。
+- **コミットメント損失** $\|z_e - \text{sg}[e]\|^2$: エンコーダ出力 $z_e$ を選択されたコードブックエントリ $e$ の近傍に引き寄せる。$e$ は固定（`sg`）なのでエンコーダのみ更新される。係数 $\beta_c$（論文では $\beta = 0.25$）は2項のバランスを調整する。
+- **再構成損失**: デコーダ $p_\theta(x \mid z_q)$ が元データを復元する通常の項。
+
+> **⚠️ Warning:** $\beta_c$ は $\beta$-VAEの $\beta$ とは別物。VQ-VAEの論文では commitment loss の係数として同じ記号 $\beta$ を使っているが、文脈によって意味が異なる。$\beta_c$ が大きすぎるとエンコーダがコードブックに急速に収束して多様性を失い、小さすぎるとエンコーダが「フラフラ」してコードブック更新が不安定になる。
+
+#### 3.10.3 Straight-Through Estimator — 数学的必然性
+
+デコーダへの入力 $z_q$ はエンコーダ出力 $z_e$ とは不連続な関係にある。再構成損失 $\mathcal{L}_\text{recon}$ を $\phi$（エンコーダパラメータ）について微分するには、$\partial z_q / \partial z_e$ が必要だが:
+
+$$
+\frac{\partial z_q}{\partial z_e} = \frac{\partial e_{k^*(z_e)}}{\partial z_e}
+$$
+
+$k^*(z_e) = \arg\min_k \|z_e - e_k\|^2$ は $z_e$ の関数だが、ボロノイ境界を除いてほぼ至る所で微分が0（または定義不能）だ。$z_e$ をわずかに動かしても $k^*$ は変わらないので $\partial e_{k^*} / \partial z_e = 0$、ボロノイ境界ではジャンプ不連続。
+
+Bengio et al. 2013 [^7] が提案したStraight-Through Estimator (STE) は、この問題を**意図的に間違った勾配**で解決する:
+
+$$
+\frac{\partial z_q}{\partial z_e} \approx I \quad (\text{Straight-Through})
+$$
+
+実装上は: 順伝播で $z_q = z_e + \text{sg}[z_q - z_e]$、逆伝播で $\partial z_q / \partial z_e = I$。
+
+なぜ $I$ が「唯一の実行可能な近似」なのか。代替案を検討しよう:
+
+- $\partial z_q / \partial z_e = 0$: エンコーダへの勾配が完全に遮断される。エンコーダは再構成損失から学習できず、コミットメント損失しか残らない。これは明らかに不十分。
+- $\partial z_q / \partial z_e = \epsilon I$ ($\epsilon \ll 1$): スケールが小さいと学習が極めて遅くなる。
+- 「正確な勾配」: $\arg\min$ の真の微分は至る所で0かつ不連続。使えない。
+
+$I$ は「最も情報ロスが少ない実用的な近似」として採用された経験則だ。STE の理論的正当性は未だ完全ではないが、実践的には非常によく機能する。
+
+#### 3.10.4 EMAコードブック更新 — 勾配法との比較
+
+コードブックの更新に勾配降下法を使う代わりに、**指数移動平均 (EMA: Exponential Moving Average)** を使う方法がVQ-VAEの実践では標準だ:
+
+$$
+N_k^{(t)} \leftarrow \gamma N_k^{(t-1)} + (1-\gamma)\, n_k^{(t)}
+$$
+
+$$
+e_k^{(t)} \leftarrow \frac{m_k^{(t)}}{N_k^{(t)}}, \quad m_k^{(t)} \leftarrow \gamma m_k^{(t-1)} + (1-\gamma)\sum_{i:\, z_i^{(t)} \mapsto k} z_e^{(i,t)}
+$$
+
+ここで $n_k^{(t)}$ はミニバッチ内でコード $k$ が選ばれた回数、$\gamma \in [0.9, 0.999]$ はEMAの減衰率。コードブックエントリ $e_k$ はその「ボロノイセルに入るエンコーダ出力の移動平均」に収束する。
+
+なぜEMAが勾配法よりよいのか:
+
+1. **スケール不変性**: 勾配法はコードブック更新にも学習率スケジューリングが必要。EMAは減衰率 $\gamma$ のみ。
+2. **安定性**: EMAによる更新は必ずコードブックを「データ分布に近い方向」へ動かす。勾配法ではオーバーシュートが起きやすい。
+3. **並列効率**: バッチ内集計 $\sum_{i: z_i \mapsto k}$ はGPU上で効率的に計算できる。
+
+#### 3.10.5 Codebook Collapse — 問題の定量化と対策
+
+$K = 512$ のコードブックを定義しても、実際に使われるエントリは100以下になることがある。これを**Codebook Collapse** と呼ぶ。
+
+定量化: コードブック使用率のエントロピー $H = -\sum_k \hat{p}_k \log \hat{p}_k$（$\hat{p}_k$ = バッチ内でコード $k$ が使われる割合）が小さい時、collapsが起きている。完全均等使用なら $H = \log K$、完全collapse なら $H \to 0$。
+
+**Perplexity** $= e^H$ がよく使われる指標で、「実効的なコードブックサイズ」を表す。$e^H \ll K$ なら collapse。
+
+主な対策:
+
+- **コードブックリセット**: 使用頻度が低いエントリをランダムなエンコーダ出力で初期化。
+- **EMA + Random Restart**: EMAの $N_k$ が閾値以下になったエントリを「死んだコード」と判定してリセット。
+- **温度付きソフト量子化**: 訓練初期に $k^* = \text{softmax}(-\|z_e - e_k\|^2 / T)$ で確率的に選択し、後半でハード量子化に切り替える。
+- **Improved VQGAN**: ランダムに一部エントリをサンプリングしてGDベースで定期的に再初期化。
+
+> **Note:** Perplexity の目標値はタスクによって異なる。言語モデル的な離散表現では高い Perplexity (= $K$ に近い) が望ましく、画像トークナイザーでは中程度の Perplexity で十分な場合がある。VQ-VAE-2 の論文では $K = 512$ に対して実効 Perplexity ≈ 450 程度を達成している。
+
+#### 3.10.6 VQ-VAEの完全ELBO導出
+
+連続VAEのELBOを離散潜在変数に拡張する。コードブック上の一様事前分布 $p(z_q) = \text{Uniform}(\{e_1, \ldots, e_K\})$、事後分布 $q(z_q \mid x) = \text{one-hot}(k^*(z_e))$ とするとELBOは:
+
+$$
+\mathcal{L}_\text{ELBO} = \mathbb{E}_{q(z_q \mid x)}[\log p_\theta(x \mid z_q)] - D_\text{KL}(q(z_q \mid x) \| p(z_q))
+$$
+
+第2項を計算する。$q(z_q \mid x)$ はone-hot分布（エントロピー = 0）、$p(z_q)$ は一様分布（エントロピー = $\log K$）なので:
+
+$$
+D_\text{KL}(q \| p) = 0 - (-\log K) = \log K
+$$
+
+つまり離散VQ-VAEのKL項は**定数** $\log K$ となり、訓練中に最適化されない。この事実は重要で、VQ-VAEではKL項を通じた情報量の制御ができない。代わりに量子化誤差 $\|z_e - z_q\|^2$ がその役割を担う。
+
+**数値例**: $K = 512$、$D = 256$ のコードブック。最近傍探索はバッチ $B = 16$、空間次元 $H \times W = 16 \times 16$、つまり $B \times H \times W = 4096$ 個のベクトルそれぞれについて $K = 512$ のコードと距離を計算。計算量は $O(B \cdot H \cdot W \cdot K \cdot D) = O(4096 \times 512 \times 256) \approx 5.4 \times 10^8$ 乗算。これは行列積 $(B \cdot H \cdot W) \times D$ と $D \times K$ の積として $\|z_e - e_k\|^2 = \|z_e\|^2 - 2 z_e^\top e_k + \|e_k\|^2$ に展開するとGPU上で効率的に計算できる。
+
+#### 3.10.7 VQ-VAE-2の階層的コードブック
+
+Razavi et al. 2019 [^8] のVQ-VAE-2は、単一コードブックの表現力の限界を階層構造で突破した。
+
+入力 $x$ を2段階でエンコード:
+
+$$
+z_\text{top} = q_{\phi,\text{top}}\!\left(\text{Encoder}_\text{top}(x)\right) \in \{e^{(\text{top})}_k\}_{k=1}^{K_1}
+$$
+
+$$
+z_\text{bottom} = q_{\phi,\text{bot}}\!\left(\text{Encoder}_\text{bot}(x, z_\text{top})\right) \in \{e^{(\text{bot})}_k\}_{k=1}^{K_2}
+$$
+
+$z_\text{top}$ はグローバル構造（物体の配置、大域的形状）、$z_\text{bottom}$ はローカル詳細（テクスチャ、局所的特徴）を担う。
+
+デコードも階層的: $\hat{x} = \text{Decoder}(z_\text{bottom}, z_\text{top})$。
+
+サンプリング時は条件付き自己回帰モデルで先にトップ層をサンプルしてからボトム層を生成:
+
+$$
+p(z_\text{bottom}, z_\text{top}) = p_\psi(z_\text{top}) \cdot p_\psi(z_\text{bottom} \mid z_\text{top})
+$$
+
+両方ともPixelSnailで実装される。VQ-VAE-2は1024×1024の高解像度画像生成をBigGANに匹敵するFID(≈2.95 on ImageNet 256×256)で達成した。
+
+---
+
+### 3.11 VQ-GAN & FSQ — 最前線の離散表現
+
+#### 3.11.1 VQ-GANの目的関数とスケーリング係数
+
+Esser et al. 2021 [^9] のVQ-GAN（Taming Transformers）は、VQ-VAEにパッチベースの識別器を追加し、訓練安定化のための**適応的重み** $\lambda$ を導入した。
+
+$$
+\mathcal{L}_\text{VQ-GAN} = \underbrace{\mathcal{L}_\text{rec}(x, \hat{x})}_{\text{再構成損失}} + \underbrace{\|\text{sg}[z_e] - e\|^2 + \beta_c \|z_e - \text{sg}[e]\|^2}_{\mathcal{L}_\text{VQ}} + \underbrace{\lambda \cdot \mathcal{L}_\text{GAN}}_{\text{GAN損失}} + \underbrace{\mathcal{L}_\text{perceptual}(x, \hat{x})}_{\text{知覚的損失}}
+$$
+
+| 記号 | 読み | 意味 |
+|:-----|:-----|:-----|
+| $\mathcal{L}_\text{rec}$ | 再構成損失 | 通常はL2またはL1 |
+| $\mathcal{L}_\text{VQ}$ | VQ損失 | コードブック更新 + コミットメント |
+| $\mathcal{L}_\text{GAN}$ | GAN損失 | 識別器 $D_\psi$ に対する敵対的損失 |
+| $\mathcal{L}_\text{perceptual}$ | 知覚的損失 | VGG特徴マップ間の距離 |
+| $\lambda$ | ラムダ | GAN損失のスケーリング係数（適応的） |
+
+#### 3.11.2 知覚的損失 — なぜピクセル損失より優れるか
+
+$$
+\mathcal{L}_\text{perceptual}(x, \hat{x}) = \sum_l \frac{1}{C_l H_l W_l}\|\phi_l(x) - \phi_l(\hat{x})\|_F^2
+$$
+
+$\phi_l$ はImageNet事前学習済みVGGネットワークの第 $l$ 層の特徴マップ、$C_l, H_l, W_l$ はその次元。
+
+ピクセル損失 $\|x - \hat{x}\|^2$ でコードブック更新を行うと、量子化後の再構成誤差がどのピクセルに起因するかが不明確で、コードブック collapse が加速する。VGG特徴マップは空間的に集約された中間表現なので、局所的な視覚的品質の差を捉えやすい。
+
+$$
+\mathcal{L}_\text{perceptual} \approx 0 \iff \phi_l(x) \approx \phi_l(\hat{x}) \text{ (すべての層 } l \text{ で)}
+$$
+
+VGG第3層の特徴マップは $C_3 = 256, H_3 = 56, W_3 = 56$（224×224入力時）で、局所テクスチャを捉える。第5層は $C_5 = 512, H_5 = 14, W_5 = 14$ で高レベルの意味を捉える。この多層的な制約がコードブックに「視覚的に意味のある離散トークン」を学習させる。
+
+> **Note:** 知覚的損失単体でもコードブック collapse の緩和効果があるが、GANとの組み合わせが決定的だ。GAN識別器は再構成画像の「全体的なリアリズム」を評価し、コードブックが持つ表現力を最大限に引き出す方向に訓練を誘導する。
+
+#### 3.11.3 適応的スケーリング係数 $\lambda$
+
+再構成損失とGAN損失のスケールは訓練中に大きく変化する。固定の $\lambda$ を使うと、訓練初期にGAN損失が再構成を破壊するか、終盤にGAN損失の影響が小さすぎるかという問題が生じる。
+
+VQ-GANはデコーダの**最終層**（$G_L$）のパラメータに対する勾配の比をリアルタイムで計算して $\lambda$ を適応的に決める:
+
+$$
+\lambda = \frac{\|\nabla_{G_L}[\mathcal{L}_\text{rec}]\|_2}{\|\nabla_{G_L}[\mathcal{L}_\text{GAN}]\|_2 + \delta}
+$$
+
+$\delta = 10^{-6}$ は数値安定化のためのepsilon。この式の意味: $\lambda$ は再構成損失の勾配ノルムとGAN損失の勾配ノルムの比なので、「再構成勾配と同程度の強さでGANが効く」よう動的に調整される。
+
+$$
+\lambda \cdot \|\nabla_{G_L}[\mathcal{L}_\text{GAN}]\| \approx \|\nabla_{G_L}[\mathcal{L}_\text{rec}]\|
+$$
+
+訓練初期は $\mathcal{L}_\text{rec}$ の勾配が大きい（再構成が悪い）ので $\lambda$ が大きく、GAN損失が強く効く。訓練後半は再構成が安定し $\mathcal{L}_\text{rec}$ 勾配が小さくなるので $\lambda$ も下がり、GANの影響が相対的に安定する。
+
+> **⚠️ Warning:** $\lambda$ の計算は最終層のパラメータに対する勾配のみを使う近似だ。全パラメータでの正確な計算は計算コストが高すぎる。また、この比は1ステップのみのスナップショットなので、EMAでスムージングしないとノイジーな $\lambda$ になる。実装では $\lambda \leftarrow 0.9 \lambda_\text{prev} + 0.1 \lambda_\text{current}$ のような平滑化が有効。
+
+#### 3.11.4 FSQ — Finite Scalar Quantization
+
+Mentzer et al. 2023 [^10] のFSQ (Finite Scalar Quantization) は、VQ-VAEのコードブック管理の複雑さ（codebook collapse、EMA、commitment loss）をすべて排除した驚くほどシンプルな量子化方式だ。
+
+各潜在次元 $j$ に対して、独立に整数グリッドへのラウンドを行う:
+
+$$
+\hat{z}_j = \text{round}\!\left(\frac{L_j}{2} \cdot \tanh(z_j)\right)
+$$
+
+ここで $L_j$ は次元 $j$ のレベル数（整数）。$\tanh$ で $(-1, 1)$ に圧縮し、$L_j/2$ で拡大してから整数に丸める。$\hat{z}_j$ の取りうる値は $\{-\lfloor L_j/2 \rfloor, \ldots, \lfloor L_j/2 \rfloor\}$ の $L_j$ 個。
+
+| 記号 | 読み | 意味 |
+|:-----|:-----|:-----|
+| $L_j$ | エル・ジェー | 第 $j$ 次元のレベル数 |
+| $d$ | ディー | 量子化する次元数 |
+| $\prod_j L_j$ | コードブックサイズ | 全次元のレベル数の積 = 実効コードブックサイズ |
+
+$d = 8$ 次元で各次元 $L = 8$ レベルなら、実効コードブックサイズ $= 8^8 = 16,777,216 \approx 1.6 \times 10^7$。これはVQ-VAEで $K = 10^7$ のコードブックを学習するに等しいが、FSQはこれを追加パラメータなしで達成する。
+
+#### 3.11.5 FSQにCodebook Collapseが起きない理由
+
+VQ-VAEでは $z_e$ がコードブック $\{e_k\}$ からどの $e_k$ にも近くない「死角」に入るとcollapseが起きる。FSQではこの問題が構造的に存在しない:
+
+$$
+\hat{z}_j = \text{round}\!\left(\frac{L_j}{2} \cdot \tanh(z_j)\right)
+$$
+
+任意の実数 $z_j$ に対して $\tanh(z_j) \in (-1, 1)$、$\frac{L_j}{2} \tanh(z_j) \in (-L_j/2, L_j/2)$、これを整数に丸めると $\hat{z}_j$ は **必ずグリッド上のいずれかの値** をとる。丸め先が存在しない領域は存在しない。
+
+$$
+\forall z_j \in \mathbb{R},\quad \hat{z}_j \in \left\{-\left\lfloor\frac{L_j}{2}\right\rfloor, \ldots, \left\lfloor\frac{L_j}{2}\right\rfloor\right\}
+$$
+
+commitmentlossもEMAも不要な理由も同じ構造から来る。VQ-VAEでは $z_e$ がコードブックエントリ $e_k$ に近づく必要があるため、それを保証するための追加損失が必要だった。FSQでは $z_e$ がどこにあっても $\hat{z}$ は自動的にグリッド上に着地する。
+
+#### 3.11.6 FSQのSTE勾配
+
+丸め操作 $\text{round}(x)$ は不連続で微分不可能（整数境界を除き勾配は0）。これもSTEで処理する:
+
+$$
+\frac{\partial\, \text{round}(x)}{\partial x} \approx 1
+$$
+
+実装: $\hat{z}_j = z_j^{(s)} + \text{sg}\!\left[\text{round}(z_j^{(s)}) - z_j^{(s)}\right]$、ここで $z_j^{(s)} = \frac{L_j}{2} \tanh(z_j)$。
+
+$\tanh$ は滑らかで微分可能なので $\partial \tanh / \partial z_j = 1 - \tanh^2(z_j)$ が正確に計算される。丸め部分だけSTEを使う。したがってFSQの勾配は $\partial \hat{z}_j / \partial z_j \approx \frac{L_j}{2}(1 - \tanh^2(z_j))$、つまり $|z_j|$ が大きいほど勾配が小さくなる（$\tanh$ の飽和）。
+
+> **Note:** FSQの $\tanh$ 飽和は「自然なgradient clipping」として機能する。$z_j$ が大きくなりすぎると $\hat{z}_j$ の選択肢が端のグリッド値に固定され、勾配が小さくなるため、latentの過剰な発散を防ぐ。これはVQ-VAEのcommitment lossが果たす「latentを有界に保つ」役割を、損失項なしに実現している。
+
+#### 3.11.7 離散表現手法の比較表
+
+| 手法 | コードブックサイズ | Collapse リスク | 勾配品質 | 追加パラメータ | 適用事例 |
+|:-----|:----------------|:--------------|:--------|:-------------|:--------|
+| VQ-VAE | $K$（任意） | 高（$K$ 大時） | STE（粗）| $K \times D$ | 音声 (WaveNet) |
+| VQ-GAN | $K$（任意） | 中（GAN+知覚損失で軽減）| STE | $K \times D$ | 画像トークナイザー |
+| FSQ | $\prod_j L_j$（構造的）| なし | STE（$\tanh$ 飽和で安定）| なし | MAR, MaskBit |
+| LFQ (Lookup-Free) | $2^d$（2値） | 低 | STE | なし | MAGVIT-v2 |
+| RQ-VAE (Residual) | $K^M$（$M$ 段）| 中 | STE（多段）| $M \times K \times D$ | 階層的圧縮 |
+
+**数値検証**: FSQで $d = 8, L = (8, 8, 8, 5, 5, 5, 5, 5)$ の場合のコードブックサイズ:
+
+$$
+\prod_j L_j = 8^3 \times 5^5 = 512 \times 3125 = 1{,}600{,}000
+$$
+
+これは論文のFSQで使われる標準設定の1つ。VQ-VAEで $K = 1.6 \times 10^6$ を実現しようとすると$D = 256$ の場合、約4億パラメータのコードブックが必要になるが、FSQでは追加パラメータゼロで同等の表現力を持つ。
+
+---
+
+> Progress: 50%
+> **理解度チェック**
+> 1. VQ-VAEのStraight-Through Estimator（STE）が必要な理由を、$\mathbf{z}_q = \arg\min_k \|\mathbf{z}_e - e_k\|$ の勾配計算から説明せよ。
+> 2. FSQ（Finite Scalar Quantization）がVQ-VAEのCodebook Collapse問題をどのように原理的に解消するか、量子化関数 $\hat{z} = \text{round}(\tanh(z) \cdot L/2)$ の構造から述べよ。
 
 ## 🔬 最新研究動向（2024-2025）
 
@@ -1505,7 +1530,7 @@ VAEと離散潜在表現学習の最新成果を概観する。
 - **提案**: VAEを経由せず、直接潜在拡散を学習
 - **結果**: 訓練時間30%削減、FIDスコア維持
 - **トレードオフ**: 潜在空間の解釈性低下
-@[card](https://arxiv.org/html/2510.15301v1)
+<https://arxiv.org/html/2510.15301v1>
 
 ### 双曲空間VAE
 
@@ -1513,7 +1538,7 @@ VAEと離散潜在表現学習の最新成果を概観する。
 - **核心**: 潜在分布として球面Cauchy分布を導入（従来のガウスやvon Mises-Fisherより自然）
 - **利点**: 超球面上で真に等方的な表現、KL項の閉形式解
 - **実装**: PyTorchで公開、MNIST/CelebAで5%性能向上
-@[card](https://arxiv.org/html/2506.21278)
+<https://arxiv.org/html/2506.21278>
 
 ### ウェーブレットベースVAE
 
@@ -1521,7 +1546,7 @@ VAEと離散潜在表現学習の最新成果を概観する。
 - **手法**: 潜在空間を多スケールHaarウェーブレット係数で構成
 - **効果**: 高周波詳細の保持、1024×1024でメモリ50%削減
 - **理論**: ウェーブレット基底が自然な階層的潜在表現を提供
-@[card](https://arxiv.org/html/2504.13214)
+<https://arxiv.org/html/2504.13214>
 
 ### GM-VAE: Gaussian Mixture事前分布
 
@@ -1530,7 +1555,7 @@ VAEと離散潜在表現学習の最新成果を概観する。
 - **解決策**: Gaussian Mixture VAE + EMベース訓練戦略
 - **応用**: レーザー誘起燃焼系のシュリーレン画像解析
 - **結果**: 物理的に解釈可能なクラスタ（燃焼モード対応）
-@[card](https://arxiv.org/html/2511.21883)
+<https://arxiv.org/html/2511.21883>
 
 ### Discrete VAE の理論
 
@@ -1538,7 +1563,7 @@ VAEと離散潜在表現学習の最新成果を概観する。
 - **網羅的サーベイ**: VQ-VAE, FSQ, Gumbel-Softmax, DALL-E, MaskGIT
 - **理論的統一**: 離散変分推論の3つのアプローチ（カテゴリカル, VQ, 二値）
 - **実装ガイド**: JAXで全手法を再実装
-@[card](https://arxiv.org/pdf/2505.10344)
+<https://arxiv.org/pdf/2505.10344>
 
 ### Uniform Transformation VAE
 
@@ -1546,7 +1571,7 @@ VAEと離散潜在表現学習の最新成果を概観する。
 - **観察**: 標準VAEの潜在分布は非一様（データに依存した歪み）
 - **手法**: Normalizing Flowで一様分布に変換
 - **効果**: Disentanglementメトリクス（MIG, SAP）で15%向上
-@[card](https://arxiv.org/html/2407.02681v1)
+<https://arxiv.org/html/2407.02681v1>
 
 ### 最新成果の要約表
 
@@ -1565,39 +1590,39 @@ VAEと離散潜在表現学習の最新成果を概観する。
 ### 主要論文
 
 [^1]: Kingma, D. P., & Welling, M. (2013). Auto-Encoding Variational Bayes. *arXiv preprint arXiv:1312.6114*.
-@[card](https://arxiv.org/abs/1312.6114)
+<https://arxiv.org/abs/1312.6114>
 
 [^2]: Higgins, I., Matthey, L., Pal, A., Burgess, C., Glorot, X., Botvinick, M., ... & Lerchner, A. (2017). β-VAE: Learning Basic Visual Concepts with a Constrained Variational Framework. *International Conference on Learning Representations (ICLR)*.
-@[card](https://openreview.net/forum?id=Sy2fzU9gl)
+<https://openreview.net/forum?id=Sy2fzU9gl>
 
 [^3]: van den Oord, A., Vinyals, O., & Kavukcuoglu, K. (2017). Neural Discrete Representation Learning. *Advances in Neural Information Processing Systems (NeurIPS)*. arXiv:1711.00937.
-@[card](https://arxiv.org/abs/1711.00937)
+<https://arxiv.org/abs/1711.00937>
 
 [^4]: Mentzer, F., Minnen, D., Agustsson, E., & Tschannen, M. (2023). Finite Scalar Quantization: VQ-VAE Made Simple. *International Conference on Learning Representations (ICLR) 2024*. arXiv:2309.15505.
-@[card](https://arxiv.org/abs/2309.15505)
+<https://arxiv.org/abs/2309.15505>
 
 [^5]: NVIDIA. (2024). Cosmos Tokenizer. *GitHub Repository*.
-@[card](https://github.com/NVIDIA/Cosmos-Tokenizer)
+<https://github.com/NVIDIA/Cosmos-Tokenizer>
 
 [^6]: Bengio, Y., Léonard, N., & Courville, A. (2013). Estimating or Propagating Gradients Through Stochastic Neurons for Conditional Computation. arXiv:1308.3432.
-@[card](https://arxiv.org/abs/1308.3432)
+<https://arxiv.org/abs/1308.3432>
 
 [^7]: Kingma, D. P., Salimans, T., Jozefowicz, R., Chen, X., Sutskever, I., & Welling, M. (2016). Improved Variational Inference with Inverse Autoregressive Flow. *NeurIPS 2016*.
-@[card](https://arxiv.org/abs/1606.04934)
+<https://arxiv.org/abs/1606.04934>
 
 ### 関連論文
 
 - Burgess, C. P., Higgins, I., Pal, A., Matthey, L., Watters, N., Desjardins, G., & Lerchner, A. (2018). Understanding disentangling in β-VAE. arXiv:1804.03599.
-@[card](https://arxiv.org/abs/1804.03599)
+<https://arxiv.org/abs/1804.03599>
 
 - Kingma, D. P., Salimans, T., & Welling, M. (2015). Variational Dropout and the Local Reparameterization Trick. *NeurIPS*. arXiv:1506.02557.
-@[card](https://arxiv.org/abs/1506.02557)
+<https://arxiv.org/abs/1506.02557>
 
 - Esser, P., Rombach, R., & Ommer, B. (2021). Taming Transformers for High-Resolution Image Synthesis. *CVPR*. arXiv:2012.09841.
-@[card](https://arxiv.org/abs/2012.09841)
+<https://arxiv.org/abs/2012.09841>
 
 - Yu, L., Poirson, P., Yang, S., Berg, A. C., & Berg, T. L. (2023). MAGVIT-v2: Language Model Beats Diffusion - Tokenizer is Key to Visual Generation. arXiv:2310.05737.
-@[card](https://arxiv.org/abs/2310.05737)
+<https://arxiv.org/abs/2310.05737>
 
 ### 教科書
 
@@ -1606,43 +1631,17 @@ VAEと離散潜在表現学習の最新成果を概観する。
 - Murphy, K. P. (2022). *Probabilistic Machine Learning: Advanced Topics*. MIT Press. Chapter 21: Variational Inference.
 
 - Goodfellow, I., Bengio, Y., & Courville, A. (2016). *Deep Learning*. MIT Press. Chapter 20: Deep Generative Models.
-@[card](https://www.deeplearningbook.org/)
+<https://www.deeplearningbook.org/>
 
 ---
 
-## 記法規約
+## 著者リンク
 
-本講義シリーズで使用する数学記法の統一ルール:
-
-| 記号 | 意味 | 読み方 | 例 |
-|:-----|:-----|:------|:---|
-| $x$ | データ（観測変数） | エックス | $x \in \mathbb{R}^{784}$ |
-| $z$ | 潜在変数 | ゼット | $z \in \mathbb{R}^{20}$ |
-| $\theta$ | 生成モデルのパラメータ（Decoder） | シータ | $p_\theta(x \mid z)$ |
-| $\phi$ | 変分分布のパラメータ（Encoder） | ファイ | $q_\phi(z \mid x)$ |
-| $\mu, \sigma$ | 平均、標準偏差 | ミュー、シグマ | $\mathcal{N}(\mu, \sigma^2)$ |
-| $\epsilon$ | ノイズ変数 | イプシロン | $\epsilon \sim \mathcal{N}(0, I)$ |
-| $p(x)$ | 真の分布 | ピー | $p(x) = \int p(x, z) dz$ |
-| $q(z \mid x)$ | 変分分布（近似事後分布） | キュー | $q_\phi(z \mid x)$ |
-| $\mathbb{E}_{q}[\cdot]$ | $q$ の下での期待値 | イー サブ キュー | $\mathbb{E}_{q(z)}[f(z)]$ |
-| $D_\text{KL}(q \| p)$ | KL発散 | ディー ケーエル | $D_\text{KL}(q \| p) = \mathbb{E}_q[\log q - \log p]$ |
-| $\mathcal{L}(\theta, \phi)$ | ELBO（損失関数） | エル シータ ファイ | $\mathcal{L} = \mathbb{E}_q[\log p] - D_\text{KL}(q \| p)$ |
-| $\nabla_\theta$ | $\theta$ に関する勾配 | ナブラ シータ | $\nabla_\theta \mathcal{L}$ |
-| $\odot$ | 要素ごとの積（Hadamard積） | Hadamard product | $z = \mu + \sigma \odot \epsilon$ |
-| $\|x\|$ | ユークリッドノルム | ノルム | $\|x\|^2 = \sum x_i^2$ |
-
-**Julia記法との対応**:
-- `μ` (U+03BC), `σ` (U+03C3), `θ` (U+03B8), `φ` (U+03C6), `ε` (U+03B5) — Juliaでは変数名にギリシャ文字を使える
-- `.` — broadcast演算子（要素ごと適用）
-- `.*` — 要素ごとの積（$\odot$ に対応）
-
----
-
-**EOF**
-
----
-
----
+- Blog: https://fumishiki.dev
+- X: https://x.com/fumishiki
+- LinkedIn: https://www.linkedin.com/in/fumitakamurakami
+- GitHub: https://github.com/fumishiki
+- Hugging Face: https://huggingface.co/fumishiki
 
 ## ライセンス
 

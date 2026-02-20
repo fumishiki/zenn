@@ -4,6 +4,11 @@ emoji: "⚡"
 type: "tech"
 topics: ["machinelearning", "deeplearning", "attention", "julia", "rust"]
 published: true
+slug: "ml-lecture-15-part1"
+difficulty: "advanced"
+time_estimate: "90 minutes"
+languages: ["Julia", "Rust"]
+keywords: ["機械学習", "深層学習", "生成モデル"]
 ---
 
 # 第15回: Attention 類似手法 & Sparse Attention — O(N²)の代償とトレードオフ
@@ -27,9 +32,7 @@ GPT-4の128Kトークンコンテキスト。Claude 3の200Kトークン。こ�
 
 ⚡ Julia と 🦀 Rust で全て実装する。理論と実装の1対1対応を徹底する。
 
-:::message
-**このシリーズについて**: 東京大学 松尾・岩澤研究室動画講義の**完全上位互換**の全50回シリーズ。理論（論文が書ける）、実装（Production-ready）、最新（2025-2026 SOTA）の3軸で差別化する。
-:::
+> **Note:** **このシリーズについて**: 東京大学 松尾・岩澤研究室動画講義の**完全上位互換**の全50回シリーズ。理論（論文が書ける）、実装（Production-ready）、最新（2025-2026 SOTA）の3軸で差別化する。
 
 ```mermaid
 graph TD
@@ -83,7 +86,7 @@ function standard_attention(Q::Matrix{Float32}, K::Matrix{Float32}, V::Matrix{Fl
     return out, attn
 end
 
-function softmax(x::Matrix{T}, ; dims::Int=2) where T
+function softmax(x::Matrix{T}; dims::Int=2) where T
     exp_x = exp.(x .- maximum(x, dims=dims))
     return exp_x ./ sum(exp_x, dims=dims)
 end
@@ -140,9 +143,7 @@ $$
 
 ここで $QK^\top \in \mathbb{R}^{N \times N}$ が問題だ。**系列長Nが2倍になると、メモリは4倍になる。**
 
-:::message
-**進捗: 3% 完了** O(N²)の壁を体感した。ここから、この壁を突破する数学と実装に入っていく。
-:::
+> **Note:** **進捗: 3% 完了** O(N²)の壁を体感した。ここから、この壁を突破する数学と実装に入っていく。
 
 ---
 
@@ -170,107 +171,9 @@ $$
 
 $W^K, W^V$ がヘッドインデックス $i$ に依存しない。つまり **KV-Cacheが1/h に削減**される。
 
-```julia
-using LinearAlgebra
-
-function multi_head_attention(Q::Array{Float32,3}, K::Array{Float32,3}, V::Array{Float32,3}, num_heads::Int)
-    # Q, K, V: (batch, seq_len, d_model)
-    batch_size, seq_len, d_model = size(Q)
-    d_head = d_model ÷ num_heads
-
-    # Reshape: (batch, seq_len, num_heads, d_head) -> (batch, num_heads, seq_len, d_head)
-    Q_heads = reshape(Q, batch_size, seq_len, num_heads, d_head)
-    Q_heads = permutedims(Q_heads, (1, 3, 2, 4))
-
-    K_heads = reshape(K, batch_size, seq_len, num_heads, d_head)
-    K_heads = permutedims(K_heads, (1, 3, 2, 4))
-
-    V_heads = reshape(V, batch_size, seq_len, num_heads, d_head)
-    V_heads = permutedims(V_heads, (1, 3, 2, 4))
-
-    # Attention per head: scores = Q @ K^T / sqrt(d_head)
-    # (batch, num_heads, seq_len, d_head) @ (batch, num_heads, d_head, seq_len) -> (batch, num_heads, seq_len, seq_len)
-    scores = batched_matmul(Q_heads, permutedims(K_heads, (1, 2, 4, 3))) / sqrt(Float32(d_head))
-    attn_weights = softmax_4d(scores)
-
-    # (batch, num_heads, seq_len, seq_len) @ (batch, num_heads, seq_len, d_head) -> (batch, num_heads, seq_len, d_head)
-    out_heads = batched_matmul(attn_weights, V_heads)
-
-    # Reshape back: (batch, seq_len, d_model)
-    out_heads = permutedims(out_heads, (1, 3, 2, 4))
-    out = reshape(out_heads, batch_size, seq_len, d_model)
-
-    return out
-end
-
-function multi_query_attention(Q::Array{Float32,3}, K::Array{Float32,2}, V::Array{Float32,2}, num_heads::Int)
-    # Q: (batch, seq_len, d_model)
-    # K, V: (batch, seq_len, d_head) — SHARED across heads
-    batch_size, seq_len, d_model = size(Q)
-    d_head = d_model ÷ num_heads
-
-    # Q heads: (batch, num_heads, seq_len, d_head)
-    Q_heads = reshape(Q, batch_size, seq_len, num_heads, d_head)
-    Q_heads = permutedims(Q_heads, (1, 3, 2, 4))
-
-    # K, V expand: (batch, seq_len, d_head) -> (batch, 1, seq_len, d_head) (broadcast)
-    K_expanded = reshape(K, batch_size, 1, seq_len, d_head)
-    V_expanded = reshape(V, batch_size, 1, seq_len, d_head)
-
-    # Attention: (batch, num_heads, seq_len, d_head) @ (batch, 1, d_head, seq_len) -> (batch, num_heads, seq_len, seq_len)
-    scores = batched_matmul(Q_heads, permutedims(K_expanded, (1, 2, 4, 3))) / sqrt(Float32(d_head))
-    attn_weights = softmax_4d(scores)
-
-    # (batch, num_heads, seq_len, seq_len) @ (batch, 1, seq_len, d_head) -> (batch, num_heads, seq_len, d_head)
-    out_heads = batched_matmul(attn_weights, V_expanded)
-
-    # Reshape: (batch, seq_len, d_model)
-    out_heads = permutedims(out_heads, (1, 3, 2, 4))
-    out = reshape(out_heads, batch_size, seq_len, d_model)
-
-    return out
-end
-
-function batched_matmul(A::Array{T,4}, B::Array{T,4}) where T
-    # A: (batch, heads, M, K), B: (batch, heads, K, N) -> C: (batch, heads, M, N)
-    batch, heads, M, K = size(A)
-    _, _, _, N = size(B)
-    C = zeros(T, batch, heads, M, N)
-    for b in 1:batch, h in 1:heads
-        C[b, h, :, :] = A[b, h, :, :] * B[b, h, :, :]
-    end
-    return C
-end
-
-function softmax_4d(x::Array{T,4}) where T
-    # Apply softmax along last dimension
-    exp_x = exp.(x .- maximum(x, dims=4))
-    return exp_x ./ sum(exp_x, dims=4)
-end
-
-# Benchmark
-batch_size, seq_len, d_model, num_heads = 2, 512, 512, 8
-d_head = d_model ÷ num_heads
-
-Q_mha = randn(Float32, batch_size, seq_len, d_model)
-K_mha = randn(Float32, batch_size, seq_len, d_model)
-V_mha = randn(Float32, batch_size, seq_len, d_model)
-
-Q_mqa = randn(Float32, batch_size, seq_len, d_model)
-K_mqa = randn(Float32, batch_size, seq_len, d_head)  # SHARED
-V_mqa = randn(Float32, batch_size, seq_len, d_head)  # SHARED
-
-println("MHA KV-Cache size: ", sizeof(K_mha) + sizeof(V_mha), " bytes")
-println("MQA KV-Cache size: ", sizeof(K_mqa) + sizeof(V_mqa), " bytes")
-println("Memory reduction: ", (sizeof(K_mha) + sizeof(V_mha)) / (sizeof(K_mqa) + sizeof(V_mqa)), "x")
-```
 
 出力:
-```
-MHA KV-Cache size: 2097152 bytes
-MQA KV-Cache size: 262144 bytes
-Memory reduction: 8.0x
-```
+
 
 **MQAは8ヘッドで8倍のメモリ削減。** 代償は品質の若干の低下 — Qの多様性はあるがKVは共有なので、表現力が制限される。
 
@@ -292,48 +195,9 @@ $$
 
 各グループが1組のKVを共有する。例: 8ヘッドを2グループ(各4ヘッド)に分けると、KV-Cacheは1/4に削減。
 
-```julia
-# GQA: num_heads=8, num_groups=2 → each group has 4 heads sharing KV
-function grouped_query_attention(Q::Array{Float32,3}, K::Array{Float32,4}, V::Array{Float32,4}, num_heads::Int, num_groups::Int)
-    # Q: (batch, seq_len, d_model)
-    # K, V: (batch, num_groups, seq_len, d_head)
-    batch_size, seq_len, d_model = size(Q)
-    d_head = d_model ÷ num_heads
-    heads_per_group = num_heads ÷ num_groups
-
-    # Q: (batch, num_heads, seq_len, d_head)
-    Q_heads = reshape(Q, batch_size, seq_len, num_heads, d_head)
-    Q_heads = permutedims(Q_heads, (1, 3, 2, 4))
-
-    # Expand K, V from (batch, num_groups, seq_len, d_head) to (batch, num_heads, seq_len, d_head)
-    K_expanded = repeat(K, inner=(1, heads_per_group, 1, 1))
-    V_expanded = repeat(V, inner=(1, heads_per_group, 1, 1))
-
-    # Standard MHA from here
-    scores = batched_matmul(Q_heads, permutedims(K_expanded, (1, 2, 4, 3))) / sqrt(Float32(d_head))
-    attn_weights = softmax_4d(scores)
-    out_heads = batched_matmul(attn_weights, V_expanded)
-
-    out_heads = permutedims(out_heads, (1, 3, 2, 4))
-    out = reshape(out_heads, batch_size, seq_len, d_model)
-
-    return out
-end
-
-# Benchmark
-num_groups = 2
-K_gqa = randn(Float32, batch_size, num_groups, seq_len, d_head)
-V_gqa = randn(Float32, batch_size, num_groups, seq_len, d_head)
-
-println("GQA (2 groups) KV-Cache size: ", sizeof(K_gqa) + sizeof(V_gqa), " bytes")
-println("Memory reduction from MHA: ", (sizeof(K_mha) + sizeof(V_mha)) / (sizeof(K_gqa) + sizeof(V_gqa)), "x")
-```
 
 出力:
-```
-GQA (2 groups) KV-Cache size: 524288 bytes
-Memory reduction from MHA: 4.0x
-```
+
 
 **GQAは品質とメモリのトレードオフを制御できる。** LLaMA-2 [^3] がGQAを採用している。
 
@@ -351,39 +215,6 @@ Memory reduction from MHA: 4.0x
 | メモリ断片化 | 連続メモリ不要 |
 | Prefix共有なし | Prefix共有で複数リクエスト効率化 |
 
-```julia
-# Simplified PagedAttention concept (actual vLLM is CUDA-optimized)
-struct PagedKVCache
-    pages::Dict{Int, Matrix{Float32}}  # page_id -> (page_size, d_head)
-    page_size::Int
-    next_page_id::Ref{Int}
-end
-
-function PagedKVCache(page_size::Int, d_head::Int)
-    return PagedKVCache(Dict{Int, Matrix{Float32}}(), page_size, Ref(1))
-end
-
-function allocate_page!(cache::PagedKVCache, d_head::Int)
-    page_id = cache.next_page_id[]
-    cache.pages[page_id] = zeros(Float32, cache.page_size, d_head)
-    cache.next_page_id[] += 1
-    return page_id
-end
-
-function get_kv_for_sequence(cache::PagedKVCache, page_ids::Vector{Int})
-    # Concatenate pages for a sequence
-    return vcat([cache.pages[pid] for pid in page_ids]...)
-end
-
-# Example
-cache = PagedKVCache(128, 64)  # page_size=128 tokens, d_head=64
-seq1_pages = [allocate_page!(cache, 64), allocate_page!(cache, 64)]  # 256 tokens
-seq2_pages = [allocate_page!(cache, 64)]  # 128 tokens
-
-println("Allocated pages: ", length(cache.pages))
-println("Sequence 1 uses pages: ", seq1_pages)
-println("Sequence 2 uses pages: ", seq2_pages)
-```
 
 **PagedAttentionは推論スループットを2-3倍改善する。** 詳細はZone 3で。
 
@@ -410,11 +241,15 @@ graph TD
 
 > **Zone 1 まとめ**: MQA/GQA/PagedAttentionで推論時のKV-Cacheメモリを削減する方法を体感した。これらは「計算量O(N²)」自体は変えない — **メモリ管理の工夫**だ。次は訓練時の計算量・メモリを削減する FlashAttention へ。
 
-:::message
-**進捗: 10% 完了** KV-Cache最適化手法をマスター。次は「なぜO(N²)が問題なのか」を深く理解する。
-:::
+> **Note:** **進捗: 10% 完了** KV-Cache最適化手法をマスター。次は「なぜO(N²)が問題なのか」を深く理解する。
 
 ---
+
+
+> Progress: 10%
+> **理解度チェック**
+> 1. $\text{GQA}$ の各記号の意味と、この式が表す操作を説明してください。
+> 2. このゾーンで学んだ手法の直感的な意味と、なぜこの定式化が必要なのかを説明してください。
 
 ## 🧩 2. 直感ゾーン（15分）— O(N²)の本質的な問題
 
@@ -447,7 +282,73 @@ Zone 0で見たように、N=128Kで64GBの注意行列。これはGPUメモリ�
 
 つまり **計算は速いがメモリ転送が遅い**。Standard Attentionは **メモリ律速** (memory-bound) であり、計算能力を活かせていない。
 
-### 2.2 第14回からの接続 — Attentionは必然だったが完璧ではない
+### 2.1b Roofline Model — ハードウェア限界の数学的分析
+
+O(N²)の問題を定量化するために、**Roofline Model** を使う。これは演算カーネルの実効性能を理論的上限と比較するフレームワークである。
+
+**算術強度 (Arithmetic Intensity)**
+
+演算カーネルの算術強度 $I$ を次のように定義する:
+
+$$
+I = \frac{\text{FLOPs}}{\text{メモリバイト転送量}} \quad [\text{FLOP/byte}]
+$$
+
+ハードウェアの**ピーク算術強度** (Ridge Point) は:
+
+$$
+I_{\text{ridge}} = \frac{\text{ピークFLOPs}}{\text{ピーク帯域幅}}
+$$
+
+A100の場合: $I_{\text{ridge}} = 312 \times 10^{12} / (1.5 \times 10^{12}) \approx 208 \;\text{FLOP/byte}$。
+
+- $I < I_{\text{ridge}}$: **メモリ律速** — 帯域幅が律速、計算ユニットは遊んでいる
+- $I > I_{\text{ridge}}$: **計算律速** — FLOPs が律速、メモリは十分速い
+
+**Standard AttentionのRoofline分析**
+
+Attentionの各ステップを分析する。$Q, K, V \in \mathbb{R}^{N \times d}$ として:
+
+**(1) スコア行列計算**: $S = QK^\top / \sqrt{d}$
+
+$$
+\text{FLOPs} = 2N^2 d, \quad \text{メモリ転送} = (N d + N d + N^2) \times 2\,\text{bytes}
+$$
+
+$$
+I_S = \frac{2N^2 d}{2(2Nd + N^2)} = \frac{N^2 d}{2Nd + N^2} \approx \frac{d}{2} \quad (N \gg d)
+$$
+
+$d = 64$ の場合 $I_S \approx 32 \;\text{FLOP/byte}$ → $I_{\text{ridge}} = 208$ を大きく下回る → **メモリ律速**。
+
+**(2) Softmax と $AV$ 計算**: 注意行列 $A \in \mathbb{R}^{N \times N}$ をHBMに書き戻して再読み込み
+
+$$
+\text{メモリ転送 (追加)} = 2 \times N^2 \times 2\,\text{bytes} \quad (\text{書き込み} + \text{読み込み})
+$$
+
+HBMのラウンドトリップが支配的になり、計算はほぼアイドルになる。
+
+**FlashAttentionのRoofline改善**
+
+FlashAttentionはタイリングによってHBMへの注意行列書き出しを排除する:
+
+$$
+\text{メモリ転送 (FlashAttention)} \approx (3Nd + Nd) \times 2\,\text{bytes} = 8Nd\,\text{bytes}
+$$
+
+$$
+I_{\text{FA}} = \frac{2N^2 d}{8Nd} = \frac{N}{4} \quad \text{(例: } N=4096 \Rightarrow I \approx 1024 \gg I_{\text{ridge}}\text{)}
+$$
+
+つまりFlashAttentionは同じ $O(N^2 d)$ FLOPsを、約 $N/4d$ 倍少ないHBM転送で実現し、計算律速領域に到達する。これがFlashAttentionが「速い」理由の本質だ。
+
+この分析は、効率化の方向性を明確に示す:
+
+- **Sparse Attention**: FLOPs自体を $O(\beta N^2 d)$ に削減 → $I$ は変わらないが絶対量が減る
+- **Linear Attention**: FLOPs を $O(Nd^2)$ に削減 → $N \gg d$ なら圧倒的に有利
+- **Ring Attention**: HBM転送を $O(Nd)$ に制限 → 単一GPU問題を多GPU問題に変換
+
 
 第14回で学んだこと:
 
@@ -520,22 +421,20 @@ N人が全員と握手すると N(N-1)/2 ≈ O(N²) 回の握手。Attentionは�
 
 **多重ディスパッチ**が威力を発揮する:
 
-```julia
-# 同じ関数名で、型に応じて自動で最適実装が選ばれる
-attention(q::Matrix, k::Matrix, v::Matrix) = standard_attention(q, k, v)
-attention(q::Matrix, k::Matrix, v::Matrix, mask::SparseMask) = sparse_attention(q, k, v, mask)
-attention(q::Matrix, k::Matrix, v::Matrix, ::LinearAttentionType) = linear_attention(q, k, v)
-```
 
 型が異なれば、**if文を書かずに**自動で別の実装が呼ばれる。これがJuliaの本質だ。
 
 > **Zone 2 まとめ**: O(N²)の本質的な問題(計算量・メモリ・ハードウェア限界)を理解した。次はこれを数学的に解決する手法を完全導出する。
 
-:::message
-**進捗: 20% 完了** 直感ゾーンクリア。O(N²)が「なぜ問題なのか」を完全に理解した。次は60分の数式修行ゾーン — 5つのアプローチを完全導出する。
-:::
+> **Note:** **進捗: 20% 完了** 直感ゾーンクリア。O(N²)が「なぜ問題なのか」を完全に理解した。次は60分の数式修行ゾーン — 5つのアプローチを完全導出する。
 
 ---
+
+
+> Progress: 20%
+> **理解度チェック**
+> 1. このゾーンの主要な概念・定義を自分の言葉で説明してください。
+> 2. この手法が他のアプローチより優れている点と、その限界を述べてください。
 
 ## 📐 3. 数式修行ゾーン（60分）— 効率化手法の完全導出
 
@@ -647,38 +546,6 @@ $$
 
 **3.2.3 FlashAttentionのアルゴリズム**
 
-```
-Input: Q, K, V in HBM
-Output: O in HBM
-
-Initialize: O = 0 (size N × d), ℓ = 0 (size N), m = -∞ (size N)
-
-For i = 1 to T_r (rows):
-    Load Q_i from HBM to SRAM
-    Initialize: O_i = 0, ℓ_i = 0, m_i = -∞
-
-    For j = 1 to T_c (columns):
-        Load K_j, V_j from HBM to SRAM
-
-        # Compute S_ij in SRAM
-        S_ij = Q_i @ K_j^T / sqrt(d)
-
-        # Update max
-        m_i_new = max(m_i, rowmax(S_ij))
-
-        # Update normalization constant ℓ
-        ℓ_i_new = ℓ_i * exp(m_i - m_i_new) + rowsum(exp(S_ij - m_i_new))
-
-        # Update output O_i
-        O_i = O_i * (ℓ_i / ℓ_i_new) * exp(m_i - m_i_new) + (exp(S_ij - m_i_new) @ V_j) / ℓ_i_new
-
-        # Update state
-        ℓ_i = ℓ_i_new
-        m_i = m_i_new
-
-    # Write O_i back to HBM
-    Store O_i to HBM
-```
 
 **IO複雑度**:
 
@@ -687,9 +554,7 @@ For i = 1 to T_r (rows):
 
 A100では $M \approx 20$ MB, $d=128$, $N=8192$ → 約10倍のIO削減。
 
-:::message
-ここで多くの人が混乱するのが「計算量は同じなのになぜ速い？」だ。答えは **メモリアクセスが律速** だから。FlashAttentionは計算量O(N²d)を減らしていない。だがメモリアクセスを削減することで、**GPUの計算能力を活かせる**ようになる。
-:::
+> **Note:** ここで多くの人が混乱するのが「計算量は同じなのになぜ速い？」だ。答えは **メモリアクセスが律速** だから。FlashAttentionは計算量O(N²d)を減らしていない。だがメモリアクセスを削減することで、**GPUの計算能力を活かせる**ようになる。
 
 **3.2.4 FlashAttention-2 と FlashAttention-3**
 
@@ -845,19 +710,9 @@ FlashAttentionは数学的には単純だが、実装は高度なCUDAプログ�
 
 Julia/Rustで「概念実証」は可能だが、**本番はCUDA必須**。幸い、公式実装が利用可能:
 
-```bash
-pip install flash-attn --no-build-isolation
-```
 
 PyTorchでの使用:
 
-```python
-import torch
-from flash_attn import flash_attn_func
-
-# Q, K, V: (batch, seqlen, nheads, headdim)
-out = flash_attn_func(q, k, v, causal=False)
-```
 
 ### 3.3 Sparse Attention — 注意パターンを疎にする
 
@@ -950,6 +805,52 @@ DeepSeek の **Native Sparse Attention** (2025) は、ハードウェアレベ�
 - メモリアクセスパターンを最適化
 - 2-3倍の高速化
 
+**3.3.4b Native Sparse Attention のハードウェア最適化**
+
+標準的なスパース行列乗算をGPUで素直に実装すると、**不規則メモリアクセス**という致命的な問題が生じる。GPUのメモリ帯域を最大限活用するには、**コアレスアクセス** (coalesced access) — 隣接スレッドが連続アドレスを読む — が必須だが、要素単位のスパース行列ではこれが崩れる。
+
+NSAの本質的な解決策は、**スパース粒度をブロック単位**に揃えることにある。
+
+**ブロックスパースAttentionの形式化**
+
+ブロックサイズを $B$ とする。系列長 $N$ を $T = N/B$ ブロックに分割する:
+
+$$
+Q = [Q^{(1)}, \ldots, Q^{(T)}], \quad K = [K^{(1)}, \ldots, K^{(T)}], \quad V = [V^{(1)}, \ldots, V^{(T)}]
+$$
+
+各 $Q^{(i)}, K^{(j)} \in \mathbb{R}^{B \times d}$。スパースパターンを二値マスク $\mathcal{M} \in \{0,1\}^{T \times T}$ で表す:
+
+$$
+\mathcal{M}_{ij} = \begin{cases} 1 & \text{ブロック } (i,j) \text{ を計算する} \\ 0 & \text{スキップ} \end{cases}
+$$
+
+出力ブロック $O^{(i)}$ は:
+
+$$
+O^{(i)} = \text{softmax}\!\left(\frac{1}{\sqrt{d}} \bigoplus_{j:\mathcal{M}_{ij}=1} Q^{(i)} (K^{(j)})^\top\right) \cdot \bigoplus_{j:\mathcal{M}_{ij}=1} V^{(j)}
+$$
+
+ここで $\bigoplus$ はブロック集約を意味し、Softmaxは存在するブロックのみにわたる。
+
+**CUDAカーネル設計の要点**
+
+ブロックスパース実装では、各CTAブロック (Cooperative Thread Array) が $Q^{(i)}$ の1ブロックに対応し、$\mathcal{M}_{i,:} = 1$ となる $K^{(j)}, V^{(j)}$ のみを順番にShared Memoryにロードして処理する。
+
+- **Shared Memory tiling**: $Q^{(i)}$ はSMEMに常駐させ、$K^{(j)}, V^{(j)}$ をタイルごとにロード
+- **コアレスアクセス**: 各ブロックは $B \times d$ の連続メモリ領域 → 128バイト境界でコアレス
+- **疎ブロックリスト**: $\mathcal{M}$ の各行の非ゼロ列インデックスを事前コンパイル → ループはゼロ要素をスキップ
+
+**計算量の削減**
+
+スパース率を $\beta = |\{(i,j): \mathcal{M}_{ij}=1\}| / T^2$ とすると:
+
+$$
+\text{FLOPs} = \beta \cdot 2N^2 d \quad (\text{vs. } 2N^2 d \text{ for dense})
+$$
+
+NSAでは $\beta \approx 0.02$〜$0.05$ を達成。重要なのは、ブロックスパース構造によりGPUスループットがほぼ理論値通り得られる点で、**実効スピードアップ** $\approx 1/\beta$ となる。
+
 **3.3.5 ⚔️ Boss Battle: BigBird のスパースパターンを完全実装**
 
 BigBird [^9] の理論的保証を理解し、実装しよう。
@@ -962,143 +863,9 @@ BigBird [^9] の理論的保証を理解し、実装しよう。
 
 **完全実装 (Julia)**:
 
-```julia
-using SparseArrays
-using Random
-
-"""
-BigBird Sparse Attention Pattern
-
-Parameters:
-- window_size: local window radius (w)
-- num_global: number of global tokens (g)
-- num_random: number of random connections (r)
-"""
-function bigbird_attention(Q::Matrix{T}, K::Matrix{T}, V::Matrix{T};
-                           window_size::Int=3,
-                           num_global::Int=2,
-                           num_random::Int=3,
-                           seed::Int=42) where T
-    N, d = size(Q)
-    sqrt_d = sqrt(T(d))
-
-    # Build sparse adjacency: mask[i, j] = 1 if i attends to j
-    Random.seed!(seed)
-
-    I_idx = Int[]
-    J_idx = Int[]
-
-    for i in 1:N
-        # 1. Local window
-        for j in max(1, i - window_size):min(N, i + window_size)
-            push!(I_idx, i)
-            push!(J_idx, j)
-        end
-
-        # 2. Global tokens
-        for g in 1:num_global
-            if g != i
-                push!(I_idx, i)
-                push!(J_idx, g)
-            end
-        end
-
-        # If i is a global token, attend to all
-        if i <= num_global
-            for j in 1:N
-                if j != i && !((i, j) in zip(I_idx, J_idx))
-                    push!(I_idx, i)
-                    push!(J_idx, j)
-                end
-            end
-        end
-
-        # 3. Random connections
-        candidates = setdiff(1:N, [i])
-        # Exclude already connected
-        already_connected = [j for (ii, j) in zip(I_idx, J_idx) if ii == i]
-        candidates = setdiff(candidates, already_connected)
-
-        if length(candidates) >= num_random
-            random_targets = Random.shuffle(candidates)[1:num_random]
-            for j in random_targets
-                push!(I_idx, i)
-                push!(J_idx, j)
-            end
-        else
-            # If not enough candidates, connect to all remaining
-            for j in candidates
-                push!(I_idx, i)
-                push!(J_idx, j)
-            end
-        end
-    end
-
-    # Remove duplicates
-    pairs = unique(zip(I_idx, J_idx))
-    I_idx = [p[1] for p in pairs]
-    J_idx = [p[2] for p in pairs]
-
-    # Compute sparse scores
-    scores = zeros(T, length(I_idx))
-    for (idx, (i, j)) in enumerate(zip(I_idx, J_idx))
-        scores[idx] = dot(Q[i, :], K[j, :]) / sqrt_d
-    end
-
-    # Build sparse matrix
-    S_sparse = sparse(I_idx, J_idx, scores, N, N)
-
-    # Softmax per row (sparse)
-    O = zeros(T, N, d)
-    for i in 1:N
-        row_indices = findall(!iszero, S_sparse[i, :])
-        if isempty(row_indices)
-            continue
-        end
-
-        row_scores = [S_sparse[i, j] for j in row_indices]
-        row_scores_exp = exp.(row_scores .- maximum(row_scores))
-        row_attn = row_scores_exp ./ sum(row_scores_exp)
-
-        # Weighted sum
-        for (idx, j) in enumerate(row_indices)
-            O[i, :] .+= row_attn[idx] .* V[j, :]
-        end
-    end
-
-    return O, S_sparse
-end
-
-# Test
-N, d = 64, 32
-Q = randn(Float32, N, d)
-K = randn(Float32, N, d)
-V = randn(Float32, N, d)
-
-O_bigbird, S_sparse = bigbird_attention(Q, K, V, window_size=3, num_global=2, num_random=3)
-
-# Analyze sparsity
-nnz_per_row = [count(!iszero, S_sparse[i, :]) for i in 1:N]
-println("BigBird sparsity analysis:")
-println("  Total possible edges: ", N^2)
-println("  Actual edges: ", nnz(S_sparse))
-println("  Sparsity: ", round(100 * (1 - nnz(S_sparse) / N^2), digits=2), "%")
-println("  Avg edges per row: ", round(mean(nnz_per_row), digits=2))
-println("  Max edges per row: ", maximum(nnz_per_row), " (global tokens)")
-println("  Min edges per row: ", minimum(nnz_per_row), " (edge tokens)")
-```
 
 **期待される出力**:
 
-```
-BigBird sparsity analysis:
-  Total possible edges: 4096
-  Actual edges: 576
-  Sparsity: 85.94%
-  Avg edges per row: 9.0
-  Max edges per row: 64 (global tokens)
-  Min edges per row: 7 (edge tokens)
-```
 
 **理論的検証**:
 
@@ -1262,50 +1029,232 @@ $$
 
 **これにより、推論時に O(1) per token で生成可能。**
 
-```julia
-function causal_linear_attention(Q::Matrix{T}, K::Matrix{T}, V::Matrix{T}) where T
-    N, d = size(Q)
-
-    # Feature maps
-    ϕ_Q = max.(Q, zero(T)) .+ T(1)
-    ϕ_K = max.(K, zero(T)) .+ T(1)
-
-    # Initialize cumulative states
-    S = zeros(T, d, d)  # (d, d) matrix
-    z = zeros(T, d)      # (d,) vector
-
-    O = zeros(T, N, d)
-
-    for i in 1:N
-        # Update cumulative states
-        S += ϕ_K[i, :] * V[i, :]'
-        z += ϕ_K[i, :]
-
-        # Compute output for position i
-        numerator = ϕ_Q[i, :]' * S
-        denominator = ϕ_Q[i, :]' * z
-        O[i, :] = numerator[:] ./ (denominator + T(1e-6))
-    end
-
-    return O
-end
-```
 
 **推論時の効率**: 各ステップで $S, z$ を更新するだけ → $O(d^2)$ per token → 系列全体で $O(Nd^2)$。
 
 ### 3.5 Ring Attention — 超長コンテキストの分散処理
 
-**Ring Attention** [^13] は、**Blockwise並列**で数百万トークンを扱う:
+**Ring Attention** [^13] は、Blockwise並列計算によって数百万トークンのAttentionを複数GPUで協調処理する手法である。まず問題の本質から出発し、アルゴリズムを数学的に厳密に導出する。
 
-- 系列を $P$ 個のブロックに分割
-- 各デバイスが1ブロックを担当
-- リング状に通信しながらAttentionを計算
+#### 3.5.1 問題の本質 — なぜリング構造なのか
 
-計算量: 各デバイスで $O((N/P)^2 d)$ → 全体で $O(N^2 d / P)$。
+長さ $N = 10^6$ の系列に対してAttentionを計算するとき、注意行列 $A \in \mathbb{R}^{N \times N}$ は:
 
-メモリ: 各デバイスで $O((N/P)^2)$ → 全GPUで $O(N^2 / P)$。
+$$
+\text{メモリ} = N^2 \times 2 \text{ bytes (bf16)} = (10^6)^2 \times 2 = 2 \times 10^{12} \text{ bytes} = 2 \text{ TB}
+$$
 
-**通信量**: $O(N d)$ (K, V のブロックをリング状に転送)。
+現代のH100 GPUのHBMは80GBであり、単体では到底収まらない。**問題を $P$ 台のGPUに分散させる**必要がある。
+
+素朴なアプローチとして、All-to-All通信で全GPUがすべての $K, V$ を受け取る方法が考えられる。しかしこの場合の通信量は $O(N \cdot d \cdot P)$ であり、デバイス数 $P$ とともに線形増加する。
+
+**Ring Attentionのアイデア**: $P$ デバイスをリング状に接続し、各デバイスは**隣接デバイスとのみP2P通信**を行う。各ステップで $K, V$ の1ブロックをリング上を右方向に送りながら、手元の $Q$ ブロックとの部分積を蓄積する。これにより:
+
+- 通信量: $O(Nd)$ (デバイス数 $P$ に依存しない)
+- All-to-All不要: 隣接P2P通信のみ
+- 通信と計算のオーバーラップ: パイプライン効率化が可能
+
+#### 3.5.2 Blockwise Parallel Self-Attention の数学的導出
+
+系列を $P$ 個の等分ブロックに分割する:
+
+$$
+Q = [Q_1 \mid Q_2 \mid \cdots \mid Q_P], \quad K = [K_1 \mid K_2 \mid \cdots \mid K_P], \quad V = [V_1 \mid V_2 \mid \cdots \mid V_P]
+$$
+
+各ブロック $Q_p, K_p, V_p \in \mathbb{R}^{(N/P) \times d}$。デバイス $p$ は最初に $Q_p, K_p, V_p$ を保持し、計算ステップ $t = 0, 1, \ldots, P-1$ の各ステップで $K_{(p+t) \bmod P}, V_{(p+t) \bmod P}$ を受け取る。
+
+**Online Softmaxによる分散累積**
+
+デバイス $p$ は次の3つの量を各行ごとに管理する:
+
+- $m_p \in \mathbb{R}^{N/P}$: これまでのスコアの行ごと最大値
+- $\ell_p \in \mathbb{R}^{N/P}$: これまでの指数和 (未正規化分母)
+- $O_p \in \mathbb{R}^{(N/P) \times d}$: これまでの出力の加重和
+
+ステップ $t$ で $K_j = K_{(p+t) \bmod P}$, $V_j = V_{(p+t) \bmod P}$ を受け取ったとき、スコア行列を計算:
+
+$$
+S^{(t)} = \frac{Q_p K_j^\top}{\sqrt{d}} \in \mathbb{R}^{(N/P) \times (N/P)}
+$$
+
+行ごとの最大値を更新:
+
+$$
+m_p^{(t)} = \max\!\left(m_p^{(t-1)},\; \text{rowmax}(S^{(t)})\right)
+$$
+
+修正係数を計算: $\alpha^{(t)} = \exp\!\left(m_p^{(t-1)} - m_p^{(t)}\right) \in \mathbb{R}^{N/P}$ (スカラー、行ごと)。
+
+指数和を更新:
+
+$$
+\ell_p^{(t)} = \alpha^{(t)} \cdot \ell_p^{(t-1)} + \text{rowsum}\!\left(\exp\!\left(S^{(t)} - m_p^{(t)}\right)\right)
+$$
+
+出力を更新:
+
+$$
+O_p^{(t)} = \text{diag}(\alpha^{(t)}) \cdot O_p^{(t-1)} + \exp\!\left(S^{(t)} - m_p^{(t)}\right) V_j
+$$
+
+ここで $\text{diag}(\alpha^{(t)})$ は $\alpha^{(t)}$ を対角に持つ行列で、各行を独立にスケールする操作を意味する。
+
+全ステップ $t = 0, \ldots, P-1$ を経た後、正規化して最終出力を得る:
+
+$$
+O_p = \text{diag}\!\left(\ell_p^{(P-1)}\right)^{-1} O_p^{(P-1)}
+$$
+
+**正しさの証明概要**
+
+この更新則は、FlashAttentionのOnline Softmaxと本質的に同じ数値安定化を行う。$t$ ステップ後に $O_p^{(t)} / \ell_p^{(t)}$ が、ブロック $j = 0, \ldots, t$ 全体のスコアに対する正規化済みAttentionの出力と等しくなることは、帰納法で確認できる。最終ステップ $t = P-1$ では全ブロックをカバーするため、グローバルなSoftmax Attentionと厳密に一致する。
+
+#### 3.5.3 通信パターンの詳細
+
+リング構造における通信を形式化する。デバイス番号を $0, 1, \ldots, P-1$ とし、デバイス $p$ の右隣を $(p+1) \bmod P$ とする。
+
+ステップ $t$ における通信:
+
+| ステップ $t$ | デバイス $p$ が処理するブロック | 通信 |
+|---|---|---|
+| $t=0$ | $(K_p, V_p)$ (自己保有) | なし |
+| $t=1$ | $(K_{p-1}, V_{p-1})$ | 左隣から受け取り、右隣へ送信 |
+| $t=2$ | $(K_{p-2}, V_{p-2})$ | 同上 |
+| $\vdots$ | $\vdots$ | $\vdots$ |
+| $t=P-1$ | $(K_{p+1}, V_{p+1})$ | 同上 |
+
+各通信ステップで転送されるデータ量:
+
+$$
+\text{通信量/ステップ} = 2 \times \frac{N}{P} \times d \times 2\,\text{bytes (bf16)}
+$$
+
+($K$ と $V$ それぞれ $N/P$ 行 $d$ 列)。ステップ数は $P-1$ 回なので、デバイスあたりの総通信量:
+
+$$
+\text{総通信量} = (P-1) \times 2 \times \frac{N}{P} \times d \approx 2Nd \quad \text{(for large } P\text{)}
+$$
+
+これはシステム全体でも $O(Nd)$ であり、注意行列 $O(N^2)$ と比べて遥かに小さい。$N = 10^6$, $d = 128$ の場合:
+
+$$
+2Nd = 2 \times 10^6 \times 128 = 2.56 \times 10^8 \quad \text{vs.} \quad N^2 = 10^{12}
+$$
+
+通信量は $\approx 4000$ 倍小さい。
+
+#### 3.5.4 計算・メモリ・通信の複雑度まとめ
+
+**計算量 (FLOPs)**
+
+デバイス $p$ は各ステップで $(N/P) \times (N/P)$ の行列積を $d$ 次元で実行する:
+
+$$
+\text{FLOPs/デバイス} = P \times 2 \times \left(\frac{N}{P}\right)^2 \times d = \frac{2N^2 d}{P}
+$$
+
+全デバイス合計: $P \times \frac{2N^2 d}{P} = 2N^2 d$ (dense Attentionと同等、ただし $P$ 台で並列化)。
+
+**メモリ (per device)**
+
+| 量 | サイズ | 説明 |
+|---|---|---|
+| $Q_p$ | $(N/P) \times d$ | 固定保持 |
+| $K_j, V_j$ (current) | $2 \times (N/P) \times d$ | 1ブロックのみ保持 |
+| $m_p, \ell_p$ | $(N/P)$ | スカラー統計量 |
+| $O_p$ | $(N/P) \times d$ | 累積出力 |
+| **合計** | $\approx 5(N/P)d$ | $= O(Nd/P)$ per device |
+
+注意行列自体を $O((N/P)^2)$ 保持する必要がなく、FlashAttentionと同様にタイルごとに捨てられる。
+
+**通信**
+
+$$
+O(Nd) \quad \text{total, } O(Nd/P) \text{ per step per device}
+$$
+
+**通信と計算のオーバーラップ**: デバイス $p$ がステップ $t$ の行列積を実行している間に、次ステップの $K_{t+1}, V_{t+1}$ を非同期でプリフェッチできる。NCCL の非同期P2P通信と組み合わせると、通信コストをほぼゼロに隠蔽できる。
+
+#### 3.5.5 Causal Ring Attention — 因果マスクの特殊処理
+
+言語モデルでは因果 (causal) マスクが必須であり、$i < j$ のペア (未来トークン) をすべてマスクする:
+
+$$
+A_{ij} = \begin{cases} \text{softmax}(S_{ij}) & i \geq j \\ 0 & i < j \end{cases}
+$$
+
+**ブロック単位の分類**
+
+デバイス $p$ が $Q_p$ と $K_j$ のブロックペアを処理する際:
+
+- **$j < p$ (過去ブロック)**: $Q_p$ の全行が $K_j$ の全列にアクセス可能 → **完全計算ブロック**
+- **$j = p$ (対角ブロック)**: $Q_p$ の行 $i$ は $K_p$ の列 $j \leq i$ のみ有効 → **三角マスクブロック**  
+- **$j > p$ (未来ブロック)**: 全要素がマスク → **スキップ可能**
+
+```mermaid
+graph LR
+    subgraph "ブロック分類 (P=4)"
+        direction TB
+        A["(p=0, j=0) 三角"] 
+        B["(p=1, j=0) 完全"]
+        C["(p=1, j=1) 三角"]
+        D["(p=2, j=0) 完全"]
+        E["(p=2, j=2) 三角"]
+        F["(p=3, j=0) 完全"]
+        G["(p=3, j=3) 三角"]
+        H["(p=0, j=1..3) スキップ"]
+    end
+```
+
+**負荷不均衡の問題**
+
+単純なRing Attentionでは、各デバイスが $P$ ステップすべてを実行するが、$j > p$ のブロックはスキップされる。デバイス $p = 0$ は対角ブロックのみ (有効計算 $\approx (N/P)^2/2$)、デバイス $p = P-1$ は全ブロックを計算 (有効計算 $\approx P \cdot (N/P)^2/2$)。
+
+**解決策: Load Balancing**
+
+系列インデックスを再配置し、各デバイスが均等な有効計算量を持つようにする。具体的には、デバイス $p$ が担当するトークン集合を $\{p, p+P, p+2P, \ldots\}$ のような等間隔サンプリングで定義する (zig-zag ordering)。これにより全デバイスで計算負荷が均一になり、アイドル時間が排除される。
+
+#### 3.5.6 Sequence Parallelism との統合
+
+Ring Attentionは**Sequence Parallelism**の一形態であり、他の並列化戦略と組み合わせ可能:
+
+| 並列化戦略 | 分割軸 | 効果 |
+|---|---|---|
+| Tensor Parallelism | ヘッド数 $H$ を分割 | 各GPUで $H/T_p$ ヘッド |
+| Sequence Parallelism (Ring) | 系列長 $N$ を分割 | 各GPUで $N/P$ トークン |
+| Pipeline Parallelism | 層数 $L$ を分割 | 各GPUで $L/P_p$ 層 |
+
+これら3軸を組み合わせると、モデル並列度 $T_p \times P \times P_p$ のデバイスを活用できる。Llama-3の128Kコンテキストは、Tensor Parallel度8 + Sequence Parallel度4の組み合わせで実現されている。
+
+**1M+ トークンへのスケーリング**
+
+$N = 10^6$, $P = 64$ GPUs の場合:
+- 各GPUが担当: $N/P = 15625$ トークン
+- GPU当たりメモリ (KQV): $\approx 15625 \times 128 \times 3 \times 2\,\text{bytes} \approx 12\,\text{MB}$
+- 通信量/GPU: $2 \times 15625 \times 128 \times 2\,\text{bytes} \times 63\,\text{steps} \approx 500\,\text{MB}$
+
+NVLink (600 GB/s) ならば通信時間 $< 1\,\text{ms}$、H100の行列積ピーク性能に対して通信は十分に隠蔽できる。
+
+**3.5.7 実装上の注意**
+
+Ring Attentionを実際に実装する際、以下の点に注意が必要である。
+
+まず、**数値精度の管理**。各デバイスが独立に $m_p, \ell_p$ を維持するため、ステップをまたぐ $\exp$ 計算での桁落ちを防ぐには、常に現在の最大値を基準にスコアをシフトしなければならない。BF16での実装では、$m_p^{(t-1)} - m_p^{(t)}$ が十分小さい ($< 10$) ことを確認する実装ガードが有用である。
+
+次に、**Softmax分母の蓄積**。$\ell_p$ は各ステップで $\ell_p \leftarrow \alpha \ell_p + \Delta\ell$ と更新されるが、最終正規化まで $O_p$ を正規化してはならない。途中で誤って正規化すると、後続ステップの加重に誤差が生じる。
+
+最後に、**勾配計算**。バックパスでもリング通信が必要であり、$dQ_p, dK_p, dV_p$ の各勾配に対して同様のリング通信プロトコルが要求される。フォワードとバックワードの通信量は等しく、合計通信量はフォワード $2Nd$ の2倍となる。
+
+**Ring Attention 複雑度サマリー**
+
+| 指標 | 値 | 備考 |
+|---|---|---|
+| 計算量 (全体) | $O(N^2 d)$ | Dense Attentionと同等、$P$ 台並列 |
+| 計算量 (per device) | $O(N^2 d / P)$ | 線形スケールアウト |
+| メモリ (per device) | $O(Nd/P)$ | 注意行列不要 |
+| 通信量 (total) | $O(Nd)$ | $P$ に依存しない |
+| ハードウェア要件 | P2P接続リング | NVLink / InfiniBand |
 
 ### 3.6 Mixture of Experts (MoE) — Sparse Activationで計算効率化
 
@@ -1336,7 +1285,7 @@ Switch Transformer [^14] は **Top-1 routing** (k=1) を使う:
 
 DeepSeek-MoE [^15] は **Fine-grained routing**:
 
-- 各Expertをさらに小さな「sub-expert」に分割
+- 各Expertをより小さな「sub-expert」に分割
 - Top-k を sub-expert レベルで選択 → より柔軟
 
 **3.6.3 MoE の数学的詳細**
@@ -1448,9 +1397,7 @@ $$
 
 高速インターコネクト (InfiniBand, NVLink) 必須。
 
-:::message
-**進捗: 50% 完了** 数式修行ゾーン前半クリア。FlashAttention, Sparse Attention, Linear Attention, Ring Attention, MoE の数学を完全導出した。次は実装ゾーンへ。
-:::
+> **Note:** **進捗: 50% 完了** 数式修行ゾーン前半クリア。FlashAttention, Sparse Attention, Linear Attention, Ring Attention, MoE の数学を完全導出した。次は実装ゾーンへ。
 
 ---
 
@@ -1465,7 +1412,7 @@ Sparse AttentionとLinear Attentionの研究は2024-2025年に爆発的進展を
 - **手法**: Tiling + recomputation in backward pass
 - **性能**: GPT-2で7.6倍高速化、メモリ使用量線形
 - **影響**: 事実上の業界標準（PyTorch/JAX統合）
-@[card](https://arxiv.org/abs/2205.14135)
+<https://arxiv.org/abs/2205.14135>
 
 ### Block Sparse FlashAttention
 
@@ -1474,7 +1421,7 @@ Sparse AttentionとLinear Attentionの研究は2024-2025年に爆発的進展を
 - **仕組**: ブロックごとの最大スコアを閾値と比較、約50%のブロックをスキップ
 - **性能**: 長文コンテキスト推論で2.1倍高速化、精度ロス<1%
 - **実装**: Tritonカーネル公開
-@[card](https://arxiv.org/html/2512.07011)
+<https://arxiv.org/html/2512.07011>
 
 ### SeerAttention: 学習可能なスパースパターン
 
@@ -1483,7 +1430,7 @@ Sparse AttentionとLinear Attentionの研究は2024-2025年に爆発的進展を
 - **手法**: 学習可能なゲートで重要ブロックを選択的に活性化
 - **結果**: GPU上で顕著な高速化、長文コンテキストpre-fillingで精度向上
 - **理論**: 注意パターンの本質的構造をモデルが発見
-@[card](https://arxiv.org/abs/2410.13276)
+<https://arxiv.org/abs/2410.13276>
 
 ### Native Sparse Attention: ハードウェアレベル最適化
 
@@ -1492,7 +1439,7 @@ Sparse AttentionとLinear Attentionの研究は2024-2025年に爆発的進展を
 - **性能**: 64k文脈長で前方9.0倍、後方6.0倍高速化（文脈長増加で加速度的向上）
 - **実装**: CUDAカーネル直接実装、メモリアクセスパターン最適化
 - **インパクト**: DeepSeek-V3で実戦投入
-@[card](https://arxiv.org/pdf/2502.11089)
+<https://arxiv.org/pdf/2502.11089>
 
 ### FlashInfer: カスタマイズ可能なAttentionエンジン
 
@@ -1500,7 +1447,7 @@ Sparse AttentionとLinear Attentionの研究は2024-2025年に爆発的進展を
 - **特徴**: プラグイン可能なAttentionカーネル、動的スパースパターン対応
 - **API**: 統一インターフェースで多様なAttention variant
 - **性能**: FlashAttention-2と同等速度、柔軟性10倍
-@[card](https://www.arxiv.org/pdf/2501.01005)
+<https://www.arxiv.org/pdf/2501.01005>
 
 ### 効率的Attentionメカニズムのサーベイ
 
@@ -1508,7 +1455,7 @@ Sparse AttentionとLinear Attentionの研究は2024-2025年に爆発的進展を
 - **網羅**: 100以上のAttention変種を分類（Sparse, Linear, Low-rank, Hybrid）
 - **ベンチマーク**: 統一評価（速度, メモリ, 精度, 長文対応）
 - **結論**: タスク依存の最適選択、単一最強手法なし
-@[card](https://arxiv.org/html/2507.19595v1)
+<https://arxiv.org/html/2507.19595v1>
 
 ### 最新成果の技術比較表
 
@@ -1556,23 +1503,6 @@ Sparse AttentionとLinear Attentionの研究は2024-2025年に爆発的進展を
 
 **ライブラリ選定:**
 
-```python
-# PyTorch: FlashAttention-2 統合（torch >= 2.0）
-import torch.nn.functional as F
-out = F.scaled_dot_product_attention(q, k, v, is_causal=True)  # 自動でFlash選択
-
-# Triton: カスタムカーネル
-import triton
-# Block Sparse FlashAttention のTriton実装が公開中
-
-# JAX: Pallas でFlashAttention
-from jax.experimental import pallas
-# FlashAttention-2 equivalent on TPU
-
-# Rust: burn/candle
-use candle_nn::ops::flash_attn;
-let out = flash_attn(&q, &k, &v, scale, is_causal)?;
-```
 
 ### MoEの実装詳細 — 負荷分散の数学
 
@@ -1598,64 +1528,9 @@ $$
 
 **実装 (PyTorch):**
 
-```python
-def load_balancing_loss(gate_logits, expert_indices, num_experts):
-    """
-    Args:
-        gate_logits: (batch_size, seq_len, num_experts) — ルーティングロジット
-        expert_indices: (batch_size, seq_len, top_k) — 選ばれたExpertのインデックス
-        num_experts: int
-    Returns:
-        loss: float — Load balancing loss
-    """
-    # f_i: 実際の使用頻度
-    expert_mask = torch.zeros_like(gate_logits)
-    expert_mask.scatter_(-1, expert_indices, 1.0)
-    f = expert_mask.mean(dim=[0, 1])  # (num_experts,)
-
-    # P_i: ソフトな割り当て確率
-    gate_probs = F.softmax(gate_logits, dim=-1)
-    P = gate_probs.mean(dim=[0, 1])  # (num_experts,)
-
-    # Loss = E * sum(f_i * P_i)
-    loss = num_experts * torch.sum(f * P)
-    return loss
-
-# Training
-for batch in dataloader:
-    logits, gate_logits, expert_indices = model(batch)
-    task_loss = F.cross_entropy(logits, labels)
-    balance_loss = load_balancing_loss(gate_logits, expert_indices, num_experts)
-    total_loss = task_loss + alpha * balance_loss  # alpha = 0.01
-    total_loss.backward()
-```
 
 **Capacity Factor の実装:**
 
-```python
-def top_k_gating_with_capacity(gate_logits, k=2, capacity_factor=1.25):
-    """Top-k routing with capacity constraint (Switch Transformer)"""
-    batch_size, seq_len, num_experts = gate_logits.shape
-    capacity = int((batch_size * seq_len / num_experts) * capacity_factor)
-
-    # Top-k selection
-    gate_probs = F.softmax(gate_logits, dim=-1)
-    top_k_probs, top_k_indices = torch.topk(gate_probs, k, dim=-1)
-
-    # Capacity enforcement
-    expert_counts = torch.zeros(num_experts, device=gate_logits.device)
-    expert_mask = torch.zeros_like(gate_logits)
-
-    for i in range(batch_size * seq_len):
-        for j in range(k):
-            expert_id = top_k_indices.view(-1, k)[i, j]
-            if expert_counts[expert_id] < capacity:
-                expert_mask.view(-1, num_experts)[i, expert_id] = 1.0
-                expert_counts[expert_id] += 1
-            # else: overflow, token dropped
-
-    return expert_mask, top_k_probs, top_k_indices
-```
 
 **DeepSeek-MoE の Fine-Grained Routing:**
 
@@ -1671,7 +1546,47 @@ $$
 
 ---
 
+## 参考文献
+
+[^1]: Shazeer, N. (2019). "Fast Transformer Decoding: One Write-Head is All You Need". arXiv:1911.02150.
+
+[^2]: Ainslie, J., Lee-Thorp, J., de Jong, M., Zemlyanskiy, Y., Lebrón, F., & Sanghai, S. (2023). "GQA: Training Generalized Multi-Query Transformer Models from Multi-Head Checkpoints". arXiv:2305.13245.
+
+[^3]: Touvron, H., et al. (2023). "Llama 2: Open Foundation and Fine-Tuned Chat Models". arXiv:2307.09288.
+
+[^4]: Kwon, W., Li, Z., Zhuang, S., Sheng, Y., Zheng, L., Yu, C. H., et al. (2023). "Efficient Memory Management for Large Language Model Serving with PagedAttention". In *SOSP 2023*.
+
+[^5]: Dao, T., Fu, D. Y., Ermon, S., Rudra, A., & Ré, C. (2022). "FlashAttention: Fast and Memory-Efficient Exact Attention with IO-Awareness". In *NeurIPS 2022*.
+
+[^6]: Dao, T. (2023). "FlashAttention-2: Faster Attention with Better Parallelism and Work Partitioning". arXiv:2307.08691.
+
+[^7]: Shah, J., Bikshandi, G., Zhang, Y., Thakkar, V., Ramani, P., & Dao, T. (2024). "FlashAttention-3: Fast and Accurate Attention with Asynchrony and Low-precision". arXiv:2407.08608.
+
+[^8]: Beltagy, I., Peters, M. E., & Cohan, A. (2020). "Longformer: The Long-Document Transformer". arXiv:2004.05150.
+
+[^9]: Zaheer, M., Guruganesh, G., Dubey, A., Ainslie, J., Alberti, C., Ontanon, S., et al. (2020). "Big Bird: Transformers for Longer Sequences". In *NeurIPS 2020*.
+
+[^10]: Yuan, J., Gao, H., Dai, D., et al. (2025). "Native Sparse Attention: Hardware-Aligned and Natively Trainable Sparse Attention". arXiv:2502.11089.
+
+[^11]: Choromanski, K., Likhosherstov, V., Dohan, D., Song, X., Gane, A., Sarlos, T., et al. (2021). "Rethinking Attention with Performers". In *ICLR 2021*.
+
+[^12]: Yang, S., Wang, B., Shen, Y., Panda, R., & Kim, Y. (2023). "Gated Linear Attention Transformers with Hardware-Efficient Training". arXiv:2312.06635.
+
+[^13]: Liu, H., Zaharia, M., & Abbeel, P. (2023). "Ring Attention with Blockwise Transformers for Near-Infinite Context". arXiv:2310.01889.
+
+[^14]: Fedus, W., Zoph, B., & Shazeer, N. (2022). "Switch Transformers: Scaling to Trillion Parameter Models with Simple and Efficient Sparsity". *JMLR*, 23(120), 1-39.
+
+[^15]: DeepSeek-AI. (2024). "DeepSeek-MoE: Towards Ultimate Expert Specialization in Mixture-of-Experts Language Models". arXiv:2401.06066.
+
 ---
+
+## 著者リンク
+
+- Blog: https://fumishiki.dev
+- X: https://x.com/fumishiki
+- LinkedIn: https://www.linkedin.com/in/fumitakamurakami
+- GitHub: https://github.com/fumishiki
+- Hugging Face: https://huggingface.co/fumishiki
 
 ## ライセンス
 

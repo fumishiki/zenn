@@ -4,7 +4,14 @@ emoji: "🌀"
 type: "tech"
 topics: ["machinelearning", "deeplearning", "flowmatching", "julia", "diffusion"]
 published: true
+slug: "ml-lecture-38-part2"
+difficulty: "advanced"
+time_estimate: "90 minutes"
+languages: ["Julia", "Rust"]
+keywords: ["機械学習", "深層学習", "生成モデル"]
 ---
+
+**→ 前編（理論編）**: [ml-lecture-38-part1](./ml-lecture-38-part1)
 
 ## Zone 4: 実装ゾーン — Julia Flow Matching実装
 
@@ -50,29 +57,16 @@ Target distribution: mixture of 2 Gaussians
     p_data(x) = 0.5*N([-2, 0], I) + 0.5*N([2, 0], I)
 """
 function sample_target(n::Int; rng=Random.default_rng())
-    d = 2  # dimension
-    x = zeros(Float32, d, n)
-
-    for i in 1:n
-        # Randomly choose component
-        if rand(rng) < 0.5
-            # First mode: μ = [-2, 0]
-            x[:, i] = randn(rng, Float32, d) .+ Float32[-2, 0]
-        else
-            # Second mode: μ = [2, 0]
-            x[:, i] = randn(rng, Float32, d) .+ Float32[2, 0]
-        end
-    end
-
-    return x
+    d       = 2
+    centers = Float32[-2 2; 0 0]         # (d×2): each col is a mode center
+    idx     = rand(rng, 1:2, n)          # randomly pick mode per sample
+    return randn(rng, Float32, d, n) .+ centers[:, idx]
 end
 
 """
 Source distribution: standard Gaussian N(0, I)
 """
-function sample_source(n::Int, d::Int=2; rng=Random.default_rng())
-    return randn(rng, Float32, d, n)
-end
+sample_source(n::Int, d::Int=2; rng=Random.default_rng()) = randn(rng, Float32, d, n)
 ```
 
 ---
@@ -204,22 +198,19 @@ function cfm_loss(model, ps, st, path::GaussianPath, batch_size::Int; rng=Random
     t = rand(rng, Float32, batch_size)
 
     # Sample x₀ ~ N(0, I) and x₁ ~ p_data
-    x_0 = sample_source(batch_size; rng=rng)
-    x_1 = sample_target(batch_size; rng=rng)
+    x₀ = sample_source(batch_size; rng=rng)
+    x₁ = sample_target(batch_size; rng=rng)
 
     # Sample x_t ~ q_t(x|x₁, x₀)
-    x_t = sample_conditional(path, t, x_1, x_0; rng=rng)
+    x_t = sample_conditional(path, t, x₁, x₀; rng=rng)
 
     # Compute target vector field
-    u_t = conditional_vector_field(path, t, x_t, x_1, x_0)
+    u_t = conditional_vector_field(path, t, x_t, x₁, x₀)
 
     # Model prediction
-    v_pred, st = model(x_t, t, ps, st)
+    v̂, st = model(x_t, t, ps, st)
 
-    # MSE loss
-    loss = mean((v_pred .- u_t).^2)
-
-    return loss, st
+    return mean((v̂ .- u_t).^2), st
 end
 ```
 
@@ -234,7 +225,7 @@ Train Flow Matching model
 function train_flow_matching(;
     n_epochs=1000,
     batch_size=256,
-    learning_rate=1f-3,
+    η=1f-3,
     path_type=:ot,
     rng=Random.default_rng()
 )
@@ -244,7 +235,7 @@ function train_flow_matching(;
     ps, st = Lux.setup(rng, model)
 
     # Optimizer
-    opt_state = Optimisers.setup(Adam(learning_rate), ps)
+    opt_state = Optimisers.setup(Adam(η), ps)
 
     # Path
     path = GaussianPath{Float32}(path_type, 1f-5)
@@ -374,7 +365,7 @@ end
 model_ot, ps_ot, st_ot, losses_ot = train_flow_matching(
     n_epochs=1000,
     batch_size=256,
-    learning_rate=1f-3,
+    η=1f-3,
     path_type=:ot
 )
 
@@ -404,10 +395,8 @@ model_vp, ps_vp, st_vp, losses_vp = train_flow_matching(
 | $\mathcal{L}_{\text{CFM}}$ | `cfm_loss()` のMSE |
 | ODE Sampling | `sample_flow()` の `solve(ODEProblem)` |
 
-:::message
-**実装の核心**
-CFMの実装は驚くほどシンプル。Diffusion Modelのような複雑なノイズスケジュール、多段階逆過程、score networkの工夫は一切不要。**直線経路（OT Path）+ MSE Loss + ODE Solver**だけで十分だ。
-:::
+> **Note:** **実装の核心**
+> CFMの実装は驚くほどシンプル。Diffusion Modelのような複雑なノイズスケジュール、多段階逆過程、score networkの工夫は一切不要。**直線経路（OT Path）+ MSE Loss + ODE Solver**だけで十分だ。
 
 ---
 
@@ -464,17 +453,15 @@ end
 新しいペア$(\mathbf{x}_0', \mathbf{x}_1')$に対し、**完全な直線**を目標とする：
 
 ```julia
-function rectified_loss(model, ps, st, x_0, x_1, batch_size)
-    idx = rand(1:size(x_0, 2), batch_size)
-    t = rand(Float32, batch_size)
+function rectified_loss(model, ps, st, x₀, x₁, batch_size)
+    idx = rand(1:size(x₀, 2), batch_size)
+    t   = rand(Float32, batch_size)
 
-    x_t = t .* x_1[:, idx] .+ (1 .- t) .* x_0[:, idx]
-    u_t = x_1[:, idx] .- x_0[:, idx]  # 常に直線方向
+    @views x_t = @. t * x₁[:, idx] + (1 - t) * x₀[:, idx]
+    @views u_t = x₁[:, idx] .- x₀[:, idx]   # 常に直線方向
 
-    v_pred, st = model(x_t, t, ps, st)
-    loss = mean((v_pred .- u_t).^2)
-
-    return loss, st
+    v̂, st = model(x_t, t, ps, st)
+    return mean((v̂ .- u_t).^2), st
 end
 ```
 
@@ -482,15 +469,15 @@ end
 
 ```julia
 # Resample
-x_0_new, x_1_new = resample_trajectories(model_1, ps_1, st_1, 10000)
+x₀_new, x₁_new = resample_trajectories(model_1, ps_1, st_1, 10000)
 
 # Re-train
-model_2, ps_2, st_2, _ = train_with_rectified_loss(x_0_new, x_1_new)
+model_2, ps_2, st_2, _ = train_with_rectified_loss(x₀_new, x₁_new)
 
 # 1-step sampling (Euler with Δt=1)
-x_0_test = sample_source(1000)
-v_final, _ = model_2(x_0_test, ones(Float32, 1000), ps_2, st_2)
-x_1_gen = x_0_test .+ v_final  # Single step!
+x₀_test  = sample_source(1000)
+v̂, _     = model_2(x₀_test, ones(Float32, 1000), ps_2, st_2)
+x₁_gen   = x₀_test .+ v̂        # Single step!
 ```
 
 **検証**：
@@ -656,10 +643,13 @@ end
 | 演習4 | DiffFlow統一 | $\lambda$でDiffusion↔GAN連続変化 |
 | 演習5 | Wasserstein勾配流 | JKO = 離散勾配降下 |
 
-:::message
-**実験の本質**
-理論は美しいが、手を動かして初めて「なぜこれが革命的か」が腹落ちする。特に演習2のRectified Flowでは、**1-stepで高品質な画像が生成される瞬間**に立ち会える。これは、理論が実用に直結する稀有な例だ。
-:::
+> **Note:** **実験の本質**
+> 理論は美しいが、手を動かして初めて「なぜこれが革命的か」が腹落ちする。特に演習2のRectified Flowでは、**1-stepで高品質な画像が生成される瞬間**に立ち会える。これは、理論が実用に直結する稀有な例だ。
+
+> **Progress: 85%**
+> **理解度チェック**
+> 1. OT-CFM 実装で `x_t = (1-t)*x0 + t*x1` を使った場合の条件付きベクトル場 `u_t = x1 - x0` が定数になる理由を、経路の微分から導け。
+> 2. Rectified Flow の ReFlow アルゴリズムにおいて、訓練済みモデルから生成した軌道 $(x_0, x_1^\prime)$ をペアとして再訓練する理由（直線性改善のメカニズム）を説明せよ。
 
 ---
 
@@ -892,7 +882,8 @@ Flow Matchingは画像生成を超えて広がっている：
 5. **Discrete Flow Matching**（Campbell+ 2024）
    - テキスト生成への応用
 
-:::details さらに深掘りしたい読者へ
+<details><summary>深掘り: Flow Matching実装リソース</summary>
+
 Flow Matchingのコミュニティは活発で、毎月新しい論文が登場する。以下のリソースが有用：
 
 - **GitHub**: `atong01/conditional-flow-matching`（公式実装）
@@ -900,7 +891,13 @@ Flow Matchingのコミュニティは活発で、毎月新しい論文が登場�
 - **Twitter**: #FlowMatching ハッシュタグ（研究者の議論）
 
 特に、**ICLR 2025 Workshop on Flow-Based Models**では、未公開の最新研究が議論される。
-:::
+
+</details>
+
+> **Progress: 95%**
+> **理解度チェック**
+> 1. Flow Map Matching（arXiv:2406.07507）がなぜ反復サンプリングを不要にできるのか、Flow Consistency 条件の観点から説明せよ。
+> 2. Wasserstein 勾配流の離散近似である JKO scheme $\rho^{k+1} = \arg\min_\rho \frac{1}{2\tau}W_2^2(\rho,\rho^k) + \mathcal{F}(\rho)$ において、$\tau\to0$ の極限で連続時間の Fokker-Planck 方程式が復元されることを直感的に説明せよ。
 
 ---
 
@@ -939,9 +936,9 @@ Flow Matchingのコミュニティは活発で、毎月新しい論文が登場�
 ### 7.2 重要な数式の総まとめ
 
 **CFM Loss**：
-$$math
+$$
 \mathcal{L}_{\text{CFM}}(\theta) = \mathbb{E}_{t, \mathbf{x}_0, \mathbf{x}_1}\left[\left\|\mathbf{v}_\theta(t, \mathbf{x}_t) - \mathbf{u}_t(\mathbf{x}_t | \mathbf{x}_1, \mathbf{x}_0)\right\|^2\right]
-```
+$$
 
 **Gaussian Probability Path**（OT）：
 $$
@@ -1283,35 +1280,29 @@ function sinkhorn_ot(C::Matrix{Float64}, ε=0.1, max_iter=100)
     # ε: entropic regularization
     # Returns: coupling matrix π (B × B)
 
-    B = size(C, 1)
-    K = exp.(-C / ε)  # Gibbs kernel
+    B    = size(C, 1)
+    K    = exp.(-C ./ ε)    # Gibbs kernel
     u, v = ones(B), ones(B)
 
     for _ in 1:max_iter
-        u = 1 ./ (K * v)
-        v = 1 ./ (K' * u)
+        u .= 1 ./ (K  * v)
+        v .= 1 ./ (K' * u)
     end
 
     π = Diagonal(u) * K * Diagonal(v)
-    return π / sum(π)  # Normalize
+    return π ./ sum(π)    # Normalize
 end
 
 function minibatch_ot_loss(x₀_batch, x₁_batch, v_θ, t)
     B = size(x₀_batch, 2)
-    C = pairwise(SqEuclidean(), x₁_batch, x₀_batch, dims=2)  # B×B
+    C = pairwise(SqEuclidean(), x₁_batch, x₀_batch, dims=2)
     π = sinkhorn_ot(C)
 
-    loss = 0.0
-    for i in 1:B, j in 1:B
-        if π[i,j] > 1e-6
-            x_t = (1-t) * x₀_batch[:,i] + t * x₁_batch[:,j]
-            v_true = x₁_batch[:,j] - x₀_batch[:,i]
-            v_pred = v_θ(x_t, t)
-            loss += π[i,j] * norm(v_pred - v_true)^2
-        end
-    end
-
-    return loss
+    return sum(
+        π[i,j] * norm(v_θ(@. (1-t)*x₀_batch[:,i] + t*x₁_batch[:,j], t) .-
+                      (x₁_batch[:,j] .- x₀_batch[:,i]))^2
+        for i in 1:B, j in 1:B if π[i,j] > 1e-6
+    )
 end
 ```
 
@@ -1376,27 +1367,25 @@ using DifferentialEquations, Plots
 
 # --- Minibatch OT Solver ---
 function sinkhorn_coupling(C::Matrix{T}, ε::T=T(0.1), max_iter::Int=50) where T
-    B = size(C, 1)
-    K = exp.(-C / ε)
+    B    = size(C, 1)
+    K    = exp.(-C ./ ε)
     u, v = ones(T, B), ones(T, B)
 
     for _ in 1:max_iter
-        u = 1 ./ (K * v .+ 1e-8)
-        v = 1 ./ (K' * u .+ 1e-8)
+        u .= 1 ./ (K  * v .+ T(1e-8))
+        v .= 1 ./ (K' * u .+ T(1e-8))
     end
 
     π = Diagonal(u) * K * Diagonal(v)
-    return π / sum(π)
+    return π ./ sum(π)
 end
 
 # --- Velocity Network ---
-function VelocityNet(d_in::Int, d_hidden::Int=128)
-    return Chain(
-        Dense(d_in + 1, d_hidden, relu),  # [x_t; t]
-        Dense(d_hidden, d_hidden, relu),
-        Dense(d_hidden, d_in)
-    )
-end
+VelocityNet(d_in::Int, d_hidden::Int=128) = Chain(
+    Dense(d_in + 1, d_hidden, relu),  # [x_t; t]
+    Dense(d_hidden, d_hidden, relu),
+    Dense(d_hidden, d_in)
+)
 
 # --- Minibatch OT-CFM Training ---
 function train_minibatch_ot_cfm(
@@ -1429,19 +1418,12 @@ function train_minibatch_ot_cfm(
 
         # Compute loss
         loss, grads = Zygote.withgradient(ps) do p
-            total_loss = 0.0f0
-            for i in 1:batch_size, j in 1:batch_size
-                if π[i,j] > 1f-6
-                    x_t = (1 - t) * x₀[:,i] + t * x₁[:,j]
-                    v_true = x₁[:,j] - x₀[:,i]
-
-                    input = vcat(x_t, [t])
-                    v_pred, _ = model(input, p, st)
-
-                    total_loss += π[i,j] * sum((v_pred - v_true).^2)
-                end
-            end
-            total_loss / batch_size
+            sum(
+                π[i,j] * sum(abs2,
+                    first(model(vcat(@. (1-t)*x₀[:,i] + t*x₁[:,j], [t]), p, st)) .-
+                    (x₁[:,j] .- x₀[:,i]))
+                for i in 1:batch_size, j in 1:batch_size if π[i,j] > 1f-6
+            ) / batch_size
         end
 
         # Update
@@ -1465,14 +1447,11 @@ function sample_ot_cfm(model, ps, st, x₀::Matrix{Float32}, T::Float32=1.0f0, s
         du .= v
     end
 
-    trajectories = []
-    for i in 1:B
-        prob = ODEProblem(velocity!, x₀[:,i], (0.0f0, T))
-        sol = solve(prob, Tsit5(), saveat=range(0, T, length=steps))
-        push!(trajectories, sol)
-    end
-
-    return [sol[end] for sol in trajectories]
+    return [
+        solve(ODEProblem(velocity!, @view(x₀[:,i]), (0.0f0, T)),
+              Tsit5(); saveat=range(0, T, length=steps)).u[end]
+        for i in 1:B
+    ]
 end
 ```
 
@@ -1480,19 +1459,19 @@ end
 
 ```julia
 # Data: Two Gaussians
-source() = randn(Float32, 2, 256)  # 𝒩(0, I)
-target() = randn(Float32, 2, 256) .+ Float32[3, 0]  # 𝒩([3,0], I)
+source() = randn(Float32, 2, 256)                    # 𝒩(0, I)
+target() = randn(Float32, 2, 256) .+ Float32[3, 0]   # 𝒩([3,0], I)
 
 # Train
 ps, st, model = train_minibatch_ot_cfm(source, target, n_epochs=200, batch_size=256)
 
 # Sample
-x₀_test = randn(Float32, 2, 500)
+x₀_test    = randn(Float32, 2, 500)
 x₁_samples = sample_ot_cfm(model, ps, st, x₀_test)
 
 # Visualize
 scatter(x₀_test[1,:], x₀_test[2,:], label="Source", alpha=0.3)
-scatter!([x[1] for x in x₁_samples], [x[2] for x in x₁_samples], label="Generated", alpha=0.5)
+scatter!(first.(x₁_samples), last.(x₁_samples), label="Generated", alpha=0.5)
 ```
 
 ---
@@ -1503,7 +1482,7 @@ scatter!([x[1] for x in x₁_samples], [x[2] for x in x₁_samples], label="Gene
 
 [^minibatch_ot]: Tong, A., et al. (2023). "Improving and Generalizing Flow-Based Generative Models with Minibatch Optimal Transport". *arXiv:2302.00482*.
 
-[^weighted_cfm]: Liu, X., et al. (2025). "Weighted Conditional Flow Matching". *arXiv:2507.22270*.
+[^weighted_cfm]: Calvo-Ordonez, S., et al. (2025). "Weighted Conditional Flow Matching". *arXiv:2507.22270*.
 
 ---
 
@@ -1543,28 +1522,24 @@ $k$ 回目の Flow で生成したペアを使い、$k+1$ 回目を訓練。
 
 ```julia
 function reflow_iteration(model_k, ps_k, st_k, data_source, data_target, n_samples=10000)
-    # Generate new pairs using current flow
-    x₀_new = []
-    x₁_new = []
-
-    for _ in 1:n_samples
-        x₀ = data_source()
-        # Solve ODE with model_k
-        x₁ = solve_ode(model_k, ps_k, st_k, x₀, T=1.0)
-        push!(x₀_new, x₀)
-        push!(x₁_new, x₁)
-    end
-
-    # Train new model on (x₀_new, x₁_new)
-    model_k1, ps_k1, st_k1 = train_cfm(x₀_new, x₁_new)
-
-    return model_k1, ps_k1, st_k1
+    # Generate new (x₀, x₁) pairs via current flow
+    x₀_new = [data_source() for _ in 1:n_samples]
+    x₁_new = [solve_ode(model_k, ps_k, st_k, x₀; T=1.0) for x₀ in x₀_new]
+    return train_cfm(x₀_new, x₁_new)
 end
 ```
 
 **応用**: Text-to-Image (Stable Diffusion) で Reflow² → 4-step 生成で品質維持。
 
 ---
+
+## 著者リンク
+
+- Blog: https://fumishiki.dev
+- X: https://x.com/fumishiki
+- LinkedIn: https://www.linkedin.com/in/fumitakamurakami
+- GitHub: https://github.com/fumishiki
+- Hugging Face: https://huggingface.co/fumishiki
 
 ## ライセンス
 

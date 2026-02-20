@@ -4,6 +4,11 @@ emoji: "🔍"
 type: "tech"
 topics: ["machinelearning", "deeplearning", "transformer", "julia", "rust"]
 published: true
+slug: "ml-lecture-14-part2"
+difficulty: "advanced"
+time_estimate: "90 minutes"
+languages: ["Julia", "Rust"]
+keywords: ["機械学習", "深層学習", "生成モデル"]
 ---
 
 ## 💻 4. 実装ゾーン（45分）— Julia完全実装 + Rust推論
@@ -170,11 +175,8 @@ end
 
 # --- Causal Mask ---
 function causal_mask(seq_len::Int)
-    mask = fill(-Inf32, seq_len, seq_len, 1)
-    for i in 1:seq_len
-        mask[i, 1:i, 1] .= 0.0f0
-    end
-    return mask
+    m = Float32[j ≤ i ? 0f0 : -Inf32 for i in 1:seq_len, j in 1:seq_len]
+    return reshape(m, seq_len, seq_len, 1)
 end
 
 # --- Micro-GPT Model ---
@@ -251,7 +253,7 @@ fn softmax_2d(mut scores: Array2<f32>) -> Array2<f32> {
     for mut row in scores.rows_mut() {
         let max = row.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
         row.mapv_inplace(|x| (x - max).exp());
-        let sum: f32 = row.sum();
+        let sum: f32 = row.iter().sum();
         row.mapv_inplace(|x| x / sum);
     }
     scores
@@ -291,11 +293,9 @@ fn main() {
 
     // Causal mask
     let mut mask = Array2::<f32>::zeros((seq_len, seq_len));
-    for i in 0..seq_len {
-        for j in (i+1)..seq_len {
-            mask[[i, j]] = f32::NEG_INFINITY;
-        }
-    }
+    (0..seq_len)
+        .flat_map(|i| ((i + 1)..seq_len).map(move |j| (i, j)))
+        .for_each(|(i, j)| mask[[i, j]] = f32::NEG_INFINITY);
 
     let output = scaled_dot_product_attention(&q, &k, &v, Some(&mask));
 
@@ -388,7 +388,7 @@ for t in 1:max_len
     K_full, V_full = update_cache!(cache, K_new, V_new)
 
     # Attention with cached K, V
-    scores = (Q_new * K_full') / sqrt(d_k)
+    scores = (Q_new * K_full') / sqrt(Float32(d_k))
     attn_weights = softmax(scores, dims=2)
     output = attn_weights * V_full
 
@@ -401,9 +401,7 @@ end
 - **解決策**: PagedAttention (vLLM) — メモリを仮想化し、バッチ間で共有
 - **次世代**: MQA (Multi-Query Attention) / GQA (Grouped-Query Attention) — KVのheadを削減（第15回で詳説）
 
-:::message
-**進捗: 70% 完了** Self-AttentionからTransformer Block全体をJuliaで完全実装し、RustでAttention推論を高速化した。KV-Cache概念も実装。次は実験ゾーンへ。
-:::
+> **Note:** **進捗: 70% 完了** Self-AttentionからTransformer Block全体をJuliaで完全実装し、RustでAttention推論を高速化した。KV-Cache概念も実装。次は実験ゾーンへ。
 
 ---
 
@@ -434,17 +432,9 @@ seq_len = 32
 batch_size = 16
 
 function get_batch(data, seq_len, batch_size)
-    max_start = length(data) - seq_len - 1
-    starts = rand(1:max_start, batch_size)
-
-    x = zeros(Int, seq_len, batch_size)
-    y = zeros(Int, seq_len, batch_size)
-
-    for (i, start) in enumerate(starts)
-        x[:, i] = data[start:start+seq_len-1]
-        y[:, i] = data[start+1:start+seq_len]
-    end
-
+    starts = rand(1:(length(data) - seq_len - 1), batch_size)
+    x = reduce(hcat, data[s:s+seq_len-1] for s in starts)
+    y = reduce(hcat, data[s+1:s+seq_len]  for s in starts)
     return x, y
 end
 
@@ -474,10 +464,8 @@ for step in 1:100
 
     # Convert y to one-hot (for loss computation)
     y_onehot = zeros(Float32, seq_len, vocab_size, batch_size)
-    for b in 1:batch_size
-        for t in 1:seq_len
-            y_onehot[t, y[t, b], b] = 1.0f0
-        end
+    for b in 1:batch_size, t in 1:seq_len
+        y_onehot[t, y[t, b], b] = 1.0f0
     end
 
     # Gradient
@@ -535,7 +523,7 @@ for _ in 1:10
     push!(generated, next_token)
 end
 
-output_text = join([idx_to_char[i] for i in generated])
+output_text = join(idx_to_char[i] for i in generated)
 println("Generated: ", output_text)
 ```
 
@@ -597,11 +585,15 @@ Input: "moon" → Output: "noom"
 - [ ] JuliaでMicro-GPTを実装し、訓練できる
 - [ ] In-Context Learningの理論的説明を1文で述べられる
 
-:::message
-**進捗: 85% 完了** Micro-GPT訓練+ICL実験+Grokking観察を通じて、Transformerの挙動を実践的に理解した。次は発展ゾーンへ。
-:::
+> **Note:** **進捗: 85% 完了** Micro-GPT訓練+ICL実験+Grokking観察を通じて、Transformerの挙動を実践的に理解した。次は発展ゾーンへ。
 
 ---
+
+
+> Progress: 95%
+> **理解度チェック**
+> 1. $a + b \mod 97$ の各記号の意味と、この式が表す操作を説明してください。
+> 2. このゾーンで学んだ手法の直感的な意味と、なぜこの定式化が必要なのかを説明してください。
 
 ## 🎓 6. 振り返りゾーン（30分）— まとめ・発展・問い
 
@@ -776,7 +768,7 @@ $$
 - **第16回**: SSM (S4→Mamba) — Attentionの代替
 - **第17回**: Mamba-2 (Attention=SSM双対性証明)
 
-:::details 発展ゾーン推薦図書
+<details><summary>発展ゾーン推薦図書</summary>
 
 **教科書**:
 - "Attention is All You Need" (Vaswani+ 2017) — 原論文
@@ -784,7 +776,7 @@ $$
 - "Formal Algorithms for Transformers" (Phuong & Hutter 2022) — 数学的定式化
 
 **サーベイ**:
-- "A Survey of Transformers" (Lin+ 2021) — 包括的レビュー
+- "A Survey of Transformers" (Lin+ 2021) — 網羅的レビュー
 - "Efficient Transformers: A Survey" (Tay+ 2022) — 効率化手法
 
 **最新論文**:
@@ -793,11 +785,10 @@ $$
 - "Differential Transformer" (Ye+ 2024 / ICLR 2025) [^7]
 - "Transformers learn in-context by gradient descent" (von Oswald+ 2022) [^8]
 - "Grokking: Generalization Beyond Overfitting" (Power+ 2022) [^9]
-:::
 
-:::message
-**進捗: 100% 完了** GPT/BERT/T5の比較、Scaling Laws、Emergent Abilities、Differential Transformerまで — Attention研究の全体像を把握した。第14回完走！
-:::
+</details>
+
+> **Note:** **進捗: 100% 完了** GPT/BERT/T5の比較、Scaling Laws、Emergent Abilities、Differential Transformerまで — Attention研究の全体像を把握した。第14回完走！
 
 ---
 
@@ -830,7 +821,7 @@ $$
 
 ### 7.3 FAQ — よくある質問と実践的回答
 
-:::details Q1: Self-Attentionの計算量 $O(N^2)$ は実用上問題ないのか？
+<details><summary>Q1: Self-Attentionの計算量 $O(N^2)$ は実用上問題ないのか？</summary>
 
 **A**: $N \leq 2048$ なら許容可能。それ以上は以下で対処:
 - **Sparse Attention**: 疎パターンで $O(N\sqrt{N})$ に削減
@@ -839,9 +830,10 @@ $$
 - **Hierarchical**: 長文を分割し、階層的に処理
 
 第15回で全て詳説する。
-:::
 
-:::details Q2: Position Encodingはどれを使うべきか？
+</details>
+
+<details><summary>Q2: Position Encodingはどれを使うべきか？</summary>
 
 **A**: タスク依存:
 - **Sinusoidal**: 汎用、実装簡単 → BERT/GPT-3
@@ -849,25 +841,29 @@ $$
 - **ALiBi**: 外挿性能最高 → BLOOM
 
 **推奨**: 2025年以降の新規LLMはRoPEが主流。
-:::
 
-:::details Q3: Pre-LN vs Post-LN、どちらが良いか？
+</details>
+
+<details><summary>Q3: Pre-LN vs Post-LN、どちらが良いか？</summary>
 
 **A**: **Pre-LN**。訓練安定性が圧倒的に高い。GPT-2以降の標準。Post-LNは深いモデル（>12層）で勾配爆発しやすい。
-:::
 
-:::details Q4: KV-Cacheの実装で注意すべき点は？
+</details>
+
+<details><summary>Q4: KV-Cacheの実装で注意すべき点は？</summary>
 
 **A**:
 - メモリ管理: 長い系列ではGBオーダーに → PagedAttention検討
 - バッチ処理: バッチ間で系列長が異なる場合、paddingに注意
 - Multi-head: head数分のキャッシュが必要 → MQA/GQAで削減（第15回）
-:::
 
-:::details Q5: In-Context Learningはなぜ動くのか？
+</details>
+
+<details><summary>Q5: In-Context Learningはなぜ動くのか？</summary>
 
 **A**: 理論的には「暗黙的勾配降下」説が有力。Attentionが、few-shot examplesから損失関数を推定し、forward pass中に最適化を実行している。数学的証明は進行中（2024-2025の最新研究）。
-:::
+
+</details>
 
 ### 7.4 学習スケジュール（1週間プラン）
 
@@ -940,13 +936,11 @@ Goal: Check all 8 items before moving to Lecture 15
 
 **準備**: 第14回の内容を完全に理解していること。特にAttention計算の数式とKV-Cacheの仕組みは前提知識。
 
-:::message
-**Course II 進捗: 第14回完了（6/10講義）**
-
-第9回 (VI+ELBO) → 第10回 (VAE) → 第11回 (OT) → 第12回 (GAN) → 第13回 (AR) → **第14回 (Attention)** → 第15回 (Attention効率化) → 第16回 (SSM) → 第17回 (Mamba発展) → 第18回 (Hybrid+読了)
-
-化石から脱却し、Transformerの時代へ。次は効率化の戦いだ。
-:::
+> **Note:** **Course II 進捗: 第14回完了（6/10講義）**
+>
+> 第9回 (VI+ELBO) → 第10回 (VAE) → 第11回 (OT) → 第12回 (GAN) → 第13回 (AR) → **第14回 (Attention)** → 第15回 (Attention効率化) → 第16回 (SSM) → 第17回 (Mamba発展) → 第18回 (Hybrid+読了)
+>
+> 化石から脱却し、Transformerの時代へ。次は効率化の戦いだ。
 
 ---
 
@@ -961,7 +955,7 @@ RNNは逐次処理の呪縛に縛られ、CNNは受容野の限界に阻まれ�
 2. **$O(N^2)$ の代償**をどこまで許容すべきか？ SSM (Mamba) が $O(N)$ で同等性能を達成するなら、Attentionは過去の遺物か？
 3. **Emergent Abilities**は、単なるスケールの産物か、質的転換か？ 100B→1Tで何が変わる？
 
-:::details 歴史的文脈 — Attentionが"必然"だった理由
+<details><summary>歴史的文脈 — Attentionが"必然"だった理由</summary>
 
 **2014年**: Bahdanau Attention [^2] — Seq2SeqでRNNの限界を突破
 **2017年**: "Attention is All You Need" [^1] — RNN/CNNを完全に捨て去る
@@ -970,7 +964,14 @@ RNNは逐次処理の呪縛に縛られ、CNNは受容野の限界に阻まれ�
 **2023-2025**: SSM/Mamba — Attentionの代替が現実的に
 
 **結論**: Attentionは2017年時点で「唯一の解」だった。だが2025年、もはや唯一ではない。
-:::
+
+</details>
+
+---
+
+> **理解度チェック**
+> 1. Scaling Lawsにおいて、モデルサイズ $N$、データ量 $D$、計算量 $C$ の最適バランスを記述するChinchilla則を式で述べ、Kaplan則との違いを説明してください。
+> 2. KV-Cacheによって推論の計算量がどのように変化するか、$O(\cdot)$ 表記を用いて比較してください。
 
 ---
 
@@ -979,34 +980,34 @@ RNNは逐次処理の呪縛に縛られ、CNNは受容野の限界に阻まれ�
 ### 主要論文
 
 [^1]: Vaswani, A., Shazeer, N., Parmar, N., et al. (2017). "Attention Is All You Need". *NeurIPS 2017*.
-@[card](https://arxiv.org/abs/1706.03762)
+<https://arxiv.org/abs/1706.03762>
 
 [^2]: Bahdanau, D., Cho, K., & Bengio, Y. (2015). "Neural Machine Translation by Jointly Learning to Align and Translate". *ICLR 2015*.
-@[card](https://arxiv.org/abs/1409.0473)
+<https://arxiv.org/abs/1409.0473>
 
 [^3]: Radford, A., Narasimhan, K., Salimans, T., & Sutskever, I. (2018). "Improving Language Understanding by Generative Pre-Training". *OpenAI*.
-@[card](https://cdn.openai.com/research-covers/language-unsupervised/language_understanding_paper.pdf)
+<https://cdn.openai.com/research-covers/language-unsupervised/language_understanding_paper.pdf>
 
 [^4]: Devlin, J., Chang, M.-W., Lee, K., & Toutanova, K. (2019). "BERT: Pre-training of Deep Bidirectional Transformers for Language Understanding". *NAACL 2019*.
-@[card](https://arxiv.org/abs/1810.04805)
+<https://arxiv.org/abs/1810.04805>
 
 [^5]: Kaplan, J., McCandlish, S., Henighan, T., et al. (2020). "Scaling Laws for Neural Language Models". *arXiv:2001.08361*.
-@[card](https://arxiv.org/abs/2001.08361)
+<https://arxiv.org/abs/2001.08361>
 
 [^6]: Hoffmann, J., Borgeaud, S., Mensch, A., et al. (2022). "Training Compute-Optimal Large Language Models". *NeurIPS 2022*.
-@[card](https://arxiv.org/abs/2203.15556)
+<https://arxiv.org/abs/2203.15556>
 
 [^7]: Ye, T., Li, Y., Zhang, Y., et al. (2024). "Differential Transformer". *ICLR 2025 (Oral)*.
-@[card](https://arxiv.org/abs/2410.05258)
+<https://arxiv.org/abs/2410.05258>
 
 [^8]: von Oswald, J., Niklasson, E., Randazzo, E., et al. (2022). "Transformers learn in-context by gradient descent". *arXiv:2212.07677*.
-@[card](https://arxiv.org/abs/2212.07677)
+<https://arxiv.org/abs/2212.07677>
 
 [^9]: Power, A., Burda, Y., Edwards, H., Babuschkin, I., & Misra, V. (2022). "Grokking: Generalization Beyond Overfitting on Small Algorithmic Datasets". *arXiv:2201.02177*.
-@[card](https://arxiv.org/abs/2201.02177)
+<https://arxiv.org/abs/2201.02177>
 
 [^10]: Su, J., Lu, Y., Pan, S., Murtadha, A., Wen, B., & Liu, Y. (2021). "RoFormer: Enhanced Transformer with Rotary Position Embedding". *arXiv:2104.09864*.
-@[card](https://arxiv.org/abs/2104.09864)
+<https://arxiv.org/abs/2104.09864>
 
 ### 教科書
 
@@ -1015,6 +1016,14 @@ RNNは逐次処理の呪縛に縛られ、CNNは受容野の限界に阻まれ�
 - Shazeer, N. (2020). "GLU Variants Improve Transformer". *arXiv:2002.05202*
 
 ---
+
+## 著者リンク
+
+- Blog: https://fumishiki.dev
+- X: https://x.com/fumishiki
+- LinkedIn: https://www.linkedin.com/in/fumitakamurakami
+- GitHub: https://github.com/fumishiki
+- Hugging Face: https://huggingface.co/fumishiki
 
 ## ライセンス
 
@@ -1054,238 +1063,6 @@ RNNは逐次処理の呪縛に縛られ、CNNは受容野の限界に阻まれ�
 
 ---
 
-## 記法規約
-
-本講義で使用した記法の統一表:
-
-| 記号 | 意味 | 備考 |
-|:-----|:-----|:-----|
-| $N$ | 系列長（トークン数） | |
-| $d_{\text{model}}$ | モデル埋め込み次元 | GPT-3: 12288 |
-| $d_k, d_v$ | Query/Key, Value次元 | 通常 $d_{\text{model}} / h$ |
-| $h$ | Multi-Headの数 | GPT-3: 96 |
-| $X \in \mathbb{R}^{N \times d}$ | 入力系列 | |
-| $Q, K, V$ | Query, Key, Value行列 | |
-| $W_Q, W_K, W_V$ | QKV射影行列 | 学習可能 |
-| $\text{softmax}(x)_i = \frac{e^{x_i}}{\sum_j e^{x_j}}$ | Softmax関数 | |
-| $\text{LayerNorm}(x)$ | Layer Normalization | |
-| $\text{GELU}(x) = x\Phi(x)$ | Gaussian Error Linear Unit | |
-| $\otimes$ | 要素ごとの積 (Hadamard) | |
-| $\circ$ | 関数合成 | $f \circ g = f(g(\cdot))$ |
-
----
-
-### 7.6 Paper Reading Mini-Project: "Attention Is All You Need" 3-Pass読解
-
-**目標**: Transformer原論文を3-Pass Reading法で読み、核心を抽出する。
-
-#### Pass 1: Overview (5分)
-
-**Abstract + Introduction + Conclusionを読む**
-
-Checklist:
-```julia
-pass1_checklist = Dict(
-    "category" => "Architecture proposal (Transformer)",
-    "context" => "Seq2Seq, Machine Translation",
-    "correctness" => "Experimental validation on WMT 2014 En-De/En-Fr",
-    "contributions" => [
-        "Self-Attention-only architecture (no RNN/CNN)",
-        "Multi-Head Attention mechanism",
-        "Position Encoding for sequence order",
-        "SOTA on translation with less training time"
-    ],
-    "clarity" => "High — clear structure, comprehensive ablation studies"
-)
-
-for (k, v) in pass1_checklist
-    println("$k: $v")
-end
-```
-
-出力:
-```
-category: Architecture proposal (Transformer)
-context: Seq2Seq, Machine Translation
-correctness: Experimental validation on WMT 2014 En-De/En-Fr
-contributions: ["Self-Attention-only architecture (no RNN/CNN)", "Multi-Head Attention mechanism", "Position Encoding for sequence order", "SOTA on translation with less training time"]
-clarity: High — clear structure, comprehensive ablation studies
-```
-
-**1文サマリー**: "Vaswani+ (2017) proposed Transformer, a Seq2Seq architecture based solely on self-attention, achieving SOTA translation quality with significantly reduced training time."
-
-#### Pass 2: Deep Read (20分)
-
-**Section 3 (Model Architecture) を精読**
-
-| Component | Formula | Implementation Note |
-|:----------|:--------|:--------------------|
-| Scaled Dot-Product Attention | $\text{Attention}(Q,K,V) = \text{softmax}(\frac{QK^\top}{\sqrt{d_k}})V$ | Why $\sqrt{d_k}$? → Variance control |
-| Multi-Head Attention | $\text{MultiHead} = \text{Concat}(\text{head}_1, \dots, \text{head}_h)W^O$ | $h=8$, $d_k=d_v=64$ in base model |
-| Position Encoding | $PE_{pos,2i} = \sin(pos/10000^{2i/d})$ | Allow extrapolation to longer sequences |
-| Encoder-Decoder | Encoder: 6 layers, Decoder: 6 layers + Masked Attention | $d_{\text{model}}=512$, $d_{ff}=2048$ |
-
-**Key Insight**: The paper's ablation study (Table 3) shows that removing positional encoding drops BLEU by 1.3 points — proving position information is critical despite self-attention being permutation-invariant.
-
-#### Pass 3: Reproduce (60分 — optional deep dive)
-
-**再実装チャレンジ**: 論文のミニマル版を実装する（既にZone 4で実施済み）
-
-**批判的分析**:
-
-1. **Limitation指摘**: 論文は $N=512$ までしか実験していない。$N \gg 512$ での $O(N^2)$ 問題に触れていない。
-   - **2025年の視点**: Flash Attention / Sparse Attention が必要になる（第15回）
-
-2. **Position Encoding選択の理論的根拠が弱い**: Sinusoidalを選んだ理由が "may allow the model to extrapolate to sequence lengths longer than the ones encountered during training" と曖昧。
-   - **2025年の視点**: RoPE (2021) [^10] が理論的に優れていることが判明
-
-3. **Multi-Head数 $h=8$ の根拠不明**: アブレーションで $h=1,2,4,8,16$ を試したが、なぜ8が最適かの理論的説明なし。
-   - **2025年の視点**: 計算効率とのトレードオフ。MQA/GQA (第15回) がさらに効率化
-
-**評価**: ★★★★★ (5/5) — パラダイム転換論文。2017年時点で完璧に近い設計。ただし長期的課題（長コンテキスト）は未解決。
-
----
-
-### 7.7 Code Translation Mini-Project: Self-Attention 3言語比較
-
-**課題**: 同じSelf-Attention計算を🐍Python, ⚡Julia, 🦀Rustで実装し、コードの密度・速度・安全性を比較する。
-
-#### 🐍 Python (NumPy)
-
-```python
-import numpy as np
-
-def self_attention_python(Q, K, V, mask=None):
-    """
-    Q, K, V: (seq_len, d_k)
-    mask: (seq_len, seq_len) or None
-    """
-    d_k = Q.shape[1]
-    scores = Q @ K.T / np.sqrt(d_k)
-
-    if mask is not None:
-        scores = scores + mask
-
-    attn_weights = np.exp(scores) / np.exp(scores).sum(axis=1, keepdims=True)
-    output = attn_weights @ V
-
-    return output, attn_weights
-
-# Test
-np.random.seed(42)
-Q = np.random.randn(4, 8).astype(np.float32)
-K = np.random.randn(4, 8).astype(np.float32)
-V = np.random.randn(4, 8).astype(np.float32)
-
-out_py, _ = self_attention_python(Q, K, V)
-print("Python output shape:", out_py.shape)
-```
-
-**特徴**:
-- 簡潔（12行）
-- 型安全性: ❌ — 実行時エラーのリスク
-- 速度: NumPy BLASに依存 → 中速
-
-#### ⚡ Julia
-
-```julia
-using LinearAlgebra
-
-function self_attention_julia(Q, K, V, mask=nothing)
-    # Q, K, V: (seq_len, d_k)
-    d_k = size(Q, 2)
-    scores = (Q * K') / sqrt(d_k)
-
-    if !isnothing(mask)
-        scores = scores .+ mask
-    end
-
-    attn_weights = exp.(scores) ./ sum(exp.(scores), dims=2)
-    output = attn_weights * V
-
-    return output, attn_weights
-end
-
-# Test
-using Random
-Random.seed!(42)
-Q = randn(Float32, 4, 8)
-K = randn(Float32, 4, 8)
-V = randn(Float32, 4, 8)
-
-out_jl, _ = self_attention_julia(Q, K, V)
-println("Julia output shape: ", size(out_jl))
-```
-
-**特徴**:
-- 同じく簡潔（10行）
-- 型安全性: ✅ — JITで型推論
-- 速度: BLAS + JIT最適化 → 高速
-- **数式1:1対応**: `.` (broadcast) が数学的直感と一致
-
-#### 🦀 Rust (ndarray)
-
-```rust
-use ndarray::{Array2, Axis};
-
-fn self_attention_rust(
-    q: &Array2<f32>,
-    k: &Array2<f32>,
-    v: &Array2<f32>,
-    mask: Option<&Array2<f32>>,
-) -> Array2<f32> {
-    let d_k = q.shape()[1] as f32;
-    let mut scores = q.dot(&k.t()) / d_k.sqrt();
-
-    if let Some(m) = mask {
-        scores = scores + m;
-    }
-
-    // Softmax (manual implementation for clarity)
-    for mut row in scores.rows_mut() {
-        let max = row.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
-        row.mapv_inplace(|x| (x - max).exp());
-        let sum: f32 = row.sum();
-        row.mapv_inplace(|x| x / sum);
-    }
-
-    scores.dot(v)
-}
-
-fn main() {
-    let q = Array2::<f32>::from_shape_fn((4, 8), |(i, j)| (i + j) as f32 * 0.1);
-    let k = Array2::<f32>::from_shape_fn((4, 8), |(i, j)| (i as f32 - j as f32) * 0.1);
-    let v = Array2::<f32>::from_shape_fn((4, 8), |(i, j)| (i * j) as f32 * 0.01);
-
-    let out = self_attention_rust(&q, &k, &v, None);
-    println!("Rust output shape: {:?}", out.shape());
-}
-```
-
-**特徴**:
-- 冗長（25行 — Softmax手動実装のため）
-- 型安全性: ✅✅ — コンパイル時保証
-- 速度: BLAS + ゼロコピー → 最高速
-- **メモリ安全**: 借用チェッカーでメモリリークゼロ保証
-
-#### 3言語比較表
-
-| | 🐍 Python | ⚡ Julia | 🦀 Rust |
-|:--|:---------|:---------|:--------|
-| コード行数 | 12 | 10 | 25 |
-| 型安全性 | ❌ | ✅ | ✅✅ |
-| 速度 (相対) | 1.0x | 1.2x | 1.5x |
-| 数式対応 | 中 | ★★★ | 低 |
-| メモリ安全 | ❌ | GC | ✅✅ |
-| 用途 | プロトタイプ | 研究+訓練 | 本番推論 |
-
-**結論**:
-- **研究・訓練**: ⚡ Julia — 数式1:1対応 + 高速
-- **本番推論**: 🦀 Rust — メモリ安全 + 最高速
-- **プロトタイプ**: 🐍 Python — エコシステム豊富
-
----
-
 ### 7.8 Symbol Reading Test (10問)
 
 **目標**: 論文中の記法を瞬時に読めるようになる。
@@ -1293,54 +1070,74 @@ fn main() {
 #### 問題
 
 1. $\mathbf{Q} \in \mathbb{R}^{N \times d_k}$ — これは何？
-   :::details 答え
+<details><summary>答え</summary>
+
    Query行列。系列長 $N$、各トークンが $d_k$ 次元のQueryベクトルを持つ。
-   :::
+
+</details>
 
 2. $\text{softmax}(x)_i = \frac{e^{x_i}}{\sum_j e^{x_j}}$ — $i$ と $j$ の役割は？
-   :::details 答え
+<details><summary>答え</summary>
+
    $i$: 出力要素のインデックス。$j$: 全要素にわたる和のインデックス。各 $i$ に対して独立に計算。
-   :::
+
+</details>
 
 3. $\text{Attention}(Q, K, V) = \text{softmax}(\frac{QK^\top}{\sqrt{d_k}}) V$ — 次元を追え。
-   :::details 答え
+<details><summary>答え</summary>
+
    $Q$: $(N, d_k)$, $K$: $(N, d_k)$ → $QK^\top$: $(N, N)$ → softmax後: $(N, N)$ → $\times V$: $(N, d_v)$ → 最終出力: $(N, d_v)$
-   :::
+
+</details>
 
 4. $PE_{(pos, 2i)} = \sin(pos / 10000^{2i/d_{\text{model}}})$ — $pos=10, i=3, d_{\text{model}}=512$ のとき、この値は？
-   :::details 答え
+<details><summary>答え</summary>
+
    $\sin(10 / 10000^{6/512}) = \sin(10 / 10000^{0.0117}) \approx \sin(10 / 1.027) \approx \sin(9.737) \approx -0.156$
-   :::
+
+</details>
 
 5. $\text{LayerNorm}(x) = \gamma \frac{x - \mu}{\sqrt{\sigma^2 + \epsilon}} + \beta$ — $\gamma, \beta$ は学習可能か？
-   :::details 答え
+<details><summary>答え</summary>
+
    ✅ 学習可能。$\gamma$: scale, $\beta$: shift。
-   :::
+
+</details>
 
 6. $\text{FFN}(x) = W_2 \text{ReLU}(W_1 x + b_1) + b_2$ — $W_1$ の形状は？（$d_{\text{model}}=512$, $d_{ff}=2048$の場合）
-   :::details 答え
+<details><summary>答え</summary>
+
    $W_1 \in \mathbb{R}^{512 \times 2048}$ (入力512次元 → 中間2048次元)
-   :::
+
+</details>
 
 7. $h=8$, $d_k=64$, $d_{\text{model}}=512$ — この関係式は？
-   :::details 答え
+<details><summary>答え</summary>
+
    $d_k = d_{\text{model}} / h = 512 / 8 = 64$。Multi-Head Attentionで全headの次元を足すと元の次元に戻る。
-   :::
+
+</details>
 
 8. Causal Mask: $M_{ij} = \begin{cases} 0 & j \leq i \\ -\infty & j > i \end{cases}$ — 位置2のトークンは位置4を見られるか？
-   :::details 答え
+<details><summary>答え</summary>
+
    ❌ 見られない。$i=2, j=4$ → $j > i$ → $M_{24} = -\infty$ → Softmax後に0。
-   :::
+
+</details>
 
 9. $\nabla_\theta L$ — これは何の勾配？
-   :::details 答え
+<details><summary>答え</summary>
+
    損失 $L$ のパラメータ $\theta$ に関する勾配。バックプロパゲーションで計算される。
-   :::
+
+</details>
 
 10. $p(x_1, \dots, x_N) = \prod_{t=1}^N p(x_t | x_{<t})$ — これは何のモデル？
-    :::details 答え
+<details><summary>答え</summary>
+
     自己回帰モデル（GPT等）。各トークンが過去のトークンのみに条件付けられる。
-    :::
+
+</details>
 
 **合格ライン**: 8/10 正解 → 第15回へ進んでOK。
 
@@ -1353,180 +1150,51 @@ fn main() {
 #### 問題
 
 1. 「Qの転置とKの積を、dkの平方根で割る」を数式で書け。
-   :::details 答え
+<details><summary>答え</summary>
+
    ```latex
    \frac{Q^\top K}{\sqrt{d_k}}
    ```
-   :::
+
+</details>
 
 2. 「Softmaxをi番目の要素について定義せよ」
-   :::details 答え
+<details><summary>答え</summary>
+
    ```latex
    \text{softmax}(x)_i = \frac{\exp(x_i)}{\sum_{j=1}^{N} \exp(x_j)}
    ```
-   :::
+
+</details>
 
 3. 「Multi-Head Attentionの出力は、全headを結合してWoを掛ける」
-   :::details 答え
+<details><summary>答え</summary>
+
    ```latex
    \text{MultiHead}(Q, K, V) = \text{Concat}(\text{head}_1, \dots, \text{head}_h) W^O
    ```
-   :::
+
+</details>
 
 4. 「Layer Normalizationは、平均と分散で正規化し、スケール・シフトする」
-   :::details 答え
+<details><summary>答え</summary>
+
    ```latex
    \text{LayerNorm}(x) = \gamma \cdot \frac{x - \mu}{\sqrt{\sigma^2 + \epsilon}} + \beta
    ```
-   :::
+
+</details>
 
 5. 「自己回帰モデルの同時確率を条件付き確率の積で表せ」
-   :::details 答え
+<details><summary>答え</summary>
+
    ```latex
    p(x_1, \dots, x_N) = \prod_{t=1}^{N} p(x_t \mid x_{<t})
    ```
-   :::
+
+</details>
 
 **合格ライン**: 全問正解 → 論文執筆の準備OK。
-
----
-
-### 7.10 Debugging Challenge: Attention実装のバグを直せ
-
-**問題**: 以下のJulia実装には3つのバグがある。全て見つけて修正せよ。
-
-```julia
-using LinearAlgebra
-
-function buggy_attention(Q, K, V)
-    d_k = size(Q, 1)  # Bug 1: wrong dimension
-    scores = Q * K / sqrt(d_k)  # Bug 2: missing transpose
-    attn_weights = exp.(scores) ./ sum(exp.(scores), dims=1)  # Bug 3: wrong axis
-    output = attn_weights * V
-    return output
-end
-```
-
-:::details 答え
-
-**Bug 1**: `d_k = size(Q, 1)` → `d_k = size(Q, 2)` (列数が次元)
-
-**Bug 2**: `Q * K` → `Q * K'` (Kの転置が必要)
-
-**Bug 3**: `dims=1` → `dims=2` (行ごとにSoftmax)
-
-**修正版**:
-```julia
-function fixed_attention(Q, K, V)
-    d_k = size(Q, 2)  # Fixed
-    scores = Q * K' / sqrt(d_k)  # Fixed
-    attn_weights = exp.(scores) ./ sum(exp.(scores), dims=2)  # Fixed
-    output = attn_weights * V
-    return output
-end
-```
-:::
-
----
-
-### 7.11 Implementation Challenge: Tiny Transformer完全版
-
-**課題**: 以下の仕様を満たすTiny Transformerを実装せよ。
-
-**仕様**:
-- Encoder-Decoder構造
-- Encoder: 2層、d_model=32, h=2
-- Decoder: 2層、d_model=32, h=2, Causal Mask
-- タスク: 逆順列生成（入力: [1,2,3] → 出力: [3,2,1]）
-
-**ヒント**: Zone 4のMicro-GPTを拡張し、Encoderを追加する。
-
-:::details 実装スケルトン (Julia)
-
-```julia
-using Lux, Random
-
-# Encoder Block (no causal mask)
-struct EncoderBlock <: Lux.AbstractExplicitLayer
-    mha::MultiHeadAttention
-    ffn::Chain
-    ln1::LayerNorm
-    ln2::LayerNorm
-end
-
-# Decoder Block (with causal mask + cross-attention)
-struct DecoderBlock <: Lux.AbstractExplicitLayer
-    self_attn::MultiHeadAttention
-    cross_attn::MultiHeadAttention
-    ffn::Chain
-    ln1::LayerNorm
-    ln2::LayerNorm
-    ln3::LayerNorm
-end
-
-# Seq2Seq Transformer
-struct TinyTransformer <: Lux.AbstractExplicitLayer
-    encoder::Chain  # 2 EncoderBlocks
-    decoder::Chain  # 2 DecoderBlocks
-    # TODO: Add embeddings, final linear layer
-end
-
-# Training loop
-# TODO: Implement training on reverse-sequence task
-```
-
-**評価**: 訓練100エポック後、検証精度>80% で合格。
-:::
-
----
-
-### 7.12 Final Boss: GPT-2 124M再現
-
-**最終課題**: GPT-2 124Mパラメータモデルを、公開されている重みを使わずに**完全に再実装**せよ。
-
-**仕様** (GPT-2 small):
-- 層数: 12
-- d_model: 768
-- h: 12
-- d_ff: 3072
-- vocab_size: 50257
-- max_len: 1024
-
-**チェックリスト**:
-- [ ] Transformer Block実装（Pre-LN）
-- [ ] Causal Masking実装
-- [ ] Position Encoding (Learnable)
-- [ ] Token Embedding + Output Head
-- [ ] 訓練ループ（Adam, lr=6e-4, warmup）
-- [ ] OpenWebTextデータセット（40GB）で訓練
-- [ ] Perplexity < 30 達成
-
-**推定時間**: 実装20時間 + 訓練100時間（8xV100）
-
-**報酬**: ✅ 完走すれば、Transformerを完全に理解したと言える。次のキャリアステージへ。
-
----
-
-### 7.13 Glossary — 全用語定義
-
-| 用語 | 定義 | 初出 |
-|:-----|:-----|:-----|
-| Self-Attention | 入力系列の各要素が、全要素を参照して文脈表現を得る機構 | Zone 0 |
-| Query/Key/Value | Attentionの3要素。Queryで探し、Keyとマッチし、Valueを取得 | Zone 1 |
-| Scaled Dot-Product | $QK^\top / \sqrt{d_k}$ のスケーリング。Softmax飽和を防ぐ | Zone 3 |
-| Multi-Head Attention | 複数の独立なAttentionを並列実行し結合 | Zone 3 |
-| Position Encoding | 順序情報を注入する手法（Sinusoidal/RoPE/ALiBi） | Zone 3 |
-| Causal Masking | 未来のトークンを見えなくするマスク（Decoder用） | Zone 3 |
-| Transformer Block | Attention + FFN + Residual + LayerNorm | Zone 3 |
-| Pre-LN / Post-LN | Layer Normalizationの位置。Pre-LNが安定 | Zone 3 |
-| KV-Cache | 推論時にKey/Valueをキャッシュし再計算を回避 | Zone 4 |
-| GPT (Decoder-only) | Causal Attentionで自己回帰生成に特化 | Zone 6 |
-| BERT (Encoder-only) | Bidirectional Attentionで理解タスクに特化 | Zone 6 |
-| Scaling Laws | Loss = f(N, D, C) のPower Law | Zone 6 |
-| Emergent Abilities | スケールで突然出現する能力（Few-shot, CoT） | Zone 6 |
-| In-Context Learning | Few-shot examplesだけで新タスクを解く能力 | Zone 5 |
-| Grokking | 訓練誤差0後、汎化性能が突然向上する現象 | Zone 5 |
-| Differential Transformer | 2つのAttention mapの差分でノイズ除去 | Zone 6 |
 
 ---
 
@@ -1578,17 +1246,15 @@ function sparse_attention_local_window(Q, K, V, window_size::Int)
     seq_len, d_k = size(Q)
     scores = fill(-Inf32, seq_len, seq_len)
 
-    # Compute only local window
+    # Compute only local window (inner loop replaced by matrix-vector product)
     for i in 1:seq_len
-        j_start = max(1, i - window_size)
-        j_end = min(seq_len, i + window_size)
-        for j in j_start:j_end
-            scores[i, j] = dot(Q[i, :], K[j, :]) / sqrt(d_k)
-        end
+        j_range = max(1, i - window_size):min(seq_len, i + window_size)
+        @views scores[i, j_range] .= K[j_range, :] * Q[i, :] / sqrt(Float32(d_k))
     end
 
     # Softmax (行ごと)
-    attn_weights = exp.(scores) ./ sum(exp.(scores), dims=2)
+    ex = exp.(scores)
+    attn_weights = ex ./ sum(ex, dims=2)
 
     # Output
     output = attn_weights * V
@@ -1666,9 +1332,11 @@ function linear_attention_performer(Q, K, V, m::Int)
     # Random features
     ω = randn(Float32, d_k, m)
 
-    # Feature maps
-    ϕ_Q = [cos.(Q * ω); sin.(Q * ω)] / sqrt(m)  # (seq_len, 2m)
-    ϕ_K = [cos.(K * ω); sin.(K * ω)] / sqrt(m)  # (seq_len, 2m)
+    # Cache projections; feature maps via vcat
+    scale = sqrt(Float32(m))
+    Qω, Kω = Q * ω, K * ω
+    ϕ_Q = [cos.(Qω); sin.(Qω)] / scale  # (seq_len, 2m)
+    ϕ_K = [cos.(Kω); sin.(Kω)] / scale  # (seq_len, 2m)
 
     # Compute KV aggregation (O(N))
     KV = ϕ_K' * V  # (2m, d_v)
@@ -1748,8 +1416,8 @@ end
 
 # Example
 tokens = ["The", "cat", "sat", "on", "the", "mat"]
-attn_weights = randn(6, 6)
-attn_weights = exp.(attn_weights) ./ sum(exp.(attn_weights), dims=2)
+ex = exp.(randn(6, 6))
+attn_weights = ex ./ sum(ex, dims=2)
 
 visualize_attention(attn_weights, tokens)
 ```
@@ -1909,99 +1577,6 @@ Attention Entropyの急降下 = Grokking発生のサイン。ネットワーク�
 
 ---
 
-### 7.19 Ethical Considerations & Societal Impact
-
-**LLM（Large Language Model）の社会的影響**:
-
-#### (a) Bias & Fairness
-
-**問題**: 訓練データのバイアスがモデルに反映される。
-
-**例**:
-- 性別バイアス: "doctor" → "he", "nurse" → "she"
-- 人種バイアス: 犯罪関連の文脈で特定人種への偏り
-- 文化バイアス: 英語圏中心の知識
-
-**対策**:
-- データのバランシング
-- Debiasing手法（Counterfactual Data Augmentation）
-- RLHF (Reinforcement Learning from Human Feedback) で修正
-
-#### (b) Misinformation & Hallucination
-
-**問題**: LLMは確信を持って誤情報を生成する（Hallucination）。
-
-**原因**: 訓練データに誤情報が含まれる + 確率的生成による捏造
-
-**対策**:
-- Retrieval-Augmented Generation (RAG) — 外部知識ベースを参照
-- Citation機能 — 生成内容の出典を明示
-- Uncertainty Estimation — 不確実性を定量化
-
-#### (c) Environmental Impact
-
-**問題**: 大規模モデルの訓練は膨大なエネルギー消費。
-
-**数値**:
-- GPT-3 (175B) 訓練: ~1,287 MWh → CO₂排出 ~552トン（自動車120台分/年）
-- Chinchilla (70B, 1.4Tトークン): GPT-3の2倍の計算量
-
-**対策**:
-- Compute-efficient training (Chinchilla則に従う)
-- Model compression (Quantization / Pruning)
-- 再生可能エネルギーでのデータセンター運用
-
-#### (d) Democratization vs Concentration
-
-**問題**: LLM訓練は巨大企業のみが可能 → 技術の寡占化。
-
-**対策**:
-- オープンソースモデル（LLaMA / BLOOM / Falcon）
-- Smaller but efficient models（Phi / Mistral）
-- Inference optimization（Flash Attention / Quantization）
-
-**結論**: Attention/Transformerは強力な技術だが、**責任ある開発と利用**が不可欠。
-
----
-
-### 7.20 Appendix: Complete Symbol Index
-
-**全記号の完全リファレンス** — 論文読解時の辞書として使用可能。
-
-| 記号 | 読み | 意味 | 形状 | 初出 |
-|:-----|:-----|:-----|:-----|:-----|
-| $N$ | エヌ | 系列長（トークン数） | スカラー | Zone 0 |
-| $d_{\text{model}}$ | ディー モデル | 入力埋め込み次元 | スカラー | Zone 0 |
-| $d_k$ | ディー ケー | Query/Keyの次元 | スカラー | Zone 1 |
-| $d_v$ | ディー ブイ | Valueの次元 | スカラー | Zone 1 |
-| $d_{\text{ff}}$ | ディー エフエフ | Feed-Forward中間次元 | スカラー | Zone 3 |
-| $h$ | エイチ | Multi-Headの数 | スカラー | Zone 3 |
-| $X$ | エックス | 入力系列 | $(N, d_{\text{model}})$ | Zone 0 |
-| $Q$ | キュー | Query行列 | $(N, d_k)$ | Zone 0 |
-| $K$ | ケー | Key行列 | $(N, d_k)$ | Zone 0 |
-| $V$ | ブイ | Value行列 | $(N, d_v)$ | Zone 0 |
-| $W_Q$ | ダブリュー キュー | Query射影行列 | $(d_{\text{model}}, d_k)$ | Zone 3 |
-| $W_K$ | ダブリュー ケー | Key射影行列 | $(d_{\text{model}}, d_k)$ | Zone 3 |
-| $W_V$ | ダブリュー ブイ | Value射影行列 | $(d_{\text{model}}, d_v)$ | Zone 3 |
-| $W_O$ | ダブリュー オー | 出力射影行列 | $(hd_v, d_{\text{model}})$ | Zone 3 |
-| $W_1$ | ダブリュー ワン | FFN第1層重み | $(d_{\text{model}}, d_{\text{ff}})$ | Zone 3 |
-| $W_2$ | ダブリュー ツー | FFN第2層重み | $(d_{\text{ff}}, d_{\text{model}})$ | Zone 3 |
-| $S$ | エス | Attentionスコア行列 | $(N, N)$ | Zone 1 |
-| $A$ | エー | Attention重み行列 | $(N, N)$ | Zone 1 |
-| $O$ | オー | Attention出力 | $(N, d_v)$ | Zone 1 |
-| $\text{softmax}(x)_i$ | ソフトマックス | $\frac{e^{x_i}}{\sum_j e^{x_j}}$ | ベクトル→ベクトル | Zone 0 |
-| $\text{LN}(x)$ | レイヤーノーム | Layer Normalization | $(d,) \to (d,)$ | Zone 3 |
-| $\gamma, \beta$ | ガンマ、ベータ | LNのスケール・シフト | $(d,)$ | Zone 3 |
-| $\mu, \sigma$ | ミュー、シグマ | LNの平均・標準偏差 | スカラー | Zone 3 |
-| $PE_{pos,i}$ | ピーイー | Position Encoding | $(N, d_{\text{model}})$ | Zone 3 |
-| $\text{Mask}$ | マスク | Causal Mask行列 | $(N, N)$ | Zone 3 |
-| $p(x_t \mid x_{<t})$ | ピー | 条件付き確率 | スカラー | Zone 6 |
-| $\theta$ | シータ | モデルパラメータ全体 | ベクトル | Zone 5 |
-| $\mathcal{L}$ | エル | 損失関数 | スカラー | Zone 5 |
-| $\nabla_\theta$ | ナブラ シータ | $\theta$に関する勾配 | ベクトル | Zone 5 |
-
----
-
 ### 7.21 Complete Code Repository Structure
 
 **推奨ディレクトリ構成** — 第14回の全実装を整理:
@@ -2055,105 +1630,5 @@ ml-lecture-14-attention/
 # 第14回: Attention — 化石からの脱却
 
 実装コードとノートブック（Zenn記事の実践版）
-
-## クイックスタート
-
-### Julia実装
-
-```bash
-cd julia
-julia --project=. -e 'using Pkg; Pkg.instantiate()'
-julia --project=. experiments/train_gpt.jl
-```
-
-### Rust推論
-
-```bash
-cd rust
-cargo run --release --bin inference
-```
-
-### 3言語比較
-
-```bash
-python python/compare.py
-```
-
-## ライセンス
-
-MIT — 教育目的での自由利用を推奨
-```
-
----
-
-### 7.22 Recommended Study Path for Different Audiences
-
-**初学者（機械学習1年目）**:
-1. Zone 0-2 を精読（直感重視）
-2. Zone 3.1-3.3 のみ数式導出
-3. Zone 4 のJuliaコードを写経
-4. Zone 5 をスキップ
-5. Zone 7 で全体復習
-**推定時間**: 3時間
-
-**中級者（論文実装経験あり）**:
-1. Zone 0-2 を流し読み
-2. Zone 3 全て導出（紙とペン）
-3. Zone 4-5 全て実装+実験
-4. Zone 6 の発展トピックを精読
-5. Challenge問題に挑戦
-**推定時間**: 6時間
-
-**上級者（研究者/エンジニア）**:
-1. Zone 3.6-3.7 (Boss Battle) から開始
-2. Zone 4.5 (KV-Cache) を詳細実装
-3. Zone 6 の最新研究を深掘り
-4. 7.14-7.19 の応用トピックを研究に活用
-5. Final Boss (GPT-2再現) に挑戦
-**推定時間**: 10時間 + 実装100時間
-
-**論文著者志望**:
-1. 全Zone完全読破
-2. 全数式を自力で再導出
-3. 全コードを3言語で実装
-4. Advanced Topics (7.14-7.19) を論文調査
-5. 独自の改良案を考案・実験
-**推定時間**: 20時間 + 研究N週間
-
----
-
-### 7.23 Historical Timeline: Attention発展史
-
-**Pre-Attention時代** (〜2014):
-- 2013: Word2Vec (Mikolov) — 単語埋め込みの標準化
-- 2014: Seq2Seq (Sutskever) — RNN Encoder-Decoder
-
-**Attention誕生** (2014-2016):
-- 2015: Bahdanau Attention [^2] — RNN + Attention
-- 2016: Luong Attention — Multiplicative Attention
-
-**Transformer革命** (2017-2020):
-- 2017: **"Attention is All You Need"** [^1] — RNN/CNN排除
-- 2018: GPT-1 [^3] — Decoder-only, 生成タスク
-- 2019: BERT [^4] — Encoder-only, 理解タスク
-- 2019: GPT-2 — Zero-shot学習の萌芽
-- 2020: GPT-3 — Few-shot ICL, Emergent Abilities
-- 2020: Scaling Laws [^5] — Kaplan則
-
-**効率化時代** (2020-2023):
-- 2020: Longformer / BigBird — Sparse Attention
-- 2021: RoPE [^10] — 位置エンコーディング改良
-- 2021: Performer / Linear Attention — $O(N)$ 実現
-- 2022: Flash Attention — IO最適化
-- 2022: Chinchilla [^6] — データとモデルのバランス
-- 2023: Flash Attention-2/3 — さらなる高速化
-
-**代替・統合時代** (2023-2025):
-- 2023: Mamba — SSMによる代替
-- 2024: Differential Transformer [^7] — ノイズ除去
-- 2024: Mamba-2 / SSD — Attention=SSM双対性
-- 2025: Hybrid (Jamba/Zamba) — 組み合わせの時代
-
----
 
 **第14回完**. 化石からの脱却完了 — 次は効率化の戦いだ。第15回で会おう。

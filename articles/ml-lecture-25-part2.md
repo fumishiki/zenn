@@ -5,7 +5,14 @@ emoji: "🔗"
 type: "tech"
 topics: ["machinelearning", "causalinference", "julia", "statistics", "experiment"]
 published: true
+difficulty: "advanced"
+time_estimate: "90 minutes"
+languages: ["Julia", "Rust", "Elixir"]
+keywords: ["機械学習", "深層学習", "生成モデル"]
 ---
+
+> **第25回【前編】**: [第25回【前編】](https://zenn.dev/fumishiki/ml-lecture-25-part1)
+
 
 ## 💻 4. 実装ゾーン（45分）— Julia因果推論フルスタック
 
@@ -98,11 +105,11 @@ function simulate_from_dag(n::Int=5000)
     gene = rand(Bernoulli(0.3), n)
 
     # Smoking | Gene ~ Bernoulli(logistic(0.5 * Gene))
-    smoking_prob = 1 ./ (1 .+ exp.(-(0.5 .* gene .- 0.2)))
+    smoking_prob = @. 1 / (1 + exp(-(0.5gene - 0.2)))
     smoking = rand.(Bernoulli.(smoking_prob))
 
     # Cancer | Smoking, Gene ~ Bernoulli(logistic(1.5 * Smoking + 0.8 * Gene))
-    cancer_prob = 1 ./ (1 .+ exp.(-(1.5 .* smoking .+ 0.8 .* gene .- 1.0)))
+    cancer_prob = @. 1 / (1 + exp(-(1.5smoking + 0.8gene - 1.0)))
     cancer = rand.(Bernoulli.(cancer_prob))
 
     return DataFrame(Gene=gene, Smoking=smoking, Cancer=cancer)
@@ -171,11 +178,11 @@ function generate_ps_data(n::Int=2000)
     income = rand(Normal(50, 15), n)
 
     # Treatment assignment depends on age and income
-    propensity = 1 ./ (1 .+ exp.(-(0.05 .* age .+ 0.03 .* income .- 3.5)))
+    propensity = @. 1 / (1 + exp(-(0.05age + 0.03income - 3.5)))
     treatment = rand(n) .< propensity
 
     # Outcome depends on treatment + confounders
-    outcome = 2.0 .* treatment .+ 0.5 .* age .+ 0.3 .* income .+ randn(n) * 5
+    outcome = 2.0 .* treatment .+ 0.5 .* age .+ 0.3 .* income .+ randn(n) .* 5
 
     return DataFrame(Treatment=treatment, Age=age, Income=income, Outcome=outcome)
 end
@@ -208,7 +215,7 @@ function ipw_estimator(data::DataFrame, treatment::Symbol, outcome::Symbol, prop
 
     # Variance estimation (Horvitz-Thompson)
     n = length(D_trim)
-    var_ipw = var(D_trim .* Y_trim ./ e_trim - (1 .- D_trim) .* Y_trim ./ (1 .- e_trim)) / n
+    var_ipw = var(D_trim .* Y_trim ./ e_trim .- (1 .- D_trim) .* Y_trim ./ (1 .- e_trim)) / n
     se = sqrt(var_ipw)
 
     return ate, se
@@ -245,11 +252,11 @@ function doubly_robust_estimator(data::DataFrame, treatment::Symbol, outcome::Sy
     μ_0 = predict(model_0, data)
 
     # DR estimator
-    dr_term_1 = D .* (Y .- μ_1) ./ e .+ μ_1
-    dr_term_0 = (1 .- D) .* (Y .- μ_0) ./ (1 .- e) .+ μ_0
-    ate_dr = mean(dr_term_1 - dr_term_0)
+    dr_term_1 = @. D * (Y - μ_1) / e + μ_1
+    dr_term_0 = @. (1 - D) * (Y - μ_0) / (1 - e) + μ_0
+    ate_dr = mean(dr_term_1 .- dr_term_0)
 
-    var_dr = var(dr_term_1 - dr_term_0) / nrow(data)
+    var_dr = var(dr_term_1 .- dr_term_0) / nrow(data)
     se_dr = sqrt(var_dr)
 
     return ate_dr, se_dr
@@ -349,12 +356,12 @@ function generate_iv_data(n::Int=2000)
     Z = rand(Bernoulli(0.5), n)
 
     # Treatment D depends on Z and U (endogenous)
-    D = Z .+ 0.5 .* U .+ randn(n) * 0.3
+    D = Z .+ 0.5 .* U .+ randn(n) .* 0.3
     D = D .> median(D)  # binarize
 
     # Outcome Y depends on D and U (confounded)
     # True causal effect of D: 2.0
-    Y = 2.0 .* D .+ U .+ randn(n) * 0.5
+    Y = 2.0 .* D .+ U .+ randn(n) .* 0.5
 
     return DataFrame(Outcome=Y, Treatment=D, Instrument=Z)
 end
@@ -400,7 +407,7 @@ function regression_discontinuity(data::DataFrame, outcome::Symbol, running_var:
     rdd_effect = β[2]
 
     # Standard error (simplified - use robust SE in practice)
-    residuals = Y_local - design_matrix * β
+    residuals = Y_local .- design_matrix * β
     se = sqrt(sum(residuals.^2) / (length(Y_local) - 4)) *
          sqrt((design_matrix' * design_matrix)[2, 2]^(-1))
 
@@ -417,7 +424,7 @@ function generate_rdd_data(n::Int=2000, cutoff::Float64=18.0)
 
     # Outcome (discontinuity at cutoff)
     # True effect: 3.0
-    Y = 10 .+ 0.5 .* X .+ 3.0 .* D .+ randn(n) * 0.8
+    Y = 10 .+ 0.5 .* X .+ 3.0 .* D .+ randn(n) .* 0.8
 
     return DataFrame(Age=X, Treatment=D, Outcome=Y)
 end
@@ -463,7 +470,7 @@ function generate_did_data(n_group::Int=500, n_period::Int=2)
     # Group effect: +5 for treated group
     # Time effect: +2 for post period
     # True DiD effect: +3
-    Y = 10 .+ 5 .* groups .+ 2 .* periods .+ 3 .* treatment .+ randn(length(groups)) * 1.0
+    Y = 10 .+ 5 .* groups .+ 2 .* periods .+ 3 .* treatment .+ randn(length(groups))
 
     return DataFrame(Group=groups, Post=periods, Treatment=treatment, Outcome=Y)
 end
@@ -509,7 +516,7 @@ function causal_forest_simple(data::DataFrame, outcome::Symbol, treatment::Symbo
     μ_1 = predict(model_1, data)
     μ_0 = predict(model_0, data)
 
-    cate = μ_1 - μ_0
+    cate = μ_1 .- μ_0
 
     # ATE = mean(CATE)
     ate_cf = mean(cate)
@@ -528,8 +535,8 @@ function generate_hte_data(n::Int=2000)
     # Heterogeneous treatment effect: τ(X) = 2 + X1
     # Y^1 = 10 + 2*X1 + X2 + (2 + X1)
     # Y^0 = 10 + 2*X1 + X2
-    Y1 = 10 .+ 2 .* X1 .+ X2 .+ (2 .+ X1) .+ randn(n) * 0.5
-    Y0 = 10 .+ 2 .* X1 .+ X2 .+ randn(n) * 0.5
+    Y1 = 10 .+ 2 .* X1 .+ X2 .+ (2 .+ X1) .+ randn(n) .* 0.5
+    Y0 = 10 .+ 2 .* X1 .+ X2 .+ randn(n) .* 0.5
     Y = D .* Y1 .+ (1 .- D) .* Y0
 
     true_cate = 2 .+ X1  # ground truth
@@ -591,11 +598,15 @@ ps_test_data = generate_ps_data(2000)
 causal_inference_pipeline(ps_test_data, "propensity")
 ```
 
-:::message
-**進捗: 70% 完了** Julia因果推論フルスタックを実装した。DAG/do-演算/傾向スコア/IV/RDD/DiD/Causal Forestの全手法をCausalInference.jlで実装。次は実験ゾーンで実データに適用する。
-:::
+> **Note:** **進捗: 70% 完了** Julia因果推論フルスタックを実装した。DAG/do-演算/傾向スコア/IV/RDD/DiD/Causal Forestの全手法をCausalInference.jlで実装。次は実験ゾーンで実データに適用する。
 
 ---
+
+
+> Progress: [85%]
+> **理解度チェック**
+> 1. 傾向スコアマッチング後のバランスチェックで標準化差（SMD）が0.1未満を目安にする理由は？
+> 2. 2SLS推定量の第一段階F統計量が10未満のとき「弱操作変数」と判定される根拠は？
 
 ## 🔬 5. 実験ゾーン（30分）— 実データ因果推論チャレンジ
 
@@ -609,14 +620,14 @@ function comprehensive_causal_data(n::Int=3000)
     income = rand(Normal(50, 20), n)
 
     # Propensity score (selection on observables)
-    e_X = 1 ./ (1 .+ exp.(-(0.05 .* age .+ 0.03 .* income .- 3.0)))
+    e_X = @. 1 / (1 + exp(-(0.05age + 0.03income - 3.0)))
     treatment = rand(n) .< e_X
 
     # Instrumental variable (random assignment)
     instrument = rand(Bernoulli(0.5), n)
 
     # Outcome (true effect = 5.0)
-    outcome = 5.0 .* treatment .+ 0.3 .* age .+ 0.2 .* income .+ randn(n) * 3.0
+    outcome = 5.0 .* treatment .+ 0.3 .* age .+ 0.2 .* income .+ randn(n) .* 3.0
 
     return DataFrame(
         Treatment=treatment,
@@ -718,7 +729,7 @@ sample_ratio_mismatch_test(test_data, :Treatment, 0.5)
 
 #### テスト1: 記法理解（10問）
 
-:::details Q1: $\mathbb{E}[Y^1 - Y^0]$ は何を表すか？
+<details><summary>Q1: $\mathbb{E}[Y^1 - Y^0]$ は何を表すか？</summary>
 
 **Answer**: ATE (Average Treatment Effect) — 全体の平均処置効果
 
@@ -727,9 +738,10 @@ $$
 $$
 
 **補足**: これは個体レベルの処置効果 $\tau_i = Y_i^1 - Y_i^0$ の期待値。個体レベルは観測不能（根本的因果推論問題）だが、集団平均なら推定可能。
-:::
 
-:::details Q2: $P(Y \mid do(X=x))$ と $P(Y \mid X=x)$ の違いは？
+</details>
+
+<details><summary>Q2: $P(Y \mid do(X=x))$ と $P(Y \mid X=x)$ の違いは？</summary>
 
 **Answer**:
 - $P(Y \mid do(X=x))$: **介入確率** — $X$ を外部から強制的に $x$ に固定した場合の $Y$ の分布
@@ -742,9 +754,10 @@ $$
 - $P(\text{がん} \mid do(\text{喫煙}=1))$: 強制的に喫煙させた場合のがん率（因果効果）
 
 前者は相関、後者は因果。Simpson's Paradoxでは両者が逆転することすらある。
-:::
 
-:::details Q3: $e(X) = P(D=1 \mid X)$ の名前と役割は？
+</details>
+
+<details><summary>Q3: $e(X) = P(D=1 \mid X)$ の名前と役割は？</summary>
 
 **Answer**: **傾向スコア (Propensity Score)**
 
@@ -754,9 +767,10 @@ $$
 - $X$ が10次元でも $e(X)$ は1次元 → マッチングが容易
 - 共通サポート $0 < e(X) < 1$ の確認が簡単
 - IPW推定で $1/e(X)$ の重みを使うだけで因果効果推定可能
-:::
 
-:::details Q4: SUTVAの2つの仮定を述べよ
+</details>
+
+<details><summary>Q4: SUTVAの2つの仮定を述べよ</summary>
 
 **Answer**:
 1. **処置の一意性**: 個体 $i$ の処置が $d$ のとき、結果は $Y_i^d$ の1つのみ
@@ -772,9 +786,10 @@ $$
 - 教室内の処置: 同じクラスの学生間で相互影響
 
 SUTVAが破れる場合は、**Spillover Effects** や **Network Effects** を明示的にモデル化する必要がある。
-:::
 
-:::details Q5: バックドア基準を満たす変数集合 $Z$ の条件は？
+</details>
+
+<details><summary>Q5: バックドア基準を満たす変数集合 $Z$ の条件は？</summary>
 
 **Answer**:
 1. $Z$ のどの変数も $X$ の子孫でない
@@ -793,9 +808,10 @@ $$
 **例**: 喫煙→がん、バックドアパス: 喫煙←遺伝→がん
 - $Z = \{\text{遺伝}\}$ で条件づけるとバックドアパスが遮断される
 - $Z = \{\text{タール沈着}\}$ (喫煙の結果) で条件づけるとCollider Biasが発生
-:::
 
-:::details Q6: d-分離とは何か？
+</details>
+
+<details><summary>Q6: d-分離とは何か？</summary>
 
 **Answer**: DAG上で変数集合 $Z$ が $X$ と $Y$ を d-分離する $\iff$ $X$ から $Y$ へのすべてのパスが $Z$ によって遮断される。
 
@@ -805,9 +821,10 @@ $$
 - **Collider** $X \to Z \leftarrow Y$: $Z \notin \mathcal{Z}$ かつ $\text{DE}(Z) \cap \mathcal{Z} = \emptyset$ なら遮断
 
 **d-分離の重要性**: $X \perp_d Y \mid Z$ (d-分離) $\Rightarrow$ $X \perp\!\!\!\perp Y \mid Z$ (条件付き独立)
-:::
 
-:::details Q7: Colliderで条件づけると何が起こる？
+</details>
+
+<details><summary>Q7: Colliderで条件づけると何が起こる？</summary>
 
 **Answer**: **選択バイアス** — 独立だった変数が条件付きで相関する
 
@@ -828,9 +845,10 @@ $$
 合格者の中では「努力が少ない→才能が高い」という負の相関が生まれる。これが**Berkson's Paradox**。
 
 **実用例**: 病院患者データで疾患Aと疾患Bが負の相関 → 入院（Collider）で条件づけられているため
-:::
 
-:::details Q8: Unconfoundedness仮定とは？
+</details>
+
+<details><summary>Q8: Unconfoundedness仮定とは？</summary>
 
 **Answer**: $(Y^1, Y^0) \perp\!\!\!\perp D \mid X$
 
@@ -843,9 +861,10 @@ $$
 - 未測定交絡 $U$ が存在しない
 
 **破れる例**: 能力 $U$ が未測定で、$U \to D$ かつ $U \to Y$ なら Unconfoundedness は成り立たない → IV/RDD/DiDなど他の手法が必要
-:::
 
-:::details Q9: LATEとATEの違いは？
+</details>
+
+<details><summary>Q9: LATEとATEの違いは？</summary>
 
 **Answer**:
 - **ATE**: $\mathbb{E}[Y^1 - Y^0]$ — 全体の平均処置効果
@@ -864,9 +883,10 @@ $$
 - Defier: IVに逆らう（Monotonicity仮定で排除）
 
 **ATE vs LATE**: LATEはコンプライアーのみの効果なので、ATEより局所的。外部妥当性が低い可能性がある。
-:::
 
-:::details Q10: 並行トレンド仮定とは？
+</details>
+
+<details><summary>Q10: 並行トレンド仮定とは？</summary>
 
 **Answer**: DiDの識別仮定
 
@@ -883,11 +903,12 @@ $$
 - Placebo Test: 処置前期間で「偽の処置」を設定し、効果がゼロか確認
 
 **破れる例**: 処置群が高成長企業、対照群が低成長企業 → もともとトレンドが異なる → DiDは適用不可
-:::
+
+</details>
 
 #### テスト2: 数式導出（5問）
 
-:::details Q1: IPW推定量が不偏であることを示せ
+<details><summary>Q1: IPW推定量が不偏であることを示せ</summary>
 
 **Proof**:
 
@@ -911,9 +932,10 @@ $$
 - Step 3→4: Unconfoundedness $(Y^1, Y^0) \perp\!\!\!\perp D \mid X$ により $\mathbb{E}[Y \mid D=1, X] = \mathbb{E}[Y^1 \mid X]$
 - Step 4→5: $e(X) = P(D=1 \mid X)$ なので約分
 - Overlap仮定 $0 < e(X) < 1$ が必須（分母がゼロにならない）
-:::
 
-:::details Q2: 2SLS推定量を導出せよ（Wald推定量形式）
+</details>
+
+<details><summary>Q2: 2SLS推定量を導出せよ（Wald推定量形式）</summary>
 
 **Derivation**:
 
@@ -951,9 +973,10 @@ $$
 - 外生性: $\text{Cov}(U, Z) = 0$
 - 関連性: $\text{Cov}(D, Z) \neq 0$ (弱IVなら分母が小さくバイアス大)
 - 排除制約: $Z \to Y$ の直接パスなし
-:::
 
-:::details Q3: DiD推定量を導出せよ
+</details>
+
+<details><summary>Q3: DiD推定量を導出せよ</summary>
 
 **Setup**: 2期間 $t \in \{0, 1\}$, 2グループ $G \in \{0, 1\}$
 
@@ -997,9 +1020,10 @@ $$
 $$
 
 DiDはATT（処置群の平均処置効果）を識別する。
-:::
 
-:::details Q4: Doubly Robust推定量が2重頑健である理由を示せ
+</details>
+
+<details><summary>Q4: Doubly Robust推定量が2重頑健である理由を示せ</summary>
 
 **DR推定量**:
 
@@ -1025,9 +1049,10 @@ $$
 IPWの不偏性により $\mathbb{E}[\hat{\tau}_{\text{DR}}] = \text{ATE}$
 
 **結論**: $\hat{\mu}$ or $\hat{e}$ のどちらか一方が正しければ不偏 → 2重頑健性
-:::
 
-:::details Q5: RDD効果を導出せよ（Sharp RDD）
+</details>
+
+<details><summary>Q5: RDD効果を導出せよ（Sharp RDD）</summary>
 
 **Setup**: カットオフ $c$ で処置割り当て
 
@@ -1063,11 +1088,12 @@ $$
 $$
 
 $\hat{\beta}_1 = \hat{\tau}_{\text{RDD}}$
-:::
+
+</details>
 
 #### テスト3: Julia実装（5問）
 
-:::details Q1: 傾向スコアを推定し、共通サポートを確認せよ
+<details><summary>Q1: 傾向スコアを推定し、共通サポートを確認せよ</summary>
 
 ```julia
 # 1. Estimate propensity score
@@ -1091,7 +1117,8 @@ histogram([e_X[data.Treatment .== 0], e_X[data.Treatment .== 1]],
 trimmed = (e_X .> ε) .& (e_X .< (1 - ε))
 println("Trimmed $(sum(.!trimmed)) observations ($(round(100*mean(.!trimmed), digits=1))%)")
 ```
-:::
+
+</details>
 
 ### 5.5 ミニプロジェクト: 教育介入の因果効果推定
 
@@ -1127,14 +1154,14 @@ function education_program_data(n::Int=2000)
 
     # Treatment: program enrollment (endogenous)
     # Depends on: coupon, covariates, ability
-    enroll_prob = 1 ./ (1 .+ exp.(-(0.8 .* coupon .+ 0.02 .* age .- 0.01 .* baseline_score .+
-                                   0.01 .* income .+ 0.3 .* ability .- 1.0)))
+    enroll_prob = @. 1 / (1 + exp(-(0.8coupon + 0.02age - 0.01baseline_score +
+                                   0.01income + 0.3ability - 1.0)))
     enroll = rand(n) .< enroll_prob
 
     # Outcome: test score
     # True program effect: 10 points
     # Also depends on baseline score and ability
-    test_score = 50 .+ 10 .* enroll .+ 0.5 .* baseline_score .+ 5 .* ability .+ randn(n) * 8
+    test_score = 50 .+ 10 .* enroll .+ 0.5 .* baseline_score .+ 5 .* ability .+ randn(n) .* 8
 
     return DataFrame(
         Enroll=enroll,
@@ -1166,9 +1193,7 @@ println("First-stage F: $(round(f_stat, digits=2))")
 sensitivity_analysis_gamma(ate_ps, se_ps, [1.0, 1.5, 2.0])
 ```
 
-:::message
-**進捗: 85% 完了** 実データ因果推論チャレンジを完了した。全手法を比較し、感度分析で頑健性を確認した。次は発展ゾーンで研究フロンティアを探索する。
-:::
+> **Note:** **進捗: 85% 完了** 実データ因果推論チャレンジを完了した。全手法を比較し、感度分析で頑健性を確認した。次は発展ゾーンで研究フロンティアを探索する。
 
 ---
 
@@ -1237,7 +1262,7 @@ graph TD
 
 ### 6.4 因果推論用語集
 
-:::details 用語集（アルファベット順）
+<details><summary>用語集（アルファベット順）</summary>
 
 | 用語 | 定義 |
 |:-----|:-----|
@@ -1262,7 +1287,8 @@ graph TD
 | **SCM** | Structural Causal Model — 構造因果モデル $(\mathcal{U}, \mathcal{V}, \mathcal{F})$ |
 | **SUTVA** | Stable Unit Treatment Value Assumption — 安定個体処置値仮定 |
 | **Unconfoundedness** | 無交絡性 — $(Y^1, Y^0) \perp\!\!\!\perp D \mid X$ |
-:::
+
+</details>
 
 ### 6.5 因果推論の知識マップ
 
@@ -1296,9 +1322,7 @@ mindmap
       EconML
 ```
 
-:::message
-**進捗: 100% 完了** 因果推論のフロンティアを探索した。論文・教科書・ツール・用語を完全整理。あとは振り返りゾーンでまとめ。
-:::
+> **Note:** **進捗: 100% 完了** 因果推論のフロンティアを探索した。論文・教科書・ツール・用語を完全整理。あとは振り返りゾーンでまとめ。
 
 ---
 
@@ -1317,46 +1341,51 @@ mindmap
 
 ### 6.7 よくある質問 (FAQ)
 
-:::details Q1: 因果推論と機械学習の違いは？
+<details><summary>Q1: 因果推論と機械学習の違いは？</summary>
 
 **A**:
 - **機械学習**: 予測精度の最大化 — $\hat{Y} \approx Y$
 - **因果推論**: 因果効果の推定 — $\mathbb{E}[Y \mid do(X=x)]$
 
 MLは「次に何が起こるか」、因果推論は「介入したら何が起こるか」を問う。MLは相関を学習し、因果推論は因果構造を仮定する。
-:::
 
-:::details Q2: いつ傾向スコア vs IVを使う？
+</details>
+
+<details><summary>Q2: いつ傾向スコア vs IVを使う？</summary>
 
 **A**:
 - **傾向スコア**: Unconfoundedness $(Y^d \perp\!\!\!\perp D \mid X)$ が成立する場合 — すべての交絡因子を測定できている
 - **IV**: 未測定交絡がある場合 — 外生的なランダム変動（操作変数）を利用
 
 ランダム化実験に近い状況なら傾向スコア、観測研究で交絡が疑われるならIV。
-:::
 
-:::details Q3: RDDとDiDの使い分けは？
+</details>
+
+<details><summary>Q3: RDDとDiDの使い分けは？</summary>
 
 **A**:
 - **RDD**: 処置割り当てがカットオフで決まる（例: 年齢18歳で選挙権、スコア70点で合格）
 - **DiD**: 2期間データがあり、処置タイミングが群によって異なる
 
 RDDは空間的不連続、DiDは時間的変化を利用する。
-:::
 
-:::details Q4: Causal Forestで何がわかる？
+</details>
+
+<details><summary>Q4: Causal Forestで何がわかる？</summary>
 
 **A**: **異質な処置効果 (HTE)** — 個体特性 $X$ に応じた処置効果 $\tau(X)$
 
 平均効果(ATE)だけでなく、「高齢者には効果大、若年者には効果小」といった部分集団ごとの効果を推定できる。政策のターゲティングに有用。
-:::
 
-:::details Q5: 因果推論で最も重要な仮定は？
+</details>
+
+<details><summary>Q5: 因果推論で最も重要な仮定は？</summary>
 
 **A**: **Unconfoundedness** $(Y^d \perp\!\!\!\perp D \mid X)$ または **Exclusion Restriction** (IV)
 
 これが破れると、どんな手法も因果効果を正しく推定できない。仮定の妥当性を理論・ドメイン知識・感度分析で検証することが最重要。
-:::
+
+</details>
 
 ### 6.8 学習スケジュール（1週間復習プラン）
 
@@ -1385,127 +1414,6 @@ RDDは空間的不連続、DiDは時間的変化を利用する。
 - BootstrapによるCI推定
 - 多重検定補正 (Bonferroni, FDR)
 - 因果効果の可視化 (Forest Plot, Love Plot)
-
-### 6.10 自己チェックリスト
-
-- [ ] Simpson's Paradoxを説明できる
-- [ ] ATE, ATT, CATEの違いを説明できる
-- [ ] 潜在的結果 $Y^1, Y^0$ を定義できる
-- [ ] SUTVAの2つの仮定を述べられる
-- [ ] do-演算 $P(Y \mid do(X))$ と条件付き確率の違いを説明できる
-- [ ] バックドア基準を説明できる
-- [ ] d-分離の3パターン (Chain/Fork/Collider) を図示できる
-- [ ] 傾向スコアの定義と次元削減の意味を説明できる
-- [ ] IPW推定量を導出できる
-- [ ] Doubly Robust推定量のメリットを説明できる
-- [ ] 操作変数の3条件を述べられる
-- [ ] 2SLS推定量 (Wald推定量) を導出できる
-- [ ] LATEとATEの違いを説明できる
-- [ ] Weak IV問題と第1段階F統計量の関係を説明できる
-- [ ] RDDの局所ランダム化仮定を説明できる
-- [ ] Sharp RDDとFuzzy RDDの違いを説明できる
-- [ ] DiDの並行トレンド仮定を説明できる
-- [ ] Staggered DiDの問題点 (TWFE バイアス) を説明できる
-- [ ] Causal ForestでHTEを推定する意義を説明できる
-- [ ] Double MLのNeyman-Orthogonal Scoreを説明できる
-- [ ] JuliaでIPW推定を実装できる
-- [ ] JuliaでDAGを構築しバックドア基準を検証できる
-- [ ] JuliaでRDD推定を実装できる
-- [ ] JuliaでDiD推定を実装できる
-- [ ] 感度分析 (Rosenbaum's Γ) を実行できる
-
-**25項目中20項目以上チェック** → 因果推論マスター！
-
-### 6.6 進捗トラッカー (Julia実装)
-
-```julia
-# Self-assessment progress tracker
-function causal_inference_progress()
-    skills = [
-        "Simpson's Paradox理解",
-        "ATE/ATT/CATE区別",
-        "潜在的結果定義",
-        "SUTVA説明",
-        "do-演算理解",
-        "バックドア基準",
-        "d-分離",
-        "傾向スコア定義",
-        "IPW導出",
-        "DR推定量",
-        "IV 3条件",
-        "2SLS導出",
-        "LATE vs ATE",
-        "Weak IV問題",
-        "RDD局所ランダム化",
-        "Sharp vs Fuzzy RDD",
-        "DiD並行トレンド",
-        "Staggered DiD",
-        "Causal Forest HTE",
-        "Double ML",
-        "Julia IPW実装",
-        "Julia DAG実装",
-        "Julia RDD実装",
-        "Julia DiD実装",
-        "感度分析実行"
-    ]
-
-    println("🎯 因果推論スキル進捗")
-    println("達成した項目を true にマークしてください:\n")
-
-    completed = [
-        true,   # Simpson's Paradox理解
-        true,   # ATE/ATT/CATE区別
-        true,   # 潜在的結果定義
-        false,  # SUTVA説明
-        false,  # do-演算理解
-        false,  # バックドア基準
-        false,  # d-分離
-        false,  # 傾向スコア定義
-        false,  # IPW導出
-        false,  # DR推定量
-        false,  # IV 3条件
-        false,  # 2SLS導出
-        false,  # LATE vs ATE
-        false,  # Weak IV問題
-        false,  # RDD局所ランダム化
-        false,  # Sharp vs Fuzzy RDD
-        false,  # DiD並行トレンド
-        false,  # Staggered DiD
-        false,  # Causal Forest HTE
-        false,  # Double ML
-        false,  # Julia IPW実装
-        false,  # Julia DAG実装
-        false,  # Julia RDD実装
-        false,  # Julia DiD実装
-        false   # 感度分析実行
-    ]
-
-    n_completed = sum(completed)
-    n_total = length(skills)
-    progress = round(100 * n_completed / n_total, digits=1)
-
-    for (i, skill) in enumerate(skills)
-        status = completed[i] ? "✅" : "⬜"
-        println("$status $i. $skill")
-    end
-
-    println("\n📊 進捗: $n_completed/$n_total ($progress%)")
-
-    if n_completed >= 20
-        println("🏆 因果推論マスター達成！")
-    elseif n_completed >= 15
-        println("🥈 上級レベル — もう一息！")
-    elseif n_completed >= 10
-        println("🥉 中級レベル — 順調です")
-    else
-        println("📚 初級レベル — 復習を続けましょう")
-    end
-
-    return progress
-end
-
-causal_inference_progress()
-```
 
 ### 6.7 次回予告: 推論最適化 & Production品質
 
@@ -1547,7 +1455,7 @@ causal_inference_progress()
 
 **あなたの答えは？** — 観測データ因果推論とA/Bテストのバランスをどう取るか？
 
-:::details 議論のポイント
+<details><summary>議論のポイント</summary>
 
 1. **観測研究の強み**:
    - 倫理的制約がない（既存データを使う）
@@ -1571,11 +1479,10 @@ causal_inference_progress()
    - 現代: ML×因果推論で大規模観測データ活用
 
 **結論**: A/Bテストは依然としてゴールドスタンダードだが、**因果推論は観測データから最大限の情報を引き出す強力な武器**。両者を適切に組み合わせることで、より正確な意思決定が可能になる。
-:::
 
-:::message
-**進捗: 100% 完了** 🎉 講義完走！
-:::
+</details>
+
+> **Note:** **進捗: 100% 完了** 🎉 講義完走！
 
 ### 6.6 深層学習と因果推論の融合（2024-2026最新動向）
 
@@ -1716,7 +1623,7 @@ function (m::TARNet)(x, d)
     y1 = m.treated(h)
     y0 = m.control(h)
     # Return observed outcome
-    return d .* y1 + (1 .- d) .* y0
+    return d .* y1 .+ (1 .- d) .* y0
 end
 
 # Training
@@ -1753,104 +1660,75 @@ end
 
 この実装により、個人レベルの処置効果（CATE）を推定できる。
 
-:::message
-**進捗: 100% 完了** 🎉 講義完走！最新の深層学習×因果推論手法まで網羅した。
-:::
+> **Note:** **進捗: 100% 完了** 🎉 講義完走！最新の深層学習×因果推論手法まで網羅した。
 
 ---
+
+
+> Progress: [95%]
+> **理解度チェック**
+> 1. E-valueが「観察研究における因果主張の頑健性」を定量化できる理由を述べよ。
+> 2. Causal ForestがS/T-Learnerより異質処置効果（HTE）推定に優れる理由は？
 
 ## 参考文献
 
 ### 主要論文
 
 [^1]: Pearl, J. (2009). *Causality: Models, Reasoning, and Inference* (2nd ed.). Cambridge University Press.
-@[card](https://bayes.cs.ucla.edu/BOOK-2K/)
+<https://bayes.cs.ucla.edu/BOOK-2K/>
 
 [^2]: Rubin, D. B. (2005). Causal Inference Using Potential Outcomes: Design, Modeling, Decisions. *Journal of the American Statistical Association*, 100(469), 322-331.
-@[card](https://www.tandfonline.com/doi/abs/10.1198/016214504000001880)
+<https://www.tandfonline.com/doi/abs/10.1198/016214504000001880>
 
 [^3]: Wager, S., & Athey, S. (2018). Estimation and Inference of Heterogeneous Treatment Effects using Random Forests. *Journal of the American Statistical Association*, 113(523), 1228-1242.
-@[card](https://arxiv.org/abs/1510.04342)
+<https://arxiv.org/abs/1510.04342>
 
 [^4]: Chernozhukov, V., Chetverikov, D., Demirer, M., Duflo, E., Hansen, C., Newey, W., & Robins, J. (2018). Double/debiased machine learning for treatment and structural parameters. *The Econometrics Journal*, 21(1), C1-C68.
-@[card](https://arxiv.org/abs/1608.00060)
+<https://arxiv.org/abs/1608.00060>
 
 [^5]: Callaway, B., & Sant'Anna, P. H. (2021). Difference-in-Differences with multiple time periods. *Journal of Econometrics*, 225(2), 200-230.
-@[card](https://www.sciencedirect.com/science/article/abs/pii/S0304407620303948)
+<https://www.sciencedirect.com/science/article/abs/pii/S0304407620303948>
 
 [^6]: Fabijan, A., Gupchup, J., Gupta, S., Omhover, J., Qin, W., Vermeer, L., & Dmitriev, P. (2019). Diagnosing Sample Ratio Mismatch in Online Controlled Experiments: A Taxonomy and Rules of Thumb for Practitioners. *Proceedings of the 25th ACM SIGKDD International Conference on Knowledge Discovery & Data Mining*, 2156-2164.
-@[card](https://dl.acm.org/doi/10.1145/3292500.3330722)
+<https://dl.acm.org/doi/10.1145/3292500.3330722>
 
 [^7]: Stock, J. H., & Yogo, M. (2005). Testing for Weak Instruments in Linear IV Regression. In *Identification and Inference for Econometric Models: Essays in Honor of Thomas Rothenberg* (pp. 80-108). Cambridge University Press.
-@[card](https://www.cambridge.org/core/books/abs/identification-and-inference-for-econometric-models/testing-for-weak-instruments-in-linear-iv-regression/8AD94FF2EFD214D05D75EE35015021E4)
+<https://www.cambridge.org/core/books/abs/identification-and-inference-for-econometric-models/testing-for-weak-instruments-in-linear-iv-regression/8AD94FF2EFD214D05D75EE35015021E4>
 
 [^8]: Pearl, J. (2014). Understanding Simpson's Paradox. *The American Statistician*, 68(1), 8-13.
-@[card](https://ftp.cs.ucla.edu/pub/stat_ser/r414.pdf)
+<https://ftp.cs.ucla.edu/pub/stat_ser/r414.pdf>
 
 [^9]: Hernán, M. A., & Robins, J. M. (2020). *Causal Inference: What If*. Chapman & Hall/CRC. (Free online)
-@[card](https://www.hsph.harvard.edu/miguel-hernan/causal-inference-book/)
+<https://www.hsph.harvard.edu/miguel-hernan/causal-inference-book/>
 
 [^10]: Mschauer. (2021). CausalInference.jl: Causal inference, graphical models and structure learning in Julia.
-@[card](https://github.com/mschauer/CausalInference.jl)
+<https://github.com/mschauer/CausalInference.jl>
 
 [^11]: Wang, Y., et al. (2024). "Causal Inference Meets Deep Learning: A Comprehensive Survey". *Research*, 7, 0467.
-@[card](https://arxiv.org/abs/2303.02186)
+<https://arxiv.org/abs/2303.02186>
 
 [^12]: Guo, R., et al. (2024). "Deep Causal Learning: Representation, Discovery and Inference". *ACM Computing Surveys*, 56(9), 1-40.
-@[card](https://arxiv.org/abs/2211.03374)
+<https://arxiv.org/abs/2211.03374>
 
 
-[^24]: Li, H., et al. (2025). "Hybrid Local Causal Discovery". *arXiv preprint*.
-@[card](https://arxiv.org/abs/2412.19507)
+[^24]: Ling, Z., et al. (2025). "Hybrid Local Causal Discovery". *arXiv preprint*.
+<https://arxiv.org/abs/2412.19507>
 
 [^25]: Zhou, J., & Wang, M. (2025). "Differentiable Constraint-Based Causal Discovery". *arXiv preprint*.
-@[card](https://arxiv.org/abs/2510.22031)
+<https://arxiv.org/abs/2510.22031>
 
-[^26]: Zhang, Y., et al. (2024). "Recursive Causal Discovery". *arXiv preprint*.
-@[card](https://arxiv.org/abs/2403.09300)
+[^26]: Mokhtarian, E., et al. (2024). "Recursive Causal Discovery". *arXiv preprint*.
+<https://arxiv.org/abs/2403.09300>
 
 [^27]: Gerhardus, A., & Runge, J. (2023). "Causal Discovery from Time Series with Hybrids of Constraint-Based and Noise-Based Algorithms". *arXiv preprint*.
-@[card](https://arxiv.org/abs/2306.08765)
+<https://arxiv.org/abs/2306.08765>
 
-### 教科書
-
-- Angrist, J. D., & Pischke, J.-S. (2009). *Mostly Harmless Econometrics: An Empiricist's Companion*. Princeton University Press.
-- Cunningham, S. (2021). *Causal Inference: The Mixtape*. Yale University Press. (Free online)
-- Facure, M. (2022). *Causal Inference for The Brave and True*. (Free online)
-- Imbens, G. W., & Rubin, D. B. (2015). *Causal Inference for Statistics, Social, and Biomedical Sciences: An Introduction*. Cambridge University Press.
-- Morgan, S. L., & Winship, C. (2014). *Counterfactuals and Causal Inference* (2nd ed.). Cambridge University Press.
-
----
-
-## 記法規約
-
-| 記法 | 意味 |
-|:-----|:-----|
-| $D$ | 処置変数 (Treatment), $D \in \\{0, 1\\}$ |
-| $Y$ | 結果変数 (Outcome) |
-| $X$ | 共変量 (Covariates), 交絡因子候補 |
-| $Y^d$ | 潜在的結果 (Potential Outcome), $d \in \\{0, 1\\}$ |
-| $Y^1$ | 処置を受けた場合の結果 |
-| $Y^0$ | 処置を受けなかった場合の結果 |
-| $\tau$ | 処置効果 (Treatment Effect), $\tau = Y^1 - Y^0$ |
-| $\mathbb{E}[\cdot]$ | 期待値 |
-| $P(\cdot)$ | 確率 |
-| $P(Y \mid X)$ | 条件付き確率 |
-| $P(Y \mid do(X))$ | 介入確率 (Interventional Probability) |
-| $e(X)$ | 傾向スコア (Propensity Score), $e(X) = P(D=1 \mid X)$ |
-| $\mathcal{G}$ | DAG (Directed Acyclic Graph) |
-| $\text{PA}_i$ | 変数 $i$ の親ノード集合 |
-| $X \perp\!\!\!\perp Y \mid Z$ | $Z$ を所与としたときの $X$ と $Y$ の条件付き独立 |
-| $X \perp_d Y \mid Z$ | DAG上での $X$ と $Y$ の d-分離 |
-| $\text{ATE}$ | Average Treatment Effect, $\mathbb{E}[Y^1 - Y^0]$ |
-| $\text{ATT}$ | Average Treatment Effect on the Treated, $\mathbb{E}[Y^1 - Y^0 \mid D=1]$ |
-| $\text{CATE}$ | Conditional Average Treatment Effect, $\mathbb{E}[Y^1 - Y^0 \mid X]$ |
-| $\text{LATE}$ | Local Average Treatment Effect (IV文脈) |
-| $Z$ | 操作変数 (Instrumental Variable) |
-| $c$ | カットオフ (RDD) |
-| $h$ | 帯域幅 (Bandwidth, RDD) |
-
----
+## 著者リンク
+- Blog: https://fumishiki.dev
+- X: https://x.com/fumishiki
+- LinkedIn: https://www.linkedin.com/in/fumitakamurakami
+- GitHub: https://github.com/fumishiki
+- Hugging Face: https://huggingface.co/fumishiki
 
 ## ライセンス
 

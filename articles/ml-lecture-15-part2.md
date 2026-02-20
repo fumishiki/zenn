@@ -4,7 +4,14 @@ emoji: "⚡"
 type: "tech"
 topics: ["machinelearning", "deeplearning", "attention", "julia", "rust"]
 published: true
+slug: "ml-lecture-15-part2"
+difficulty: "advanced"
+time_estimate: "90 minutes"
+languages: ["Julia", "Rust"]
+keywords: ["機械学習", "深層学習", "生成モデル"]
 ---
+
+**← Part1（理論編）**: [第15回 Part1](./ml-lecture-15-part1)
 
 ## 💻 4. 実装ゾーン（45分）— Julia & Rust で全て実装
 
@@ -63,14 +70,14 @@ function flash_attention(Q::Matrix{T}, K::Matrix{T}, V::Matrix{T}, block_size::I
             S_ij = (Q_i * K_j') / sqrt_d
 
             # Update max per row
-            m_i_new = max.(m_i, maximum(S_ij, dims=2)[:])
+            m_i_new = max.(m_i, vec(maximum(S_ij, dims=2)))
 
             # Rescale factor for ℓ
             exp_diff_m = exp.(m_i .- m_i_new)
 
             # Update ℓ: ℓ_new = ℓ_old * exp(m_old - m_new) + sum(exp(S - m_new))
             exp_S = exp.(S_ij .- m_i_new)
-            ℓ_i_new = ℓ_i .* exp_diff_m .+ sum(exp_S, dims=2)[:]
+            ℓ_i_new = ℓ_i .* exp_diff_m .+ vec(sum(exp_S, dims=2))
 
             # Update O: O_new = (O_old * ℓ_old / ℓ_new) * exp(m_old - m_new) + (exp(S - m_new) @ V_j) / ℓ_new
             O_i = (O_i .* (ℓ_i ./ ℓ_i_new) .* exp_diff_m) .+ (exp_S * V_j) ./ ℓ_i_new
@@ -81,9 +88,9 @@ function flash_attention(Q::Matrix{T}, K::Matrix{T}, V::Matrix{T}, block_size::I
         end
 
         # Write block back
-        O[i_start:i_end, :] = O_i
-        ℓ[i_start:i_end] = ℓ_i
-        m[i_start:i_end] = m_i
+        O[i_start:i_end, :] .= O_i
+        ℓ[i_start:i_end] .= ℓ_i
+        m[i_start:i_end] .= m_i
     end
 
     return O
@@ -162,14 +169,11 @@ function sparse_attention(Q::Matrix{T}, K::Matrix{T}, V::Matrix{T}, window_size:
 
     # Remove duplicates
     pairs = unique(zip(I_idx, J_idx))
-    I_idx = [p[1] for p in pairs]
-    J_idx = [p[2] for p in pairs]
+    I_idx = first.(pairs)
+    J_idx = last.(pairs)
 
     # Compute scores for sparse pairs
-    scores = zeros(T, length(I_idx))
-    for (idx, (i, j)) in enumerate(zip(I_idx, J_idx))
-        scores[idx] = dot(Q[i, :], K[j, :]) / sqrt_d
-    end
+    scores = [dot(@view(Q[i, :]), @view(K[j, :])) for (i, j) in zip(I_idx, J_idx)] ./ sqrt_d
 
     # Build sparse matrix
     S_sparse = sparse(I_idx, J_idx, scores, N, N)
@@ -179,18 +183,14 @@ function sparse_attention(Q::Matrix{T}, K::Matrix{T}, V::Matrix{T}, window_size:
     O = zeros(T, N, d)
     for i in 1:N
         row_indices = findall(!iszero, S_sparse[i, :])
-        if isempty(row_indices)
-            continue
-        end
+        isempty(row_indices) && continue
 
         row_scores = [S_sparse[i, j] for j in row_indices]
-        row_scores_exp = exp.(row_scores .- maximum(row_scores))
-        row_attn = row_scores_exp ./ sum(row_scores_exp)
+        row_exp    = exp.(row_scores .- maximum(row_scores))
+        row_attn   = row_exp ./ sum(row_exp)
 
-        # Weighted sum of V
-        for (idx, j) in enumerate(row_indices)
-            O[i, :] .+= row_attn[idx] .* V[j, :]
-        end
+        # Weighted sum of V via matrix-vector product
+        @views O[i, :] .= V[row_indices, :]' * row_attn
     end
 
     return O
@@ -222,37 +222,21 @@ function gated_linear_attention(Q::Matrix{T}, K::Matrix{T}, V::Matrix{T}) where 
     N, d = size(Q)
 
     # Feature map: φ(x) = elu(x) + 1
-    ϕ_Q = max.(Q, zero(T)) .+ T(1)
-    ϕ_K = max.(K, zero(T)) .+ T(1)
+    ϕ_Q = @. max(Q, zero(T)) + T(1)
+    ϕ_K = @. max(K, zero(T)) + T(1)
 
-    # Gating: g_i = sigmoid(linear(K_i))
-    # Simplified: g = sigmoid(sum(K, dims=2))
-    g = 1 ./ (1 .+ exp.(-sum(K, dims=2)[:]))
+    # Gating: g_i = sigmoid(sum(K_i))
+    g = vec(@. T(1) / (T(1) + exp(-sum(K, dims=2))))  # (N,)
 
-    # Linear attention with gating:
-    # O_i = (φ(Q_i)^T * Σ_j g_j * φ(K_j) ⊗ V_j) / (φ(Q_i)^T * Σ_j g_j * φ(K_j))
+    # KV accumulator and K normalizer — fully vectorized
+    # KV_sum[a,b] = Σ_j g[j] * ϕ_K[j,a] * V[j,b]  →  ϕ_K' * Diagonal(g) * V
+    KV_sum = ϕ_K' * (Diagonal(g) * V)                 # (d, d)
+    K_sum  = ϕ_K' * g                                  # (d,)
 
-    # Compute Σ_j g_j * φ(K_j) ⊗ V_j: (d, d) matrix
-    KV_sum = zeros(T, d, d)
-    for j in 1:N
-        KV_sum .+= g[j] .* (ϕ_K[j, :] * V[j, :]')
-    end
-
-    # Compute Σ_j g_j * φ(K_j): (d,) vector
-    K_sum = zeros(T, d)
-    for j in 1:N
-        K_sum .+= g[j] .* ϕ_K[j, :]
-    end
-
-    # Compute output
-    O = zeros(T, N, d)
-    for i in 1:N
-        numerator = ϕ_Q[i, :]' * KV_sum  # (1, d)
-        denominator = ϕ_Q[i, :]' * K_sum  # scalar
-        O[i, :] = numerator[:] ./ (denominator + T(1e-6))
-    end
-
-    return O
+    # Output: O_i = (ϕ_Q_i · KV_sum) / (ϕ_Q_i · K_sum + ε)
+    numer = ϕ_Q * KV_sum                               # (N, d)
+    denom = ϕ_Q * K_sum .+ T(1e-6)                    # (N,)
+    return numer ./ reshape(denom, :, 1)
 end
 
 # Test
@@ -302,15 +286,12 @@ pub fn sparse_attention(
 
         // Softmax
         let max_score = scores.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
-        let exp_scores: Vec<f32> = scores.iter().map(|s| (s - max_score).exp()).collect();
-        let sum_exp: f32 = exp_scores.iter().sum();
-        let attn_weights: Vec<f32> = exp_scores.iter().map(|e| e / sum_exp).collect();
+        let sum_exp: f32 = scores.iter().map(|s| (s - max_score).exp()).sum();
+        let attn_weights: Vec<f32> = scores.iter().map(|s| (s - max_score).exp() / sum_exp).collect();
 
-        // Weighted sum
-        for (w, &j) in attn_weights.iter().zip(indices.iter()) {
-            for d_idx in 0..d {
-                output[[i, d_idx]] += w * v[[j, d_idx]];
-            }
+        // Weighted sum via scaled_add
+        for (&w, &j) in attn_weights.iter().zip(indices.iter()) {
+            output.row_mut(i).scaled_add(w, &v.row(j));
         }
     }
 
@@ -319,7 +300,7 @@ pub fn sparse_attention(
 
 #[inline]
 fn dot_product(a: &ndarray::ArrayView1<f32>, b: &ndarray::ArrayView1<f32>) -> f32 {
-    a.iter().zip(b.iter()).map(|(x, y)| x * y).sum()
+    a.dot(b)
 }
 
 #[cfg(test)]
@@ -356,9 +337,7 @@ mod tests {
 | $\ell_i^{(j)} = \ell_i^{(j-1)} \cdot \exp(m_i^{(j-1)} - m_i^{(j)}) + \sum_k \exp(S_{ij,k} - m_i^{(j)})$ | `ℓ_i_new = ℓ_i .* exp_diff_m .+ sum(exp_S, dims=2)[:]` | Complex — requires state tracking |
 | Sparse mask $\mathcal{N}(i)$ | `sparse(I_idx, J_idx, scores, N, N)` | `Vec<(usize, f32)>` per row |
 
-:::message
-**進捗: 70% 完了** 実装ゾーンクリア。FlashAttention, Sparse Attention, Linear Attention を Julia + Rust で完全実装した。次は実験ゾーン — 速度・メモリ・精度のトレードオフを計測する。
-:::
+> **Note:** **進捗: 70% 完了** 実装ゾーンクリア。FlashAttention, Sparse Attention, Linear Attention を Julia + Rust で完全実装した。次は実験ゾーン — 速度・メモリ・精度のトレードオフを計測する。
 
 ---
 
@@ -568,25 +547,12 @@ function scaling_benchmark()
 
     for N in seq_lengths
         println("Testing N=$N...")
-        Q = randn(Float32, N, d)
-        K = randn(Float32, N, d)
-        V = randn(Float32, N, d)
+        Q, K, V = randn(Float32, N, d), randn(Float32, N, d), randn(Float32, N, d)
 
-        # Standard
-        t = @elapsed standard_attention(Q, K, V)
-        push!(times_std, t)
-
-        # FlashAttention
-        t = @elapsed flash_attention(Q, K, V, 128)
-        push!(times_flash, t)
-
-        # Sparse
-        t = @elapsed sparse_attention(Q, K, V, 64, [1, 2])
-        push!(times_sparse, t)
-
-        # GLA
-        t = @elapsed gated_linear_attention(Q, K, V)
-        push!(times_gla, t)
+        push!(times_std,    @elapsed standard_attention(Q, K, V))
+        push!(times_flash,  @elapsed flash_attention(Q, K, V, 128))
+        push!(times_sparse, @elapsed sparse_attention(Q, K, V, 64, [1, 2]))
+        push!(times_gla,    @elapsed gated_linear_attention(Q, K, V))
     end
 
     # Plot
@@ -726,10 +692,10 @@ function memory_benchmark()
     seq_lengths = [1024, 2048, 4096, 8192, 16384, 32768]
     d = 64
 
-    mem_std = [(N, N^2 * 4 / 1024^2) for N in seq_lengths]  # attention matrix in MB
-    mem_flash = [(N, 128^2 * 4 / 1024^2) for N in seq_lengths]  # block size 128
-    mem_sparse = [(N, N * 130 * 4 / 1024^2) for N in seq_lengths]  # window=64, global=2 → ~130 per row
-    mem_gla = [(N, d^2 * 4 / 1024^2) for N in seq_lengths]  # KV_sum matrix
+    mem_std    = [N^2 * 4 / 1024^2 for N in seq_lengths]          # attention matrix in MB
+    mem_flash  = fill(128^2 * 4 / 1024^2, length(seq_lengths))    # block size 128
+    mem_sparse = [N * 130 * 4 / 1024^2 for N in seq_lengths]      # window=64, global=2 → ~130 per row
+    mem_gla    = fill(d^2 * 4 / 1024^2, length(seq_lengths))      # KV_sum matrix
 
     println("=" ^ 80)
     println("Memory Consumption (MB)")
@@ -738,7 +704,7 @@ function memory_benchmark()
     println("-" ^ 80)
     for (i, N) in enumerate(seq_lengths)
         @printf("%-10d %.2f        %.2f        %.2f        %.2f\n",
-                N, mem_std[i][2], mem_flash[i][2], mem_sparse[i][2], mem_gla[i][2])
+                N, mem_std[i], mem_flash[i], mem_sparse[i], mem_gla[i])
     end
 end
 
@@ -824,27 +790,37 @@ GLA                  17.78x          3200x           5.87e-01
 
 ### 5.6 自己診断テスト
 
-:::details Q1: FlashAttentionは計算量を削減するか？
+<details><summary>Q1: FlashAttentionは計算量を削減するか？</summary>
+
 **答え**: いいえ。FlashAttentionの計算量は依然 $O(N^2 d)$ で Standard Attention と同じ。削減しているのは **HBM アクセス回数** ($O(N^2) \to O(N^2 d / M)$)。GPUはメモリ律速なので、これが2-3倍の高速化につながる。
-:::
 
-:::details Q2: Sparse Attentionで計算量がO(N)になる条件は？
+</details>
+
+<details><summary>Q2: Sparse Attentionで計算量がO(N)になる条件は？</summary>
+
 **答え**: 各位置が見る位置数 $|\mathcal{N}(i)|$ が定数のとき。例: Local window (w=64) → 各位置は128個だけ見る → $O(N \cdot 128) = O(N)$。
-:::
 
-:::details Q3: Linear Attentionの近似誤差の原因は？
+</details>
+
+<details><summary>Q3: Linear Attentionの近似誤差の原因は？</summary>
+
 **答え**: Softmax カーネル $\exp(q^\top k)$ を特徴写像 $\phi(q)^\top \phi(k)$ で近似しているため。完全に一致しない → 近似誤差が生じる。
-:::
 
-:::details Q4: なぜFlashAttentionは「メモリ律速」を解決できるのか？
+</details>
+
+<details><summary>Q4: なぜFlashAttentionは「メモリ律速」を解決できるのか？</summary>
+
 **答え**: 注意行列 $S \in \mathbb{R}^{N \times N}$ を **HBMに書き込まない**。Tiling により小さなブロックをSRAMで計算し、その場で出力に集約する。SRAM (19 TB/s) は HBM (1.5 TB/s) より13倍速い。
-:::
 
-:::details Q5: Sparse AttentionとLinear Attentionの使い分けは？
+</details>
+
+<details><summary>Q5: Sparse AttentionとLinear Attentionの使い分けは？</summary>
+
 **答え**:
 - **Sparse**: 構造化されたパターンが有効なタスク (文書処理, 長文要約)。近似だが解釈可能。
 - **Linear**: 極端に長い系列 (100K+ tokens)。近似誤差大だが最速。タスク性能で判断。
-:::
+
+</details>
 
 ### 5.7 実装チャレンジ
 
@@ -913,51 +889,6 @@ graph TD
 | Linear | 極低 | 極低 | 70-85% | 中 |
 | Ring | 中 | 低 (分散) | 100% | 極高 |
 
-**5.8.1 PyTorch/Hugging Face での実装例**
-
-**FlashAttention**:
-
-```python
-# Install
-pip install flash-attn --no-build-isolation
-
-# Usage in PyTorch
-from flash_attn import flash_attn_qkvpacked_func
-
-# q, k, v: (batch, seqlen, nheads, headdim)
-qkv = torch.stack([q, k, v], dim=2)  # (batch, seqlen, 3, nheads, headdim)
-out = flash_attn_qkvpacked_func(qkv, causal=True)
-```
-
-**GQA** (Hugging Face Transformers 4.37+):
-
-```python
-from transformers import AutoModelForCausalLM
-
-model = AutoModelForCausalLM.from_pretrained(
-    "meta-llama/Llama-2-7b-hf",
-    attn_implementation="flash_attention_2",  # Use FlashAttention-2
-    torch_dtype=torch.float16
-)
-
-# LLaMA-2 uses GQA internally (4 groups for 32 heads)
-```
-
-**Sparse Attention** (Longformer):
-
-```python
-from transformers import LongformerModel
-
-model = LongformerModel.from_pretrained("allenai/longformer-base-4096")
-
-# Attention mask: 1 = attend, 0 = don't attend
-# Global attention: -1 = global token
-attention_mask = torch.ones(1, 4096)
-attention_mask[0, 0] = -1  # First token is global
-
-outputs = model(input_ids, attention_mask=attention_mask)
-```
-
 **5.8.2 実装のピットフォール — よくある間違い**
 
 **ピットフォール1: FlashAttention の数値不安定性を無視**
@@ -997,21 +928,24 @@ attn_sparse[mask] = softmax(sparse_scores)
 
 **ピットフォール4: MoE で Load Balancing を忘れる**
 
-```python
+$$
+\mathcal{L}_{\text{balance}} = \frac{\text{std}(\text{expert\_counts})}{\text{mean}(\text{expert\_counts})}
+$$
+
+```julia
 # ❌ BAD: ルーティングのみ (Expert collapseが発生)
-router_logits = self.router(x)
-router_probs = F.softmax(router_logits, dim=-1)
-top_k_indices = torch.topk(router_probs, k, dim=-1).indices
+router_probs = softmax(router_logits, dims=2)
+top_k_idx = [partialsortperm(router_probs[i,:], 1:k, rev=true) for i in 1:size(router_probs,1)]
 
-# ✅ GOOD: Load balancing loss を追加
-router_logits = self.router(x)
-router_probs = F.softmax(router_logits, dim=-1)
-top_k_indices = torch.topk(router_probs, k, dim=-1).indices
-
-# Compute load balancing loss
-expert_counts = torch.bincount(top_k_indices.view(-1), minlength=num_experts)
-load_balance_loss = torch.std(expert_counts.float()) / torch.mean(expert_counts.float())
-total_loss = task_loss + 0.01 * load_balance_loss
+# ✅ GOOD: Load balancing lossを追加
+router_probs = softmax(router_logits, dims=2)
+top_k_idx = [partialsortperm(router_probs[i,:], 1:k, rev=true) for i in 1:size(router_probs,1)]
+expert_counts = zeros(Float32, num_experts)
+for idx_row in top_k_idx, idx in idx_row
+    expert_counts[idx] += 1f0
+end
+load_balance_loss = std(expert_counts) / mean(expert_counts)
+total_loss = task_loss + 0.01f0 * load_balance_loss
 ```
 
 **5.8.3 デバッグのベストプラクティス**
@@ -1074,11 +1008,14 @@ p2 = visualize_attention_pattern(Matrix(S_sparse), "Sparse")
 plot(p1, p2, layout=(1, 2), size=(1000, 400))
 ```
 
-:::message
-**進捗: 85% 完了** 実験ゾーンクリア。速度・メモリ・精度のトレードオフを完全に理解し、実践的な選択ガイドとデバッグ手法を習得した。次は発展ゾーン — 最新研究動向へ。
-:::
+> **Note:** **進捗: 85% 完了** 実験ゾーンクリア。速度・メモリ・精度のトレードオフを完全に理解し、実践的な選択ガイドとデバッグ手法を習得した。次は発展ゾーン — 最新研究動向へ。
 
 ---
+
+> Progress: 85%
+> **理解度チェック**
+> 1. FlashAttention Julia実装で、タイルサイズ$B_r, B_c$を変えると何が変わるか？ SRAMサイズとの関係を述べよ。
+> 2. Sparse AttentionのLocal+Global WindowパターンはO(N√N)計算量を達成する。その直感的な理由を述べよ。
 
 ## 🎓 6. 振り返りゾーン（30分）— まとめ・発展・問い
 
@@ -1295,7 +1232,7 @@ graph TD
 
 ### 6.8 用語集
 
-:::details Glossary
+<details><summary>Glossary</summary>
 
 | 用語 | 定義 |
 |:-----|:-----|
@@ -1311,7 +1248,7 @@ graph TD
 | **KV-Cache** | 推論時にKey, Valueを再計算せずキャッシュする手法 |
 | **Load Balancing** | MoEで各Expertが均等に使われるよう制御する損失項 |
 
-:::
+</details>
 
 ### 6.9 推薦文献
 
@@ -1333,9 +1270,7 @@ graph TD
 | vLLM (PagedAttention) | https://github.com/vllm-project/vllm | 推論エンジン |
 | Performer | https://github.com/google-research/google-research/tree/master/performer | FAVOR+実装 |
 
-:::message
-**進捗: 100% 完了** 発展ゾーンクリア。最新研究 (2024-2025) と研究系譜を完全把握した。最後に振り返りゾーンへ。
-:::
+> **Note:** **進捗: 100% 完了** 発展ゾーンクリア。最新研究 (2024-2025) と研究系譜を完全把握した。最後に振り返りゾーンへ。
 
 ---
 
@@ -1390,29 +1325,39 @@ graph LR
 
 ### 10.5 FAQ
 
-:::details Q1: FlashAttentionは訓練と推論のどちらで使うべき？
+<details><summary>Q1: FlashAttentionは訓練と推論のどちらで使うべき？</summary>
+
 **答え**: **両方**。訓練ではメモリ削減+高速化、推論ではバッチ処理の高速化。ただし推論の最大の問題はKV-Cache肥大化なので、MQA/GQAと併用する。
-:::
 
-:::details Q2: Sparse Attentionは品質が下がるのでは？
+</details>
+
+<details><summary>Q2: Sparse Attentionは品質が下がるのでは？</summary>
+
 **答え**: タスク依存。文書分類など「局所性が強い」タスクでは品質低下が小さい。機械翻訳など「全文脈が必要」なタスクでは品質低下あり。Long Range Arenaベンチマークで事前評価すべき。
-:::
 
-:::details Q3: Linear Attentionは実用的か？
+</details>
+
+<details><summary>Q3: Linear Attentionは実用的か？</summary>
+
 **答え**: 2024年時点では「部分的に」。研究では有望だが、Standard Attentionとの品質差が依然ある。100K+ tokensの超長コンテキストでは有用。GLA (Gated Linear Attention) が最も実用的。
-:::
 
-:::details Q4: MoEは「Attention効率化」なのか？
+</details>
+
+<details><summary>Q4: MoEは「Attention効率化」なのか？</summary>
+
 **答え**: 厳密には違う。MoEは「FFN層の効率化」が主目的だが、Sparse Activationの考え方はSparse Attentionと共通する。両方を併用するモデル (DeepSeek-V3) も増えている。
-:::
 
-:::details Q5: 結局どの手法を使えばいい？
+</details>
+
+<details><summary>Q5: 結局どの手法を使えばいい？</summary>
+
 **答え**:
 - **訓練**: FlashAttention (必須)
 - **推論 (短文)**: MQA/GQA + FlashAttention
 - **推論 (長文, 100K+)**: GQA + Sparse or Linear Attention
 - **超長文 (1M+)**: Ring Attention
-:::
+
+</details>
 
 ### 10.6 学習スケジュール
 
@@ -1440,9 +1385,7 @@ RNNの「忘却の壁」を数学的に突破する旅が始まる。
 
 **次回のキーワード**: HiPPO, 対角化, Selective SSM, Hardware-aware scan, "忘れる"ことの制御
 
-:::message
-お疲れ様でした。第15回「Attention 類似手法 & Sparse Attention」完了。O(N²)の代償を理解し、5つの突破法を完全マスターした。次回はAttentionを超える — SSMの世界へ。
-:::
+> **Note:** お疲れ様でした。第15回「Attention 類似手法 & Sparse Attention」完了。O(N²)の代償を理解し、5つの突破法を完全マスターした。次回はAttentionを超える — SSMの世界へ。
 
 ---
 
@@ -1456,7 +1399,7 @@ RNNの「忘却の壁」を数学的に突破する旅が始まる。
 
 **論点3**: Linear Attentionはカーネルトリックで O(N) を実現したが、近似誤差が大きい。「厳密性」と「効率」の境界線はどこにあるのか？
 
-:::details 歴史的文脈 — Attentionの限界は予見されていた
+<details><summary>歴史的文脈 — Attentionの限界は予見されていた</summary>
 
 Vaswani+ (2017) の Transformer 論文 [^25] は革命的だったが、O(N²) の問題は**初日から自明**だった:
 
@@ -1468,67 +1411,73 @@ Vaswani+ (2017) の Transformer 論文 [^25] は革命的だったが、O(N²) �
 **FlashAttention (2022) の衝撃**: 「計算量を減らさずに速くできる」という逆説。ハードウェア理解がアルゴリズムを変える実例。
 
 **Mamba (2023) の提案**: 「Attentionを捨てる」という選択肢。SSMという別パラダイムでO(N)を実現 — これは第16回で詳述する。
-:::
+
+</details>
 
 ---
+
+> Progress: 95%
+> **理解度チェック**
+> 1. FlashAttention-3のFP8量子化が FlashAttention-2より高速な理由を、ハードウェアアーキテクチャの観点から説明せよ。
+> 2. SageAttentionとNative Sparse Attention (NSA)はどのような問題設定に最適か？
 
 ## 参考文献
 
 ### 主要論文
 
 [^1]: Shazeer, N. (2019). "Fast Transformer Decoding: One Write-Head is All You Need". arXiv:1911.02150.
-@[card](https://arxiv.org/abs/1911.02150)
+<https://arxiv.org/abs/1911.02150>
 
 [^2]: Ainslie, J., Lee-Thorp, J., de Jong, M., Zemlyanskiy, Y., Lebrón, F., & Sanghai, S. (2023). "GQA: Training Generalized Multi-Query Transformer Models from Multi-Head Checkpoints". arXiv:2305.13245.
-@[card](https://arxiv.org/abs/2305.13245)
+<https://arxiv.org/abs/2305.13245>
 
 [^3]: Touvron, H., et al. (2023). "Llama 2: Open Foundation and Fine-Tuned Chat Models". arXiv:2307.09288.
-@[card](https://arxiv.org/abs/2307.09288)
+<https://arxiv.org/abs/2307.09288>
 
 [^4]: Kwon, W., Li, Z., Zhuang, S., Sheng, Y., Zheng, L., Yu, C. H., ... & Stoica, I. (2023). "Efficient Memory Management for Large Language Model Serving with PagedAttention". In *SOSP 2023*.
-@[card](https://arxiv.org/abs/2309.06180)
+<https://arxiv.org/abs/2309.06180>
 
 [^5]: Dao, T., Fu, D. Y., Ermon, S., Rudra, A., & Ré, C. (2022). "FlashAttention: Fast and Memory-Efficient Exact Attention with IO-Awareness". In *NeurIPS 2022*.
-@[card](https://arxiv.org/abs/2205.14135)
+<https://arxiv.org/abs/2205.14135>
 
 [^6]: Dao, T. (2023). "FlashAttention-2: Faster Attention with Better Parallelism and Work Partitioning". arXiv:2307.08691.
-@[card](https://arxiv.org/abs/2307.08691)
+<https://arxiv.org/abs/2307.08691>
 
 [^7]: Shah, J., Bikshandi, G., Zhang, Y., Thakkar, V., Ramani, P., & Dao, T. (2024). "FlashAttention-3: Fast and Accurate Attention with Asynchrony and Low-precision". arXiv:2407.08608.
-@[card](https://arxiv.org/abs/2407.08608)
+<https://arxiv.org/abs/2407.08608>
 
 [^8]: Beltagy, I., Peters, M. E., & Cohan, A. (2020). "Longformer: The Long-Document Transformer". arXiv:2004.05150.
-@[card](https://arxiv.org/abs/2004.05150)
+<https://arxiv.org/abs/2004.05150>
 
 [^9]: Zaheer, M., Guruganesh, G., Dubey, A., Ainslie, J., Alberti, C., Ontanon, S., ... & Ahmed, A. (2020). "Big Bird: Transformers for Longer Sequences". In *NeurIPS 2020*.
-@[card](https://arxiv.org/abs/2007.14062)
+<https://arxiv.org/abs/2007.14062>
 
 [^10]: Yuan, J., Gao, H., Dai, D., et al. (2025). "Native Sparse Attention: Hardware-Aligned and Natively Trainable Sparse Attention". arXiv:2502.11089.
-@[card](https://arxiv.org/abs/2502.11089)
+<https://arxiv.org/abs/2502.11089>
 
 [^11]: Choromanski, K., Likhosherstov, V., Dohan, D., Song, X., Gane, A., Sarlos, T., ... & Weller, A. (2021). "Rethinking Attention with Performers". In *ICLR 2021*.
-@[card](https://arxiv.org/abs/2009.14794)
+<https://arxiv.org/abs/2009.14794>
 
 [^12]: Yang, S., Wang, B., Shen, Y., Panda, R., & Kim, Y. (2023). "Gated Linear Attention Transformers with Hardware-Efficient Training". arXiv:2312.06635.
-@[card](https://arxiv.org/abs/2312.06635)
+<https://arxiv.org/abs/2312.06635>
 
 [^13]: Liu, H., Zaharia, M., & Abbeel, P. (2023). "Ring Attention with Blockwise Transformers for Near-Infinite Context". arXiv:2310.01889.
-@[card](https://arxiv.org/abs/2310.01889)
+<https://arxiv.org/abs/2310.01889>
 
 [^14]: Fedus, W., Zoph, B., & Shazeer, N. (2022). "Switch Transformers: Scaling to Trillion Parameter Models with Simple and Efficient Sparsity". *JMLR*, 23(120), 1-39.
-@[card](https://arxiv.org/abs/2101.03961)
+<https://arxiv.org/abs/2101.03961>
 
-[^15]: DeepSeek-AI. (2024). "DeepSeek-MoE: Towards Ultimate Expert Specialization in Mixture-of-Experts Language Models". arXiv:2401.06066.
-@[card](https://arxiv.org/abs/2401.06066)
+[^15]: DeepSeek-AI. (2024). "DeepSeekMoE: Towards Ultimate Expert Specialization in Mixture-of-Experts Language Models". arXiv:2401.06066.
+<https://arxiv.org/abs/2401.06066>
 
 [^16]: Tay, Y., Dehghani, M., Abnar, S., Shen, Y., Bahri, D., Pham, P., ... & Metzler, D. (2021). "Long Range Arena: A Benchmark for Efficient Transformers". In *ICLR 2021*.
-@[card](https://arxiv.org/abs/2011.04006)
+<https://arxiv.org/abs/2011.04006>
 
-[^17]: Sun, Q., et al. (2025). "SageAttention3: Accurate 4-Bit Attention for Plug-and-play Inference Acceleration". arXiv:2505.11594.
-@[card](https://arxiv.org/abs/2505.11594)
+[^17]: Zhang, J., Wei, J., Zhang, P., Xu, X., et al. (2025). "SageAttention3: Microscaling FP4 Attention for Inference and An Exploration of 8-Bit Training". arXiv:2505.11594.
+<https://arxiv.org/abs/2505.11594>
 
 [^18]: Ye, T., et al. (2024). "Differential Transformer". In *ICLR 2025*.
-@[card](https://openreview.net/forum?id=differential-transformer)
+<https://openreview.net/forum?id=differential-transformer>
 
 [^19]: Zhang, L., et al. (2025). "Fast Attention via Chebyshev Polynomial Approximation". *Nature Machine Intelligence*, 2025.
 
@@ -1540,6 +1489,14 @@ Vaswani+ (2017) の Transformer 論文 [^25] は革命的だったが、O(N²) �
 - Rabe, M. N., & Staats, C. (2021). Self-Attention Aligner: How Aligners Can Refactor Transformers.
 
 ---
+
+## 著者リンク
+
+- Blog: https://fumishiki.dev
+- X: https://x.com/fumishiki
+- LinkedIn: https://www.linkedin.com/in/fumitakamurakami
+- GitHub: https://github.com/fumishiki
+- Hugging Face: https://huggingface.co/fumishiki
 
 ## ライセンス
 
@@ -1578,19 +1535,19 @@ Vaswani+ (2017) の Transformer 論文 [^25] は革命的だったが、O(N²) �
 **無断利用が発覚した場合**、使用料の請求およびSNS等での公表を行う場合があります。
 
 [^21]: DeepSeek-AI. (2024). "DeepSeek-V3 Technical Report". arXiv:2412.19437.
-@[card](https://arxiv.org/abs/2412.19437)
+<https://arxiv.org/abs/2412.19437>
 
 [^22]: Raposo, D., Ritter, S., Richards, B., Lillicrap, T., Santoro, A., & Botvinick, M. (2024). "Mixture-of-Depths: Dynamically Allocating Compute in Transformer-Based Language Models". arXiv:2404.02258.
-@[card](https://arxiv.org/abs/2404.02258)
+<https://arxiv.org/abs/2404.02258>
 
 [^23]: Tay, Y., Dehghani, M., Bahri, D., & Metzler, D. (2022). "Efficient Transformers: A Survey". *ACM Computing Surveys*, 55(6), 1-28.
-@[card](https://arxiv.org/abs/2009.06732)
+<https://arxiv.org/abs/2009.06732>
 
 [^24]: Lin, J., et al. (2024). "A Survey on Efficient Inference for Large Language Models". arXiv:2404.14294.
-@[card](https://arxiv.org/abs/2404.14294)
+<https://arxiv.org/abs/2404.14294>
 
 [^25]: Vaswani, A., Shazeer, N., Parmar, N., Uszkoreit, J., Jones, L., Gomez, A. N., ... & Polosukhin, I. (2017). "Attention is All You Need". In *NeurIPS 2017*.
-@[card](https://arxiv.org/abs/1706.03762)
+<https://arxiv.org/abs/1706.03762>
 
 ### 教科書
 
@@ -1598,37 +1555,3 @@ Vaswani+ (2017) の Transformer 論文 [^25] は革命的だったが、O(N²) �
 - Zhang, A., Lipton, Z. C., Li, M., & Smola, A. J. (2023). *Dive into Deep Learning*. [https://d2l.ai/](https://d2l.ai/)
 
 ---
-
-## 記法規約
-
-本講義で使用する記法の一覧:
-
-| 記号 | 意味 | 備考 |
-|:-----|:-----|:-----|
-| $N$ | 系列長 (sequence length) | トークン数 |
-| $d, d_k, d_v$ | 隠れ次元 (hidden dimension) | $d_k = d_v = d / h$ |
-| $h$ | ヘッド数 (number of heads) | Multi-Head Attention |
-| $Q, K, V$ | Query, Key, Value行列 | $\in \mathbb{R}^{N \times d}$ |
-| $S = QK^\top$ | スコア行列 (score matrix) | $\in \mathbb{R}^{N \times N}$ |
-| $P = \text{softmax}(S)$ | 注意重み (attention weights) | $\in \mathbb{R}^{N \times N}$ |
-| $O = PV$ | 出力 (output) | $\in \mathbb{R}^{N \times d}$ |
-| $B_r, B_c$ | ブロックサイズ (block size) | Tiling用 |
-| $\mathcal{N}(i)$ | 位置 $i$ が注意を向ける位置集合 | Sparse Attention |
-| $\phi(\cdot)$ | 特徴写像 (feature map) | Linear Attention |
-| $\kappa(q, k)$ | カーネル関数 | $\exp(q^\top k / \sqrt{d})$ |
-| $w$ | ウィンドウサイズ | Local Attention |
-| $g$ | グローバルトークン数 | Global Attention |
-| $M$ | SRAM容量 | FlashAttention |
-| $\ell, m$ | 正規化定数, 最大値 | Online Softmax |
-| $E$ | Expert数 | MoE |
-| $k$ | Top-k routing | MoE |
-
----
-
-**行数確認**:
-```bash
-wc -l /Users/pikafumi/Desktop/blog/Zenn/docs/ml-lecture-15.md
-```
-
-期待: ≥3000行
-

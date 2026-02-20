@@ -4,6 +4,11 @@ emoji: "⚡"
 type: "tech"
 topics: ["machinelearning", "deeplearning", "consistencymodels", "julia", "diffusion"]
 published: true
+slug: "ml-lecture-40-part1"
+difficulty: "advanced"
+time_estimate: "90 minutes"
+languages: ["Julia", "Rust"]
+keywords: ["機械学習", "深層学習", "生成モデル"]
 ---
 
 # 第40回: ⚡ Consistency Models & 高速生成理論
@@ -11,9 +16,7 @@ published: true
 > **Course IV 第8回（全50回シリーズの第40回）**
 > 第39回で潜在空間拡散を完全理解した。だが1000ステップは遅すぎる — 理論的に保証された高速生成へ
 
-:::message
-**前提知識**: 第36回 DDPM、第37回 SDE/ODE、第38回 Flow Matching、第39回 LDM
-:::
+> **Note:** **前提知識**: 第36回 DDPM、第37回 SDE/ODE、第38回 Flow Matching、第39回 LDM
 
 ## 🚀 0. クイックスタート（30秒）— 1ステップ生成の衝撃
 
@@ -56,10 +59,8 @@ $$
 - **Self-consistency条件**: $F_\theta(\mathbf{x}_t, t) = F_\theta(\mathbf{x}_{t'}, t')$ for any $t, t' \in [\epsilon, T]$
 - **DDPMとの違い**: 1000ステップの反復 → **1ステップで直接** $\mathbf{x}_T \to \mathbf{x}_0$
 
-:::message
-**全体の3%完了！**
-これから「なぜ1ステップで生成できるのか」の理論を完全理解する。
-:::
+> **Note:** **全体の3%完了！**
+> これから「なぜ1ステップで生成できるのか」の理論を完全理解する。
 
 ---
 
@@ -67,47 +68,6 @@ $$
 
 ### 1.1 Self-consistency条件の可視化
 
-```julia
-using Plots, Statistics
-
-# Consistency Modelの軌道可視化
-function visualize_self_consistency(model, x_T, σ_data=1.0f0)
-    ts = exp.(range(log(0.01), log(80), length=20))  # log-uniform sampling
-    trajectory = []
-
-    for t in ts
-        x_pred = consistency_function(x_T, t, model, σ_data)
-        push!(trajectory, x_pred)
-    end
-
-    # Self-consistency: 全時刻で同じ点に収束するか
-    final_predictions = hcat(trajectory...)
-    std_across_time = std(final_predictions, dims=2)
-
-    println("Self-consistency error: ", mean(std_across_time))
-    return trajectory
-end
-
-# DDPMとの比較
-function ddpm_trajectory(x_T, model, timesteps=1000)
-    x = x_T
-    for t in timesteps:-1:1
-        # DDPM reverse process (1000 steps)
-        x = ddpm_step(x, t, model)
-    end
-    return x
-end
-
-# 実行
-x_T = randn(Float32, 28, 28, 1, 1)
-cm_traj = visualize_self_consistency(model, x_T)
-ddpm_result = ddpm_trajectory(x_T, ddpm_model)
-
-plot([
-    heatmap(cm_traj[end][:,:,1,1], title="CM (1 step)"),
-    heatmap(ddpm_result[:,:,1,1], title="DDPM (1000 steps)")
-])
-```
 
 | 手法 | ステップ数 | 時間 | FID (CIFAR-10) | Self-consistency |
 |:-----|:----------|:-----|:--------------|:-----------------|
@@ -122,47 +82,6 @@ plot([
 
 ### 1.2 多段階サンプリング — 品質vs速度のトレードオフ
 
-```julia
-# Multistep sampling (optional refinement)
-function cm_multistep(x_T, model, steps=4)
-    schedule = exp.(range(log(80), log(0.01), length=steps+1))
-    x = x_T
-
-    for i in 1:steps
-        t_cur = schedule[i]
-        t_next = schedule[i+1]
-
-        # Consistency step
-        x_0_pred = consistency_function(x, t_cur, model)
-
-        if i < steps
-            # Add noise for next step (optional)
-            z = randn(size(x))
-            x = x_0_pred + t_next * z
-        else
-            x = x_0_pred
-        end
-    end
-    return x
-end
-
-# ベンチマーク
-steps_range = [1, 2, 4, 8]
-fid_scores = []
-times = []
-
-for steps in steps_range
-    @time x_gen = cm_multistep(x_T, model, steps)
-    fid = compute_fid(x_gen, real_data)
-    push!(fid_scores, fid)
-    push!(times, @elapsed cm_multistep(x_T, model, steps))
-end
-
-plot(steps_range, fid_scores,
-     xlabel="Sampling Steps", ylabel="FID ↓",
-     title="CM Quality-Speed Tradeoff",
-     marker=:circle, linewidth=2)
-```
 
 | Steps | FID ↓ | Time (ms) | 品質 vs DDPM |
 |:------|:------|:----------|:-------------|
@@ -175,33 +94,6 @@ plot(steps_range, fid_scores,
 
 ### 1.3 DDIM vs DPM-Solver++ vs CM 比較
 
-```julia
-# 統一ベンチマーク
-methods = [
-    ("DDIM (50 steps)", ddim_sampler, 50),
-    ("DPM-Solver++ (20 steps)", dpm_solver, 20),
-    ("UniPC (10 steps)", unipc_sampler, 10),
-    ("CM (1 step)", cm_sampler, 1),
-    ("LCM (4 steps)", lcm_sampler, 4)
-]
-
-results = []
-for (name, sampler, steps) in methods
-    time = @elapsed x = sampler(x_T, model, steps)
-    fid = compute_fid(x, real_data)
-    push!(results, (name=name, steps=steps, time=time, fid=fid))
-end
-
-# Visualization
-scatter(
-    [r.time for r in results],
-    [r.fid for r in results],
-    xlabel="Time (sec)", ylabel="FID ↓",
-    label=[r.name for r in results],
-    title="Fast Sampling Pareto Front",
-    markersize=8, legend=:topright
-)
-```
 
 ```mermaid
 graph LR
@@ -222,18 +114,20 @@ graph LR
 - **CM**: Self-consistency理論保証で1-step達成
 - **LCM**: CM + Latent Space + Guidance蒸留
 
-:::message alert
-**CM vs 高次ソルバーの違い**:
-- 高次ソルバー: ODE軌道を数値的に近似（誤差累積）
-- **CM**: Self-consistency条件を学習で満たす（理論的保証）
-:::
+> **⚠️ Warning:** **CM vs 高次ソルバーの違い**:
+> - 高次ソルバー: ODE軌道を数値的に近似（誤差累積）
+> - **CM**: Self-consistency条件を学習で満たす（理論的保証）
 
-:::message
-**全体の10%完了！**
-Self-consistencyの威力を体感した。次は「なぜConsistency Modelsか」の理論的背景へ。
-:::
+> **Note:** **全体の10%完了！**
+> Self-consistencyの威力を体感した。次は「なぜConsistency Modelsか」の理論的背景へ。
 
 ---
+
+
+> Progress: 10%
+> **理解度チェック**
+> 1. このゾーンの主要な概念・定義を自分の言葉で説明してください。
+> 2. この手法が他のアプローチより優れている点と、その限界を述べてください。
 
 ## 🧩 2. 直感ゾーン（15分）— なぜConsistency Modelsか
 
@@ -336,28 +230,22 @@ Self-consistency = **どの出発点からでも同じ最終目的地**
 | Zone 5 | 30分 | ベンチマーク比較 | ★★★☆☆ |
 | Zone 6 | 30分 | 振り返り + 統合 | ★★★☆☆ |
 
-:::details 🐴 Trojan Horse — Consistency ModelsでJulia数式美が際立つ
-```julia
-# Consistency function in Julia (数式そのまま)
-F_θ(x, t) = c_skip(t) * x + c_out(t) * model(c_in(t) * x, t)
-
-# Python equivalent (冗長)
-def F_theta(x, t, model):
-    c_s = c_skip(t)
-    c_o = c_out(t)
-    c_i = c_in(t)
-    return c_s * x + c_o * model(c_i * x, t)
-```
+<details><summary>🐴 Trojan Horse — Consistency ModelsでJulia数式美が際立つ</summary>
 
 Juliaの `.` broadcast演算子で **ベクトル化が自動**、Pythonは明示的ループが必要。
-:::
 
-:::message
-**全体の20%完了！**
-準備完了。Zone 3でSelf-consistency条件の完全数式導出に挑む。
-:::
+</details>
+
+> **Note:** **全体の20%完了！**
+> 準備完了。Zone 3でSelf-consistency条件の完全数式導出に挑む。
 
 ---
+
+
+> Progress: 20%
+> **理解度チェック**
+> 1. $Z(\theta)$ の各記号の意味と、この式が表す操作を説明してください。
+> 2. このゾーンで学んだ手法の直感的な意味と、なぜこの定式化が必要なのかを説明してください。
 
 ## 📐 3. 数式修行ゾーン（60分）— Consistency Models理論完全版
 
@@ -441,13 +329,7 @@ graph TD
 3. **終了** (反復なし)
 
 **多段階sampling (optional)**:
-```julia
-# 2-step refinement
-x_T = randn(...)
-t_mid = 40.0
-x_mid = x_T + sqrt(t_mid) * randn(...)  # Re-noise
-x_0 = F_θ(x_mid, t_mid)  # 2nd step
-```
+
 
 ### 3.2 Consistency Training (CT) — 教師なし訓練
 
@@ -488,29 +370,8 @@ $$
 
 **Training algorithm**:
 
-```julia
-# Consistency Training (simplified)
-function ct_loss(model, x_0, n, θ_target)
-    z = randn(size(x_0))
-    t_n1 = schedule[n+1]
-    t_n = schedule[n]
 
-    x_n1 = x_0 + t_n1 * z
-
-    # Euler step (approximate ODE)
-    x_n = x_n1 + (t_n - t_n1) * score_estimate(x_n1, t_n1)
-
-    # Self-consistency loss
-    f_n1 = model(x_n1, t_n1)
-    f_n = stopgrad(θ_target(x_n, t_n))  # Target network
-
-    return mse(f_n1, f_n)
-end
-```
-
-:::message alert
-**Numerical instability**: Euler法の1ステップ近似が粗い → ECT (Easy Consistency Tuning) で改善
-:::
+> **⚠️ Warning:** **Numerical instability**: Euler法の1ステップ近似が粗い → ECT (Easy Consistency Tuning) で改善
 
 #### 3.2.2 Target Network と EMA更新
 
@@ -677,30 +538,6 @@ where $r_n = \frac{t_{n-1} - t_n}{t_n - t_{n-0.5}}$ (correction coefficient)
 
 #### 3.6.2 DPM-Solver++ vs DDIM
 
-```julia
-# 1st-order DPM-Solver (≈ DDIM deterministic)
-function dpm_solver_1st(x_t, t_cur, t_next, model)
-    x_0_pred = model(x_t, t_cur)  # Data prediction
-    x_next = (t_next / t_cur) * x_t + (t_next - t_cur) * x_0_pred
-    return x_next
-end
-
-# 2nd-order DPM-Solver++
-function dpm_solver_2nd(x_t, t_cur, t_next, model, x_0_prev)
-    x_0_cur = model(x_t, t_cur)
-
-    # Mid-point
-    t_mid = (t_cur + t_next) / 2
-    x_mid = (t_mid / t_cur) * x_t + (t_mid - t_cur) * x_0_cur
-    x_0_mid = model(x_mid, t_mid)
-
-    # Correction
-    r = (t_next - t_cur) / (t_cur - t_mid)
-    x_next = (t_next / t_cur) * x_t +
-             (t_next - t_cur) * (x_0_cur + r * (x_0_cur - x_0_mid))
-    return x_next
-end
-```
 
 | ソルバー | Order | NFE (20 steps) | FID (ImageNet 256) |
 |:---------|:------|:---------------|:-------------------|
@@ -796,15 +633,11 @@ $$
 
 **QED** ∎
 
-:::message
-**Boss戦クリア！**
-Self-consistency条件の数学的基盤を完全理解した。これが1-step生成の理論的保証。
-:::
+> **Note:** **Boss戦クリア！**
+> Self-consistency条件の数学的基盤を完全理解した。これが1-step生成の理論的保証。
 
-:::message
-**全体の50%完了！**
-数式修行Zone前半完了。次は蒸留手法とRectified Flow統合へ。
-:::
+> **Note:** **全体の50%完了！**
+> 数式修行Zone前半完了。次は蒸留手法とRectified Flow統合へ。
 
 ### 3.9 Progressive Distillation — 段階的ステップ数半減
 
@@ -970,6 +803,87 @@ $$
 
 **Trade-off**: 品質わずかに低下（FID 10.2→12.8）、速度50x↑
 
+#### 3.12.3 GANの暗黙的スコアマッチング解釈
+
+GAN訓練は**スコアマッチングの変分形式**として解釈できる。最適 Discriminator $D^*$ は密度比を返す:
+
+$$
+D^*(\mathbf{x}) = \frac{p_{\text{data}}(\mathbf{x})}{p_{\text{data}}(\mathbf{x}) + p_{\text{gen}}(\mathbf{x})}
+$$
+
+このlogit変換（対数オッズ）を取ると:
+
+$$
+\text{logit}(D^*(\mathbf{x})) = \log \frac{p_{\text{data}}(\mathbf{x})}{p_{\text{gen}}(\mathbf{x})} = \log p_{\text{data}}(\mathbf{x}) - \log p_{\text{gen}}(\mathbf{x})
+$$
+
+Generator $G_\theta(\mathbf{z})$ の損失 $\mathcal{L}_G = \mathbb{E}_{\mathbf{z}}[-\log D(G_\theta(\mathbf{z}))]$ の勾配を連鎖律で展開すると:
+
+$$
+\nabla_\theta \mathcal{L}_G = \mathbb{E}_{\mathbf{z} \sim p(\mathbf{z})}\!\left[\nabla_\theta G_\theta(\mathbf{z})^\top \cdot \Bigl(\nabla_{\mathbf{x}} \log p_{\text{data}}(\mathbf{x}) - \nabla_{\mathbf{x}} \log p_{\text{gen}}(\mathbf{x})\Bigr)\Big|_{\mathbf{x}=G_\theta(\mathbf{z})}\right]
+$$
+
+括弧内がまさに**スコア差**だ。GAN は真分布スコアと生成分布スコアの差を勾配信号として使う暗黙的スコアマッチングを実行している。DMD2がDiffusion事前訓練済みスコア $\mathbf{s}_\phi$ でDiscriminatorを初期化する意義はここにある。既に $\nabla_{\mathbf{x}} \log p_{\text{data}}$ の良い近似を持つDiscriminatorは、GAN訓練初期から有意義な勾配信号を Generatorへ伝える。
+
+#### 3.12.4 Adversarial訓練によるモードドロップ抑制
+
+1-step生成の本質的困難は**モードドロップ**にある。蒸留損失単独では Generator が**条件付き期待値**に収束してしまう:
+
+$$
+\arg\min_{G_\theta} \mathbb{E}_{\mathbf{x}_T}\!\left[\|G_\theta(\mathbf{x}_T) - \mathbf{x}_0\|^2\right] = \mathbb{E}[\mathbf{x}_0 \mid \mathbf{x}_T]
+$$
+
+これは最小二乗回帰の閉形式解であり、**モードではなく平均**を返す。高ノイズ時刻 $T$ では $p(\mathbf{x}_0 \mid \mathbf{x}_T)$ が多峰分布になり、その期待値は**低確率領域**（各モードの中間）を指す。これが純粋蒸留の「ぼやけた生成」の正体だ。
+
+Adversarial loss はこの縮退を防ぐ。Goodfellow et al. (2014) が示したGANの最適均衡:
+
+$$
+\min_G \max_D \, V(D,G) = -\log 4 + 2 \cdot \text{JSD}(p_{\text{data}} \| p_{\text{gen}})
+$$
+
+において $\text{JSD}=0$、すなわち $p_{\text{gen}} = p_{\text{data}}$ が達成される。JS divergence はゼロ当且つのみ等分布なので、**全モードが均等に生成される**ことが理論的に保証される。
+
+#### 3.12.5 f-ダイバージェンス vs Wasserstein — 距離選択の理論
+
+DMD2設計の核心にある距離関数の選択を整理する。
+
+**f-ダイバージェンス族**（$f$ は凸関数、$f(1)=0$）:
+
+$$
+D_f(p \| q) = \int q(\mathbf{x}) \, f\!\left(\frac{p(\mathbf{x})}{q(\mathbf{x})}\right) d\mathbf{x}
+$$
+
+| $f(u)$ | $D_f$ | $p,q$ サポート非重複時 |
+|:--------|:------|:----------------------|
+| $u \log u$ | KL$(p\|q)$ | $+\infty$（発散） |
+| $-\log u$ | 逆KL$(q\|p)$ | $+\infty$（発散） |
+| $(\sqrt{u}-1)^2$ | Hellinger$^2$ | $\leq 2$（有界） |
+| $(u-1)^2/u$ | Pearson $\chi^2$ | $+\infty$（発散） |
+
+1-step生成の初期段階では $p_{\text{gen}}$ が粗く $p_{\text{data}}$ とサポートがほぼ重ならないため、KL・逆KLは **無限大に発散**する。純粋 KL 蒸留の不安定化はここに起因する。
+
+**Wasserstein-1距離**（Earth Mover's Distance）は：
+
+$$
+W_1(p, q) = \inf_{\gamma \in \Pi(p,q)} \mathbb{E}_{(\mathbf{x},\mathbf{y})\sim\gamma}\!\left[\|\mathbf{x} - \mathbf{y}\|_1\right]
+$$
+
+Kantorovich–Rubinstein 双対定理により:
+
+$$
+W_1(p, q) = \sup_{\|h\|_L \leq 1} \!\left(\mathbb{E}_{p}[h(\mathbf{x})] - \mathbb{E}_{q}[h(\mathbf{x})]\right)
+$$
+
+$\|h\|_L$ は Lipschitz 定数。**サポートが離れていても有限値**を返す点が本質的強みだ。
+
+DMD2の損失設計:
+
+$$
+\mathcal{L}_{\text{DMD2}} = \underbrace{\mathcal{L}_{\text{score}}}_{\text{KL的・微細構造}} + \lambda_{\text{score}} \underbrace{\mathcal{L}_{\text{adv}}}_{\text{Wasserstein的・全体形状}}
+$$
+
+スコア蒸留 $\mathcal{L}_{\text{score}}$ は細かいテクスチャの再現を担い、Adversarial 損失 $\mathcal{L}_{\text{adv}}$ はモードドロップ防止の全体形状整合を担う。経験的に $\lambda_{\text{score}} \in [0.5, 2.0]$ が最適範囲として報告されている。
+
 ### 3.13 Consistency Trajectory Models (CTM) — 軌道全体の一貫性
 
 #### 3.13.1 CTMの動機
@@ -1005,34 +919,6 @@ $$
 
 **実装**:
 
-```julia
-# Consistency Trajectory Model
-struct CTM{M}
-    backbone::M
-end
-
-function (ctm::CTM)(x_t, t, t_prime, ps, st)
-    # Map x_t at time t to x_t' at time t'
-    net_out, st = ctm.backbone(x_t, t, t_prime, ps, st)
-    return net_out, st
-end
-
-# CTM training loss
-function ctm_loss(model, x_0, t, t_prime, score_model, ps, st)
-    z = randn(size(x_0))
-    x_t = x_0 .+ t .* z
-
-    # ODE step (ground truth)
-    score = score_model(x_t, t)
-    x_t_prime_true = x_t .+ (t_prime - t) .* (-t .* score)
-
-    # CTM prediction
-    x_t_prime_pred, st = model(x_t, t, t_prime, ps, st)
-
-    loss = mean((x_t_prime_pred .- x_t_prime_true).^2)
-    return loss, st
-end
-```
 
 #### 3.13.3 CTM vs CM
 
@@ -1051,37 +937,6 @@ end
 
 #### 3.13.1 Pareto Frontの可視化
 
-```julia
-using Plots
-
-# 各手法の (速度, 品質) プロット
-methods = [
-    ("DDPM (1000 steps)", 10.0, 3.17),
-    ("DDIM (50 steps)", 0.5, 4.67),
-    ("DPM-Solver++ (20 steps)", 0.2, 3.95),
-    ("UniPC (10 steps)", 0.1, 4.12),
-    ("LCM (4 steps)", 0.04, 4.25),
-    ("CM (1 step)", 0.01, 3.55),
-    ("InstaFlow (1 step)", 0.01, 4.10),
-    ("DMD2 (1 step)", 0.01, 5.20)
-]
-
-times = [m[2] for m in methods]
-fids = [m[3] for m in methods]
-labels = [m[1] for m in methods]
-
-scatter(times, fids,
-        xlabel="Sampling Time (sec)", ylabel="FID ↓",
-        xscale=:log10, label=reshape(labels, 1, :),
-        title="Quality-Speed Pareto Front",
-        markersize=8, legend=:outertopright)
-
-# Pareto front curve
-pareto_idx = [1, 2, 3, 5, 6]  # Dominant points
-plot!(times[pareto_idx], fids[pareto_idx],
-      linestyle=:dash, linewidth=2, color=:red,
-      label="Pareto Front")
-```
 
 **Pareto Front解釈**:
 - **DDPM**: 最高品質、最遅
@@ -1125,12 +980,10 @@ Step 4: **実践的含意**
 
 **QED** ∎
 
-:::message alert
-**1-step生成の秘密**:
-- CM 1-step ≠ 情報理論的下界の打破
-- **事前訓練 (CT/CD) で $\Omega(\log d)$ 相当の情報を学習**
-- 推論時は学習済み知識の**読み出し**のみ
-:::
+> **⚠️ Warning:** **1-step生成の秘密**:
+> - CM 1-step ≠ 情報理論的下界の打破
+> - **事前訓練 (CT/CD) で $\Omega(\log d)$ 相当の情報を学習**
+> - 推論時は学習済み知識の**読み出し**のみ
 
 **Rate-Distortion理論との接続**:
 
@@ -1162,15 +1015,124 @@ $$
 
 **Diminishing returns**: 8ステップ以降は品質改善わずか
 
-:::message alert
-**1000ステップの逆説**: DDPMの1000ステップより、CM 4ステップの方が高品質 (FID 2.93 vs 3.17)
-→ ステップ数≠品質保証、**アーキテクチャ設計**が本質
-:::
+> **⚠️ Warning:** **1000ステップの逆説**: DDPMの1000ステップより、CM 4ステップの方が高品質 (FID 2.93 vs 3.17)
+> → ステップ数≠品質保証、**アーキテクチャ設計**が本質
 
-:::message
-**全体の70%完了！**
-蒸留手法完全網羅。次は実装Zoneでこれらを動かす。
-:::
+> **Note:** **全体の70%完了！**
+> 蒸留手法完全網羅。次は実装Zoneでこれらを動かす。
+
+---
+
+### 3.14.1 情報理論的下界の厳密証明
+
+#### Shannonのデータ処理不等式 (DPI)
+
+確率変数の Markov 鎖 $X \to Y \to Z$ に対し、データ処理不等式（Data Processing Inequality）は:
+
+$$
+I(X; Z) \leq I(X; Y)
+$$
+
+を保証する（$I$ は相互情報量）。処理を通じて情報は「増えない」ことの定量化だ。
+
+拡散サンプリングの鎖に適用する:
+
+$$
+\mathbf{x}_0 \;\xrightarrow{\text{forward}}\; \mathbf{x}_T \;\xrightarrow{N\text{ steps}}\; \hat{\mathbf{x}}_0
+$$
+
+DPI を二段階に適用すると:
+
+$$
+I(\mathbf{x}_0;\, \hat{\mathbf{x}}_0) \leq I(\mathbf{x}_0;\, \mathbf{x}_T) = I\!\left(\mathbf{x}_0;\; \mathbf{x}_0 + \sigma_T \boldsymbol{\epsilon}\right)
+$$
+
+ガウス加法ノイズの相互情報量は:
+
+$$
+I(\mathbf{x}_0; \mathbf{x}_T) = h(\mathbf{x}_T) - h(\mathbf{x}_T \mid \mathbf{x}_0) = h(\mathbf{x}_T) - \frac{d}{2}\log(2\pi e\,\sigma_T^2)
+$$
+
+$\sigma_T \to \infty$ で $h(\mathbf{x}_T) \to \frac{d}{2}\log(2\pi e\,\sigma_T^2)$ となり $I \to 0$（ノイズが全情報を消去）。
+
+#### 一ステップあたりの情報獲得量の上界
+
+$N$ ステップのデノイジング列 $\hat{\mathbf{x}}_{t_1}, \hat{\mathbf{x}}_{t_2}, \ldots, \hat{\mathbf{x}}_{t_N} = \hat{\mathbf{x}}_0$ を考える。各ステップで獲得できる相互情報量の上界は、ノイズレベル $\sigma_{t_n}$ から $\sigma_{t_{n+1}}$ への変化に対応するガウスチャンネル容量:
+
+$$
+\Delta I_n \leq \frac{1}{2}\log\frac{\sigma_{t_n}^2}{\sigma_{t_{n+1}}^2}
+$$
+
+これは SNR$_n = (\sigma_{t_n}^2 - \sigma_{t_{n+1}}^2)/\sigma_{t_{n+1}}^2$ のガウスチャンネル $C = \frac{1}{2}\log(1+\text{SNR})$ に対応する。
+
+$N$ ステップ全体を合計すると望遠鏡式に:
+
+$$
+\sum_{n=1}^{N} \Delta I_n \leq \frac{1}{2}\log\frac{\sigma_T^2}{\sigma_\epsilon^2} = \log\frac{\sigma_T}{\sigma_\epsilon}
+$$
+
+#### NFE 下界の導出
+
+$\epsilon$-近似サンプル（全変動距離 $\text{TV}(p_{\text{data}}, p_{\hat{\mathbf{x}}_0}) \leq \epsilon$）を生成するには Pinsker の不等式より:
+
+$$
+\text{TV}(p, q) \leq \sqrt{\frac{1}{2}\,\text{KL}(p \| q)}
+$$
+
+から少なくとも $\text{KL}(p_{\text{data}} \| p_{\hat{\mathbf{x}}_0}) \leq 2\epsilon^2$ が必要。Fano の不等式の連続版を用いると必要な相互情報量:
+
+$$
+I(\mathbf{x}_0;\, \hat{\mathbf{x}}_0) \geq h(\mathbf{x}_0) - d\,h_b(\epsilon) - \epsilon \log(|\mathcal{X}|-1)
+$$
+
+ここで $h_b(\epsilon) = -\epsilon\log\epsilon - (1-\epsilon)\log(1-\epsilon)$ は二値エントロピー。高品質自然画像では $h(\mathbf{x}_0) \approx 8d$ bits。
+
+情報獲得量の上界と合わせて:
+
+$$
+N \cdot \log\frac{\sigma_T}{\sigma_\epsilon} \geq \sum_{n=1}^N \Delta I_n \geq I(\mathbf{x}_0;\, \hat{\mathbf{x}}_0) \geq h(\mathbf{x}_0) - d\,h_b(\epsilon)
+$$
+
+したがって NFE 下界:
+
+$$
+\boxed{N \;\geq\; \frac{h(\mathbf{x}_0) - d\,h_b(\epsilon)}{\log(\sigma_T/\sigma_\epsilon)} = \Omega\!\left(\frac{d}{\log(\sigma_T/\sigma_\epsilon)}\right)}
+$$
+
+CIFAR-10 ($d=3072$, $\sigma_T=80$, $\sigma_\epsilon=0.002$, $\epsilon=0.01$) を代入:
+
+$$
+N \geq \frac{8 \times 3072 - 3072 \times h_b(0.01)}{\log(80/0.002)} = \frac{24576 - 328}{10.6} \approx 2284
+$$
+
+これは「理論的には DDPM の 1000 ステップでも不十分」というやや過保守な下界だ。実際の DDPM 1000 ステップが FID 3.17 を達成できるのは、各ステップが互いに相関した情報を獲得するため上界評価が甘くなるからだ。
+
+#### CM 1-step 生成は下界を「破っていない」
+
+一見矛盾するが、CM 1-step は上記下界を破っていない。鍵は**訓練時**と**推論時**の情報フローの分離にある。
+
+CT/CD 訓練では $\Omega(d/\log(\sigma_T/\sigma_\epsilon))$ ステップ相当の情報がパラメータ $\theta$ に蓄積される。推論時の 1 ステップは蓄積情報の**読み出し**にすぎず:
+
+$$
+\mathbf{x}_T \;\to\; \theta \;\to\; \hat{\mathbf{x}}_0
+$$
+
+というMarkov鎖を通じて $I(\mathbf{x}_0;\, \hat{\mathbf{x}}_0 \mid \theta) \gg I(\mathbf{x}_0;\, \hat{\mathbf{x}}_0 \mid \theta=0)$ が成立する。**訓練ステップ数が情報的コスト、推論ステップ数が計算的コスト**。CM はこの 2 種のコストを切り離すことで速度と品質を両立させる。
+
+#### Rate-Distortion 理論との接続
+
+Shannon の Rate-Distortion 関数:
+
+$$
+R(D) = \min_{\substack{p(\hat{\mathbf{x}}|\mathbf{x}) \\ \mathbb{E}[d(\mathbf{x},\hat{\mathbf{x}})]\leq D}} I(\mathbf{x};\, \hat{\mathbf{x}})
+$$
+
+で「レート $R$ = ステップ数 $N$、歪み $D$ = FID」と対応させると:
+
+- **R-D 関数の凸性**: 1 ステップの追加から得られる FID 改善量は単調減少
+- **Pareto Front** = R-D 曲線の離散サンプル
+
+ガウス分布の R-D 関数は解析的に $R(D) = \frac{d}{2}\max\!\left(0, \log\frac{\sigma_{\mathbf{x}}^2}{D}\right)$ であり、FID の減少が $N$ の対数に比例して鈍化することと整合する。8 ステップ以降の逓減収益はこの凸性の直接的帰結だ。
 
 ---
 
@@ -1223,27 +1185,6 @@ $$
 
 **Julia実装**:
 
-```julia
-# Improved Consistency Training (without EMA)
-function improved_ct_loss(model, x_0, n, ps, st)
-    z = randn(size(x_0))
-    t_n1, t_n = schedule[n+1], schedule[n]
-
-    x_n1 = x_0 .+ t_n1 .* z
-
-    # Euler step
-    x_n = x_n1 .+ (t_n - t_n1) .* (-t_n1 .* z ./ (t_n1^2 .+ 1f-5))
-
-    # Forward: both use same θ
-    F_n1, st = model(x_n1, t_n1, ps, st)
-    F_n, _ = model(x_n, t_n, ps, st)  # stop_gradient applied later
-
-    # Loss (manually stop gradient on F_n)
-    loss = mean((F_n1 .- Zygote.ignore(() -> F_n)).^2)
-
-    return loss, st
-end
-```
 
 #### 3.15.2 Multi-step Consistency Models
 
@@ -1283,6 +1224,104 @@ $$
 
 4-step CMが**250倍高速 + 高品質** — sweet spot。
 
+### 3.15.3 連続時間 Consistency Models
+
+離散スケジュール $\{t_i\}_{i=1}^N$ からの自然な一般化として、**連続時間**での Consistency 条件を定式化する。
+
+#### 連続時間 Self-consistency 条件
+
+離散 CM の条件は隣接タイムステップ間のみ:
+
+$$
+f_\theta(\mathbf{x}_{t_n}, t_n) = f_\theta(\mathbf{x}_{t_{n+1}}, t_{n+1})
+$$
+
+連続時間 CM はこれを全時刻の組に拡張する:
+
+$$
+f_\theta(\mathbf{x}_t, t) = f_\theta(\mathbf{x}_s, s) \quad \forall\, t, s \in [\epsilon, T], \quad (\mathbf{x}_t, \mathbf{x}_s) \text{ が同一 PF-ODE 軌道上}
+$$
+
+この条件を**微分形式**に書き換える。$(\mathbf{x}_t, t)$ が PF-ODE 軌道上を移動するとき $f_\theta$ の全微分がゼロであること:
+
+$$
+\frac{d}{dt} f_\theta(\mathbf{x}_t, t) = 0
+$$
+
+連鎖律を適用して:
+
+$$
+\frac{\partial f_\theta}{\partial t}(\mathbf{x}_t, t) \;+\; \nabla_{\mathbf{x}} f_\theta(\mathbf{x}_t, t) \cdot \frac{d\mathbf{x}_t}{dt} = 0
+$$
+
+PF-ODE の速度場 $\mathbf{v}(\mathbf{x}_t, t) = -t\,\nabla_{\mathbf{x}} \log p_t(\mathbf{x}_t) = (\mathbf{x}_t - \hat{\mathbf{x}}_0(\mathbf{x}_t,t))/t$ を代入すると**連続時間 Consistency PDE**:
+
+$$
+\boxed{\partial_t f_\theta(\mathbf{x}_t, t) \;+\; \bigl\langle \nabla_{\mathbf{x}} f_\theta(\mathbf{x}_t, t),\; \mathbf{v}(\mathbf{x}_t, t) \bigr\rangle = 0}
+$$
+
+#### 連続時間 CT 損失
+
+この PDE の残差を最小化する損失関数:
+
+$$
+\mathcal{L}_{\text{CT-cont}}(\theta) = \mathbb{E}_{t \sim \mathcal{U}(\epsilon, T),\; \mathbf{x}_0 \sim p_{\text{data}}}\!\left[\Bigl\|\partial_t f_\theta(\mathbf{x}_t, t) + \nabla_{\mathbf{x}} f_\theta(\mathbf{x}_t, t) \cdot \mathbf{v}_\theta(\mathbf{x}_t, t)\Bigr\|^2\right]
+$$
+
+離散版との関係を確認する。隣接 2 点 $(t, t+\Delta t)$ 間の離散 CT 損失:
+
+$$
+\mathcal{L}_{\text{CT-disc}} = \mathbb{E}\!\left[\bigl\|f_\theta(\mathbf{x}_{t+\Delta t}, t+\Delta t) - f_\theta(\mathbf{x}_t, t)\bigr\|^2\right]
+$$
+
+をテイラー展開すると:
+
+$$
+f_\theta(\mathbf{x}_{t+\Delta t}, t+\Delta t) - f_\theta(\mathbf{x}_t, t) = \left(\partial_t f_\theta + \langle \nabla_{\mathbf{x}} f_\theta, \mathbf{v} \rangle\right)\!\Delta t + O((\Delta t)^2)
+$$
+
+したがって $\mathcal{L}_{\text{CT-disc}} = (\Delta t)^2 \mathcal{L}_{\text{CT-cont}} + O((\Delta t)^3)$。連続版は $\Delta t \to 0$ の極限で離散版と一致する。
+
+#### Neural ODE との接続
+
+連続時間 CM の Consistency PDE は **Neural ODE**（Chen et al. 2018）と深く繋がる。Neural ODE は隠れ状態のダイナミクスを:
+
+$$
+\frac{d\mathbf{h}(t)}{dt} = g_\phi(\mathbf{h}(t), t)
+$$
+
+として定義し、時刻 $0$ から $T$ まで数値積分する。「隠れ状態が ODE 解軌道上にある」ことが Neural ODE の定義だ。
+
+連続時間 CM は別の観点から同じ軌道に関わる。$f_\theta$ が理想的な ODE 積分器であれば:
+
+$$
+f_\theta(\mathbf{x}_t, t) = \Phi_\epsilon(\mathbf{x}_t, t) \equiv \mathbf{x}_t + \int_t^\epsilon \mathbf{v}(\mathbf{x}_s, s)\, ds
+$$
+
+この $\Phi_\epsilon$ が PF-ODE を時刻 $t$ から $\epsilon$ まで積分するフロー写像だ。$f_\theta \approx \Phi_\epsilon$ ということは、**ニューラルネットワークが $t \to \epsilon$ までの ODE 積分を内部に記憶している**ことを意味する。
+
+#### 特性曲線法による幾何学的解釈
+
+Boundary condition $f_\theta(\mathbf{x}_\epsilon, \epsilon) = \mathbf{x}_\epsilon$ と Consistency PDE:
+
+$$
+\partial_t f_\theta + \langle \nabla_{\mathbf{x}} f_\theta, \mathbf{v} \rangle = 0
+$$
+
+を合わせると、これは**一階双曲型 PDE の初期値問題**（時間を逆向きに読むと終端値問題）になる。特性曲線法（Method of Characteristics）を適用すると特性曲線は:
+
+$$
+\frac{d\mathbf{x}}{dt} = \mathbf{v}(\mathbf{x}, t), \qquad \frac{df_\theta}{dt} = 0
+$$
+
+第一式は正確に PF-ODE の軌道方程式、第二式は $f_\theta$ が各軌道上で**定数**であることを述べる。Self-consistency とは「特性曲線（= ODE 軌道）上での不変量の学習」という幾何学的本質が浮かび上がる。
+
+離散 CM は有限個の特性曲線上で条件を課すが、連続時間 CM は全軌道上で連続的に条件を課す。これは離散版より強い正則化として機能し、特に時刻の**補間**（訓練時に見ていない $t$ での推論）における品質向上が期待できる。
+
+$$
+\underbrace{f_\theta(\mathbf{x}_t, t) = f_\theta(\mathbf{x}_s, s)}_{\text{Self-consistency}} \;\Longleftrightarrow\; \underbrace{f_\theta = \text{const on PF-ODE trajectories}}_{\text{特性曲線上の不変量}}
+$$
+
 ### 3.16 Consistency Models in Practice
 
 #### 3.16.1 Latent Consistency Models (LCM)
@@ -1313,21 +1352,6 @@ $$
 
 **LoRA fine-tuning**との統合:
 
-```julia
-# LCM + LoRA for fast personalization
-function lcm_lora_inference(prompt, base_model, lora_weights, steps=4)
-    # Merge LoRA weights
-    merged_model = merge_lora(base_model, lora_weights)
-
-    # LCM sampling (4 steps)
-    z_T = randn(latent_shape)
-    z_0 = lcm_sample(merged_model, z_T, prompt, steps=steps)
-
-    # Decode
-    image = vae_decode(z_0)
-    return image
-end
-```
 
 **Real-world application**: スマホで1秒以内の画像生成が可能に。
 
@@ -1366,7 +1390,7 @@ Adversarial training で**さらに18%改善**。
 
 ### 3.17 Consistency Models vs Other Fast Samplers
 
-#### 3.17.1 包括的比較表
+#### 3.17.1 比較表: Fast Samplers全般
 
 | Method | Paradigm | Steps | FID (CIFAR-10) | Training Cost | Inference Cost |
 |:-------|:---------|:------|:---------------|:--------------|:---------------|
@@ -1432,9 +1456,7 @@ $$
 3. **Generalization**: CM の汎化性能の理論解析
 4. **Adversarial Robustness**: CMの敵対的サンプルへの頑健性
 
-:::message
-**進捗: 100%完了！** Improved CT、Multi-step theory、LCM、Adversarial CM、包括的比較、Future Directionsまで完全制覇。Consistency Modelsの全てを習得！
-:::
+> **Note:** **進捗: 100%完了！** Improved CT、Multi-step theory、LCM、Adversarial CM、Fast Sampler比較、Future Directionsまで完全制覇。Consistency Modelsの全てを習得！
 
 ---
 
@@ -1444,248 +1466,14 @@ $$
 
 **完全な Improved CT実装**:
 
-```julia
-using Lux, Optimisers, Zygote, Random, Statistics
-
-# U-Net backbone (simplified)
-function build_unet(; hidden_dim=128)
-    return Chain(
-        Conv((3, 3), 3 => hidden_dim, pad=1),
-        BatchNorm(hidden_dim),
-        relu,
-        Conv((3, 3), hidden_dim => hidden_dim, pad=1),
-        BatchNorm(hidden_dim),
-        relu,
-        Conv((3, 3), hidden_dim => 3, pad=1)  # Output RGB
-    )
-end
-
-# Consistency function with boundary condition
-struct ConsistencyModel{M}
-    backbone::M
-    σ_data::Float32
-end
-
-function (cm::ConsistencyModel)(x_t, t, ps, st)
-    # Boundary condition: F(x_ε, ε) = x_ε
-    c_skip = cm.σ_data^2 ./ (t.^2 .+ cm.σ_data^2)
-    c_out = cm.σ_data .* t ./ sqrt.(t.^2 .+ cm.σ_data^2)
-    c_in = 1 ./ sqrt.(t.^2 .+ cm.σ_data^2)
-
-    # Network evaluation
-    net_out, st = cm.backbone(c_in .* x_t, ps, st)
-
-    # Consistency function
-    F = c_skip .* x_t .+ c_out .* net_out
-    return F, st
-end
-
-# Improved CT loss (no EMA)
-function ict_loss(model, x_0, schedule, ps, st, rng)
-    batch_size = size(x_0, 4)
-
-    # Sample timestep indices
-    n = rand(rng, 1:length(schedule)-1, batch_size)
-    t_n1 = schedule[n .+ 1]
-    t_n = schedule[n]
-
-    # Add noise
-    z = randn(rng, Float32, size(x_0))
-    x_n1 = x_0 .+ reshape(t_n1, 1, 1, 1, :) .* z
-
-    # Euler step
-    dt = reshape(t_n - t_n1, 1, 1, 1, :)
-    x_n = x_n1 .+ dt .* (-reshape(t_n1, 1, 1, 1, :) .* z)
-
-    # Forward both
-    F_n1, st = model(x_n1, reshape(t_n1, 1, 1, 1, :), ps, st)
-
-    # Stop gradient on target
-    F_n = Zygote.ignore() do
-        F_n_val, _ = model(x_n, reshape(t_n, 1, 1, 1, :), ps, st)
-        F_n_val
-    end
-
-    # LPIPS loss (perceptual) - simplified as MSE here
-    loss = mean((F_n1 .- F_n).^2)
-
-    return loss, st
-end
-
-# Training loop
-function train_consistency_model!(model, data_loader, schedule; epochs=100, lr=1e-4)
-    ps, st = Lux.setup(Random.default_rng(), model)
-    opt_state = Optimisers.setup(Adam(lr), ps)
-
-    for epoch in 1:epochs
-        total_loss = 0.0
-        n_batches = 0
-
-        for x_batch in data_loader
-            # Compute loss and gradients
-            (loss, st), grads = Zygote.withgradient(ps) do p
-                ict_loss(model, x_batch, schedule, p, st, Random.default_rng())
-            end
-
-            # Update parameters
-            opt_state, ps = Optimisers.update(opt_state, ps, grads[1])
-
-            total_loss += loss
-            n_batches += 1
-        end
-
-        avg_loss = total_loss / n_batches
-        println("Epoch $epoch: Loss = $(round(avg_loss, digits=6))")
-    end
-
-    return ps, st
-end
-
-# Timestep schedule (EDM-style)
-function create_schedule(N=40, σ_min=0.002f0, σ_max=80.0f0, ρ=7.0f0)
-    i = collect(0:N-1)
-    σ = (σ_max^(1/ρ) .+ i ./ (N - 1) .* (σ_min^(1/ρ) - σ_max^(1/ρ))).^ρ
-    return Float32.(σ)
-end
-
-# Example usage
-schedule = create_schedule(40)
-unet = build_unet(hidden_dim=128)
-cm = ConsistencyModel(unet, 0.5f0)
-
-# Assuming data_loader is defined
-# ps, st = train_consistency_model!(cm, data_loader, schedule, epochs=100)
-```
 
 #### 3.19.2 Rust推論パイプライン (ONNX Runtime)
 
 **Julia → ONNX Export**:
 
-```julia
-using ONNX
-
-# Export trained model to ONNX
-function export_to_onnx(model, ps, st, output_path)
-    # Create dummy input
-    dummy_x = randn(Float32, 32, 32, 3, 1)  # CIFAR-10 size
-    dummy_t = Float32[1.0;;;]
-
-    # Trace and export
-    ONNX.save(output_path, model, (dummy_x, dummy_t), ps, st)
-    println("Model exported to $output_path")
-end
-
-export_to_onnx(cm, ps, st, "consistency_model.onnx")
-```
 
 **Rust Inference**:
 
-```rust
-use ort::{Environment, Session, SessionBuilder, Value};
-use ndarray::{Array4, Array1, s};
-use image::{ImageBuffer, Rgb};
-
-pub struct ConsistencyModelInference {
-    session: Session,
-    schedule: Vec<f32>,
-}
-
-impl ConsistencyModelInference {
-    pub fn new(model_path: &str) -> Result<Self, Box<dyn std::error::Error>> {
-        let environment = Environment::builder()
-            .with_name("consistency_model")
-            .build()?;
-
-        let session = SessionBuilder::new(&environment)?
-            .with_model_from_file(model_path)?;
-
-        // EDM schedule
-        let schedule = Self::create_schedule(40, 0.002, 80.0, 7.0);
-
-        Ok(Self { session, schedule })
-    }
-
-    fn create_schedule(n: usize, sigma_min: f32, sigma_max: f32, rho: f32) -> Vec<f32> {
-        (0..n)
-            .map(|i| {
-                let t = i as f32 / (n - 1) as f32;
-                let sigma = (sigma_max.powf(1.0 / rho)
-                    + t * (sigma_min.powf(1.0 / rho) - sigma_max.powf(1.0 / rho)))
-                .powf(rho);
-                sigma
-            })
-            .collect()
-    }
-
-    pub fn generate_one_step(&self, noise: Array4<f32>) -> Result<Array4<f32>, Box<dyn std::error::Error>> {
-        let t_max = self.schedule[0];
-
-        // Prepare input tensors
-        let x_input = Value::from_array(self.session.allocator(), &noise)?;
-        let t_input = Value::from_array(self.session.allocator(), &Array1::from_elem(1, t_max))?;
-
-        // Run inference
-        let outputs = self.session.run(vec![x_input, t_input])?;
-
-        // Extract output
-        let output: Array4<f32> = outputs[0].try_extract()?.view().to_owned();
-
-        Ok(output)
-    }
-
-    pub fn generate_multi_step(&self, noise: Array4<f32>, steps: usize) -> Result<Array4<f32>, Box<dyn std::error::Error>> {
-        let mut x = noise;
-
-        for i in 0..steps {
-            let t_idx = (i * self.schedule.len()) / steps;
-            let t = self.schedule[t_idx];
-
-            let x_input = Value::from_array(self.session.allocator(), &x)?;
-            let t_input = Value::from_array(self.session.allocator(), &Array1::from_elem(1, t))?;
-
-            let outputs = self.session.run(vec![x_input, t_input])?;
-            x = outputs[0].try_extract()?.view().to_owned();
-        }
-
-        Ok(x)
-    }
-
-    pub fn save_image(&self, tensor: &Array4<f32>, path: &str) -> Result<(), Box<dyn std::error::Error>> {
-        // Denormalize from [-1, 1] to [0, 255]
-        let img_data: Vec<u8> = tensor
-            .slice(s![0, .., .., ..])
-            .iter()
-            .map(|&x| ((x + 1.0) * 127.5).clamp(0.0, 255.0) as u8)
-            .collect();
-
-        let (h, w, c) = (tensor.shape()[1], tensor.shape()[2], tensor.shape()[3]);
-        let img: ImageBuffer<Rgb<u8>, Vec<u8>> = ImageBuffer::from_raw(w as u32, h as u32, img_data)
-            .ok_or("Failed to create image")?;
-
-        img.save(path)?;
-        Ok(())
-    }
-}
-
-// Usage
-fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let model = ConsistencyModelInference::new("consistency_model.onnx")?;
-
-    // Generate with 1-step
-    let noise = Array4::random((1, 32, 32, 3), rand::distributions::Standard);
-    let image = model.generate_one_step(noise)?;
-    model.save_image(&image, "output_1step.png")?;
-
-    // Generate with 4-step
-    let noise = Array4::random((1, 32, 32, 3), rand::distributions::Standard);
-    let image = model.generate_multi_step(noise, 4)?;
-    model.save_image(&image, "output_4step.png")?;
-
-    println!("✅ Images generated successfully!");
-
-    Ok(())
-}
-```
 
 **Performance Benchmark** (CIFAR-10, M1 Max):
 
@@ -1701,59 +1489,6 @@ Rust推論が **3.8倍高速** — Production環境に最適。
 
 **Serverless 1-step生成** (< 1秒レスポンス):
 
-```rust
-use lambda_runtime::{service_fn, LambdaEvent, Error};
-use serde::{Deserialize, Serialize};
-
-#[derive(Deserialize)]
-struct GenerateRequest {
-    seed: Option<u64>,
-    steps: Option<usize>,
-}
-
-#[derive(Serialize)]
-struct GenerateResponse {
-    image_url: String,
-    generation_time_ms: u64,
-}
-
-async fn handler(event: LambdaEvent<GenerateRequest>) -> Result<GenerateResponse, Error> {
-    let start = std::time::Instant::now();
-
-    // Load model (cached in Lambda container)
-    let model = ConsistencyModelInference::new("/opt/model.onnx")?;
-
-    // Generate
-    let seed = event.payload.seed.unwrap_or(42);
-    let steps = event.payload.steps.unwrap_or(1);
-
-    use rand::SeedableRng;
-    let mut rng = rand::rngs::StdRng::seed_from_u64(seed);
-    let noise = Array4::random_using((1, 32, 32, 3), rand::distributions::Standard, &mut rng);
-
-    let image = if steps == 1 {
-        model.generate_one_step(noise)?
-    } else {
-        model.generate_multi_step(noise, steps)?
-    };
-
-    // Upload to S3
-    model.save_image(&image, "/tmp/output.png")?;
-    let image_url = upload_to_s3("/tmp/output.png").await?;
-
-    let elapsed = start.elapsed().as_millis() as u64;
-
-    Ok(GenerateResponse {
-        image_url,
-        generation_time_ms: elapsed,
-    })
-}
-
-#[tokio::main]
-async fn main() -> Result<(), Error> {
-    lambda_runtime::run(service_fn(handler)).await
-}
-```
 
 **Cost Analysis** (1M requests/month):
 
@@ -1807,35 +1542,43 @@ async fn main() -> Result<(), Error> {
 - CM: $840
 - **削減額: $41,160**
 
-:::message
-**Complete!** Production実装、Rust deployment、Serverless、Real-world応用、ビジネスインパクトまで完全網羅。Consistency Modelsの理論から実践まで全て習得！
-:::
+> **Note:** **Complete!** Production実装、Rust deployment、Serverless、Real-world応用、ビジネスインパクトまで完全網羅。Consistency Modelsの理論から実践まで全て習得！
 
 ---
+
+## 参考文献
 
 ### 主要論文
 
 [^1]: Song, Y., Dhariwal, P., Chen, M., & Sutskever, I. (2023). Consistency Models. ICML 2023. arXiv:2303.01469.
-@[card](https://arxiv.org/abs/2303.01469)
+<https://arxiv.org/abs/2303.01469>
 
 [^2]: Song, Y., & Dhariwal, P. (2023). Improved Techniques for Training Consistency Models. arXiv:2310.14189.
-@[card](https://arxiv.org/abs/2310.14189)
+<https://arxiv.org/abs/2310.14189>
 
-[^3]: Kim, D. et al. (2025). Multi-step Consistency Models: Fast Generation with Theoretical Guarantees. arXiv:2505.01049.
-@[card](https://arxiv.org/abs/2505.01049)
+[^3]: Jain, N., Huang, X., Ma, Y., & Zhang, T. (2025). Multi-Step Consistency Models: Fast Generation with Theoretical Guarantees. arXiv:2505.01049.
+<https://arxiv.org/abs/2505.01049>
 
 [^4]: Luo, S. et al. (2023). Latent Consistency Models: Synthesizing High-Resolution Images with Few-Step Inference. arXiv:2310.04378.
-@[card](https://arxiv.org/abs/2310.04378)
+<https://arxiv.org/abs/2310.04378>
 
 [^5]: Ho, J., Jain, A., & Abbeel, P. (2020). Denoising Diffusion Probabilistic Models. NeurIPS 2020. arXiv:2006.11239.
-@[card](https://arxiv.org/abs/2006.11239)
+<https://arxiv.org/abs/2006.11239>
 
 [^6]: Song, J., Meng, C., & Ermon, S. (2020). Denoising Diffusion Implicit Models. ICLR 2021. arXiv:2010.02502.
-@[card](https://arxiv.org/abs/2010.02502)
+<https://arxiv.org/abs/2010.02502>
 
 ---
 
 ---
+
+## 著者リンク
+
+- Blog: https://fumishiki.dev
+- X: https://x.com/fumishiki
+- LinkedIn: https://www.linkedin.com/in/fumitakamurakami
+- GitHub: https://github.com/fumishiki
+- Hugging Face: https://huggingface.co/fumishiki
 
 ## ライセンス
 

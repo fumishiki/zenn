@@ -4,7 +4,16 @@ emoji: "🔄"
 type: "tech"
 topics: ["machinelearning", "deeplearning", "autoregressive", "julia", "rust"]
 published: true
+slug: "ml-lecture-13-part2"
+difficulty: "advanced"
+time_estimate: "90 minutes"
+languages: ["Julia", "Rust"]
+keywords: ["機械学習", "深層学習", "生成モデル"]
 ---
+
+# 第13回: 自己回帰モデル 【後編】実装編
+
+> **📖 この記事は後編（実装編）です** 理論編は [【前編】第13回](/articles/ml-lecture-13-part1) をご覧ください。
 
 ## 💻 4. 実装ゾーン(45分)— PixelCNN/WaveNetをJulia+Rustで構築
 
@@ -104,9 +113,7 @@ struct GatedActivation <: Lux.AbstractLuxLayer end
 function (::GatedActivation)(x, ps, st)
     # x: (H, W, 2C, batch) — first C channels = filter, next C = gate
     C = size(x, 3) ÷ 2
-    f = tanh.(x[:, :, 1:C, :])
-    g = sigmoid.(x[:, :, C+1:end, :])
-    return f .* g, st
+    @.(tanh(x[:, :, 1:C, :]) * sigmoid(x[:, :, C+1:end, :])), st
 end
 
 # Gated PixelCNN Block (Vertical + Horizontal stack)
@@ -174,7 +181,7 @@ function (model::PixelCNN)(x, ps, st)
 
     # Output: (H, W, num_classes, batch)
     logits, st = model.output_conv(h, ps.output_conv, st)
-    return logits, st
+    logits, st
 end
 ```
 
@@ -191,12 +198,11 @@ function pixelcnn_loss(model, ps, st, x, y)
 
     # Cross-entropy per pixel
     H, W, _, B = size(x)
-    loss = 0.0f0
-    for b in 1:B, i in 1:H, j in 1:W
-        target = Int(y[i, j, 1, b]) + 1  # 1-indexed
-        loss += -log(softmax(logits[i, j, :, b])[target] + 1f-8)
-    end
-    return loss / (H * W * B), st, ()
+    loss = -sum(
+        log(softmax(logits[i, j, :, b])[Int(y[i, j, 1, b]) + 1] + 1f-8)
+        for b in 1:B, i in 1:H, j in 1:W
+    ) / (H * W * B)
+    loss, st, ()
 end
 
 # Training loop
@@ -218,7 +224,7 @@ function train_pixelcnn!(model, ps, st, train_data, epochs=10, lr=1e-3)
         end
         println("Epoch $epoch: Loss = $(epoch_loss / length(train_data))")
     end
-    return ps, st
+    ps, st
 end
 ```
 
@@ -266,7 +272,7 @@ function (block::WaveNetBlock)(x, ps, st)
     # Gated activation
     f, st_f = block.filter_conv(x, ps.filter_conv, st)
     g, st_g = block.gate_conv(x, ps.gate_conv, st)
-    z = tanh.(f) .* sigmoid.(g)
+    z = @. tanh(f) * sigmoid(g)
 
     # Residual + Skip
     res, st_res = block.res_conv(z, ps.res_conv, st)
@@ -318,11 +324,10 @@ impl PixelCNNInference {
                 let outputs = self.session.run(inputs!["input" => input])?;
                 let logits = outputs["output"].try_extract::<f32>()?.view().to_owned();
 
-                // Sample from categorical distribution at position (i, j)
-                for b in 0..batch_size {
+                (0..batch_size).for_each(|b| {
                     let probs = softmax(&logits.slice(s![b, .., i, j]));
                     img[[b, 0, i, j]] = sample_categorical(&probs);
-                }
+                });
             }
         }
         Ok(img)
@@ -330,7 +335,7 @@ impl PixelCNNInference {
 }
 
 fn softmax(logits: &ndarray::ArrayView1<f32>) -> Vec<f32> {
-    let max = logits.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
+    let max = logits.iter().copied().fold(f32::NEG_INFINITY, f32::max);
     let exp: Vec<f32> = logits.iter().map(|&x| (x - max).exp()).collect();
     let sum: f32 = exp.iter().sum();
     exp.iter().map(|&x| x / sum).collect()
@@ -338,14 +343,10 @@ fn softmax(logits: &ndarray::ArrayView1<f32>) -> Vec<f32> {
 
 fn sample_categorical(probs: &[f32]) -> f32 {
     let u: f32 = rand::random();
-    let mut cumsum = 0.0;
-    for (i, &p) in probs.iter().enumerate() {
-        cumsum += p;
-        if u < cumsum {
-            return i as f32;
-        }
-    }
-    (probs.len() - 1) as f32
+    probs.iter()
+        .scan(0.0_f32, |cum, &p| { *cum += p; Some(*cum) })
+        .position(|cum| u < cum)
+        .unwrap_or(probs.len() - 1) as f32
 }
 ```
 
@@ -364,16 +365,13 @@ $$
 ```julia
 function greedy_decode(model, ps, st, max_len=100)
     x = [START_TOKEN]
-    for t in 1:max_len
+    for _ in 1:max_len
         logits, st = model(x, ps, st)
-        probs = softmax(logits[end, :])  # last position
-        next_token = argmax(probs)
+        next_token = argmax(softmax(logits[end, :]))
         push!(x, next_token)
-        if next_token == END_TOKEN
-            break
-        end
+        next_token == END_TOKEN && break
     end
-    return x
+    x
 end
 ```
 
@@ -394,17 +392,14 @@ $$
 - $\tau \to \infty$: 一様分布(完全ランダム)
 
 ```julia
-function sample_with_temperature(logits::Vector, tau::Float64=1.0)
-    scaled = logits ./ tau
-    probs = softmax(scaled)
-    return sample_categorical(probs)
-end
+sample_with_temperature(logits::Vector, τ::Float64=1.0) =
+    sample_categorical(softmax(logits ./ τ))
 
 # Example
 logits = [2.0, 1.0, 0.5, 0.2]
-println("tau=0.5: ", [sample_with_temperature(logits, 0.5) for _ in 1:10])
-println("tau=1.0: ", [sample_with_temperature(logits, 1.0) for _ in 1:10])
-println("tau=2.0: ", [sample_with_temperature(logits, 2.0) for _ in 1:10])
+for τ in [0.5, 1.0, 2.0]
+    println("tau=$τ: ", [sample_with_temperature(logits, τ) for _ in 1:10])
+end
 ```
 
 出力:
@@ -421,11 +416,9 @@ tau=2.0: [3, 2, 1, 4, 2, 3, 1, 2, 3, 2]  # Diverse
 ```julia
 function topk_sampling(logits::Vector, k::Int)
     probs = softmax(logits)
-    top_indices = partialsortperm(probs, 1:k, rev=true)
-    top_probs = probs[top_indices]
-    top_probs ./= sum(top_probs)  # Renormalize
-    selected = sample_categorical(top_probs)
-    return top_indices[selected]
+    idx = partialsortperm(probs, 1:k, rev=true)
+    top = probs[idx]; top ./= sum(top)
+    idx[sample_categorical(top)]
 end
 ```
 
@@ -438,17 +431,11 @@ end
 ```julia
 function nucleus_sampling(logits::Vector, p::Float64=0.9)
     probs = softmax(logits)
-    sorted_indices = sortperm(probs, rev=true)
-    sorted_probs = probs[sorted_indices]
-
-    cumsum_probs = cumsum(sorted_probs)
-    cutoff = findfirst(cumsum_probs .>= p)
-    nucleus_indices = sorted_indices[1:cutoff]
-    nucleus_probs = sorted_probs[1:cutoff]
-    nucleus_probs ./= sum(nucleus_probs)
-
-    selected = sample_categorical(nucleus_probs)
-    return nucleus_indices[selected]
+    idx = sortperm(probs, rev=true)
+    sorted = probs[idx]
+    cutoff = findfirst(cumsum(sorted) .>= p)
+    nuc = sorted[1:cutoff]; nuc ./= sum(nuc)
+    idx[sample_categorical(nuc)]
 end
 ```
 
@@ -467,29 +454,26 @@ end
 function beam_search(model, ps, st, beam_size::Int, max_len::Int)
     beams = [BeamCandidate([START_TOKEN], 0.0)]
 
-    for t in 1:max_len
+    for _ in 1:max_len
         candidates = BeamCandidate[]
         for beam in beams
             if beam.sequence[end] == END_TOKEN
-                push!(candidates, beam)
-                continue
+                push!(candidates, beam); continue
             end
             logits, _ = model(beam.sequence, ps, st)
             probs = softmax(logits[end, :])
             top_k = partialsortperm(probs, 1:beam_size, rev=true)
-
-            for k in top_k
-                new_seq = vcat(beam.sequence, k)
-                new_log_prob = beam.log_prob + log(probs[k])
-                push!(candidates, BeamCandidate(new_seq, new_log_prob))
-            end
+            append!(candidates, [
+                BeamCandidate(vcat(beam.sequence, k), beam.log_prob + log(probs[k]))
+                for k in top_k
+            ])
         end
         # Keep top beam_size candidates
-        sort!(candidates, by=x -> x.log_prob, rev=true)
+        sort!(candidates, by=c -> c.log_prob, rev=true)
         beams = candidates[1:min(beam_size, length(candidates))]
     end
 
-    return beams[1].sequence  # Best sequence
+    first(beams).sequence
 end
 ```
 
@@ -558,17 +542,6 @@ PixelCNN [^1] / WaveNet [^2] / VAR [^3] などAR論文の読み方:
 
 #### PixelCNN Forward Pass (疑似コード)
 
-**Python (PyTorch)**:
-```python
-def forward(self, x):
-    v = self.v_init(x)
-    h = self.h_init(x)
-    for block in self.blocks:
-        v, h = block(v, h)
-    logits = self.out_conv(h)
-    return logits
-```
-
 **Julia (Lux)**:
 ```julia
 function (model::PixelCNN)(x, ps, st)
@@ -578,7 +551,7 @@ function (model::PixelCNN)(x, ps, st)
         v, h, st = block(v, h, ps.blocks[i], st)
     end
     logits, st = model.out_conv(h, ps.out_conv, st)
-    return logits, st
+    logits, st
 end
 ```
 
@@ -630,20 +603,21 @@ impl PixelCNNInference {
 use std::simd::{f32x8, SimdFloat};
 
 fn softmax_simd(logits: &[f32]) -> Vec<f32> {
-    let max = logits.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
-    let mut exp_sum = 0.0f32;
+    let max = logits.iter().copied().fold(f32::NEG_INFINITY, f32::max);
     let mut exp_vals = vec![0.0f32; logits.len()];
+    let mut exp_sum = 0.0f32;
 
     // SIMD vectorized exp
     for (chunk, out_chunk) in logits.chunks(8).zip(exp_vals.chunks_mut(8)) {
         let vals = f32x8::from_slice(chunk);
-        let exp_vals = (vals - f32x8::splat(max)).exp();
-        exp_sum += exp_vals.reduce_sum();
-        exp_vals.copy_to_slice(out_chunk);
+        let exps = (vals - f32x8::splat(max)).exp();
+        exp_sum += exps.reduce_sum();
+        exps.copy_to_slice(out_chunk);
     }
 
     // Normalize
-    exp_vals.iter().map(|&x| x / exp_sum).collect()
+    exp_vals.iter_mut().for_each(|x| *x /= exp_sum);
+    exp_vals
 }
 ```
 
@@ -697,7 +671,7 @@ function train_pixelcnn_amp!(model, ps, st, train_data, epochs=10)
             opt_state, ps = Optimisers.update(opt_state, ps, grads)
         end
     end
-    return ps, st
+    ps, st
 end
 ```
 
@@ -708,18 +682,18 @@ end
 ```julia
 function train_with_grad_accumulation!(model, ps, st, train_data, accum_steps=4)
     opt_state = Optimisers.setup(Adam(1e-3), ps)
-    accumulated_grads = zero(ps)
+    ∇acc = zero(ps)
 
     for (i, (x, y)) in enumerate(train_data)
-        loss, st, grads = pixelcnn_loss(model, ps, st, x, y)
+        _, st, ∇ = pixelcnn_loss(model, ps, st, x, y)
 
         # Accumulate gradients
-        accumulated_grads = accumulated_grads .+ grads
+        ∇acc = ∇acc .+ ∇
 
         if i % accum_steps == 0
             # Update with accumulated gradients
-            opt_state, ps = Optimisers.update(opt_state, ps, accumulated_grads ./ accum_steps)
-            accumulated_grads = zero(ps)
+            opt_state, ps = Optimisers.update(opt_state, ps, ∇acc ./ accum_steps)
+            ∇acc = zero(ps)
         end
     end
 end
@@ -755,7 +729,7 @@ function distributed_train!(model, ps, st, train_data, num_gpus=4)
 
     # Average gradients
     ps_avg = mean(results)
-    return ps_avg, st
+    ps_avg, st
 end
 ```
 
@@ -868,10 +842,7 @@ function safe_train!(model, ps, st, train_data)
                 loss, st, grads = pixelcnn_loss(model, ps, st, x, y)
 
                 # Check for NaN
-                if isnan(loss)
-                    @warn "NaN loss detected at epoch $epoch"
-                    return ps, st  # Early stop
-                end
+                isnan(loss) && (@warn "NaN loss detected at epoch $epoch"; return ps, st)
 
                 # Update
                 ps = update_params(ps, grads)
@@ -881,7 +852,7 @@ function safe_train!(model, ps, st, train_data)
         @error "Training failed" exception=e
         rethrow(e)
     end
-    return ps, st
+    ps, st
 end
 ```
 
@@ -896,10 +867,10 @@ pub fn sample(&self, batch_size: usize, height: usize, width: usize)
     for i in 0..height {
         for j in 0..width {
             let input = Value::from_array(self.session.allocator(), &img)
-                .map_err(|e| InferenceError::OrtError(e))?;
+                .map_err(InferenceError::OrtError)?;
 
             let outputs = self.session.run(inputs!["input" => input])
-                .map_err(|e| InferenceError::OrtError(e))?;
+                .map_err(InferenceError::OrtError)?;
 
             // ... (sampling logic)
         }
@@ -918,7 +889,8 @@ pub enum InferenceError {
 
 **Result型**: 全エラーを型レベルで追跡 — Rustの安全性。
 
-:::details Math→Code翻訳の全対応表
+<details><summary>Math→Code翻訳の全対応表</summary>
+
 | 概念 | 数式 | Julia | Rust |
 |:-----|:-----|:------|:-----|
 | 連鎖律 | $\prod p(x_i \mid \mathbf{x}_{<i})$ | `prod(p)` | `p.iter().product()` |
@@ -929,11 +901,10 @@ pub enum InferenceError {
 | Dilated Conv | $\sum w_k x[t-dk]$ | `conv(x, dilation=d)` | Custom kernel |
 
 全て1:1対応 — 数式がそのままコードになる。
-:::
 
-:::message
-**進捗: 70% 完了** PixelCNN/WaveNetの完全実装をJulia+Rustで構築した。Masked Conv/Gating/Dilatedの全てを数式→コードに落とし込んだ。ここから実験ゾーンへ — 実際に訓練して性能を検証する。
-:::
+</details>
+
+> **Note:** **進捗: 70% 完了** PixelCNN/WaveNetの完全実装をJulia+Rustで構築した。Masked Conv/Gating/Dilatedの全てを数式→コードに落とし込んだ。ここから実験ゾーンへ — 実際に訓練して性能を検証する。
 
 ---
 
@@ -941,7 +912,7 @@ pub enum InferenceError {
 
 ### 5.1 Symbol Reading Test — AR数式を読む
 
-:::details Q1. $p(\mathbf{x}) = \prod_{i=1}^{n} p(x_i \mid \mathbf{x}_{<i})$ の $\mathbf{x}_{<i}$ は何か？
+<details><summary>Q1. $p(\mathbf{x}) = \prod_{i=1}^{n} p(x_i \mid \mathbf{x}_{<i})$ の $\mathbf{x}_{<i}$ は何か？</summary>
 
 **Answer**: 位置 $i$ より **前** の全要素 $(x_1, \dots, x_{i-1})$。
 
@@ -950,9 +921,10 @@ pub enum InferenceError {
 **直感**: 自己回帰では「過去の全てを条件にして次を予測」する — $\mathbf{x}_{<i}$ がその「過去の全て」を表す。
 
 **Citation**: van den Oord+ [^1] のEq.1参照。
-:::
 
-:::details Q2. Causal Maskの下三角行列 $\mathbf{M}_{ij} = \mathbb{1}[i \geq j]$ はなぜ必要か？
+</details>
+
+<details><summary>Q2. Causal Maskの下三角行列 $\mathbf{M}_{ij} = \mathbb{1}[i \geq j]$ はなぜ必要か？</summary>
 
 **Answer**: 位置 $i$ が位置 $j > i$(未来)を参照することを **防ぐ** ため。
 
@@ -961,9 +933,10 @@ pub enum InferenceError {
 **実装**: `mask = tril(ones(n, n))` で下三角行列を作成。
 
 **Transformer AR**: GPTなど全てのDecoder-onlyモデルがこのマスクを使用。
-:::
 
-:::details Q3. WaveNetのDilated Conv $d=2^k$ の受容野が $2^L$ になる理由は？
+</details>
+
+<details><summary>Q3. WaveNetのDilated Conv $d=2^k$ の受容野が $2^L$ になる理由は？</summary>
 
 **Answer**: 各層で受容野が $2 \times$ dilation分拡大するため。
 
@@ -975,9 +948,10 @@ pub enum InferenceError {
 Kernel size $K=2$ の場合: $2^L$
 
 **Citation**: van den Oord+ [^2] Figure 3参照。
-:::
 
-:::details Q4. PixelCNN++のDiscretized Logistic Mixtureの「離散化」は何を意味するか？
+</details>
+
+<details><summary>Q4. PixelCNN++のDiscretized Logistic Mixtureの「離散化」は何を意味するか？</summary>
 
 **Answer**: 連続分布(Logistic)を離散値(0-255)の確率に変換すること。
 
@@ -994,9 +968,10 @@ $$
 **効果**: 256-wayソフトマックスから $3K$ パラメータへ削減(K=混合数) → 訓練高速化。
 
 **Citation**: Salimans+ [^5] Eq.2参照。
-:::
 
-:::details Q5. ARモデルのBits-per-dimension (bpd)は何を測るか？
+</details>
+
+<details><summary>Q5. ARモデルのBits-per-dimension (bpd)は何を測るか？</summary>
 
 **Answer**: データ1次元あたりの平均情報量(ビット単位)。
 
@@ -1013,11 +988,12 @@ $$
 **例**: CIFAR-10 (32×32×3 = 3072次元)でbpd=3.0 → 1ピクセルあたり3ビット → 全体で約1.1KB。
 
 **Citation**: PixelCNN++ [^5] でCIFAR-10 bpd 2.92を達成。
-:::
+
+</details>
 
 ### 5.2 LaTeX Writing Test
 
-:::details Q1. 連鎖律をLaTeXで書け
+<details><summary>Q1. 連鎖律をLaTeXで書け</summary>
 
 ```latex
 p(\mathbf{x}) = \prod_{i=1}^{n} p(x_i \mid x_1, \dots, x_{i-1}) = \prod_{i=1}^{n} p(x_i \mid \mathbf{x}_{<i})
@@ -1026,9 +1002,10 @@ p(\mathbf{x}) = \prod_{i=1}^{n} p(x_i \mid x_1, \dots, x_{i-1}) = \prod_{i=1}^{n
 $$
 p(\mathbf{x}) = \prod_{i=1}^{n} p(x_i \mid x_1, \dots, x_{i-1}) = \prod_{i=1}^{n} p(x_i \mid \mathbf{x}_{<i})
 $$
-:::
 
-:::details Q2. NLL損失関数をLaTeXで書け
+</details>
+
+<details><summary>Q2. NLL損失関数をLaTeXで書け</summary>
 
 ```latex
 \mathcal{L}_\text{NLL}(\theta) = -\frac{1}{N} \sum_{n=1}^{N} \sum_{i=1}^{D} \log p_\theta(x_i^{(n)} \mid \mathbf{x}_{<i}^{(n)})
@@ -1037,9 +1014,10 @@ $$
 $$
 \mathcal{L}_\text{NLL}(\theta) = -\frac{1}{N} \sum_{n=1}^{N} \sum_{i=1}^{D} \log p_\theta(x_i^{(n)} \mid \mathbf{x}_{<i}^{(n)})
 $$
-:::
 
-:::details Q3. Gated Activationの式をLaTeXで書け
+</details>
+
+<details><summary>Q3. Gated Activationの式をLaTeXで書け</summary>
 
 ```latex
 \mathbf{y} = \tanh(\mathbf{W}_{f} * \mathbf{x}) \odot \sigma(\mathbf{W}_{g} * \mathbf{x})
@@ -1048,21 +1026,18 @@ $$
 $$
 \mathbf{y} = \tanh(\mathbf{W}_{f} * \mathbf{x}) \odot \sigma(\mathbf{W}_{g} * \mathbf{x})
 $$
-:::
+
+</details>
 
 ### 5.3 Code Translation Test
 
-:::details Q1. 連鎖律による尤度計算をJuliaで実装せよ
+<details><summary>Q1. 連鎖律による尤度計算をJuliaで実装せよ</summary>
 
 ```julia
 function ar_log_likelihood(x::Vector, conditional_probs::Vector{Vector{Float64}})
     # x: observed sequence
     # conditional_probs[i]: p(x_i | x_{<i}) for all possible values
-    log_prob = 0.0
-    for i in eachindex(x)
-        log_prob += log(conditional_probs[i][x[i]] + 1e-10)
-    end
-    return log_prob
+    sum(log(conditional_probs[i][x[i]] + 1e-10) for i in eachindex(x))
 end
 
 # Example
@@ -1074,14 +1049,13 @@ probs = [
 ]
 println(ar_log_likelihood(x, probs))  # -0.5108...
 ```
-:::
 
-:::details Q2. Causal Maskを生成するJulia関数を書け
+</details>
+
+<details><summary>Q2. Causal Maskを生成するJulia関数を書け</summary>
 
 ```julia
-function causal_mask(n::Int)
-    return tril(ones(Bool, n, n))
-end
+causal_mask(n::Int) = tril(ones(Bool, n, n))
 
 # Test
 mask = causal_mask(5)
@@ -1093,21 +1067,18 @@ println(mask)
 # 1  1  1  1  0
 # 1  1  1  1  1
 ```
-:::
 
-:::details Q3. Softmaxサンプリングをコードで実装せよ
+</details>
+
+<details><summary>Q3. Softmaxサンプリングをコードで実装せよ</summary>
 
 ```julia
 function sample_categorical(probs::Vector{Float64})
-    u = rand()
-    cumsum = 0.0
+    u, cumprob = rand(), 0.0
     for (i, p) in enumerate(probs)
-        cumsum += p
-        if u < cumsum
-            return i
-        end
+        (cumprob += p) > u && return i
     end
-    return length(probs)  # fallback
+    length(probs)
 end
 
 # Test
@@ -1116,13 +1087,14 @@ samples = [sample_categorical(probs) for _ in 1:1000]
 println("Empirical frequencies: ", [count(==(i), samples)/1000 for i in 1:4])
 # Output: [0.097, 0.602, 0.203, 0.098] ≈ probs
 ```
-:::
+
+</details>
 
 ### 5.4 Paper Reading Test — PixelCNN Pass 1
 
 論文: van den Oord+ (2016), "Conditional Image Generation with PixelCNN Decoders" [^1]
 
-:::details Pass 1 Template (5分で埋める)
+<details><summary>Pass 1 Template (5分で埋める)</summary>
 
 **Core Contribution** (1 sentence):
 Gated PixelCNN with vertical/horizontal stacks eliminates blind spot and achieves log-likelihood matching PixelRNN at lower cost.
@@ -1144,7 +1116,8 @@ ImageNet 64×64: Class-conditional生成成功
 
 **My Question**:
 Why does gating improve likelihood? (Ablation: Table 1 — gated vs non-gated)
-:::
+
+</details>
 
 ### 5.5 Implementation Challenge — Tiny PixelCNN on MNIST
 
@@ -1182,7 +1155,7 @@ function sample_pixelcnn(model, ps, st, num_samples=16)
             img[i, j, 1, b] = sample_categorical(probs) / 256.0
         end
     end
-    return img
+    img
 end
 
 samples = sample_pixelcnn(model, ps, st, 16)
@@ -1252,7 +1225,7 @@ function wavenet_sample(model, ps, st, length=100, temperature=0.8)
 
         push!(generated, next_sample)
         push!(x, next_sample)
-        x = x[2:end]  # Sliding window
+        popfirst!(x)  # Sliding window
     end
 
     # Dequantize
@@ -1366,7 +1339,7 @@ using Images, Plots
 samples = sample_pixelcnn(model, ps, st, 16)
 
 # Visualize as 4x4 grid
-grid = hcat([vcat([Gray.(samples[:, :, 1, i]) for i in (r-1)*4+1:r*4]...) for r in 1:4]...)
+grid = hcat([vcat([Gray.(@view samples[:, :, 1, i]) for i in (r-1)*4+1:r*4]...) for r in 1:4]...)
 save("pixelcnn_mnist_samples.png", grid)
 ```
 
@@ -1384,7 +1357,7 @@ audio = wavenet_sample(model, ps, st, 16000)
 window = 256
 hop = 128
 spec = stft(audio, window, hop)
-heatmap(log.(abs.(spec) .+ 1e-10), xlabel="Time", ylabel="Frequency", title="WaveNet Output")
+heatmap(@.(log(abs(spec) + 1e-10)), xlabel="Time", ylabel="Frequency", title="WaveNet Output")
 ```
 
 **期待出力**: 正弦波のハーモニクスが見える(周波数軸に横線)。
@@ -1417,7 +1390,7 @@ function (model::ConditionalPixelCNN)(x, class_labels, ps, st)
     x_cond = cat(x, class_tiled, dims=3)  # (H, W, C+embed_dim, batch)
     # Forward through PixelCNN
     logits, st_pix = model.pixelcnn(x_cond, ps.pixelcnn, st)
-    return logits, st_pix
+    logits, st_pix
 end
 
 # Conditional sampling
@@ -1476,9 +1449,12 @@ end
 
 全てチェックできたら、本講義の内容を完全習得している。
 
-:::message
-**進捗: 85% 完了** 実験ゾーンで理論→実装→検証のサイクルを回した。Symbol/LaTeX/Codeの3視点でARを完全理解し、Tiny PixelCNNで実際に訓練した。ここから発展ゾーンへ — 2024-2025最新研究と今後の展望を俯瞰する。
-:::
+> **Note:** **進捗: 85% 完了** 実験ゾーンで理論→実装→検証のサイクルを回した。Symbol/LaTeX/Codeの3視点でARを完全理解し、Tiny PixelCNNで実際に訓練した。ここから発展ゾーンへ — 2024-2025最新研究と今後の展望を俯瞰する。
+
+> Progress: 85%
+> **理解度チェック**
+> 1. Masked Convolution の Julia 実装において、`mask_type = :A` と `mask_type = :B` でマスクの構成がどう異なるか？`mask[center_h, center_w, :, :] = 0.0` という行はどちらのタイプで実行されるか？
+> 2. WaveNet の Dilated Causal Conv で `dilation=4` のとき、入力の何ステップ前まで「見える」か？3 ブロック（dilation 1, 2, 4）を積み重ねた場合の総受容野は？
 
 ---
 
@@ -1626,7 +1602,7 @@ $$
 
 **Autoregressive Models in Vision: A Survey** [^4]:
 
-2025年の包括的サーベイ [^4] が以下を分類:
+2025年のサーベイ [^4] が以下を分類:
 
 | Level | 代表モデル | 特徴 |
 |:------|:-----------|:-----|
@@ -1636,564 +1612,6 @@ $$
 | Bit-level | Infinity | 語彙∞、最速 |
 
 **動向**: Token→Scale→Bitへの進化 = 並列化の極限追求。
-
-### 6.8 AR in 3D — PointCloudとMesh生成
-
-**3D生成のAR化**: 点群を順序付けて逐次生成。
-
-#### 6.8.1 Point Cloud AR
-
-```julia
-# Autoregressive point cloud generation
-# Order: Farthest Point Sampling (FPS) based
-
-function fps_order(points::Matrix, num_samples::Int)
-    # points: (3, N) — xyz coordinates
-    N = size(points, 2)
-    selected = Int[]
-    distances = fill(Inf, N)
-
-    # Start from random point
-    current = rand(1:N)
-    push!(selected, current)
-
-    for _ in 2:num_samples
-        # Update distances
-        for i in 1:N
-            d = norm(points[:, i] - points[:, current])
-            distances[i] = min(distances[i], d)
-        end
-        # Select farthest point
-        current = argmax(distances)
-        push!(selected, current)
-        distances[current] = 0
-    end
-
-    return selected
-end
-
-# AR model: p(point_i | point_{<i})
-# Each point = (x, y, z) continuous values → Gaussian Mixture or Discretized
-```
-
-**応用**: ShapeNet点群生成、CADモデル補完。
-
-#### 6.8.2 Mesh AR — Vertex-by-Vertex
-
-メッシュを頂点順序で生成:
-
-$$
-p(\text{mesh}) = \prod_{i=1}^{V} p(\mathbf{v}_i \mid \mathbf{v}_{<i}) \cdot p(\text{faces} \mid \mathbf{V})
-$$
-
-**課題**: 位相構造(faces)の自己回帰化は未解決 — 現在はGraph Neural Networksと組み合わせ。
-
-### 6.9 AR in Video — Temporal Coherence
-
-**VideoGPT** (Yan+ 2021):
-
-$$
-p(\mathbf{x}_{1:T}) = \prod_{t=1}^{T} p(\mathbf{x}_t \mid \mathbf{x}_{<t})
-$$
-
-各フレーム $\mathbf{x}_t$ を VQ-VAE latentに変換し、latent空間でAR。
-
-**問題**: $T=30$ フレーム × $16 \times 16$ latent = 7680ステップ → 遅すぎる。
-
-**解決策**:
-- **Hierarchical AR**: 粗い動きを先に生成、後で詳細化
-- **Non-AR(MaskGIT)**: フレーム間並列生成
-
-### 6.10 Long-Range AR — Sparse Transformerとの接続
-
-**課題**: 標準ARは $O(N^2)$ Attention(Transformer)または有限受容野(Conv)。
-
-**Sparse Transformer** (Child+ 2019):
-
-$$
-\text{Attention}_{ij} = \begin{cases}
-\text{Full} & i - j < k \\
-\text{Strided}(s) & (i-j) \mod s = 0 \\
-0 & \text{otherwise}
-\end{cases}
-$$
-
-**効果**: 計算量 $O(N \sqrt{N})$ に削減、長系列対応。
-
-**AR接続**: Sparse Attentionは「長距離依存のあるAR」を可能にする。
-
-### 6.11 ARとEnergy-Based Models (EBM)の接続
-
-自己回帰は **条件付きEBM** と見なせる:
-
-$$
-p(x_i \mid \mathbf{x}_{<i}) = \frac{\exp(-E_\theta(x_i, \mathbf{x}_{<i}))}{\sum_{x_i'} \exp(-E_\theta(x_i', \mathbf{x}_{<i}))}
-$$
-
-ここで $E_\theta$ はエネルギー関数。
-
-**意義**: AR = 条件付き正規化が自明なEBM → 訓練が容易(VAE/GANより安定)。
-
-### 6.12 Hybrid Models — AR + Diffusion
-
-**FlowAR** [^7] はAR(離散ステップ)とFlow Matching(連続ODE)を融合:
-
-$$
-p(\mathbf{x}_r \mid \mathbf{x}_{<r}) = \int p_\theta(\mathbf{x}_r \mid \mathbf{z}_0) q(\mathbf{z}_0 \mid \mathbf{x}_r) d\mathbf{z}_0
-$$
-
-ここで $q(\mathbf{z}_0 \mid \mathbf{x}_r)$ は拡散過程の逆過程。
-
-**Latent Diffusion + AR**:
-- Stable Diffusion: Latent space = AR生成可能
-- DALL-E 2: CLIP embedding → Prior AR → Diffusion Decoder
-
-### 6.13 Non-Autoregressive (NAR) への展望
-
-**MaskGIT** [^8] / **MAR** [^6] はARの並列化を実現:
-
-| 手法 | 訓練 | 推論 | 速度 | 品質 |
-|:-----|:-----|:-----|:-----|:-----|
-| AR | Teacher Forcing | 逐次 | 遅 | 高 |
-| NAR(MaskGIT) | Masked予測 | 反復(8-64回) | 速 | 中 |
-| Hybrid(MAR) | Masked+Diffusion | 反復 | 中 | 高 |
-
-**未来**: 完全並列生成(1ステップ)で高品質 — まだ未達成だが、研究は進行中。
-
-### 6.14 実世界応用例
-
-#### Text-to-Speech (TTS)
-
-**WaveNet TTS**:
-- Google Assistant / DeepMind WaveNet TTS(2016-2018)
-- 現在はTacotron 2 + WaveGlow(並列化版WaveNet)が主流
-
-#### 画像圧縮
-
-**Learned Image Compression**:
-- AR entropy coder: $p(z_i \mid \mathbf{z}_{<i})$ でlatentを圧縮
-- 標準JPEG/HEVCを超える圧縮率(~30%)
-
-#### 異常検知
-
-**Likelihood-based Anomaly Detection**:
-- $\log p(\mathbf{x})$ が低い → 異常
-- ARは尤度計算可能 → 他手法(VAE/GAN)より信頼性高い
-
-#### コード生成 (GitHub Copilot)
-
-**GPT系ARモデル**:
-- トークン単位AR: $p(\text{code}_i \mid \text{code}_{<i})$
-- 文脈数十万トークン(GPT-4)
-
-### 6.15 理論的限界 — ARで表現できないもの
-
-**定理(AR表現可能性)**: 任意の分布 $p(\mathbf{x})$ は、適切な順序と条件付き分布で表現可能(連鎖律より自明)。
-
-**しかし**:
-- **最適順序は未知**: VAR [^3] がMulti-scaleで勝利したが、理論的保証はない
-- **長距離依存**: 受容野が有限(Conv)なら完全表現不可
-- **並列生成**: AR = 逐次性が本質 → 完全並列は原理的に困難
-
-**打開策**:
-- Non-AR(MaskGIT/MAR)へ移行
-- Transformer(全系列参照)でARを実装
-- Hybrid(AR骨格 + Diffusion詳細)
-
-### 6.16 計算複雑性の理論
-
-#### 訓練時複雑性
-
-| モデル | 計算量(時間) | 計算量(空間) |
-|:-------|:-------------|:-------------|
-| PixelCNN | $O(N)$ | $O(1)$ |
-| WaveNet | $O(N \log N)$ (FFT) | $O(L)$ (layers) |
-| Transformer AR | $O(N^2)$ | $O(N)$ |
-
-訓練は並列化可能 — 全位置の条件付き分布を同時計算。
-
-#### 推論時複雑性
-
-| モデル | 計算量 | Speedup可能性 |
-|:-------|:-------|:--------------|
-| PixelCNN | $O(N^2)$ (各ピクセル × 全畳み込み) | ❌ |
-| WaveNet | $O(N L)$ | ⭕ (Parallel WaveNet) |
-| Transformer AR | $O(N^2 d)$ | ⭕ (KV-Cache) |
-
-推論は逐次 — ボトルネック。
-
-#### KV-Cacheによる高速化
-
-Transformer ARの推論:
-
-**Naive**: 各ステップで全系列を再計算 → $O(N^2)$
-
-**KV-Cache**: 過去のKey/Valueを保存:
-
-```julia
-# KV-Cache example (conceptual)
-mutable struct KVCache
-    keys::Vector{Matrix{Float32}}    # (seq_len, d_k)
-    values::Vector{Matrix{Float32}}  # (seq_len, d_v)
-end
-
-function forward_with_cache!(layer, x_new, cache::KVCache)
-    # x_new: (1, d) — only new token
-    k_new = layer.W_k * x_new
-    v_new = layer.W_v * x_new
-
-    # Append to cache
-    push!(cache.keys, k_new)
-    push!(cache.values, v_new)
-
-    # Attention over all cached keys/values
-    K = hcat(cache.keys...)  # (d_k, seq_len)
-    V = hcat(cache.values...)  # (d_v, seq_len)
-    Q = layer.W_q * x_new
-
-    attn = softmax(Q' * K / sqrt(d_k))  # (1, seq_len)
-    out = V * attn'  # (d_v, 1)
-    return out
-end
-```
-
-**複雑性**: ステップ $t$ で $O(t)$ → 全体 $O(N^2)$(変わらず)、だが定数係数が激減。
-
-### 6.17 Glossary — AR用語集
-
-:::details 全用語定義(50語)
-
-| 用語 | 定義 |
-|:-----|:-----|
-| Autoregressive (AR) | 過去の値から未来を予測するモデル |
-| Chain Rule | 同時分布を条件付き分布の積に分解: $p(\mathbf{x}) = \prod p(x_i \mid \mathbf{x}_{<i})$ |
-| Causal Masking | 未来の情報を遮断するマスク |
-| Teacher Forcing | 訓練時に正解を入力として与える手法 |
-| Exposure Bias | 訓練(Teacher Forcing)と推論(AR)のギャップ |
-| Negative Log-Likelihood (NLL) | $-\log p(\mathbf{x})$ — AR訓練の損失関数 |
-| Bits-per-dimension (bpd) | データ1次元あたりの情報量(ビット) |
-| Greedy Decoding | 常に最高確率のトークンを選択 |
-| Sampling | 確率分布からランダムにトークンを選択 |
-| Temperature | サンプリングの多様性を制御するパラメータ |
-| Top-k Sampling | 確率上位k個からサンプリング |
-| Top-p (Nucleus) Sampling | 累積確率p以上の上位トークンからサンプリング |
-| Beam Search | 複数候補系列を保持する探索手法 |
-| Masked Convolution | 未来のピクセルを見ないConv |
-| Blind Spot | Masked Convの受容野の穴 |
-| Gated Activation | $\tanh(f) \odot \sigma(g)$ 形式の活性化 |
-| Vertical/Horizontal Stack | PixelCNNのBlind Spot解決策 |
-| Dilated Convolution | 間隔を空けた畳み込み(受容野拡大) |
-| Causal Convolution | 未来を見ないDilated Conv |
-| Receptive Field | 1ピクセルが参照できる過去の範囲 |
-| μ-law Quantization | 対数圧縮による音声量子化 |
-| Raster Scan | 左上→右下の順序 |
-| Random Order | ランダム置換による順序 |
-| Multi-scale | 粗→細の解像度順序 |
-| Bitwise AR | ビット単位の順序 |
-| VQ-VAE | 離散トークンに量子化するVAE |
-| Codebook | VQ-VAEの離散表現辞書 |
-| Discretized Logistic Mixture | PixelCNN++の連続値モデル化 |
-| Conditional Generation | クラス/テキスト条件付き生成 |
-| Class Embedding | クラスラベルをベクトル化 |
-| Residual Connection | $y = f(x) + x$ 形式の接続 |
-| Skip Connection | 深い層の出力を直接合計 |
-| Parallel WaveNet | WaveNetの蒸留による並列化 |
-| MaskGIT | Masked token予測による並列化 |
-| MAR | Masked AR with Diffusion Loss |
-| VAR | Visual AR with Multi-scale |
-| FlowAR | VAR + Flow Matching |
-| Infinity | Bitwise AR with infinite vocabulary |
-| Non-Autoregressive (NAR) | 並列生成モデル |
-| KV-Cache | Transformer推論の高速化 |
-| Scheduled Sampling | Teacher ForcingとARのバランス |
-| Exposure Bias | 訓練/推論ギャップ |
-| Cumulative Error | AR逐次生成の誤差累積 |
-| Likelihood | $p(\mathbf{x})$ — データの確率 |
-| Maximum Likelihood Estimation (MLE) | 尤度最大化による学習 |
-| Energy-Based Model (EBM) | $p(x) \propto \exp(-E(x))$ 形式のモデル |
-| Sparse Transformer | スパースAttentionによる長系列対応 |
-| Hierarchical AR | 粗→細の階層的生成 |
-| Latent AR | VQ-VAE latent空間でのAR |
-| Point Cloud AR | 3D点群の逐次生成 |
-| Video AR | 動画フレームの逐次生成 |
-
-:::
-
-### 6.18 Knowledge Mindmap
-
-```mermaid
-graph TD
-    AR[自己回帰モデル] --> Theory[理論]
-    AR --> Arch[アーキテクチャ]
-    AR --> App[応用]
-
-    Theory --> Chain["連鎖律<br/>p(x)=∏p(x_i|x_{<i})"]
-    Theory --> NLL["NLL損失<br/>-Σlog p"]
-    Theory --> Order["順序依存性<br/>Raster/Multi-scale"]
-
-    Arch --> PixelCNN["PixelCNN<br/>Masked Conv"]
-    Arch --> WaveNet["WaveNet<br/>Dilated Conv"]
-    Arch --> VAR["VAR<br/>Multi-scale"]
-    Arch --> Transformer["Transformer AR<br/>Causal Attention"]
-
-    App --> Image["画像生成<br/>VAR/Infinity"]
-    App --> Audio["音声生成<br/>WaveNet/TTS"]
-    App --> Text["テキスト生成<br/>GPT"]
-    App --> Video["動画生成<br/>VideoGPT"]
-
-    PixelCNN --> Gating["Gated Activation"]
-    PixelCNN --> Vertical["Vertical/Horizontal"]
-    WaveNet --> Dilation["Dilation 2^k"]
-    WaveNet --> Receptive["受容野 2^L"]
-    VAR --> NextScale["Next-Scale Prediction"]
-    VAR --> Parallel["6500x並列化"]
-
-    style AR fill:#ffeb3b
-    style Theory fill:#e1f5fe
-    style Arch fill:#c8e6c9
-    style App fill:#f8bbd0
-```
-
-### 6.19 推奨論文リスト
-
-| 論文 | カテゴリ | 優先度 | 読む理由 |
-|:-----|:---------|:-------|:---------|
-| PixelCNN [^1] | 基礎 | ★★★★★ | Gated/Masked Convの原典 |
-| WaveNet [^2] | 基礎 | ★★★★★ | Dilated Convの原典 |
-| PixelCNN++ [^5] | 基礎 | ★★★★☆ | Logistic Mixture、実用化 |
-| VAR [^3] | 最新 | ★★★★★ | 2024 Best Paper、ARの逆襲 |
-| MAR [^6] | 最新 | ★★★★☆ | VQ不要、Diffusion Loss |
-| FlowAR [^7] | 最新 | ★★★☆☆ | AR+FM融合 |
-| Infinity [^9] | 最新 | ★★★★★ | 2025 CVPR Oral、最速 |
-| MaskGIT [^8] | Non-AR | ★★★★☆ | 並列化、第14回への伏線 |
-| AR Survey [^4] | Survey | ★★★★☆ | 2025年の全体俯瞰 |
-
-**学習順序**: PixelCNN [^1] → WaveNet [^2] → VAR [^3] → MAR/FlowAR/Infinity で最新まで。
-
-:::details 推奨書籍
-| 書籍 | 著者 | 関連章 |
-|:-----|:-----|:-------|
-| Deep Learning | Goodfellow+ | Ch.10(RNN), 20(生成) |
-| Probabilistic ML | Murphy | Ch.26(AR系列) |
-| Speech and Language Processing | Jurafsky & Martin | Ch.7(Neural LM) |
-
-書籍は基礎のみ — 最新はarXiv必須。
-:::
-
-### 6.21 研究の最前線(2026年予測)
-
-**Trend 1: ARと拡散の完全融合**
-- FlowAR/MARが示した方向性 — 離散/連続の境界消失
-- 予測: 2026年には「AR vs Diffusion」の二分法が無意味に
-
-**Trend 2: 1-Step AR**
-- Infinityが0.8秒/画像を達成
-- 予測: Distillation技術でさらに高速化 → リアルタイム生成
-
-**Trend 3: Multimodal AR**
-- Text+Image+Audio+Videoを統一AR空間で扱う
-- GPT-4VやGeminiの次世代 — 全モダリティAR化
-
-**Trend 4: 3D AR**
-- Point Cloud/Mesh/NeRFのAR生成が本格化
-- 予測: CAD/ゲームアセット自動生成
-
-**Trend 5: Adaptive Order AR**
-- 固定順序(Raster/Multi-scale)ではなく、データ適応的順序を学習
-- 予測: 順序自体をニューラルネットで最適化
-
-:::message
-**進捗: 95% 完了** 2024-2025最新研究を完全網羅した。VAR/MAR/FlowAR/Infinityの全てが「ARは拡散に勝てない」という常識を覆した歴史的転換期を目撃した。ここから振り返りゾーンへ — 本講義の全体を総括する。
-:::
-
----
-
-### 6.22 今回の学習内容
-
-### 22.2 本講義の3つの本質
-
-**本質1: 連鎖律 = 全ての基礎**
-
-$$
-p(\mathbf{x}) = \prod_{i=1}^{n} p(x_i \mid \mathbf{x}_{<i})
-$$
-
-この数学的事実が、VAE(ELBO近似)やGAN(暗黙的密度)とは異なる「厳密な尤度計算」を可能にした。
-
-**本質2: 順序 = 性能を決める**
-- Raster Scan(PixelCNN): 遅いが簡単
-- Random Order(MAR): 並列化可能
-- Multi-scale(VAR): 粗→細で高品質+高速
-- Bitwise(Infinity): 語彙∞で最速
-
-順序の選択が全てを変える — これが2024-2025の大発見だった。
-
-**本質3: 並列化 = AR復活の鍵**
-「ARは逐次だから遅い」は半分正しい。しかし:
-- WaveNet: Dilated Convで訓練並列化
-- VAR: Multi-scaleで6500倍並列化
-- Infinity: Bitwise + Transformerで0.8秒/画像
-
-並列化の工夫次第で、ARは拡散モデルより速くなる。
-
-### 22.3 Course IIにおける位置付け
-
-```mermaid
-graph LR
-    A[第9回<br/>変分推論] --> B[第10回<br/>VAE]
-    B --> C[第11回<br/>最適輸送]
-    C --> D[第12回<br/>GAN]
-    D --> E["第13回<br/>自己回帰<br/>(今回)"]
-    E --> F[第14回<br/>Attention]
-    F --> G[第15回<br/>Attention効率化]
-    G --> H[第16回<br/>SSM/Mamba]
-
-    style E fill:#ffeb3b
-```
-
-**学習の流れ**:
-- 第9-11回: 変分推論→VAE→OT(連続潜在空間)
-- 第12回: GAN(敵対的学習、尤度なし)
-- **第13回: AR(厳密尤度、条件付き分解)** ← 今ここ
-- 第14-16回: Attention/SSM(ARの受容野を拡張する手法)
-
-ARは「尤度を捨てない生成モデル」の決定版 — VAE/GANとは根本的に異なる。
-
-### 22.4 FAQ — よくある疑問
-
-:::details Q1. ARとRNNの違いは？
-
-**RNN**: 隠れ状態 $\mathbf{h}_t$ を持つ。$p(x_t \mid \mathbf{h}_t)$、$\mathbf{h}_t = f(\mathbf{h}_{t-1}, x_{t-1})$。
-
-**AR**: 隠れ状態なし。過去の全て $\mathbf{x}_{<t}$ を明示的に条件付け。$p(x_t \mid \mathbf{x}_{<t})$。
-
-**実装**: PixelCNN/WaveNetはConv、Transformer ARはAttention — RNNではない。
-
-**歴史**: RNNは勾配消失で長距離依存が困難 → Transformer ARで解決(第14回で詳述)。
-:::
-
-:::details Q2. ARは本当に拡散より速いのか？
-
-**2023年まで**: 拡散が圧倒的に速かった(1ステップ vs 数千ステップAR)。
-
-**2024-2025年**:
-- VAR: Multi-scaleで10ステップ(Raster 65536ステップから激減)
-- Infinity: 0.8秒/画像(SD3-Mediumの2.6倍速)
-
-**逆転**: AR側がアーキテクチャ革新(Multi-scale/Bitwise)で並列化を極め、拡散を超えた。
-:::
-
-:::details Q3. PixelCNNは今でも使われるか？
-
-**実用**: ほぼ使われない。VQ-VAE/VQGAN latentのARが主流。
-
-**学術的価値**: Masked Conv/Gatingの原典として不朽 — 全ての後続手法がこの遺産を引き継ぐ。
-
-**教育的価値**: ARの本質(連鎖律/Causal Masking)を学ぶ最良の教材。
-:::
-
-:::details Q4. WaveNetは音声以外に使えるか？
-
-**時系列全般**: 株価/気象/センサデータなど、1D系列なら全て適用可能。
-
-**画像**: PixelCNNがWaveNetの2D版 — Dilated Conv + Gatingは共通。
-
-**動画**: VideoWaveNetも提案された(ただし現在は3D ConvやVideo Transformerが主流)。
-:::
-
-:::details Q5. ARモデルは何に向いているか？
-
-**向いている**:
-- 尤度評価が必要なタスク(異常検知/圧縮/密度推定)
-- 長い文脈依存(テキスト/音声)
-- 条件付き生成(class/text-to-image)
-
-**向いていない**:
-- リアルタイム生成(逐次性がボトルネック、ただしInfinityで改善)
-- 潜在空間補間(ARは離散的、VAEの方が得意)
-
-**現在の主戦場**: 言語モデル(GPT-4など) + 画像(VAR/Infinity)。
-:::
-
-### 22.5 学習進捗チェック
-
-| 項目 | 完了? |
-|:-----|:------|
-| 連鎖律を証明できる | □ |
-| PixelCNN Blind Spot問題を説明できる | □ |
-| WaveNet受容野 $2^L$ を導出できる | □ |
-| NLL損失をコード実装できる | □ |
-| VAR/MARの貢献を1文で言える | □ |
-| Julia/RustでAR推論を書ける | □ |
-| ARとVAE/GANの本質的違いを説明できる | □ |
-
-全て□→☑なら、本講義を完全習得している。
-
-### 22.6 1週間の学習スケジュール
-
-| 日 | 内容 | 時間 | 目標 |
-|:---|:-----|:-----|:-----|
-| 1 | Z0-Z2 | 30分 | AR直感獲得 |
-| 2 | Z3.1-3.3 | 60分 | 連鎖律/NLL完全理解 |
-| 3 | Z3.4 | 30分 | PixelCNN数学 |
-| 4 | Z3.5 | 30分 | WaveNet数学 |
-| 5 | Z4 | 60分 | Julia実装 |
-| 6 | Z5 | 60分 | Tiny PixelCNN訓練 |
-| 7 | Z6 | 30分 | 最新研究俯瞰 |
-
-**合計**: 5時間(松尾研1回分と同等の時間で、10倍の内容を習得)。
-
-### 22.7 Progress Tracker
-
-```julia
-# Self-assessment: Run this BEFORE and AFTER studying this lecture
-function ar_understanding_test()
-    questions = [
-        "What is the chain rule formula for p(x)?",
-        "Why does PixelCNN need masked convolution?",
-        "What is the receptive field of WaveNet with 10 layers (kernel=2)?",
-        "What is the difference between AR and RNN?",
-        "Name 3 AR models from 2024-2025.",
-        "Can you implement NLL loss in Julia?",
-        "Why did VAR win NeurIPS 2024 Best Paper?",
-        "What is Causal Masking?"
-    ]
-
-    println("AR Understanding Test (8 questions)")
-    println("Answer each question, then check your score:\n")
-
-    correct = 0
-    for (i, q) in enumerate(questions)
-        println("Q$i: $q")
-        print("Your answer (press Enter to skip): ")
-        readline()  # User types answer
-        print("Correct? (y/n): ")
-        ans = readline()
-        if lowercase(ans) == "y"
-            correct += 1
-        end
-        println()
-    end
-
-    score = correct / length(questions) * 100
-    println("="^50)
-    println("Score: $correct / $(length(questions)) = $(round(score, digits=1))%")
-
-    if score >= 80
-        println("🎉 Excellent! AR fully mastered.")
-    elseif score >= 60
-        println("✅ Good! Review Z3 for deeper understanding.")
-    else
-        println("📚 Keep studying! Re-read Z0-Z3.")
-    end
-end
-
-# Run before studying
-# ar_understanding_test()
-# ... study lecture ...
-# Run after studying
-# ar_understanding_test()
-```
 
 ### 22.8 次回予告 — 第14回: Attention
 
@@ -2219,52 +1637,25 @@ PixelCNNの受容野は有限(CNN制約)、WaveNetも $2^L$ まで。全系列�
 
 Course IIのクライマックスへ — 「化石(RNN/CNN)からの脱却」の物語が完結する。
 
-:::message
-**進捗: 100% 完了** 🎉
-
-本講義「第13回: 自己回帰モデル」を完全制覇した。連鎖律の厳密な証明から、PixelCNN/WaveNetの実装、2024-2025最新研究(VAR/MAR/FlowAR/Infinity)まで、ARの全てを網羅した。
-
-**達成事項**:
-- 連鎖律 $p(\mathbf{x}) = \prod p(x_i \mid \mathbf{x}_{<i})$ の証明
-- PixelCNN Gated構造 + Blind Spot解決
-- WaveNet Dilated Conv + 受容野 $2^L$ 導出
-- Julia/Rust実装(訓練+推論)
-- VAR(NeurIPS Best)からInfinity(CVPR Oral)まで最新研究俯瞰
-
-**次のステップ**: 第14回 Attention で「ARの受容野を全系列に拡大」する革命を学ぶ。
-:::
+> **Note:** **進捗: 100% 完了** 🎉
+>
+> 本講義「第13回: 自己回帰モデル」を完全制覇した。連鎖律の厳密な証明から、PixelCNN/WaveNetの実装、2024-2025最新研究(VAR/MAR/FlowAR/Infinity)まで、ARの全てを網羅した。
+>
+> **達成事項**:
+> - 連鎖律 $p(\mathbf{x}) = \prod p(x_i \mid \mathbf{x}_{<i})$ の証明
+> - PixelCNN Gated構造 + Blind Spot解決
+> - WaveNet Dilated Conv + 受容野 $2^L$ 導出
+> - Julia/Rust実装(訓練+推論)
+> - VAR(NeurIPS Best)からInfinity(CVPR Oral)まで最新研究俯瞰
+>
+> **次のステップ**: 第14回 Attention で「ARの受容野を全系列に拡大」する革命を学ぶ。
 
 ---
 
-### 6.27 💀 パラダイム転換の問い
-
-**"ARの本質は条件付き分解。この「当たり前」が全てではないのか？"**
-
-PixelCNN/WaveNet/GPT/VAR — 全ては $p(\mathbf{x}) = \prod p(x_i \mid \mathbf{x}_{<i})$ という単一の式から生まれた。連鎖律は数学的事実であり、発明ではない。
-
-では、なぜ2024年まで「ARは遅い、拡散が速い」と信じられていたのか。
-
-**答え**: 順序の選択を疑わなかったから。
-
-- PixelCNN: Raster Scan(左上→右下)を「当然」とした
-- 拡散: 並列ノイズ除去を「当然」とした
-
-VARが「解像度順序(粗→細)」を選んだ瞬間、ARは拡散を超えた [^3]。Infinityが「ビット順序」を選んだ瞬間、ARは最速になった [^9]。
-
-**問い直し**:
-- 順序は本当に「左→右」でなければならないのか？
-- 連鎖律の分解は一意ではない — ならば最適順序は？
-- 「並列性」と「自己回帰性」は本当に対立するのか？
-
-MARとMaskGITは「ランダム順序」でARを並列化した。VAR/FlowARは「階層順序」で粗から細へ生成した。Infinityは「ビット順序」で語彙を無限に拡張した。
-
-**本質的な問い**: ARと拡散の境界はどこにあるのか？
-
-FlowAR [^7] はAR(離散ステップ)と拡散(連続時間ODE)を融合した。MAR [^6] はAR(順序あり)と拡散(Diffusion Loss)を融合した。両者の区別は次第に曖昧になっている。
-
-**結論**: 「ARは遅い」は技術的制約であって、本質的制約ではなかった。連鎖律という数学的基盤の上で、順序・並列化・モデル化の工夫次第で、ARは無限の可能性を持つ。
-
-2026年、ARはどこまで進化するのか。その答えは、まだ誰も知らない。
+> Progress: 95%
+> **理解度チェック**
+> 1. VAR（Visual AutoRegressive modeling）が従来のラスタスキャン順 AR と異なる点は何か？「スケールごとの next-token prediction」の意味を、トークンマップの解像度と結びつけて説明せよ。
+> 2. AR モデルの推論を高速化する Parallel WaveNet（確率的生成蒸留）において、教師モデルと生徒モデルの役割はどのように異なるか？訓練時と推論時の違いを答えよ。
 
 ---
 
@@ -2273,31 +1664,31 @@ FlowAR [^7] はAR(離散ステップ)と拡散(連続時間ODE)を融合した�
 ### 主要論文
 
 [^1]: van den Oord, A., Kalchbrenner, N., Vinyals, O., Espeholt, L., Graves, A., & Kavukcuoglu, K. (2016). Conditional Image Generation with PixelCNN Decoders. *NeurIPS 2016*.
-@[card](https://arxiv.org/abs/1606.05328)
+<https://arxiv.org/abs/1606.05328>
 
 [^2]: van den Oord, A., Dieleman, S., Zen, H., Simonyan, K., Vinyals, O., Graves, A., Kalchbrenner, N., Senior, A., & Kavukcuoglu, K. (2016). WaveNet: A Generative Model for Raw Audio. *arXiv:1609.03499*.
-@[card](https://arxiv.org/abs/1609.03499)
+<https://arxiv.org/abs/1609.03499>
 
 [^3]: Tian, K., Jiang, Y., Yuan, Z., Peng, B., & Wang, L. (2024). Visual Autoregressive Modeling: Scalable Image Generation via Next-Scale Prediction. *NeurIPS 2024 (Best Paper Award)*.
-@[card](https://arxiv.org/abs/2404.02905)
+<https://arxiv.org/abs/2404.02905>
 
-[^4]: Tao, C., et al. (2025). Autoregressive Models in Vision: A Survey. *TMLR 2025*.
-@[card](https://arxiv.org/abs/2411.05902)
+[^4]: Xiong, J., et al. (2025). Autoregressive Models in Vision: A Survey. *TMLR 2025*.
+<https://arxiv.org/abs/2411.05902>
 
 [^5]: Salimans, T., Karpathy, A., Chen, X., & Kingma, D. P. (2017). PixelCNN++: Improving the PixelCNN with Discretized Logistic Mixture Likelihood and Other Modifications. *ICLR 2017*.
-@[card](https://arxiv.org/abs/1701.05517)
+<https://arxiv.org/abs/1701.05517>
 
 [^6]: Li, T., et al. (2024). Autoregressive Image Generation without Vector Quantization. *NeurIPS 2024*.
-@[card](https://arxiv.org/abs/2406.11838)
+<https://arxiv.org/abs/2406.11838>
 
 [^7]: Ren, S., et al. (2024). FlowAR: Scale-wise Autoregressive Image Generation Meets Flow Matching. *arXiv:2412.15205*.
-@[card](https://arxiv.org/abs/2412.15205)
+<https://arxiv.org/abs/2412.15205>
 
 [^8]: Chang, H., Zhang, H., Jiang, L., Liu, C., & Freeman, W. T. (2022). MaskGIT: Masked Generative Image Transformer. *CVPR 2022*.
-@[card](https://arxiv.org/abs/2202.04200)
+<https://arxiv.org/abs/2202.04200>
 
 [^9]: Han, J., Liu, J., Jiang, Y., et al. (2025). Infinity: Scaling Bitwise AutoRegressive Modeling for High-Resolution Image Synthesis. *CVPR 2025 (Oral)*.
-@[card](https://arxiv.org/abs/2412.04431)
+<https://arxiv.org/abs/2412.04431>
 
 ### 教科書
 
@@ -2305,6 +1696,14 @@ FlowAR [^7] はAR(離散ステップ)と拡散(連続時間ODE)を融合した�
 - Murphy, K. P. (2023). *Probabilistic Machine Learning: Advanced Topics*. MIT Press. [Ch.26: Autoregressive Sequence Models]
 
 ---
+
+## 著者リンク
+
+- Blog: https://fumishiki.dev
+- X: https://x.com/fumishiki
+- LinkedIn: https://www.linkedin.com/in/fumitakamurakami
+- GitHub: https://github.com/fumishiki
+- Hugging Face: https://huggingface.co/fumishiki
 
 ## ライセンス
 
@@ -2343,32 +1742,3 @@ FlowAR [^7] はAR(離散ステップ)と拡散(連続時間ODE)を融合した�
 **無断利用が発覚した場合**、使用料の請求およびSNS等での公表を行う場合があります。
 
 ---
-
-## 記法規約
-
-| 記号 | 読み | 意味 |
-|:-----|:-----|:-----|
-| $\mathbf{x}$ | ボールド エックス | データ(ベクトル) |
-| $x_i$ | エックス アイ | データの第 $i$ 要素 |
-| $\mathbf{x}_{<i}$ | エックス レス アイ | 位置 $i$ より前の全要素 $(x_1, \dots, x_{i-1})$ |
-| $p(\mathbf{x})$ | ピー オブ エックス | 確率分布(同時分布) |
-| $p(x_i \mid \mathbf{x}_{<i})$ | ピー オブ エックス アイ ギブン エックス レス アイ | 条件付き分布 |
-| $\theta$ | シータ | モデルパラメータ |
-| $\mathcal{L}_\text{NLL}$ | エル サブ エヌエルエル | 負対数尤度(Negative Log-Likelihood) |
-| $\log$ | ログ | 自然対数($\ln$) |
-| $\prod$ | プロダクト | 積(Product) |
-| $\sum$ | サメーション | 和(Summation) |
-| $\odot$ | オードット | 要素ごとの積(Hadamard product) |
-| $*$ | アステリスク | 畳み込み(Convolution) |
-| $\sigma$ | シグマ | ロジスティック関数 $1/(1+e^{-x})$ |
-| $\tanh$ | タンジェントハイパボリック | 双曲線正接関数 |
-| $\mathbf{W}$ | ボールド ダブリュー | 重み行列(Weight matrix) |
-| $d$ | ディー | Dilation rate |
-| $K$ | ケー | カーネルサイズ |
-| $D$ | ディー | データ次元(画像なら $H \times W \times C$) |
-| $N$ | エヌ | サンプル数 |
-| bpd | ビーピーディー | Bits-per-dimension |
-
-**コード変数命名規則**:
-- Julia: `x`, `theta`, `log_prob`, `conditional_probs`(数式そのまま)
-- Rust: `x`, `theta`, `log_prob`, `conditional_probs`(snake_case)

@@ -5,6 +5,10 @@ emoji: "🔧"
 type: "tech"
 topics: ["machinelearning", "deeplearning", "finetuning", "julia", "rust"]
 published: true
+difficulty: "advanced"
+time_estimate: "90 minutes"
+languages: ["Julia", "Rust", "Elixir"]
+keywords: ["機械学習", "深層学習", "生成モデル"]
 ---
 
 # 第23回: Fine-tuning & PEFT — 全パラメータ更新は本当に必要か？
@@ -19,9 +23,7 @@ published: true
 
 本講義はCourse III「実践編」の中核 — LoRA/QLoRA/DreamBooth/Adapterの数式と実装を完全マスターする。そして**Julia LoRA訓練 + Rust LoRA推論**で3言語制覇の旅を続ける。
 
-:::message
-**このシリーズについて**: 東京大学 松尾・岩澤研究室動画講義の**完全上位互換**の全50回シリーズ。理論（論文が書ける）、実装（Production-ready）、最新（2024-2026 SOTA）の3軸で差別化する。
-:::
+> **Note:** **このシリーズについて**: 東京大学 松尾・岩澤研究室動画講義の**完全上位互換**の全50回シリーズ。理論（論文が書ける）、実装（Production-ready）、最新（2024-2026 SOTA）の3軸で差別化する。
 
 ```mermaid
 graph TD
@@ -63,10 +65,10 @@ using LinearAlgebra
 
 # Pretrained weight W₀ ∈ ℝ^(d×k) (frozen)
 d, k, r = 512, 512, 8  # d=出力dim, k=入力dim, r=rank
-W0 = randn(d, k) / sqrt(k)  # frozen pretrained weight
+W0 = randn(d, k) / √k  # frozen pretrained weight
 
 # LoRA: ΔW = BA, B ∈ ℝ^(d×r), A ∈ ℝ^(r×k)
-B = randn(d, r) / sqrt(r)  # trainable
+B = randn(d, r) / √r  # trainable
 A = zeros(r, k)             # init to zero (ΔW starts at 0)
 
 # Forward pass: h = (W₀ + ΔW)x = W₀x + BAx
@@ -102,9 +104,7 @@ $$
 
 パラメータ数: $dk$ (Full FT) → $dr + rk \approx r(d+k)$ (LoRA)。$r=8, d=k=512$ なら削減率 $\frac{512^2}{8 \cdot 1024} = 32$倍。
 
-:::message
-**進捗: 3% 完了** LoRAの基本構造を体感した。ここから数式・実装・QLoRA・DreamBooth・Adapterと深掘りしていく。
-:::
+> **Note:** **進捗: 3% 完了** LoRAの基本構造を体感した。ここから数式・実装・QLoRA・DreamBooth・Adapterと深掘りしていく。
 
 ---
 
@@ -169,95 +169,7 @@ $$
 
 **利点**: パラメータ0.01-1%、性能≈Full FT。**欠点**: ハイパーパラメータ $r, \alpha$ 調整が必要。
 
-各戦略を実装で比較する。
-
-```julia
-using Flux
-
-# Simple Transformer layer (simplified)
-struct TransformerLayer
-    W_q::Matrix{Float32}
-    W_k::Matrix{Float32}
-    W_v::Matrix{Float32}
-    W_o::Matrix{Float32}
-end
-
-function (layer::TransformerLayer)(x::Matrix{Float32})
-    # Simplified: just linear projections (no actual attention for brevity)
-    Q = layer.W_q * x
-    K = layer.W_k * x
-    V = layer.W_v * x
-    O = layer.W_o * V  # simplified output
-    return O
-end
-
-# Strategy 1: Full Fine-tuning
-function full_finetune(layers, x, y_true, lr)
-    # Update all parameters
-    for layer in layers
-        # Compute gradients (simplified)
-        ∇W_q = randn(size(layer.W_q)) * 0.01  # placeholder
-        layer.W_q .-= lr * ∇W_q
-        # ... (similarly for W_k, W_v, W_o)
-    end
-end
-
-# Strategy 2: Feature Extraction
-function feature_extraction(layers_frozen, W_cls, x, y_true, lr)
-    # Forward through frozen layers
-    h = x
-    for layer in layers_frozen
-        h = layer(h)
-    end
-    # Train only classification head
-    y_pred = W_cls * h
-    ∇W_cls = randn(size(W_cls)) * 0.01  # placeholder gradient
-    W_cls .-= lr * ∇W_cls
-    return W_cls
-end
-
-# Strategy 3: Partial Fine-tuning
-function partial_finetune(layers_frozen, layers_tuned, x, y_true, lr)
-    # Forward frozen
-    h = x
-    for layer in layers_frozen
-        h = layer(h)
-    end
-    # Forward + backward tuned layers
-    for layer in layers_tuned
-        h = layer(h)
-        # Update layer params (simplified)
-    end
-end
-
-# Strategy 4: LoRA
-struct LoRALayer
-    W0::Matrix{Float32}  # frozen
-    B::Matrix{Float32}   # trainable
-    A::Matrix{Float32}   # trainable
-    α::Float32
-    r::Int
-end
-
-function (lora::LoRALayer)(x::Vector{Float32})
-    # h = W₀x + (α/r)BAx
-    scaling = lora.α / lora.r
-    return lora.W0 * x + scaling * (lora.B * (lora.A * x))
-end
-
-function train_lora(lora::LoRALayer, x, y_true, lr)
-    # Compute gradients w.r.t. B, A only (W₀ frozen)
-    # ... (simplified)
-    ∇B = randn(size(lora.B)) * 0.01
-    ∇A = randn(size(lora.A)) * 0.01
-    lora.B .-= lr * ∇B
-    lora.A .-= lr * ∇A
-    return lora
-end
-
-println("4 Fine-tuning strategies demonstrated")
-println("Strategy 4 (LoRA) updates 0.01-1% params with ≈Full FT performance")
-```
+各戦略のパラメータ数を定量比較すると、$d=k=512$ の1層で: Full FT = $512^2 = 262{,}144$、Feature Extraction ≈ $512 \times C$（$C$=クラス数）、Partial FT（上位25%層）≈ $65{,}536$、LoRA ($r=8$) = $512 \times 8 + 8 \times 512 = 8{,}192$。LoRAはFull FTの**3.1%**のパラメータで同等性能を実現する。
 
 ### 1.2 Catastrophic Forgetting — Fine-tuningの暗黒面
 
@@ -277,45 +189,15 @@ $$
 
 **LoRAの副次的利点**: $W_0$ を固定するため、元知識が保護される。複数タスクに対して複数の $(B, A)$ ペアを保持し、推論時に切り替え可能。
 
-```julia
-# Multi-task LoRA: 複数の (B, A) ペアを保持
-struct MultiTaskLoRA
-    W0::Matrix{Float32}      # shared frozen weight
-    tasks::Dict{String, Tuple{Matrix{Float32}, Matrix{Float32}}}  # task_name => (B, A)
-    α::Float32
-    r::Int
-end
-
-function forward(lora::MultiTaskLoRA, x::Vector{Float32}, task_name::String)
-    B, A = lora.tasks[task_name]
-    scaling = lora.α / lora.r
-    return lora.W0 * x + scaling * (B * (A * x))
-end
-
-# Example: 3 tasks, shared W₀, separate LoRA adapters
-d, k, r = 512, 512, 8
-W0 = randn(Float32, d, k) / sqrt(k)
-tasks = Dict(
-    "summarization" => (randn(Float32, d, r) / sqrt(r), zeros(Float32, r, k)),
-    "translation"   => (randn(Float32, d, r) / sqrt(r), zeros(Float32, r, k)),
-    "qa"            => (randn(Float32, d, r) / sqrt(r), zeros(Float32, r, k))
-)
-multi_lora = MultiTaskLoRA(W0, tasks, 16.0f0, r)
-
-# Inference: switch task by changing adapter
-x = randn(Float32, k)
-h_sum = forward(multi_lora, x, "summarization")
-h_qa  = forward(multi_lora, x, "qa")
-
-println("Multi-task LoRA: $(length(tasks)) tasks share W₀, each has own (B,A)")
-println("Total params: W₀=$(d*k) + $(length(tasks))×LoRA=$(length(tasks)*(d*r + r*k))")
-```
-
 **メモリ効率**: Full FT で3タスク分訓練すると $3 \times dk$ パラメータ。Multi-task LoRAは $dk + 3(dr + rk)$。$r=8, d=k=512$ なら削減率 $\frac{3 \times 512^2}{512^2 + 3 \times 8192} \approx 24$倍。
 
-:::message
-**進捗: 10% 完了** Full FT / Feature Extraction / Partial FT / LoRA の4戦略を触った。Catastrophic Forgettingの問題と、LoRAによる複数タスク保持の仕組みを理解した。次は「なぜFine-tuningが必要か」の直感へ。
-:::
+> **Note:** **進捗: 10% 完了** Full FT / Feature Extraction / Partial FT / LoRA の4戦略を触った。Catastrophic Forgettingの問題と、LoRAによる複数タスク保持の仕組みを理解した。次は「なぜFine-tuningが必要か」の直感へ。
+
+
+> **Progress: 10%**
+> **理解度チェック**
+> 1. Full Fine-tuning・Feature Extraction・LoRAの3つで、更新されるパラメータの割合はそれぞれどのくらいか？
+> 2. Catastrophic Forgetting（破滅的忘却）とは何か？なぜFull Fine-tuningで発生しやすいか？
 
 ---
 
@@ -429,11 +311,15 @@ Course IIIは「実践編」 — 第17-24回で実装・最適化・評価を学
 2. **工具**: 事前学習=汎用工具、Fine-tuning=用途特化アタッチメント
 3. **楽器**: 事前学習=基礎練習、Fine-tuning=曲ごとの解釈
 
-LoRAの比喩: **汎用工具の刃を研ぎ直すのではなく、付け替え可能な専用刃を追加する**。
+LoRAの比喩: **汎用工具の刃を研ぎ直すのではなく、付け替え可能な専用刃を追加する**。事前学習 = 大量データで汎用工具を鍛造。Fine-tuning = 特定用途の専用刃を後付けする。$W_0$ はそのまま、$BA$ だけが新しい刃だ。
 
-:::message
-**進捗: 20% 完了** なぜFine-tuningが必要か、事前学習との違い、Transfer Learningのパラダイムを理解した。次は数式修行ゾーン — LoRA/QLoRA/DreamBooth/Adapterの完全導出へ。
-:::
+> **Note:** **進捗: 20% 完了** なぜFine-tuningが必要か、事前学習との違い、Transfer Learningのパラダイムを理解した。事前学習 $p(x)$ → Fine-tuning $p(y|x;	heta)$ の2段階学習の必然性と、KL divergence視点での定式化が核心だ。次は数式修行ゾーン — LoRA/QLoRA/DreamBooth/Adapterの完全導出へ。
+
+
+> **Progress: 20%**
+> **理解度チェック**
+> 1. LoRAが「低ランク仮説」に基づいている直感的な根拠を説明せよ。
+> 2. なぜ65Bパラメータのモデルを消費者向けGPU1枚でFine-tuningできるのか、QLoRAの仕組みを概説せよ。
 
 ---
 
@@ -723,31 +609,11 @@ $$
 
 **証明のスケッチ**: 正規分布の密度関数 $p(w) = \frac{1}{\sqrt{2\pi}} e^{-w^2/2}$ は中心（$w=0$）で高密度。線形量子化は等間隔だが、NF4は高密度領域に多くのレベルを割り当てる → MSE削減。
 
-#### NF4の実装テクニック
+#### NF4量子化レベルの導出
 
-```python
-import numpy as np
-from scipy.stats import norm
+16レベルの量子化点 $\{q_0, q_1, \ldots, q_{15}\}$ を構成する。$q_0 = -1$、$q_{15} = 1$ として、中間点は標準正規分布の分位点 $q_i = \Phi^{-1}(i/15)$ で定義する（$\Phi^{-1}$ は正規逆CDF）。その後 $[-1, 1]$ に線形正規化する。得られる分位点列は非等間隔: 中心付近（$w \approx 0$）に密に、裾野（$|w| \approx 1$）に疎に配置される。
 
-# Compute NF4 levels
-nf4_levels = []
-for i in range(16):
-    if i == 0:
-        nf4_levels.append(-1.0)
-    elif i == 15:
-        nf4_levels.append(1.0)
-    else:
-        # Quantile of standard normal
-        q = norm.ppf(i / 15.0)
-        nf4_levels.append(q)
-
-# Normalize to [-1, 1]
-max_val = max(abs(min(nf4_levels)), abs(max(nf4_levels)))
-nf4_levels = [x / max_val for x in nf4_levels]
-
-print("NF4 levels:", [f"{x:.4f}" for x in nf4_levels])
-# Output: [-1.0000, -0.6962, -0.5251, -0.3949, -0.2844, -0.1848, -0.0911, 0.0000, 0.0911, 0.1848, 0.2844, 0.3949, 0.5251, 0.6962, 1.0000]
-```
+実装上の注意: NF4レベルはコンパイル時定数として16要素のルックアップテーブルに格納する。量子化は $q^* = \arg\min_{q_i} |w_\text{norm} - q_i|$（最近傍探索）で、逆量子化は $\hat{w} = q^* \cdot c_\text{absmax}$ だ。この2ステップで NF4の情報理論的最適性が成立する。
 
 #### 情報理論的最適性の証明（概要）
 
@@ -905,53 +771,11 @@ $$
 
 **結論**: Double Quantizationは定数メモリを75%削減し、精度低下は無視可能（$<0.1\%$）。
 
-#### 実装例
+#### Double Quantization — 実装の要点
 
-```python
-import numpy as np
+第1段階: ブロックサイズ $b_1 = 64$ でweight tensorをブロック分割し、各ブロックの $c_1 = \text{absmax}(W_b)$ を求める（FP32、$N/64$ 個）。第2段階: $\{c_1\}$ を再びブロックサイズ $b_2 = 256$ でまとめ、$c_2 = \text{absmax}(\{c_1\})$ を求め、$c_1$ を FP8に量子化する。
 
-def double_quantize_constants(constants: np.ndarray) -> tuple:
-    """
-    constants: FP32 array of shape (B,)
-    returns: (quant_constants, c_global)
-    """
-    # Step 1: Global max
-    c_global = np.max(constants)
-
-    # Step 2: Normalize
-    c_norm = constants / c_global  # [0, 1]
-
-    # Step 3: Quantize to 8-bit
-    c_quant = np.round(c_norm * 255).astype(np.uint8)
-
-    return c_quant, c_global
-
-def double_dequantize_constants(c_quant: np.ndarray, c_global: float) -> np.ndarray:
-    """
-    Dequantize 8-bit constants back to FP32
-    """
-    c_norm = c_quant.astype(np.float32) / 255.0
-    c_dequant = c_norm * c_global
-    return c_dequant
-
-# Example
-B = 1000000  # 1M blocks
-constants_fp32 = np.random.randn(B).astype(np.float32)
-
-# Double quantize
-c_quant, c_global = double_quantize_constants(constants_fp32)
-
-print(f"Original: {constants_fp32.nbytes / 1e6:.2f} MB")
-print(f"Quantized: {c_quant.nbytes / 1e6:.2f} MB + 4 bytes")
-print(f"Reduction: {constants_fp32.nbytes / c_quant.nbytes:.1f}x")
-
-# Dequantize
-c_dequant = double_dequantize_constants(c_quant, c_global)
-
-# Error
-error = np.mean((constants_fp32 - c_dequant) ** 2)
-print(f"MSE: {error:.6f}")
-```
+メモリ計算: 65Bモデルで $N = 65 \times 10^9$ weights。第1段階定数 = $N/64 \times 4\,\text{byte} \approx 4.06\,\text{GB}$。Double Quantization後 = $N/64 \times 1\,\text{byte} + N/16384 \times 4\,\text{byte} \approx 1.03\,\text{GB}$。削減量 $\approx 3\,\text{GB}$。65Bモデル全体の4-bit weight量 $\approx 32.5\,\text{GB}$ に対して約9%のオーバーヘッド削減。
 
 #### 3.2.4 QLoRA Forward Pass
 
@@ -1084,43 +908,15 @@ $$
 
 **理論的根拠**: $|\mathcal{D}_\text{instance}| = K \ll |\mathcal{D}_\text{prior}|$ のため、等重みでもpriorが支配的になりすぎない。実験的に $\lambda=1$ が最適。
 
-#### Step 6: 訓練アルゴリズム（擬似コード）
+#### Step 6: 訓練アルゴリズム
 
-```python
-# Pseudo-code for DreamBooth training with Prior Preservation
+訓練は2フェーズで構成される。
 
-# Step 1: Generate prior dataset
-theta_0 = load_pretrained_model()
-D_prior = []
-for _ in range(200):
-    x_pr = theta_0.generate(prompt="a dog")  # class prompt
-    D_prior.append(x_pr)
+**フェーズ1 — 先行データ生成**: 凍結した $\theta_0$ を使って、クラスプロンプト $c_\text{class}$（例: "a dog"）から200枚の画像 $\{x_\text{pr}^{(i)}\}$ を生成する。これが正則化データセット $\mathcal{D}_\text{prior}$ となる。生成は推論のみのため、$\theta_0$ の勾配は不要。
 
-# Step 2: Fine-tuning loop
-theta = copy(theta_0)
-optimizer = Adam(theta.parameters(), lr=1e-6)
+**フェーズ2 — Fine-tuning**: $\theta_0$ を初期値として、インスタンスデータ $\mathcal{D}_\text{instance}$（K=3〜5枚）と $\mathcal{D}_\text{prior}$ を交互にサンプリングし、損失 $\mathcal{L} = \mathcal{L}_\text{instance} + \lambda \mathcal{L}_\text{prior}$ で最適化する。学習率は $10^{-6}$（Full FT）または $10^{-4}$（LoRA使用時）が典型的。
 
-for epoch in range(epochs):
-    for batch in zip(D_instance, D_prior):
-        x_instance, x_prior = batch
-
-        # Instance loss
-        z_t_instance = add_noise(x_instance, t)
-        eps_pred_instance = theta(z_t_instance, c="a [V] dog")
-        L_instance = MSE(eps_pred_instance, eps)
-
-        # Prior loss
-        z_t_prior = add_noise(x_prior, t)
-        eps_pred_prior = theta(z_t_prior, c="a dog")
-        L_prior = MSE(eps_pred_prior, eps)
-
-        # Total loss
-        L_total = L_instance + lambda * L_prior
-
-        optimizer.zero_grad()
-        L_total.backward()
-        optimizer.step()
-```
+重要な実装詳細: インスタンスとpriorのバッチは同一バッチ内に混在させる（別々ではない）。ミニバッチサイズ = 2（インスタンス1 + prior1）で実装するのが論文 [^4] の設定に準じる。ステップ数は通常800〜1500（K=5の場合）で、それ以上ではoverfittingが発生する。
 
 #### Step 7: 数値例 — Prior Preservation の効果
 
@@ -1272,6 +1068,8 @@ Transformerパラメータは固定、$E_\text{prompt}$ のみtrainable。
 **極小パラメータ**: $k \times d$（$k=20, d=768$ なら $15K$）。
 
 **問題**: 小規模モデル（<1B）では性能が低い。10B超で効果が顕著 [^8]。
+
+**Prompt Tuning vs Prefix Tuning**: Prompt Tuningは入力層のembedding空間にのみ作用するのに対し、Prefix Tuningは全層のkey/valueに prefix vectorを注入する。前者はシンプルだが後者のほうが表現力が高く、特に短いtask descriptionでの性能差が顕著だ。
 
 ### 3.5 PEFT手法の統一理論
 
@@ -1459,41 +1257,13 @@ $$
 
 #### 3.7.4 AdaLoRAの訓練アルゴリズム
 
-```python
-# Pseudo-code for AdaLoRA training
+訓練ループの全体構造を整理する。
 
-# Initialize
-for layer in layers:
-    layer.P = orthogonal_init(d, r_init)
-    layer.Q = orthogonal_init(k, r_init)
-    layer.Lambda = zeros(r_init)  # trainable diagonal
+**通常ステップ（毎回）**: forward pass → lossを計算 → backpropで $\nabla_{P_\ell}, \nabla_{\Lambda_\ell}, \nabla_{Q_\ell}$ を取得 → AdamWで更新。$P, Q$ は正規直交性を保つため、更新後に**QR分解**でre-orthogonalization する。
 
-# Training loop
-for epoch in range(epochs):
-    for batch in dataloader:
-        # Forward + backward
-        loss = compute_loss(batch)
-        loss.backward()
-        optimizer.step()
+**枝刈りステップ（$T$ ステップごと）**: 各層の重要度スコア $I_i = |\lambda_i| \cdot \|\nabla_{\lambda_i} \mathcal{L}\|$ を計算する。スコアは「現在の寄与（$|\lambda_i|$）× 変化感度（勾配ノルム）」の積で、大きいほど保持価値が高い。しきい値を決めて低スコア特異値を $\lambda_i = 0$ に固定（実質削除）。空いた予算を高重要度層に再配分する。
 
-    # Importance-based pruning (every T steps)
-    if epoch % T == 0:
-        for layer in layers:
-            # Compute importance
-            I = abs(layer.Lambda) * grad_norm(layer.Lambda)
-
-            # Prune low-importance singular values
-            threshold = percentile(I, pruning_ratio)
-            mask = I > threshold
-            layer.Lambda = layer.Lambda[mask]
-            layer.P = layer.P[:, mask]
-            layer.Q = layer.Q[:, mask]
-
-        # Redistribute budget to high-importance layers
-        redistribute_budget(layers, total_budget)
-```
-
-#### 3.7.5 数値例: AdaLoRA vs 固定ランクLoRA
+**予算管理**: 総パラメータ予算 $B_\text{total}$ を事前設定し、$\sum_\ell r_\ell \cdot (d_\ell + k_\ell) \leq B_\text{total}$ を維持しながら、各 $r_\ell$ を動的調整する。初期ランク $r_\text{init} > r_\text{target}$ に設定し、段階的に枝刈りしてターゲット予算に収束させる。
 
 実験設定: DeBERTa-v3-base (86M) をGLUEでFine-tuning
 
@@ -1589,42 +1359,13 @@ $$
 - 性能も+0.7pt向上
 - Full FTに近い性能を半分の時間で達成
 
-#### 3.8.5 実装例
+#### 3.8.5 学習率非対称設定の効果
 
-```python
-# LoRA+ implementation with different learning rates
+Hayouら [^9] は、LoRAの収束が遅い原因を行列 $A$ と $B$ の**学習率スケールの不均衡**に帰着させた。$A$ はランダム初期化（有界スペクトル）、$B$ はゼロ初期化（スペクトルゼロ）から出発する。AdamWの適応的更新ではこの非対称性が自動的には補正されない。
 
-import torch
-from torch.optim import AdamW
+理論的には、$B$ の更新量 $\|\Delta B\|$ を $A$ の更新量 $\|\Delta A\|$ より $\lambda_+$ 倍大きくすることで、勾配流 $\nabla_{\Delta W} \mathcal{L} = \nabla_{\Delta W} \mathcal{L} \cdot B^\top + A^\top \cdot \nabla_{\Delta W} \mathcal{L}$ のバランスが取れる。Spectral analysisにより、最適比率は $\lambda_+ \sim \mathcal{O}(1/\sqrt{r})$ から決まり、実用的には $\lambda_+ = 16$ が $r \in [4, 64]$ で有効。
 
-# LoRA parameters
-B = torch.zeros(d, r, requires_grad=True)
-A = torch.randn(r, k, requires_grad=True) / sqrt(k)
-
-# Separate optimizers for B and A
-optimizer_B = AdamW([B], lr=3e-4)
-optimizer_A = AdamW([A], lr=3e-4 * 16)  # 16x learning rate
-
-# Training loop
-for batch in dataloader:
-    loss = compute_loss(batch)
-    loss.backward()
-
-    optimizer_B.step()
-    optimizer_A.step()
-
-    optimizer_B.zero_grad()
-    optimizer_A.zero_grad()
-```
-
-**注意**: PyTorchの`param_groups`を使えば1つのoptimizerで実装可能:
-
-```python
-optimizer = AdamW([
-    {'params': [B], 'lr': 3e-4},
-    {'params': [A], 'lr': 3e-4 * 16}
-])
-```
+実装上は `AdamW` の `param_groups` で $B$ と $A$ に別々の `lr` を渡せばよい（$\eta_B = \eta$、$\eta_A = \lambda_+ \eta$ ）。収束速度2倍・性能+0.7ptが報告されている [^9]。
 
 ### 3.9 VeRA — ランダム射影LoRA
 
@@ -1803,13 +1544,24 @@ $$
 
 タスク間で**共通部分空間**があれば、合成が効果的。
 
-:::message
-**進捗: 70% 完了** AdaLoRA（ランク適応）、LoRA+（学習率最適化）、VeRA（ランダム射影）、LoRA Composition（複数LoRA合成）の最新手法を追加。次は実装ゾーンへ。
-:::
+> **Note:** **進捗: 70% 完了** AdaLoRA（ランク適応）、LoRA+（学習率最適化）、VeRA（ランダム射影）、LoRA Composition（複数LoRA合成）の最新手法を追加。次は実装ゾーンへ。
+
+> **Progress: 50%**
+> **理解度チェック**
+> 1. LoRAのスケーリング因子 $\frac{\alpha}{r}$ で $\alpha \neq r$ にする数学的/実装上の理由を説明せよ。
+> 2. DreamBooth Prior Preservation Loss $\mathcal{L} = \mathbb{E}[\|\epsilon - \epsilon_\theta(z_t, c)\|_2^2] + \lambda \mathbb{E}[\|\epsilon - \epsilon_\theta(z_t, c_{pr})\|_2^2]$ の第2項が言語ドリフトを防ぐ仕組みを説明せよ。
+
+> 📌 **後編（実装）**: [第23回 後編](./ml-lecture-23-part2)
 
 ---
 
----
+## 著者リンク
+
+- Blog: https://fumishiki.dev
+- X: https://x.com/fumishiki
+- LinkedIn: https://www.linkedin.com/in/fumitakamurakami
+- GitHub: https://github.com/fumishiki
+- Hugging Face: https://huggingface.co/fumishiki
 
 ## ライセンス
 

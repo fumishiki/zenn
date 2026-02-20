@@ -19,7 +19,7 @@ keywords: ["measure theory", "Itô calculus", "stochastic differential equations
 
 $f(x) = \frac{1}{\sqrt{2\pi}} e^{-x^2/2}$ を「確率密度関数」と呼んだ。だが $f(0) \approx 0.399$ は「$x=0$ の確率」ではない。連続確率変数の場合、任意の1点の確率は0だ。$P(X = 0) = 0$ なのに $f(0) \neq 0$ — この矛盾を解消するのが測度論だ。
 
-本講義では、Lebesgue積分で確率密度関数を厳密に定義し、Radon-Nikodym導関数として再解釈する。さらに確率過程（Markov連鎖、Brown運動）を導入し、拡散モデルのSDE定式化への数学的基盤を先行構築する。
+Lebesgue積分で確率密度関数を厳密に定義し、Radon-Nikodym導関数として再解釈する。確率過程（Markov連鎖、Brown運動）も導入し、拡散モデルのSDE定式化への数学的基盤を先行構築する。
 
 > **Note:** このシリーズは全50回の無料講義。理論（論文が書ける）、実装（Production-ready）、最新（2025-2026 SOTA）の3軸で世界トップレベルの深層生成モデル教育を目指す。
 >
@@ -388,7 +388,7 @@ graph TD
 
 **Borel集合の構成階層**:
 
-$$mermaid
+```mermaid
 graph TD
     A["開区間 (a,b)"] --> B["閉区間 [a,b]"]
     B --> C["半開区間 [a,b)"]
@@ -491,9 +491,9 @@ $$
 
 **確率変数の可測性**: 確率変数 $X: (\Omega, \mathcal{F}) \to (\mathbb{R}, \mathcal{B}(\mathbb{R}))$ の「可測性」とは:
 
-$$math
+$$
 X^{-1}(B) = \{\omega \in \Omega : X(\omega) \in B\} \in \mathcal{F} \quad \forall B \in \mathcal{B}(\mathbb{R})
-```
+$$
 
 直感: 任意の「実数の測れる部分集合」の逆像が「事象の測れる部分集合」になる。これにより $P(X \in B) = P(X^{-1}(B))$ が意味を持つ。
 
@@ -581,9 +581,9 @@ $$
 
 **測度の計算**:
 
-$$math
+$$
 \lambda(C_n) = \left(\frac{2}{3}\right)^n \to 0 \quad \text{as } n \to \infty
-```
+$$
 
 したがって $\lambda(C) = \lim_{n\to\infty} \lambda(C_n) = 0$。
 
@@ -665,12 +665,12 @@ $$
 
 **Dirichlet関数の例**:
 
-$$math
+$$
 f(x) = \begin{cases}
 1 & x \in \mathbb{Q} \\
 0 & x \in \mathbb{R} \setminus \mathbb{Q}
 \end{cases}
-```
+$$
 
 Riemann積分では定義不可能（上積分=1, 下積分=0）。Lebesgue積分では:
 
@@ -1262,9 +1262,9 @@ SDE $dX_t = f(X_t, t) dt + g(X_t, t) dW_t$ が与えられたとき、$X_t$ の�
 
 答えが **Fokker-Planck方程式**（別名: Kolmogorov前向き方程式）だ:
 
-$$math
+$$
 \frac{\partial p}{\partial t} = -\frac{\partial}{\partial x}[f(x,t) p] + \frac{1}{2}\frac{\partial^2}{\partial x^2}[g^2(x,t) p]
-```
+$$
 
 2項の直感:
 - **第1項** $-\partial_x[f p]$: 漂流項（drift）。速度場 $f$ に従って密度が流れる（移流方程式）
@@ -1454,6 +1454,10 @@ flowchart TD
 
 > Progress: 90%
 
+> **理解度チェック**
+> 1. ルベーグ測度と確率測度の違いを一言で述べよ。$\sigma$-加法族が必要な理由は何か。
+> 2. 連続確率変数の密度関数 $p(x)$ が $p(x) \geq 0$ かつ $\int p(x)dx = 1$ を満たすとき、$P(X \in A) = \int_A p(x)dx$ が定義できる理由を測度論の言葉で説明せよ。
+
 ---
 
 ### Quick Check — Z4 (90%)
@@ -1515,6 +1519,10 @@ flowchart TD
 
 > Progress: 100%
 
+> **理解度チェック**
+> 1. 変数変換公式 $p_Y(y) = p_X(f^{-1}(y)) \left|\frac{df^{-1}}{dy}\right|$ におけるヤコビアン項の役割を、1次元の場合で直感的に説明せよ。
+> 2. 正規化フロー $\mathbf{x} = f_\theta(\mathbf{z})$ でサンプリングできる確率分布のクラスはどう決まるか。
+
 ---
 
 
@@ -1545,13 +1553,13 @@ flowchart TD
 
 [^10]: Särkkä, S., & Solin, A. (2019). *Applied Stochastic Differential Equations*. Cambridge University Press.
 
-[^11]: Tao, M. (2025). VP-SDE Discretization Error Analysis via Grönwall Inequality. [arXiv:2506.08337](https://arxiv.org/abs/2506.08337)
+[^11]: Choi, J., & Fan, C. (2025). A Simple Analysis of Discretization Error in Diffusion Models. [arXiv:2506.08337](https://arxiv.org/abs/2506.08337)
 
-[^12]: Zhang, Q., & Chen, Y. (2025). KL Convergence Guarantees for Discrete Diffusion Models. [arXiv:2509.16756](https://arxiv.org/abs/2509.16756)
+[^12]: Liang, Y., Liang, Y., Lai, L., & Shroff, N. (2025). Discrete Diffusion Models: Novel Analysis and New Sampler Guarantees. [arXiv:2509.16756](https://arxiv.org/abs/2509.16756)
 
 [^13]: Karras, T., Aittala, M., Aila, T., & Laine, S. (2024). Elucidating the Design Space of Diffusion-Based Generative Models. [arXiv:2206.00364](https://arxiv.org/abs/2206.00364)
 
-[^14]: Grathwohl, W., Chen, R. T. Q., Betterourt, J., Sutskever, I., & Duvenaud, D. (2025). Modern Stochastic Modeling Survey 2020-2025. [arXiv:2508.11004](https://arxiv.org/abs/2508.11004)
+[^14]: Sabbar, Y. & Nisar, K. S. (2025). A Selective Review of Modern Stochastic Modeling: SDE/SPDE Numerics, Data-Driven Identification, and Generative Methods with Applications in Biomathematics. [arXiv:2508.11004](https://arxiv.org/abs/2508.11004)
 
 ---
 

@@ -5,7 +5,13 @@ emoji: "📊"
 type: "tech"
 topics: ["machinelearning", "datascience", "julia", "huggingface", "dataengineering"]
 published: true
+difficulty: "advanced"
+time_estimate: "90 minutes"
+languages: ["Julia", "Rust", "Elixir"]
+keywords: ["機械学習", "深層学習", "生成モデル"]
 ---
+
+> 📌 **前編（理論）**: [第21回 前編](./ml-lecture-21-part1)
 
 ## 💻 4. 実装ゾーン（45分）— Julia × HuggingFace統合
 
@@ -39,18 +45,15 @@ pip install datasets transformers pillow numpy
 
 **Python側**: データセットをArrow形式でエクスポート
 
-```python
-# export_mnist.py
-from datasets import load_dataset
+```julia
+# Julia: Arrow.jlでArrow形式を読み込む
+using Arrow, DataFrames
 
-# Load MNIST
-dataset = load_dataset("mnist")
-
-# Export to Arrow format (zero-copy)
-dataset['train'].save_to_disk("data/mnist_train", file_format="arrow")
-dataset['test'].save_to_disk("data/mnist_test", file_format="arrow")
-
-print("Exported MNIST to Arrow format")
+# ArrowファイルをJuliaから直接読み込む
+train_table = Arrow.Table("data/mnist_train/data-00000-of-00001.arrow")
+train_df = DataFrame(train_table)
+println("Samples: $(nrow(train_df)), Features: $(ncol(train_df))")
+# Samples: 60000, Features: 2
 ```
 
 実行:
@@ -135,12 +138,8 @@ end
 
 # EDA: Pixel value distribution
 function plot_pixel_distribution(images::Vector)
-    # Flatten all images to get pixel distribution
-    all_pixels = Float64[]
-    for img in images[1:1000]  # sample 1000 images
-        img_array = Float64.(Gray.(img))
-        append!(all_pixels, vec(img_array))
-    end
+    # Flatten all images to get pixel distribution (broadcast + reduce)
+    all_pixels = mapreduce(img -> vec(Float64.(Gray.(img))), vcat, images[1:1000])
 
     histogram(all_pixels,
         bins=50,
@@ -163,11 +162,9 @@ plot(p1, p2, layout=(1, 2), size=(1000, 400))
 # Convert PIL Images to Float64 matrix
 function images_to_matrix(images::Vector)
     n = length(images)
-    # Assume 28x28 grayscale
-    X = zeros(Float64, n, 28*28)
-    for i in 1:n
-        img_array = Float64.(Gray.(images[i]))
-        X[i, :] = vec(img_array)
+    X = zeros(Float64, n, 28*28)  # Assume 28x28 grayscale
+    @views for i in eachindex(images)
+        X[i, :] .= vec(Float64.(Gray.(images[i])))
     end
     return X
 end
@@ -181,13 +178,11 @@ end
 function fit_transform(X::Matrix{Float64})
     μ = mean(X, dims=1)
     σ = std(X, dims=1) .+ 1e-8
-    Z = (X .- μ) ./ σ
+    Z = @. (X - μ) / σ
     return Z, StandardScaler(μ, σ)
 end
 
-function transform(X::Matrix{Float64}, scaler::StandardScaler)
-    return (X .- scaler.μ) ./ scaler.σ
-end
+transform(X::Matrix{Float64}, scaler::StandardScaler) = @. (X - scaler.μ) / scaler.σ
 
 # Apply
 X_train = images_to_matrix(images_train)
@@ -210,9 +205,8 @@ Standardized mean: [0.0, 0.0, 0.0, 0.0, 0.0]
 ```julia
 # One-hot encoding
 function onehot(y::Vector{Int}, K::Int)
-    n = length(y)
-    Y = zeros(Float64, n, K)
-    for i in 1:n
+    Y = zeros(Float64, length(y), K)
+    @inbounds for i in eachindex(y)
         Y[i, y[i] + 1] = 1.0  # Julia 1-indexed
     end
     return Y
@@ -293,40 +287,31 @@ function oversample(smote::SMOTE, X::Matrix{Float64}, y::Vector{Int}, minority_c
     Random.seed!(smote.random_state)
 
     # Extract minority samples
-    minority_mask = y .== minority_class
-    X_min = X[minority_mask, :]
+    X_min = X[y .== minority_class, :]
     n_min = size(X_min, 1)
 
     # Build k-NN tree
     kdtree = KDTree(X_min')
 
     # Generate synthetic samples
-    n_syn = Int(round(n_min * ratio))
+    n_syn = round(Int, n_min * ratio)
     X_syn = zeros(n_syn, size(X, 2))
 
-    for i in 1:n_syn
-        # Random sample
-        idx = rand(1:n_min)
-        x_i = X_min[idx, :]
+    @inbounds for i in 1:n_syn
+        idx     = rand(1:n_min)
+        x_i     = X_min[idx, :]
 
         # Find k nearest neighbors
         idxs, _ = knn(kdtree, x_i, smote.k + 1, true)
-        nn_idxs = idxs[2:end]
-
-        # Random neighbor
-        nn_idx = rand(nn_idxs)
-        x_nn = X_min[nn_idx, :]
+        x_nn    = X_min[rand(idxs[2:end]), :]
 
         # Interpolate: x_new = x_i + λ(x_nn - x_i)
         λ = rand()
-        X_syn[i, :] = x_i + λ * (x_nn - x_i)
+        @. X_syn[i, :] = x_i + λ * (x_nn - x_i)
     end
 
     # Combine
-    X_aug = vcat(X, X_syn)
-    y_aug = vcat(y, fill(minority_class, n_syn))
-
-    return X_aug, y_aug
+    return vcat(X, X_syn), vcat(y, fill(minority_class, n_syn))
 end
 
 # Create imbalanced MNIST subset
@@ -340,7 +325,7 @@ function create_imbalanced_mnist(X, y, majority_class=0, minority_class=1, ratio
     minority_mask = y .== minority_class
     X_min = X[minority_mask, :]
     y_min = y[minority_mask]
-    n_min = Int(round(length(y_maj) * ratio))
+    n_min = round(Int, length(y_maj) * ratio)
     sample_idx = randperm(length(y_min))[1:n_min]
     X_min_sample = X_min[sample_idx, :]
     y_min_sample = y_min[sample_idx]
@@ -378,37 +363,25 @@ struct FocalLoss
 end
 
 function (loss::FocalLoss)(p_pred::Matrix{Float64}, y_true::Vector{Int})
-    n, K = size(p_pred)
-    total_loss = 0.0
-
-    for i in 1:n
-        y_i = y_true[i] + 1  # Julia 1-indexed
-        p_t = p_pred[i, y_i]
-        α_t = loss.α[y_i]
-
-        # FL(p_t) = -α_t (1 - p_t)^γ log(p_t)
-        focal = -α_t * (1 - p_t)^loss.γ * log(p_t + 1e-8)
-        total_loss += focal
-    end
-
-    return total_loss / n
+    n    = size(p_pred, 1)
+    y_idx = y_true .+ 1                                    # Julia 1-indexed
+    p_t  = [p_pred[i, y_idx[i]] for i in 1:n]
+    α_t  = loss.α[y_idx]
+    # FL(p_t) = -α_t (1 - p_t)^γ log(p_t)
+    mean(@. -α_t * (1 - p_t)^loss.γ * log(p_t + 1e-8))
 end
 
 # Compute gradients (for demonstration)
 function focal_loss_grad(p_pred::Matrix{Float64}, y_true::Vector{Int}, α::Vector{Float64}, γ::Float64)
     n, K = size(p_pred)
-    grad = zeros(Float64, n, K)
+    grad  = zeros(Float64, n, K)
+    y_idx = y_true .+ 1                                    # Julia 1-indexed
 
-    for i in 1:n
-        y_i = y_true[i] + 1
-        p_t = p_pred[i, y_i]
-        α_t = α[y_i]
-
-        # Gradient: ∂FL/∂p_t
-        # = γ(1-p_t)^(γ-1) log(p_t) - (1-p_t)^γ / p_t
-        grad_pt = α_t * (γ * (1 - p_t)^(γ - 1) * log(p_t + 1e-8) - (1 - p_t)^γ / (p_t + 1e-8))
-
-        grad[i, y_i] = grad_pt
+    @inbounds for i in 1:n
+        p_t = p_pred[i, y_idx[i]]
+        α_t = α[y_idx[i]]
+        # Gradient: ∂FL/∂p_t = γ(1-p_t)^(γ-1) log(p_t) - (1-p_t)^γ / p_t
+        grad[i, y_idx[i]] = α_t * (γ * (1 - p_t)^(γ-1) * log(p_t + 1e-8) - (1 - p_t)^γ / (p_t + 1e-8))
     end
 
     return grad
@@ -472,9 +445,12 @@ plot(p_orig, p_aug, layout=(1, 2))
 | 反転 | $x' = w - x$ | `FlipX(0.5)` |
 | クロップ | Random $[x, y, w, h]$ | `CropRatio(0.9)` |
 
-:::message
-**進捗: 70% 完了** Julia完全実装でデータ前処理・SMOTE・Focal Loss・拡張を実装した。次は実験ゾーンで、不均衡データセットでの性能改善を検証する。
-:::
+> **Note:** **進捗: 70% 完了** Julia完全実装でデータ前処理・SMOTE・Focal Loss・拡張を実装した。次は実験ゾーンで、不均衡データセットでの性能改善を検証する。
+
+> **Progress: 85%**
+> **理解度チェック**
+> 1. Arrow.jl でHuggingFace DatasetsからJuliaへゼロコピー転送できる理由を、メモリマップの観点から説明せよ。
+> 2. Class Weighting と SMOTE はそれぞれ「損失関数」「訓練データ」のどちらに作用するか？それぞれの利点は？
 
 ---
 
@@ -540,8 +516,7 @@ end
 # Evaluation
 function evaluate(model, X, y_true)
     ŷ_logits = model(X')
-    ŷ_probs = softmax(ŷ_logits, dims=1)
-    ŷ_pred = vec(mapslices(argmax, ŷ_probs, dims=1)) .- 1  # 0-indexed
+    ŷ_pred = argmax.(eachcol(softmax(model(X'), dims=1))) .- 1  # 0-indexed
 
     # Metrics for Class 1
     tp = sum((ŷ_pred .== 1) .& (y_true .== 1))
@@ -651,9 +626,7 @@ $$
 \end{aligned}
 $$
 
-:::message
-**進捗: 85% 完了** 実験でデータサイエンス手法の効果を実証した。次は発展ゾーンで、最新研究とデータバージョニングを学ぶ。
-:::
+> **Note:** **進捗: 85% 完了** 実験でデータサイエンス手法の効果を実証した。次は発展ゾーンで、最新研究とデータバージョニングを学ぶ。
 
 ### 5.4 自己診断テスト
 
@@ -663,7 +636,7 @@ $$
 
 1. $z = \frac{x - \mu}{\sigma}$
 
-:::details 解答例1
+<details><summary>解答例1</summary>
 
 **読み**: 「ゼット イコール エックス マイナス ミュー オーバー シグマ」
 
@@ -673,11 +646,12 @@ $$
 ```julia
 z = (x .- μ) ./ σ
 ```
-:::
+
+</details>
 
 2. $\text{FL}(p_t) = -(1 - p_t)^\gamma \log(p_t)$
 
-:::details 解答例2
+<details><summary>解答例2</summary>
 
 **読み**: 「エフエル ピーティー イコール マイナス ワン マイナス ピーティー トゥー ザ パワー ガンマ タイムズ ログ ピーティー」
 
@@ -687,11 +661,12 @@ z = (x .- μ) ./ σ
 ```julia
 focal_loss(p_t, γ=2.0) = -(1 - p_t)^γ * log(p_t + 1e-8)
 ```
-:::
+
+</details>
 
 3. $\mathbf{x}_{\text{new}} = \mathbf{x}_i + \lambda(\mathbf{x}_{\text{nn}} - \mathbf{x}_i)$
 
-:::details 解答例3
+<details><summary>解答例3</summary>
 
 **読み**: 「エックス ニュー イコール エックス アイ プラス ラムダ タイムズ カッコ エックス エヌエヌ マイナス エックス アイ カッコトジ」
 
@@ -701,11 +676,12 @@ focal_loss(p_t, γ=2.0) = -(1 - p_t)^γ * log(p_t + 1e-8)
 ```julia
 x_new = x_i + λ * (x_nn - x_i)
 ```
-:::
+
+</details>
 
 4. $w_k = \frac{1 - \beta}{1 - \beta^{N_k}}$
 
-:::details 解答例4
+<details><summary>解答例4</summary>
 
 **読み**: 「ダブリュー ケー イコール ワン マイナス ベータ オーバー ワン マイナス ベータ トゥー ザ パワー エヌ ケー」
 
@@ -713,14 +689,15 @@ x_new = x_i + λ * (x_nn - x_i)
 
 **Julia実装**:
 ```julia
-β = 0.9999
-w_k = (1 - β) / (1 - β^N_k)
+β   = 0.9999
+w_k = @. (1 - β) / (1 - β^N_k)
 ```
-:::
+
+</details>
 
 5. $\rho = \frac{\max_k N_k}{\min_k N_k}$
 
-:::details 解答例5
+<details><summary>解答例5</summary>
 
 **読み**: 「ロー イコール マックス ケー エヌ ケー オーバー ミン ケー エヌ ケー」
 
@@ -731,11 +708,12 @@ w_k = (1 - β) / (1 - β^N_k)
 N_k = [count(==(k), y) for k in 0:(K-1)]
 ρ = maximum(N_k) / minimum(N_k)
 ```
-:::
+
+</details>
 
 6. $\mathbf{e}_y = [0, \ldots, 0, 1, 0, \ldots, 0]^\top$
 
-:::details 解答例6
+<details><summary>解答例6</summary>
 
 **読み**: 「イー ワイ イコール ゼロ ドット ドット ドット ゼロ ワン ゼロ ドット ドット ドット ゼロ トランスポーズ」
 
@@ -744,37 +722,40 @@ N_k = [count(==(k), y) for k in 0:(K-1)]
 **Julia実装**:
 ```julia
 Y = zeros(Float64, n, K)
-for i in 1:n
+@inbounds for i in eachindex(y)
     Y[i, y[i] + 1] = 1.0  # Julia 1-indexed
 end
 ```
-:::
+
+</details>
 
 7. $\text{Precision} = \frac{TP}{TP + FP}$
 
-:::details 解答例7
+<details><summary>解答例7</summary>
 
 **読み**: 「プレシジョン イコール ティーピー オーバー ティーピー プラス エフピー」
 
 **意味**: 精度（適合率）。予測が陽性のうち、実際に陽性だった割合。「予測が当たった率」。FP（偽陽性）が多いと低下。
 
 **数値例**: TP=80, FP=20 なら Precision = 80/100 = 0.8（80%の精度）。
-:::
+
+</details>
 
 8. $\text{Recall} = \frac{TP}{TP + FN}$
 
-:::details 解答例8
+<details><summary>解答例8</summary>
 
 **読み**: 「リコール イコール ティーピー オーバー ティーピー プラス エフエヌ」
 
 **意味**: 再現率（感度）。実際の陽性のうち、正しく検出できた割合。「見逃さなかった率」。FN（偽陰性）が多いと低下。医療診断やクラス不均衡で重視。
 
 **数値例**: TP=80, FN=20 なら Recall = 80/100 = 0.8（80%の検出率）。
-:::
+
+</details>
 
 9. $F_1 = \frac{2 \cdot \text{Precision} \cdot \text{Recall}}{\text{Precision} + \text{Recall}}$
 
-:::details 解答例9
+<details><summary>解答例9</summary>
 
 **読み**: 「エフワン イコール ツー タイムズ プレシジョン タイムズ リコール オーバー プレシジョン プラス リコール」
 
@@ -784,11 +765,12 @@ end
 ```julia
 f1 = 2 * precision * recall / (precision + recall + 1e-8)
 ```
-:::
+
+</details>
 
 10. $\text{Accuracy} = \frac{TP + TN}{TP + TN + FP + FN}$
 
-:::details 解答例10
+<details><summary>解答例10</summary>
 
 **読み**: 「アキュラシー イコール ティーピー プラス ティーエヌ オーバー ティーピー プラス ティーエヌ プラス エフピー プラス エフエヌ」
 
@@ -798,11 +780,12 @@ f1 = 2 * precision * recall / (precision + recall + 1e-8)
 ```julia
 accuracy = (tp + tn) / (tp + tn + fp + fn)
 ```
-:::
+
+</details>
 
 #### テスト2: データ前処理実装チャレンジ（3問）
 
-:::details 問題1: 標準化の完全実装
+<details><summary>問題1: 標準化の完全実装</summary>
 
 以下の要件を満たす標準化関数を実装せよ:
 
@@ -848,17 +831,16 @@ end
 function fit_transform(X::Matrix{Float64})
     μ = mean(X, dims=1)
     σ = std(X, dims=1) .+ 1e-8
-    Z = (X .- μ) ./ σ
+    Z = @. (X - μ) / σ
     return Z, StandardScaler(μ, σ)
 end
 
-function transform(X::Matrix{Float64}, scaler::StandardScaler)
-    return (X .- scaler.μ) ./ scaler.σ
-end
+transform(X::Matrix{Float64}, scaler::StandardScaler) = @. (X - scaler.μ) / scaler.σ
 ```
-:::
 
-:::details 問題2: SMOTE実装
+</details>
+
+<details><summary>問題2: SMOTE実装</summary>
 
 k-最近傍を用いたSMOTEを実装せよ。NearestNeighbors.jlを使用可。
 
@@ -880,9 +862,10 @@ println("✅ SMOTE test passed!")
 ```
 
 **解答**: Zone 4.5のSMOTE実装を参照。
-:::
 
-:::details 問題3: Focal Loss + Class Weighting統合
+</details>
+
+<details><summary>問題3: Focal Loss + Class Weighting統合</summary>
 
 Focal LossとClass Weightingを統合した損失関数を実装せよ。
 
@@ -910,11 +893,12 @@ println("✅ Weighted Focal Loss test passed! Loss = $(round(loss_val, digits=4)
 ```
 
 **解答**: Zone 4.6のFocal Loss実装を拡張。
-:::
+
+</details>
 
 #### テスト3: 概念理解（5問）
 
-:::details Q1. 標準化とBatchNormの使い分けは？
+<details><summary>Q1. 標準化とBatchNormの使い分けは？</summary>
 
 **解答**:
 
@@ -922,9 +906,10 @@ println("✅ Weighted Focal Loss test passed! Loss = $(round(loss_val, digits=4)
 - **BatchNorm**: 各層の活性化（訓練中に毎回）。ミニバッチごとの統計量で変換。
 
 両方使うのが一般的（前処理で標準化 + 各層でBatchNorm）。標準化は特徴量のスケールを揃え、BatchNormは内部共変量シフトを抑制する。
-:::
 
-:::details Q2. クラス不均衡でAccuracyが無意味な理由を数式で示せ
+</details>
+
+<details><summary>Q2. クラス不均衡でAccuracyが無意味な理由を数式で示せ</summary>
 
 **解答**:
 
@@ -945,9 +930,10 @@ $$
 $$
 F_1 = \frac{2 \cdot 0 \cdot 0.99}{0 + 0.99} = 0
 $$
-:::
 
-:::details Q3. SMOTEが高次元で効果が薄れる理由は？
+</details>
+
+<details><summary>Q3. SMOTEが高次元で効果が薄れる理由は？</summary>
 
 **解答**:
 
@@ -958,9 +944,10 @@ $$
 3. **密度の希薄化**: データ点間の距離がほぼ等しくなり、「近傍」の概念が崩壊。
 
 **対策**: Autoencoder/VAEで低次元潜在空間に埋め込んでからSMOTE（Deep SMOTE）。
-:::
 
-:::details Q4. Focal Lossの$\gamma$を大きくしすぎるリスクは？
+</details>
+
+<details><summary>Q4. Focal Lossの$\gamma$を大きくしすぎるリスクは？</summary>
 
 **解答**:
 
@@ -979,9 +966,10 @@ $p_t = 0.9$ （簡単なサンプル）で $(1 - 0.9)^{10} = 10^{-10}$ → 損�
 3. **訓練不安定**: 損失の勾配が極端になり、学習が発散
 
 **推奨**: $\gamma \in [2, 3]$ が最も安定。実験で調整すべき。
-:::
 
-:::details Q5. DVCとGitの違いを3つ挙げよ
+</details>
+
+<details><summary>Q5. DVCとGitの違いを3つ挙げよ</summary>
 
 **解答**:
 
@@ -992,7 +980,8 @@ $p_t = 0.9$ （簡単なサンプル）で $(1 - 0.9)^{10} = 10^{-10}$ → 損�
 | **ストレージ** | .git/ ディレクトリ | リモート（S3/GCS/NAS） |
 
 **補足**: DVCは「GitのデータLayerライクなツール」。`.dvc`ファイル（メタデータ）のみGit管理し、実データはリモートストレージで管理。
-:::
+
+</details>
 
 ---
 
@@ -1013,15 +1002,13 @@ $p_t = 0.9$ （簡単なサンプル）で $(1 - 0.9)^{10} = 10^{-10}$ → 損�
 
 **TrivialAugment**: 各画像に1つの拡張を**ランダムに**適用（強度もランダム）→ ハイパーパラメータゼロ。
 
-```python
-# TrivialAugment pseudocode
-def trivial_augment(image):
-    # Sample one augmentation uniformly
-    aug = random.choice(AUGMENTATION_POOL)
-    # Sample magnitude uniformly
-    magnitude = random.uniform(0, MAX_MAGNITUDE)
-    # Apply
+```julia
+# TrivialAugment: 1つの拡張をランダム適用
+function trivial_augment(image; aug_pool=AUGMENTATION_POOL, max_mag=MAX_MAGNITUDE)
+    aug = rand(aug_pool)          # 一様サンプリング
+    magnitude = rand() * max_mag  # magnitude ∈ [0, MAX_MAGNITUDE]
     return aug(image, magnitude)
+end
 ```
 
 #### 6.1.2 Data-Centric AI: データ品質>モデル
@@ -1241,48 +1228,47 @@ function knn_impute(X::Matrix{Float64}, k::Int=5)
     missing_mask = isnan.(X)
 
     for j in 1:d  # for each feature
-        if !any(missing_mask[:, j])
-            continue  # no missing values in this feature
-        end
+        @views begin
+            if !any(missing_mask[:, j])
+                continue  # no missing values in this feature
+            end
 
-        # Rows with observed values in feature j
-        observed_idx = findall(.!missing_mask[:, j])
-        X_obs = X[observed_idx, :]
+            # Rows with observed values in feature j
+            observed_idx  = findall(.!missing_mask[:, j])
+            missing_idx   = findall(missing_mask[:, j])
+            X_obs         = X[observed_idx, :]
 
-        # Rows with missing values in feature j
-        missing_idx = findall(missing_mask[:, j])
+            # Build k-NN tree on observed data (excluding feature j)
+            features_excl_j = setdiff(1:d, j)
+            X_obs_excl_j    = X_obs[:, features_excl_j]
 
-        # Build k-NN tree on observed data (excluding feature j)
-        features_excl_j = setdiff(1:d, j)
-        X_obs_excl_j = X_obs[:, features_excl_j]
+            # Remove rows with NaN in other features (for tree building)
+            valid_rows = findall(row -> !any(isnan.(row)), eachrow(X_obs_excl_j))
+            X_tree     = X_obs_excl_j[valid_rows, :]
 
-        # Remove rows with NaN in other features (for tree building)
-        valid_rows = findall(row -> !any(isnan.(row)), eachrow(X_obs_excl_j))
-        X_tree = X_obs_excl_j[valid_rows, :]
-
-        if isempty(X_tree)
-            # Fallback: mean imputation
-            X_imputed[missing_idx, j] .= mean(X[observed_idx, j])
-            continue
-        end
-
-        kdtree = KDTree(X_tree')
-
-        # Impute missing values
-        for i in missing_idx
-            query = X[i, features_excl_j]
-            if any(isnan.(query))
-                # If query has NaN in other features, use mean
-                X_imputed[i, j] = mean(X[observed_idx, j])
+            if isempty(X_tree)
+                # Fallback: mean imputation
+                X_imputed[missing_idx, j] .= mean(X[observed_idx, j])
                 continue
             end
 
-            # Find k nearest neighbors
-            idxs, _ = knn(kdtree, query, min(k, size(X_tree, 1)), true)
+            kdtree = KDTree(X_tree')
 
-            # Impute as mean of neighbors
-            neighbor_values = X_obs[valid_rows[idxs], j]
-            X_imputed[i, j] = mean(neighbor_values)
+            # Impute missing values
+            for i in missing_idx
+                query = X[i, features_excl_j]
+                if any(isnan.(query))
+                    # If query has NaN in other features, use mean
+                    X_imputed[i, j] = mean(X[observed_idx, j])
+                    continue
+                end
+
+                # Find k nearest neighbors
+                idxs, _ = knn(kdtree, query, min(k, size(X_tree, 1)), true)
+
+                # Impute as mean of neighbors
+                X_imputed[i, j] = mean(X_obs[valid_rows[idxs], j])
+            end
         end
     end
 
@@ -1292,7 +1278,7 @@ end
 # Example
 X = randn(100, 5)
 # Introduce 10% missing values (MCAR)
-missing_idx = rand(1:length(X), Int(round(0.1 * length(X))))
+missing_idx = rand(1:length(X), round(Int, 0.1 * length(X)))
 X[missing_idx] .= NaN
 
 println("Missing values: $(sum(isnan.(X))) / $(length(X))")
@@ -1341,7 +1327,7 @@ function mice_impute(X::Matrix{Float64}, n_iter::Int=10, m::Int=5)
 
         # Initialize with mean imputation
         for j in 1:d
-            col = X_imputed[:, j]
+            @views col = X_imputed[:, j]
             if any(isnan.(col))
                 mean_val = mean(filter(!isnan, col))
                 X_imputed[isnan.(col), j] .= mean_val
@@ -1351,32 +1337,30 @@ function mice_impute(X::Matrix{Float64}, n_iter::Int=10, m::Int=5)
         # Iterative imputation
         for iter in 1:n_iter
             for j in 1:d
-                missing_mask_j = isnan.(X[:, j])
+                @views missing_mask_j = isnan.(X[:, j])
                 if !any(missing_mask_j)
                     continue
                 end
 
                 # Observed rows for feature j
-                obs_idx = findall(.!missing_mask_j)
+                obs_idx  = findall(.!missing_mask_j)
                 miss_idx = findall(missing_mask_j)
 
                 # Build regression model: X_j ~ X_{-j}
-                X_obs = X_imputed[obs_idx, :]
-                y_obs = X_obs[:, j]
-                X_pred = X_obs[:, setdiff(1:d, j)]
+                X_obs  = X_imputed[obs_idx, :]
+                y_obs  = X_obs[:, j]
+                X_pred = @views X_obs[:, setdiff(1:d, j)]
 
                 # Fit linear model
-                df = DataFrame(X_pred, :auto)
-                df.y = y_obs
+                df      = DataFrame(X_pred, :auto)
+                df.y    = y_obs
                 formula = Term(:y) ~ sum(Term.(names(df)[1:end-1]))
-                model = lm(formula, df)
+                model   = lm(formula, df)
 
                 # Predict missing values
-                X_miss = X_imputed[miss_idx, setdiff(1:d, j)]
-                df_miss = DataFrame(X_miss, :auto)
-                y_pred = predict(model, df_miss)
-
-                X_imputed[miss_idx, j] = y_pred
+                X_miss       = @views X_imputed[miss_idx, setdiff(1:d, j)]
+                df_miss      = DataFrame(X_miss, :auto)
+                X_imputed[miss_idx, j] = predict(model, df_miss)
             end
         end
 
@@ -1423,30 +1407,36 @@ plot_missing_pattern(X)
 
 GPT-4/Claudeを使った自動ラベリングが実用化。
 
-```python
-# LLM-based data annotation
-from openai import OpenAI
-client = OpenAI()
+```julia
+# Julia: HTTP.jlでLLM APIを呼び出してアノテーション
+using HTTP, JSON3
 
-def annotate_with_llm(text, classes):
-    prompt = f"""Classify the following text into one of {classes}:
+function annotate_with_llm(text::String, classes::Vector{String})
+    prompt = """Classify the following text into one of $(join(classes, ", ")):
 
-Text: {text}
+Text: $text
 
 Answer with only the class name."""
 
-    response = client.chat.completions.create(
-        model="gpt-4",
-        messages=[{"role": "user", "content": prompt}],
-        temperature=0
+    body = JSON3.write(Dict(
+        "model" => "gpt-4",
+        "messages" => [Dict("role" => "user", "content" => prompt)],
+        "temperature" => 0
+    ))
+    
+    resp = HTTP.post(
+        "https://api.openai.com/v1/chat/completions",
+        ["Authorization" => "Bearer $(ENV["OPENAI_API_KEY"])",
+         "Content-Type" => "application/json"],
+        body
     )
+    result = JSON3.read(resp.body)
+    return result["choices"][1]["message"]["content"]
+end
 
-    return response.choices[0].message.content
-
-# Example
-text = "The movie was absolutely terrible, worst I've ever seen"
-label = annotate_with_llm(text, ["positive", "negative"])
-print(f"Label: {label}")  # negative
+# 使用例
+label = annotate_with_llm("I love this product!", ["positive", "negative", "neutral"])
+# => "positive"
 ```
 
 **精度**: Human baseline 95% → GPT-4 93% (Stanford研究)。コストは人間の1/100。
@@ -1485,7 +1475,7 @@ Python（HF Datasets）とJulia（Arrow.jl）の連携で、数GB級データセ
 
 ### 6.7 FAQ
 
-:::details Q1. 標準化とBatchNormは何が違う？
+<details><summary>Q1. 標準化とBatchNormは何が違う？</summary>
 
 **標準化**: データ全体（訓練セット）の統計量 $\mu, \sigma$ で一度変換 → 訓練前の前処理。
 
@@ -1499,9 +1489,10 @@ $$
 $$
 
 両方使うのが一般的（前処理で標準化 + 各層でBatchNorm）。
-:::
 
-:::details Q2. SMOTEは高次元データでも有効？
+</details>
+
+<details><summary>Q2. SMOTEは高次元データでも有効？</summary>
 
 **注意**: 高次元（>100次元）ではSMOTEの効果が薄れる。理由:
 
@@ -1513,9 +1504,10 @@ $$
 - **Borderline-SMOTE**: 決定境界付近のみ生成
 - **ADASYN**: 密度に応じて生成数調整
 - **Deep SMOTE**: AutoencoderやVAEの潜在空間で補間（低次元化後に SMOTE）
-:::
 
-:::details Q3. Focal Lossの$\gamma$はどう選ぶ？
+</details>
+
+<details><summary>Q3. Focal Lossの$\gamma$はどう選ぶ？</summary>
 
 **推奨値**: $\gamma = 2.0$（Lin et al. 2017原論文 [^6]）
 
@@ -1537,9 +1529,10 @@ end
 ```
 
 一般に $\gamma \in [2, 3]$ が最も安定する。
-:::
 
-:::details Q4. データ拡張はテストデータにも適用する？
+</details>
+
+<details><summary>Q4. データ拡張はテストデータにも適用する？</summary>
 
 **絶対にNO**。データ拡張は**訓練データのみ**に適用する。
 
@@ -1557,9 +1550,10 @@ $$
 $$
 
 評価時はTTA**なし**で計測する。
-:::
 
-:::details Q5. DVCとGit LFSの違いは？
+</details>
+
+<details><summary>Q5. DVCとGit LFSの違いは？</summary>
 
 | 観点 | DVC | Git LFS |
 |:-----|:----|:--------|
@@ -1570,7 +1564,8 @@ $$
 | **学習曲線** | やや急 | 緩やか（Git拡張） |
 
 **推奨**: 本格的なMLプロジェクト → DVC。小規模/個人 → Git LFS。
-:::
+
+</details>
 
 ### 6.8 学習スケジュール（1週間プラン）
 
@@ -1594,30 +1589,13 @@ $$
 
 ### 6.9 進捗トラッカー
 
-```julia
-# Self-assessment checklist
-checklist = Dict(
-    "標準化の数式を導出できる" => false,
-    "Focal Lossの勾配を導出できる" => false,
-    "SMOTEをスクラッチ実装できる" => false,
-    "HF Datasets→Julia Arrow統合を実装できる" => false,
-    "不均衡データセット実験を再現できる" => false
-)
+チェックリスト:
 
-# Mark as completed
-checklist["標準化の数式を導出できる"] = true
-
-# Print progress
-total = length(checklist)
-completed = sum(values(checklist))
-progress = completed / total * 100
-
-println("Progress: $(completed)/$(total) ($(round(progress, digits=1))%)")
-for (task, done) in checklist
-    status = done ? "✅" : "⬜"
-    println("$status $task")
-end
-```
+- [ ] 標準化 $z = \frac{x-\mu}{\sigma}$ をJuliaで実装し、平均0・分散1を確認できる
+- [ ] Focal Loss $\text{FL}(p_t)=-(1-p_t)^\gamma\log(p_t)$ の勾配を導出できる
+- [ ] SMOTEをスクラッチ実装し、合成サンプルが線分上にあることを検証できる
+- [ ] HF Datasets → Arrow.jl ゼロコピー転送を実装できる
+- [ ] 不均衡データでBaseline vs Combinedの性能差を実験で示せる
 
 ### 6.10 次回予告: 第22回「ネイティブマルチモーダル完全版」
 
@@ -1679,7 +1657,7 @@ graph LR
 - **2020年代**: LAION-5B（50億枚の自動収集）
 - **2025年**: 合成データが主流になる？
 
-:::details 歴史的観点: データ収集の進化
+<details><summary>歴史的観点: データ収集の進化</summary>
 
 | 時代 | データ規模 | 収集方法 | コスト | 品質 |
 |:-----|:----------|:--------|:-------|:-----|
@@ -1690,11 +1668,15 @@ graph LR
 | **2025-** | **無限（合成）** | **生成モデル** | **極低** | **？** |
 
 合成データの「品質」をどう定義するかが、次世代AIの鍵だ。
-:::
 
-:::message
-**進捗: 100% 完了** 🎉 第21回「データサイエンス & HuggingFace Datasets」完走！データ処理の全サイクルをマスターした。次回は画像とテキストの統合へ。
-:::
+</details>
+
+> **Note:** **進捗: 100% 完了** 🎉 第21回「データサイエンス & HuggingFace Datasets」完走！データ処理の全サイクルをマスターした。次回は画像とテキストの統合へ。
+
+> **Progress: 95%**
+> **理解度チェック**
+> 1. RandAugment が従来の手動データ拡張より優れている点を、探索空間の観点から説明せよ。
+> 2. DVCでデータセットをバージョン管理するとき、Git本体には何が保存され、実データはどこに置かれるか？
 
 ---
 
@@ -1703,52 +1685,52 @@ graph LR
 ### 主要論文
 
 [^1]: Lhoest, Q., et al. (2021). "Datasets: A Community Library for Natural Language Processing". *Proceedings of the 2021 Conference on Empirical Methods in Natural Language Processing: System Demonstrations*, 175-184.
-@[card](https://github.com/huggingface/datasets)
+<https://github.com/huggingface/datasets>
 
 [^2]: Apache Arrow Development Team. (2024). "Apache Arrow: A Cross-Language Development Platform for In-Memory Data".
-@[card](https://arrow.apache.org/)
+<https://arrow.apache.org/>
 
 [^3]: Bouchet-Valat, M., et al. (2024). "DataFrames.jl: Flexible and Fast Tabular Data in Julia". *Journal of Statistical Software*, 107(4), 1-32.
-@[card](https://dataframes.juliadata.org/stable/)
+<https://dataframes.juliadata.org/stable/>
 
 [^4]: Ng, A. (2021). "A Chat with Andrew on MLOps: From Model-centric to Data-centric AI". *DeepLearning.AI Blog*.
-@[card](https://www.deeplearning.ai/the-batch/issue-80/)
+<https://www.deeplearning.ai/the-batch/issue-80/>
 
 [^5]: Cui, Y., Jia, M., Lin, T.-Y., Song, Y., & Belongie, S. (2019). "Class-Balanced Loss Based on Effective Number of Samples". *Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition (CVPR)*, 9268-9277.
-@[card](https://arxiv.org/abs/1901.05555)
+<https://arxiv.org/abs/1901.05555>
 
 [^6]: Lin, T.-Y., Goyal, P., Girshick, R., He, K., & Dollár, P. (2017). "Focal Loss for Dense Object Detection". *Proceedings of the IEEE International Conference on Computer Vision (ICCV)*, 2980-2988.
-@[card](https://arxiv.org/abs/1708.02002)
+<https://arxiv.org/abs/1708.02002>
 
 [^7]: Chawla, N. V., Bowyer, K. W., Hall, L. O., & Kegelmeyer, W. P. (2002). "SMOTE: Synthetic Minority Over-sampling Technique". *Journal of Artificial Intelligence Research*, 16, 321-357.
-@[card](https://jair.org/index.php/jair/article/view/10302)
+<https://jair.org/index.php/jair/article/view/10302>
 
 [^8]: Cubuk, E. D., Zoph, B., Mane, D., Vasudevan, V., & Le, Q. V. (2019). "AutoAugment: Learning Augmentation Strategies from Data". *Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition (CVPR)*, 113-123.
-@[card](https://arxiv.org/abs/1805.09501)
+<https://arxiv.org/abs/1805.09501>
 
 [^9]: Cubuk, E. D., Zoph, B., Shlens, J., & Le, Q. V. (2020). "RandAugment: Practical Automated Data Augmentation with a Reduced Search Space". *Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition Workshops (CVPRW)*, 702-703.
-@[card](https://arxiv.org/abs/1909.13719)
+<https://arxiv.org/abs/1909.13719>
 
 [^10]: Dablain, D., Krawczyk, B., & Chawla, N. V. (2021). "DeepSMOTE: Fusing Deep Learning and SMOTE for Imbalanced Data". *IEEE Transactions on Neural Networks and Learning Systems*, 34(9), 6390-6404.
-@[card](https://arxiv.org/abs/2105.02340)
+<https://arxiv.org/abs/2105.02340>
 
-[^11]: Sharma, A., et al. (2025). "An Enhanced Focal Loss Function to Mitigate Class Imbalance in Auto Insurance Fraud Detection with Explainable AI". *arXiv preprint*.
-@[card](https://arxiv.org/abs/2508.02283)
+[^11]: Boabang, F., & Gyamerah, S. A. (2025). "An Enhanced Focal Loss Function to Mitigate Class Imbalance in Auto Insurance Fraud Detection with Explainable AI". *arXiv preprint*.
+<https://arxiv.org/abs/2508.02283>
 
 [^12]: Zha, D., et al. (2023). "Data-centric Artificial Intelligence: A Survey". *ACM Computing Surveys*, 56(4), 1-37.
-@[card](https://arxiv.org/abs/2303.10158)
+<https://arxiv.org/abs/2303.10158>
 
-[^13]: Wang, S., et al. (2024). "A Survey on Data Quality Dimensions and Tools for Machine Learning". *arXiv preprint*.
-@[card](https://arxiv.org/abs/2406.19614)
+[^13]: Zhou, Y., et al. (2024). "A Survey on Data Quality Dimensions and Tools for Machine Learning". *arXiv preprint*.
+<https://arxiv.org/abs/2406.19614>
 
 [^14]: Kotelnikov, A., et al. (2023). "TabDDPM: Modelling Tabular Data with Diffusion Models". *International Conference on Machine Learning (ICML)*, 17564-17579.
-@[card](https://arxiv.org/abs/2209.15421)
+<https://arxiv.org/abs/2209.15421>
 
-[^15]: Chen, M., et al. (2024). "Tabular Data Augmentation for Machine Learning: Progress and Prospects of Embracing Generative AI". *arXiv preprint*.
-@[card](https://arxiv.org/abs/2407.21523)
+[^15]: Cui, L., et al. (2024). "Tabular Data Augmentation for Machine Learning: Progress and Prospects of Embracing Generative AI". *arXiv preprint*.
+<https://arxiv.org/abs/2407.21523>
 
 [^16]: Zhao, S., et al. (2024). "Data augmentation with automated machine learning: approaches and performance comparison with classical data augmentation methods". *Neural Computing and Applications*, 36, 1-23.
-@[card](https://arxiv.org/abs/2403.08352)
+<https://arxiv.org/abs/2403.08352>
 
 ### 教科書
 
@@ -1758,30 +1740,13 @@ graph LR
 
 ---
 
-## 記法規約
+## 著者リンク
 
-本講義で使用した数学記号の一覧。
-
-| 記号 | 意味 | 例 |
-|:-----|:-----|:---|
-| $\mathbf{x}$ | データベクトル | $\mathbf{x} \in \mathbb{R}^d$ |
-| $\mu$ | 平均 | $\mu = \frac{1}{n}\sum_{i=1}^n x_i$ |
-| $\sigma$ | 標準偏差 | $\sigma = \sqrt{\text{Var}[x]}$ |
-| $z$ | 標準化変数 | $z = \frac{x - \mu}{\sigma}$ |
-| $y$ | ラベル | $y \in \{0, 1, \ldots, K-1\}$ |
-| $\mathbf{e}_y$ | One-hotベクトル | $\mathbf{e}_y \in \mathbb{R}^K$ |
-| $p_t$ | 正解クラスの予測確率 | $p_t = p_\theta(y \mid \mathbf{x})$ |
-| $\gamma$ | Focal Loss focusing parameter | 通常 $\gamma = 2$ |
-| $\alpha$ | クラス重み | $\alpha_k = \frac{1 - \beta}{1 - \beta^{N_k}}$ |
-| $\lambda$ | SMOTE補間パラメータ | $\lambda \sim \text{Uniform}(0, 1)$ |
-| $N_k$ | クラス $k$ のサンプル数 | $N = \sum_{k=0}^{K-1} N_k$ |
-| $\rho$ | 不均衡比 | $\rho = \frac{\max_k N_k}{\min_k N_k}$ |
-| $\mathcal{L}$ | 損失関数 | $\mathcal{L}_{\text{CE}}, \mathcal{L}_{\text{FL}}$ |
-| $\theta$ | モデルパラメータ | $\theta \in \mathbb{R}^p$ |
-| $\mathbb{E}[\cdot]$ | 期待値 | $\mathbb{E}_{x \sim p}[f(x)]$ |
-| $\text{KL}[p \| q]$ | KLダイバージェンス | 分布間の距離 |
-
----
+- Blog: https://fumishiki.dev
+- X: https://x.com/fumishiki
+- LinkedIn: https://www.linkedin.com/in/fumitakamurakami
+- GitHub: https://github.com/fumishiki
+- Hugging Face: https://huggingface.co/fumishiki
 
 ## ライセンス
 

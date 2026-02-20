@@ -4,6 +4,11 @@ emoji: "🎲"
 type: "tech"
 topics: ["machinelearning", "deeplearning", "sde", "julia", "stochasticprocesses"]
 published: true
+slug: "ml-lecture-37-part2"
+difficulty: "advanced"
+time_estimate: "90 minutes"
+languages: ["Julia", "Rust"]
+keywords: ["機械学習", "深層学習", "生成モデル"]
 ---
 
 ## 💻 4. 実装ゾーン（45分）— Julia DifferentialEquations.jlでSDE数値解法
@@ -18,15 +23,8 @@ JuliaのDifferentialEquations.jlはSDE/ODE/DAEを統一的に扱う強力なパ�
 using DifferentialEquations
 
 # SDE: dx = f(x, p, t) dt + g(x, p, t) dW
-function drift(u, p, t)
-    # Drift項 f(x, t)
-    return [-0.5 * p[1] * u[1]]  # p[1] = β
-end
-
-function diffusion(u, p, t)
-    # Diffusion項 g(x, t)
-    return [√(p[1])]  # √β
-end
+drift(u, p, t)     = [-0.5 * p[1] * u[1]]  # p[1] = β
+diffusion(u, p, t) = [√(p[1])]              # √β
 
 # 初期値、時間範囲、パラメータ
 u0 = [1.0]
@@ -66,16 +64,11 @@ $$
 β_linear(t) = β_min + t * (β_max - β_min)
 
 function vp_drift_linear(u, p, t)
-    β_min, β_max = p
-    β_t = β_min + t * (β_max - β_min)
+    β_t = p[1] + t * (p[2] - p[1])
     return [-0.5 * β_t * u[1]]
 end
 
-function vp_noise_linear(u, p, t)
-    β_min, β_max = p
-    β_t = β_min + t * (β_max - β_min)
-    return [√β_t]
-end
+vp_noise_linear(u, p, t) = [√(p[1] + t * (p[2] - p[1]))]
 
 prob_vp_linear = SDEProblem(vp_drift_linear, vp_noise_linear, [1.0], (0.0, 1.0), (β_min, β_max))
 sol_vp_linear = solve(prob_vp_linear, EM(), dt=0.001)
@@ -92,27 +85,16 @@ $$
 ```julia
 # Cosineスケジュール
 s = 0.008
-function α_bar_cosine(t, s=0.008)
-    return cos((t + s) / (1 + s) * π/2)^2 / cos(s / (1 + s) * π/2)^2
-end
+α_bar_cosine(t, s=0.008) = cos((t + s) / (1 + s) * π/2)^2 / cos(s / (1 + s) * π/2)^2
 
 function β_cosine(t, s=0.008)
     # 数値微分で β(t) = -d log(α_bar) / dt
     dt = 1e-6
-    α_t = α_bar_cosine(t, s)
-    α_t_next = α_bar_cosine(t + dt, s)
-    return -(log(α_t_next) - log(α_t)) / dt
+    return -(log(α_bar_cosine(t + dt, s)) - log(α_bar_cosine(t, s))) / dt
 end
 
-function vp_drift_cosine(u, p, t)
-    β_t = β_cosine(t)
-    return [-0.5 * β_t * u[1]]
-end
-
-function vp_noise_cosine(u, p, t)
-    β_t = β_cosine(t)
-    return [√β_t]
-end
+vp_drift_cosine(u, p, t) = [-0.5 * β_cosine(t) * u[1]]
+vp_noise_cosine(u, p, t) = [√(β_cosine(t))]
 
 prob_vp_cosine = SDEProblem(vp_drift_cosine, vp_noise_cosine, [1.0], (0.0, 1.0), nothing)
 sol_vp_cosine = solve(prob_vp_cosine, EM(), dt=0.001)
@@ -142,16 +124,12 @@ $$
 # VE-SDE with 幾何スケジュール
 σ_min, σ_max = 0.01, 50.0
 
-function ve_drift(u, p, t)
-    # Drift項 = 0
-    return [0.0]
-end
+ve_drift(u, p, t) = [0.0]  # Drift項 = 0
 
 function ve_noise(u, p, t)
     σ_min, σ_max = p
     σ_t = σ_min * (σ_max / σ_min)^t
-    dσ²_dt = 2 * σ_t^2 * log(σ_max / σ_min)
-    return [√dσ²_dt]
+    return [√(2 * σ_t^2 * log(σ_max / σ_min))]
 end
 
 prob_ve = SDEProblem(ve_drift, ve_noise, [1.0], (0.0, 1.0), (σ_min, σ_max))
@@ -192,11 +170,7 @@ function reverse_vp_drift(u, p, t)
     return [-0.5 * β_t * u[1] - β_t * score_approx]
 end
 
-function reverse_vp_noise(u, p, t)
-    β_min, β_max = p
-    β_t = β_min + t * (β_max - β_min)
-    return [√β_t]
-end
+reverse_vp_noise(u, p, t) = [√(p[1] + t * (p[2] - p[1]))]
 
 # 初期値: ノイズ分布 N(0, 1)
 u0_noise = randn(1)
@@ -276,33 +250,26 @@ Predictor-Corrector法で高品質サンプリング。
 ```julia
 # Predictor-Corrector サンプリング
 function predictor_corrector_sampling(;n_steps=100, n_corrector=5, ε_langevin=0.01, β_min=0.1, β_max=20.0)
-    # 初期ノイズ
-    x = randn(1)
-    t_vals = LinRange(1.0, 0.0, n_steps+1)
+    x = randn()
     dt = -1.0 / n_steps
 
-    trajectory = [copy(x)]
+    trajectory = [x]
 
-    for i in 1:n_steps
-        t = t_vals[i]
+    for t in LinRange(1.0, 0.0, n_steps+1)[1:n_steps]
         β_t = β_min + t * (β_max - β_min)
 
         # Predictor: Reverse-time SDE
-        score_approx = -x[1]
-        drift = -0.5 * β_t * x[1] - β_t * score_approx
-        diffusion = √β_t
-        x[1] = x[1] + drift * dt + diffusion * √(-dt) * randn()
+        x += (-0.5 * β_t * x + β_t * x) * dt + √β_t * √(-dt) * randn()
 
         # Corrector: Langevin Dynamics
         for _ in 1:n_corrector
-            score_approx = -x[1]
-            x[1] = x[1] + ε_langevin * score_approx + √(2 * ε_langevin) * randn()
+            x += ε_langevin * (-x) + √(2ε_langevin) * randn()
         end
 
-        push!(trajectory, copy(x))
+        push!(trajectory, x)
     end
 
-    return hcat(trajectory...)'  # n_steps+1 × 1 行列
+    return trajectory  # n_steps+1 要素のベクトル
 end
 
 # サンプリング実行
@@ -323,7 +290,7 @@ sol_em = solve(prob_em, EM(), dt=-0.01)
 traj_pc = predictor_corrector_sampling(n_steps=100, n_corrector=5, ε_langevin=0.01)
 
 # プロット
-plot(sol_em.t, [s[1] for s in sol_em.u], label="Euler-Maruyama", lw=2)
+plot(sol_em.t, first.(sol_em.u), label="Euler-Maruyama", lw=2)
 plot!(LinRange(1.0, 0.0, 101), traj_pc, label="Predictor-Corrector", lw=2, linestyle=:dash)
 ```
 
@@ -345,15 +312,8 @@ using DifferentialEquations, BenchmarkTools
 # テストSDE: Ornstein-Uhlenbeck過程
 # dX = -θ X dt + σ dW
 θ, σ = 1.0, 0.5
-function ou_drift(u, p, t)
-    θ, _ = p
-    return [-θ * u[1]]
-end
-
-function ou_diffusion(u, p, t)
-    _, σ = p
-    return [σ]
-end
+ou_drift(u, p, t)      = [-p[1] * u[1]]
+ou_diffusion(u, p, t) = [p[2]]
 
 u0 = [1.0]
 tspan = (0.0, 10.0)
@@ -440,8 +400,8 @@ println("EM ステップ数: $(length(sol_em_fixed.t))")
 println("SRA1 ステップ数: $(length(sol_sra1_adaptive.t))")
 
 # プロット
-plot(sol_em_fixed.t, [s[1] for s in sol_em_fixed.u], label="EM (固定dt)", marker=:circle, markersize=2)
-plot!(sol_sra1_adaptive.t, [s[1] for s in sol_sra1_adaptive.u], label="SRA1 (適応)", marker=:x, markersize=3)
+plot(sol_em_fixed.t, first.(sol_em_fixed.u), label="EM (固定dt)", marker=:circle, markersize=2)
+plot!(sol_sra1_adaptive.t, first.(sol_sra1_adaptive.u), label="SRA1 (適応)", marker=:x, markersize=3)
 xlabel!("時刻 t")
 ylabel!("X(t)")
 title!("剛性問題: EM vs SRA1")
@@ -529,15 +489,8 @@ $$
 
 β_min, β_max = 0.1, 20.0
 
-function forward_drift(x, t)
-    β_t = β_min + t * (β_max - β_min)
-    return -0.5 * β_t * x
-end
-
-function forward_diffusion(x, t)
-    β_t = β_min + t * (β_max - β_min)
-    return √β_t
-end
+forward_drift(x, t)     = -0.5 * (β_min + t * (β_max - β_min)) * x
+forward_diffusion(x, t) = √(β_min + t * (β_max - β_min))
 
 # Reverse-time では Drift に Score項が追加
 # f_reverse = -f_forward - g² ∇log p_t
@@ -553,17 +506,8 @@ end
 score_approx(x, t) = -x
 
 # Reverse-time SDE実装
-function reverse_drift_impl(u, p, t)
-    score_fn = p[1]
-    x = u[1]
-    return [reverse_drift_girsanov(x, t, score_fn)]
-end
-
-function reverse_noise_impl(u, p, t)
-    x = u[1]
-    g = forward_diffusion(x, t)
-    return [g]
-end
+reverse_drift_impl(u, p, t) = [reverse_drift_girsanov(u[1], t, p[1])]
+reverse_noise_impl(u, p, t) = [forward_diffusion(u[1], t)]
 
 u0_girsanov = [0.5]
 tspan_girsanov = (1.0, 0.0)
@@ -597,15 +541,8 @@ using DifferentialEquations
 
 θ, σ, λ = 1.0, 0.5, 2.0
 
-function jump_drift(u, p, t)
-    θ, _ = p
-    return [-θ * u[1]]
-end
-
-function jump_diffusion(u, p, t)
-    _, σ = p
-    return [σ]
-end
+jump_drift(u, p, t)      = [-p[1] * u[1]]
+jump_diffusion(u, p, t) = [p[2]]
 
 # Jumpのサイズ（毎回 +0.5）
 function jump_affect!(integrator)
@@ -641,13 +578,8 @@ using DifferentialEquations
 
 # Ornstein-Uhlenbeck SDE
 θ, σ = 1.0, 0.5
-function ou_drift(u, p, t)
-    return [-p[1] * u[1]]
-end
-
-function ou_diffusion(u, p, t)
-    return [p[2]]
-end
+ou_drift(u, p, t)      = [-p[1] * u[1]]
+ou_diffusion(u, p, t) = [p[2]]
 
 u0 = [1.0]
 tspan = (0.0, 10.0)
@@ -664,8 +596,8 @@ sol_ensemble = solve(ensemble_prob, EM(), EnsembleThreads(), trajectories=1000, 
 # 平均と標準偏差を計算
 using Statistics
 t_vals = sol_ensemble[1].t
-mean_vals = [mean([sol.u[i][1] for sol in sol_ensemble]) for i in 1:length(t_vals)]
-std_vals = [std([sol.u[i][1] for sol in sol_ensemble]) for i in 1:length(t_vals)]
+mean_vals = [mean(sol.u[i][1] for sol in sol_ensemble) for i in eachindex(t_vals)]
+std_vals  = [std( sol.u[i][1] for sol in sol_ensemble) for i in eachindex(t_vals)]
 
 # プロット
 plot(t_vals, mean_vals, ribbon=std_vals, label="平均 ± 標準偏差", fillalpha=0.3, lw=2)
@@ -702,14 +634,10 @@ tspan = (1.0, 0.0)
 # Reverse-time SDE
 function reverse_drift(u, p, t)
     β_t = p[1] + t * (p[2] - p[1])
-    score_approx = -u[1]
-    return [-0.5 * β_t * u[1] - β_t * score_approx]
+    return [-0.5 * β_t * u[1] - β_t * (-u[1])]  # score_approx = -u[1]
 end
 
-function reverse_noise(u, p, t)
-    β_t = p[1] + t * (p[2] - p[1])
-    return [√β_t]
-end
+reverse_noise(u, p, t) = [√(p[1] + t * (p[2] - p[1]))]
 
 # Probability Flow ODE
 function pf_ode(du, u, p, t)
@@ -749,15 +677,8 @@ plot(p1, p2, layout=(1,2), size=(1000, 400))
 ```julia
 # 真のスコア関数（ガウス分布 N(μ, σ²) 仮定）
 μ_true, σ_true = 1.0, 0.5
-function true_score(x, t)
-    # ∇log N(μ, σ²) = -(x - μ) / σ²
-    return -(x - μ_true) / σ_true^2
-end
-
-# 近似スコア関数（ゼロ平均ガウス仮定）
-function approx_score(x, t)
-    return -x
-end
+true_score(x, t)   = -(x - μ_true) / σ_true^2   # ∇log N(μ, σ²) = -(x - μ) / σ²
+approx_score(x, t) = -x                            # ゼロ平均ガウス仮定
 
 # Reverse-time SDE with 真のスコア
 function reverse_drift_true(u, p, t)
@@ -805,26 +726,16 @@ step_counts = [10, 25, 50, 100, 200, 500, 1000]
 kl_divergences = Float64[]
 
 for T in step_counts
-    # T ステップでサンプリング
     dt = -1.0 / T
-    n_samples = 5000
-    samples = zeros(n_samples)
+    t_seq = LinRange(1.0, 0.0, T+1)[1:T]
 
-    for i in 1:n_samples
-        x = randn(1)  # 初期ノイズ
-        t_vals = LinRange(1.0, 0.0, T+1)
-
-        for j in 1:T
-            t = t_vals[j]
+    samples = [let x = randn()
+        for t in t_seq
             β_t = β_min + t * (β_max - β_min)
-            score = true_score(x[1], t)
-            drift = -0.5 * β_t * x[1] - β_t * score
-            diffusion = √β_t
-            x[1] = x[1] + drift * dt + diffusion * √(-dt) * randn()
+            x += (-0.5 * β_t * x - β_t * true_score(x, t)) * dt + √β_t * √(-dt) * randn()
         end
-
-        samples[i] = x[1]
-    end
+        x
+    end for _ in 1:5000]
 
     # KL推定（ヒストグラムベース）
     kde_result = kde(samples)
@@ -877,11 +788,9 @@ X_noisy = α_t * X + σ_t * randn(D, n_samples)
 # Reverse-time SDE（簡易Score: PCA射影）
 function reverse_manifold_drift(u, p, t)
     Q, β = p
-    β_t = β
-    # Score近似: 部分空間への射影
     u_proj = Q * (Q' * u)  # Manifold上への射影
-    score_approx = -(u - u_proj) / σ_t^2  # 法線方向ペナルティ
-    return -0.5 * β_t * u - β_t * score_approx
+    score = @. -(u - u_proj) / σ_t^2  # 法線方向ペナルティ
+    return @. -0.5β * u - β * score
 end
 
 function reverse_manifold_noise(u, p, t)
@@ -919,25 +828,15 @@ using DifferentialEquations, Plots, Statistics
 σ_min, σ_max = 0.01, 50.0
 
 # VP-SDE
-function vp_drift(u, p, t)
-    β_t = p[1] + t * (p[2] - p[1])
-    return [-0.5 * β_t * u[1]]
-end
-
-function vp_noise(u, p, t)
-    β_t = p[1] + t * (p[2] - p[1])
-    return [√β_t]
-end
+vp_drift(u, p, t) = [-0.5 * (p[1] + t * (p[2] - p[1])) * u[1]]
+vp_noise(u, p, t) = [√(p[1] + t * (p[2] - p[1]))]
 
 # VE-SDE
-function ve_drift(u, p, t)
-    return [0.0]
-end
+ve_drift(u, p, t) = [0.0]
 
 function ve_noise(u, p, t)
     σ_t = p[1] * (p[2] / p[1])^t
-    dσ²_dt = 2 * σ_t^2 * log(p[2] / p[1])
-    return [√dσ²_dt]
+    return [√(2 * σ_t^2 * log(p[2] / p[1]))]
 end
 
 # アンサンブル実行（1000サンプル）
@@ -956,22 +855,17 @@ sol_ve_ensemble = solve(ensemble_ve, EM(), EnsembleThreads(), trajectories=n_sam
 
 # 分散の計算
 t_vals_vp = sol_vp_ensemble[1].t
-var_vp = [var([sol.u[i][1] for sol in sol_vp_ensemble]) for i in 1:length(t_vals_vp)]
+var_vp = [var([sol.u[i][1] for sol in sol_vp_ensemble]) for i in eachindex(t_vals_vp)]
 
 t_vals_ve = sol_ve_ensemble[1].t
-var_ve = [var([sol.u[i][1] for sol in sol_ve_ensemble]) for i in 1:length(t_vals_ve)]
+var_ve = [var([sol.u[i][1] for sol in sol_ve_ensemble]) for i in eachindex(t_vals_ve)]
 
 # 理論分散
 # VP: Var[X_t] = 1 - exp(-∫_0^t β(s) ds)
-function var_vp_theory(t)
-    β_avg = β_min + 0.5 * t * (β_max - β_min)
-    return 1 - exp(-β_avg * t)
-end
+var_vp_theory(t) = 1 - exp(-(β_min + 0.5t * (β_max - β_min)) * t)
 
 # VE: Var[X_t] = σ_min² (σ_max / σ_min)^(2t)
-function var_ve_theory(t)
-    return σ_min^2 * (σ_max / σ_min)^(2 * t)
-end
+var_ve_theory(t) = σ_min^2 * (σ_max / σ_min)^(2t)
 
 # プロット
 p1 = plot(t_vals_vp, var_vp, label="VP-SDE (数値)", lw=2, xlabel="時刻 t", ylabel="Var[X(t)]", title="VP-SDE 分散")
@@ -999,34 +893,26 @@ using DifferentialEquations, Plots, Statistics
 true_mean, true_std = 1.0, 0.5
 
 # 真のスコア関数
-function true_score(x, t)
-    return -(x - true_mean) / true_std^2
-end
+true_score(x, t) = -(x - true_mean) / true_std^2
 
 # Predictor-Corrector サンプリング
 function pc_sampling(n_corrector; n_steps=100, ε_langevin=0.01)
-    x = randn(1)
-    t_vals = LinRange(1.0, 0.0, n_steps+1)
+    x = randn()
     dt = -1.0 / n_steps
 
-    for i in 1:n_steps
-        t = t_vals[i]
+    for t in LinRange(1.0, 0.0, n_steps+1)[1:n_steps]
         β_t = β_min + t * (β_max - β_min)
 
         # Predictor
-        score = true_score(x[1], t)
-        drift = -0.5 * β_t * x[1] - β_t * score
-        diffusion = √β_t
-        x[1] = x[1] + drift * dt + diffusion * √(-dt) * randn()
+        x += (-0.5 * β_t * x - β_t * true_score(x, t)) * dt + √β_t * √(-dt) * randn()
 
         # Corrector
         for _ in 1:n_corrector
-            score = true_score(x[1], t)
-            x[1] = x[1] + ε_langevin * score + √(2 * ε_langevin) * randn()
+            x += ε_langevin * true_score(x, t) + √(2ε_langevin) * randn()
         end
     end
 
-    return x[1]
+    return x
 end
 
 # 各反復回数での分布
@@ -1078,36 +964,21 @@ plot(corrector_counts, kl_values, xlabel="Corrector反復回数", ylabel="KL div
 # Cosineスケジュール
 s = 0.008
 α_bar_cosine(t) = cos((t + s) / (1 + s) * π/2)^2 / cos(s / (1 + s) * π/2)^2
-function β_cosine(t)
-    dt = 1e-6
-    α_t = α_bar_cosine(t)
-    α_t_next = α_bar_cosine(t + dt)
-    return -(log(α_t_next) - log(α_t)) / dt
-end
+β_cosine(t) = -(log(α_bar_cosine(t + 1e-6)) - log(α_bar_cosine(t))) / 1e-6
 
 # 二次スケジュール
 β_quadratic(t) = β_min + t^2 * (β_max - β_min)
 
 # 各スケジュールでサンプリング
 function sample_with_schedule(β_schedule, n_samples=1000)
-    samples = zeros(n_samples)
-    for i in 1:n_samples
-        x = randn(1)
-        t_vals = LinRange(1.0, 0.0, 101)
-        dt = -0.01
-
+    t_vals = LinRange(1.0, 0.0, 101)
+    [let x = randn()
         for j in 1:100
-            t = t_vals[j]
-            β_t = β_schedule(t)
-            score = -x[1]
-            drift = -0.5 * β_t * x[1] - β_t * score
-            diffusion = √β_t
-            x[1] = x[1] + drift * dt + diffusion * √(-dt) * randn()
+            t = t_vals[j]; β_t = β_schedule(t)
+            x += (-0.5 * β_t * x + β_t * x) * (-0.01) + √β_t * 0.1 * randn()
         end
-
-        samples[i] = x[1]
-    end
-    return samples
+        x
+    end for _ in 1:n_samples]
 end
 
 samples_linear = sample_with_schedule(β_linear)
@@ -1147,30 +1018,25 @@ errors = Float64[]
 for d in dimensions
     # d次元ガウス分布
     μ_true = ones(d)
-    Σ_true = I(d)
-    p_true = MvNormal(μ_true, Σ_true)
 
     # T ステップでサンプリング
     n_samples = 500
     samples = zeros(d, n_samples)
+    dt = -1.0 / T_fixed
 
     for i in 1:n_samples
-        x = randn(d)  # 初期ノイズ
-        dt = -1.0 / T_fixed
-
+        x = randn(d)
+        ξ = similar(x)
         for _ in 1:T_fixed
-            # Score近似（ガウス仮定）
-            score = -(x - μ_true)
-            drift = -0.5 * β * x - β * score
-            diffusion = √β
-            x = x + drift * dt + diffusion * √(-dt) * randn(d)
+            randn!(ξ)
+            score = @. -(x - μ_true)
+            @. x += (-0.5β * x - β * score) * dt + √β * √(-dt) * ξ
         end
-
-        samples[:, i] = x
+        @views samples[:, i] .= x
     end
 
     # Wasserstein距離（簡易: 平均のL2距離）
-    μ_sampled = mean(samples, dims=2)[:]
+    μ_sampled = vec(mean(samples, dims=2))
     error = norm(μ_sampled - μ_true)
     push!(errors, error)
 end
@@ -1196,32 +1062,22 @@ true_score(x, t) = -(x - true_mean) / true_std^2
 
 # Reverse-time SDE サンプリング
 function sde_sampling()
-    x = randn(1)
+    x = randn()
     t_vals = LinRange(1.0, 0.0, 101)
-    dt = -0.01
-
     for i in 1:100
-        t = t_vals[i]
-        β_t = β_min + t * (β_max - β_min)
-        score = true_score(x[1], t)
-        drift = -0.5 * β_t * x[1] - β_t * score
-        diffusion = √β_t
-        x[1] = x[1] + drift * dt + diffusion * √(-dt) * randn()
+        t = t_vals[i]; β_t = β_min + t * (β_max - β_min)
+        x += (-0.5 * β_t * x - β_t * true_score(x, t)) * (-0.01) + √β_t * 0.1 * randn()
     end
-
-    return x[1]
+    x
 end
 
 # Langevin Dynamics サンプリング（t=0のスコアのみ使用）
 function langevin_sampling(n_steps=1000, ε=0.01)
-    x = randn(1)
-
+    x = randn()
     for _ in 1:n_steps
-        score = true_score(x[1], 0.0)
-        x[1] = x[1] + ε * score + √(2 * ε) * randn()
+        x += ε * true_score(x, 0.0) + √(2ε) * randn()
     end
-
-    return x[1]
+    x
 end
 
 # サンプル生成
@@ -1307,40 +1163,26 @@ using Distributions
 β_min, β_max = 0.1, 20.0
 true_mean, true_std = 1.0, 0.5
 
-function true_score(x, t)
-    return -(x - true_mean) / true_std^2
-end
+true_score(x, t) = -(x - true_mean) / true_std^2
 
 function reverse_drift!(du, u, p, t)
     β_t = p[1] + t * (p[2] - p[1])
-    score = true_score(u[1], t)
-    du[1] = -0.5 * β_t * u[1] - β_t * score
+    du[1] = -0.5 * β_t * u[1] - β_t * true_score(u[1], t)
 end
 
 function reverse_noise!(du, u, p, t)
-    β_t = p[1] + t * (p[2] - p[1])
-    du[1] = √β_t
+    du[1] = √(p[1] + t * (p[2] - p[1]))
 end
 
 n_samples = 2000
 
+solve_sde(u0) = solve(SDEProblem(reverse_drift!, reverse_noise!, u0, (1.0, 0.0), (β_min, β_max)), EM(), dt=-0.001).u[end][1]
+
 # ガウス初期ノイズ
-samples_gaussian = zeros(n_samples)
-for i in 1:n_samples
-    u0 = randn(1)  # N(0, 1)
-    prob = SDEProblem(reverse_drift!, reverse_noise!, u0, (1.0, 0.0), (β_min, β_max))
-    sol = solve(prob, EM(), dt=-0.001)
-    samples_gaussian[i] = sol.u[end][1]
-end
+samples_gaussian = [solve_sde(randn(1))           for _ in 1:n_samples]
 
 # 一様分布初期ノイズ
-samples_uniform = zeros(n_samples)
-for i in 1:n_samples
-    u0 = [rand(Uniform(-3, 3))]  # Uniform(-3, 3)
-    prob = SDEProblem(reverse_drift!, reverse_noise!, u0, (1.0, 0.0), (β_min, β_max))
-    sol = solve(prob, EM(), dt=-0.001)
-    samples_uniform[i] = sol.u[end][1]
-end
+samples_uniform  = [solve_sde([rand(Uniform(-3, 3))]) for _ in 1:n_samples]
 
 # 分布比較
 using StatsPlots
@@ -1365,46 +1207,32 @@ using BenchmarkTools, Distributions, Statistics
 true_mean, true_std = 1.0, 0.5
 p_true = Normal(true_mean, true_std)
 
-function true_score(x, t)
-    return -(x - true_mean) / true_std^2
-end
+true_score(x, t) = -(x - true_mean) / true_std^2
 
 function reverse_drift!(du, u, p, t)
     β_t = p[1] + t * (p[2] - p[1])
-    score = true_score(u[1], t)
-    du[1] = -0.5 * β_t * u[1] - β_t * score
+    du[1] = -0.5 * β_t * u[1] - β_t * true_score(u[1], t)
 end
 
 function reverse_noise!(du, u, p, t)
-    β_t = p[1] + t * (p[2] - p[1])
-    du[1] = √β_t
+    du[1] = √(p[1] + t * (p[2] - p[1]))
 end
 
 dt_values = [0.1, 0.05, 0.01, 0.005, 0.001]
 errors = Float64[]
-times = Float64[]
+times  = Float64[]
 
 for dt_val in dt_values
-    # サンプル生成
-    n_samples = 500
-    samples = zeros(n_samples)
+    time_taken = @elapsed samples = [
+        solve(SDEProblem(reverse_drift!, reverse_noise!, randn(1), (1.0, 0.0), (β_min, β_max)),
+              EM(), dt=-dt_val).u[end][1]
+        for _ in 1:500
+    ]
 
-    time_taken = @elapsed begin
-        for i in 1:n_samples
-            u0 = randn(1)
-            prob = SDEProblem(reverse_drift!, reverse_noise!, u0, (1.0, 0.0), (β_min, β_max))
-            sol = solve(prob, EM(), dt=-dt_val)
-            samples[i] = sol.u[end][1]
-        end
-    end
-
-    # 平均誤差
     μ_sampled = mean(samples)
     error = abs(μ_sampled - true_mean)
-
     push!(errors, error)
     push!(times, time_taken)
-
     println("dt=$dt_val: error=$error, time=$time_taken s")
 end
 
@@ -1421,12 +1249,15 @@ plot(p1, p2, layout=(1,2), size=(1200, 400))
 
 ---
 
-:::message
-**進捗: 92%完了**
-実装と実験を完了。次は発展ゾーンで研究動向と参考文献を整理する。
-:::
+> **Note:** **進捗: 92%完了**
+> 実装と実験を完了。次は発展ゾーンで研究動向と参考文献を整理する。
 
 ---
+
+> Progress: 85%
+> **理解度チェック**
+> 1. Julia DifferentialEquations.jl での `SDEProblem` 実装において、VP-SDEとVE-SDEのdrift関数とdiffusion関数の具体的な違いをコードの変数名と対応する数式で示せ。
+> 2. Predictor-Corrector実装でCorrectorのLangevinステップ数を増やすとサンプル品質が向上するが、計算コストとのトレードオフが生じる境界条件を述べよ。
 
 ## 🚀 6. 発展ゾーン（20分）— 研究動向とSDEの未来
 
@@ -1527,6 +1358,11 @@ plot(p1, p2, layout=(1,2), size=(1200, 400))
 - Euler-Maruyamaを超える高次SDE solver
 - Strong convergence $O(\Delta t^{3/2})$
 - DifferentialEquations.jlで実装済み（`SRIW1()`, `SRIW2()`等）
+
+> Progress: 95%
+> **理解度チェック**
+> 1. SDE → Flow Matching への接続において、Fokker-Planck方程式の連続性方程式としての解釈が条件付き速度場 $u_t(\mathbf{x}|\mathbf{x}_1)$ の設計にどう寄与するか述べよ。
+> 2. VP-SDE・VE-SDE・Sub-VP SDE・PF-ODEの4定式化が同一の周辺分布 $p_t(\mathbf{x})$ を生成できる条件と、それぞれの数値解法上の有利な点を一行ずつ述べよ。
 
 ## 🎓 6. 振り返り + 統合ゾーン（30分）— まとめとFAQ
 
@@ -1629,19 +1465,6 @@ A: 理論派なら推奨、実装派なら不要。
 - Song et al. 2021がAnderson定理を現代的に再解釈
 - Reverse-time SDEの導出スケッチ（本回3.8節）で十分
 - 厳密証明（Girsanov定理）は専門書（Øksendal等）参照
-
-### 7.5 学習スケジュール — 1週間の復習計画
-
-| 日 | タスク | 所要時間 |
-|:---|:------|:---------|
-| **Day 1** | Zone 3.1-3.3（Brown運動・伊藤積分・伊藤の補題）再読 + 数値検証 | 60分 |
-| **Day 2** | Zone 3.4-3.6（SDE・Fokker-Planck）再読 + 手計算で導出 | 90分 |
-| **Day 3** | Zone 3.7-3.9（VP-SDE/VE-SDE/Reverse-time SDE/PF-ODE）再読 + Julia実装 | 90分 |
-| **Day 4** | Zone 3.10-3.13（収束性解析・Manifold仮説・数値解法）精読 | 60分 |
-| **Day 5** | Zone 4実装（DifferentialEquations.jl）全コード実行 + 改変実験 | 120分 |
-| **Day 6** | Zone 5演習（軌道比較・スコア影響・収束検証）全課題実施 | 90分 |
-| **Day 7** | 論文精読（Song et al. 2021 Score SDE [arXiv:2011.13456](https://arxiv.org/abs/2011.13456)）+ 次回予習 | 90分 |
-
 ### 7.6 自己診断チェックリスト
 
 - [ ] Brown運動の二次変分 $\langle W \rangle_t = t$ を導出できる
@@ -1673,10 +1496,8 @@ A: 理論派なら推奨、実装派なら不要。
 - Probability Flow ODE → Flow Matching ODE（Optimal Transport統合）
 - Score SDE → Flow Matching統一理論へ
 
-:::message
-**進捗: 100%完了 — 第37回読了！**
-SDE/ODE & 確率過程論を完全習得した。VP-SDE/VE-SDE導出、Anderson逆時間SDE、Probability Flow ODE、Score SDE統一理論、収束性解析、Julia実装を修得。次回Flow Matchingで全生成モデルの統一理論へ。
-:::
+> **Note:** **進捗: 100%完了 — 第37回読了！**
+> SDE/ODE & 確率過程論を完全習得した。VP-SDE/VE-SDE導出、Anderson逆時間SDE、Probability Flow ODE、Score SDE統一理論、収束性解析、Julia実装を修得。次回Flow Matchingで全生成モデルの統一理論へ。
 
 ---
 
@@ -1689,7 +1510,7 @@ SDE/ODE & 確率過程論を完全習得した。VP-SDE/VE-SDE導出、Anderson�
 2. O(d/T)収束理論（2024）で「$T = 1000$ が十分な理由」が数学的に説明された。だが実装者の何%がこれを知るべきか？
 3. Probability Flow ODEの発見（Song et al. 2021）はSDEの連続時間定式化なしには不可能だった。連続理論が新手法を生む例。理論 vs 実装、どちらが先か？
 
-:::details 歴史的文脈 — SDEと拡散モデルの40年ギャップ
+<details><summary>歴史的文脈 — SDEと拡散モデルの40年ギャップ</summary>
 
 **Anderson 1982**: Reverse-time SDEを証明。当時は理論的興味のみ、応用なし。
 
@@ -1702,7 +1523,8 @@ SDE/ODE & 確率過程論を完全習得した。VP-SDE/VE-SDE導出、Anderson�
 **2024-2025 収束理論**: Li & Yan、Potaptchik et al.がO(d/T)、Manifold線形収束を証明。理論が実装を逆照射。
 
 **教訓**: 理論と実装の対話が新パラダイムを生む。40年の時を経て理論が実装に光を当てる。
-:::
+
+</details>
 
 ---
 
@@ -1711,34 +1533,34 @@ SDE/ODE & 確率過程論を完全習得した。VP-SDE/VE-SDE導出、Anderson�
 ### 主要論文
 
 [^1]: Yang Song, Jascha Sohl-Dickstein, Diederik P. Kingma, Abhishek Kumar, Stefano Ermon, and Ben Poole (2021). "Score-Based Generative Modeling through Stochastic Differential Equations". *ICLR 2021 (Oral)*.
-@[card](https://arxiv.org/abs/2011.13456)
+<https://arxiv.org/abs/2011.13456>
 
 [^2]: Brian D. O. Anderson (1982). "Reverse-time diffusion equation models". *Stochastic Processes and their Applications*, vol. 12, pp. 313-326.
-@[card](https://www.sciencedirect.com/science/article/pii/0304414982900515)
+<https://www.sciencedirect.com/science/article/pii/0304414982900515>
 
 [^3]: Gen Li and Yuling Yan (2024). "O(d/T) Convergence Theory for Diffusion Probabilistic Models under Minimal Assumptions". *arXiv preprint*.
-@[card](https://arxiv.org/abs/2409.18959)
+<https://arxiv.org/abs/2409.18959>
 
 [^4]: Peter Potaptchik, Iskander Azangulov, and George Deligiannidis (2024). "Linear Convergence of Diffusion Models Under the Manifold Hypothesis". *arXiv preprint*.
-@[card](https://arxiv.org/abs/2410.09046)
+<https://arxiv.org/abs/2410.09046>
 
-[^5]: Anonymous (2025). "Diffusion Models under Alternative Noise: Simplified Analysis and Sensitivity". *arXiv preprint*.
-@[card](https://arxiv.org/abs/2506.08337)
+[^5]: Choi, J. & Fan, C. (2025). "Diffusion Models under Alternative Noise: Simplified Analysis and Sensitivity". *arXiv preprint*.
+<https://arxiv.org/abs/2506.08337>
 
 [^6]: Jonathan Ho, Ajay Jain, and Pieter Abbeel (2020). "Denoising Diffusion Probabilistic Models". *NeurIPS 2020*.
-@[card](https://arxiv.org/abs/2006.11239)
+<https://arxiv.org/abs/2006.11239>
 
 [^7]: Alex Nichol and Prafulla Dhariwal (2021). "Improved Denoising Diffusion Probabilistic Models". *ICML 2021*.
-@[card](https://arxiv.org/abs/2102.09672)
+<https://arxiv.org/abs/2102.09672>
 
 [^8]: Jascha Sohl-Dickstein, Eric Weiss, Niru Maheswaranathan, and Surya Ganguli (2015). "Deep Unsupervised Learning using Nonequilibrium Thermodynamics". *ICML 2015*.
-@[card](https://arxiv.org/abs/1503.03585)
+<https://arxiv.org/abs/1503.03585>
 
 [^9]: Jiaming Song, Chenlin Meng, and Stefano Ermon (2020). "Denoising Diffusion Implicit Models". *ICLR 2021*.
-@[card](https://arxiv.org/abs/2010.02502)
+<https://arxiv.org/abs/2010.02502>
 
 [^10]: Yang Song and Stefano Ermon (2020). "Improved Techniques for Training Score-Based Generative Models". *NeurIPS 2020*.
-@[card](https://arxiv.org/abs/2006.09011)
+<https://arxiv.org/abs/2006.09011>
 
 ### 教科書
 
@@ -1754,28 +1576,13 @@ SDE/ODE & 確率過程論を完全習得した。VP-SDE/VE-SDE導出、Anderson�
 
 ---
 
-## 記法規約
+## 著者リンク
 
-本講義で使用する記法の統一：
-
-| 記号 | 意味 | 備考 |
-|:-----|:-----|:-----|
-| $W_t$ | Brown運動（Wiener過程） | $W_0 = 0$, $W_t \sim \mathcal{N}(0, t)$ |
-| $dW_t$ | Brown運動の増分 | 形式的に $\mathcal{N}(0, dt)$ |
-| $\langle W \rangle_t$ | Brown運動の二次変分 | $= t$ |
-| $X_t$ | 確率過程（SDE解） | $dX_t = f dt + g dW_t$ |
-| $f(x, t)$ | Drift係数 | 決定論的トレンド |
-| $g(x, t)$ | Diffusion係数 | 確率的揺らぎの強度 |
-| $p_t(x)$ | 時刻 $t$ の確率密度 | 周辺分布 |
-| $\nabla \log p_t(x)$ | Score関数 | データ対数密度の勾配 |
-| $\beta(t)$ | ノイズスケジュール | VP-SDEのパラメータ |
-| $\sigma(t)$ | ノイズレベル | VE-SDEのパラメータ |
-| $\alpha_t$ | 減衰係数 | $\exp(-\frac{1}{2}\int_0^t \beta(s) ds)$ |
-| $\bar{\alpha}_t$ | 累積積（DDPM） | $\prod_{i=1}^t (1-\beta_i)$ |
-| $\bar{W}_t$ | 逆時間Brown運動 | Reverse-time SDE用 |
-| $T$ | ステップ数 | 離散化の分割数 |
-| $d$ | データ次元 / 固有次元 | 文脈依存 |
----
+- Blog: https://fumishiki.dev
+- X: https://x.com/fumishiki
+- LinkedIn: https://www.linkedin.com/in/fumitakamurakami
+- GitHub: https://github.com/fumishiki
+- Hugging Face: https://huggingface.co/fumishiki
 
 ## ライセンス
 

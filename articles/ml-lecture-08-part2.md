@@ -105,7 +105,7 @@ $$
 import numpy as np
 
 
-def logsumexp(a, axis=-1):
+def logsumexp(a: np.ndarray, axis: int = -1) -> np.ndarray:
     m = np.max(a, axis=axis, keepdims=True)
     s = np.sum(np.exp(a - m), axis=axis, keepdims=True)
     return (m + np.log(s)).squeeze(axis)
@@ -192,13 +192,13 @@ $$
 import numpy as np
 
 
-def logsumexp(a, axis=-1):
+def logsumexp(a: np.ndarray, axis: int = -1) -> np.ndarray:
     m = np.max(a, axis=axis, keepdims=True)
     s = np.sum(np.exp(a - m), axis=axis, keepdims=True)
     return (m + np.log(s)).squeeze(axis)
 
 
-def log_mvnormal(X, mu_k, Sigma_k, eps=1e-6):
+def log_mvnormal(X: np.ndarray, mu_k: np.ndarray, Sigma_k: np.ndarray, eps: float = 1e-6) -> np.ndarray:
     # X: (N,d), mu_k: (d,), Sigma_k: (d,d)
     N, d = X.shape
     Sigma_k = Sigma_k + eps * np.eye(d)
@@ -209,7 +209,7 @@ def log_mvnormal(X, mu_k, Sigma_k, eps=1e-6):
     return -0.5 * (d * np.log(2.0 * np.pi) + logdet + quad)
 
 
-def e_step(X, pi, mu, Sigma):
+def e_step(X: np.ndarray, pi: np.ndarray, mu: np.ndarray, Sigma: np.ndarray) -> np.ndarray:
     N = X.shape[0]
     K = pi.shape[0]
     log_r = np.zeros((N, K))
@@ -224,7 +224,7 @@ def e_step(X, pi, mu, Sigma):
     return gamma
 
 
-def m_step(X, gamma, eps=1e-6):
+def m_step(X: np.ndarray, gamma: np.ndarray, eps: float = 1e-6) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     # X: (N,d), gamma: (N,K)
     N, d = X.shape
     K = gamma.shape[1]
@@ -248,7 +248,7 @@ def m_step(X, gamma, eps=1e-6):
     return pi, mu, Sigma
 
 
-def loglik_gmm(X, pi, mu, Sigma):
+def loglik_gmm(X: np.ndarray, pi: np.ndarray, mu: np.ndarray, Sigma: np.ndarray) -> float:
     N = X.shape[0]
     K = pi.shape[0]
     log_r = np.zeros((N, K))
@@ -257,7 +257,7 @@ def loglik_gmm(X, pi, mu, Sigma):
     return float(np.sum(logsumexp(log_r, axis=1)))
 
 
-def run_em(X, K, steps=30, seed=0):
+def run_em(X: np.ndarray, K: int, steps: int = 30, seed: int = 0) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     rng = np.random.default_rng(seed)
     N, d = X.shape
 
@@ -280,7 +280,7 @@ def run_em(X, K, steps=30, seed=0):
     return pi, mu, Sigma, np.array(ll_hist)
 
 
-def aic_bic(loglik, N, k_params):
+def aic_bic(loglik: float, N: int, k_params: int) -> tuple[float, float]:
     aic = 2.0 * k_params - 2.0 * loglik
     bic = np.log(float(N)) * k_params - 2.0 * loglik
     return aic, bic
@@ -500,7 +500,7 @@ NumPy は BLAS で並列化しているが、Python のオブジェクトオー�
 | Julia（BLAS + @threads） | ~0.02 秒 | ~1 秒 | 第9回以降 |
 | Rust（rayon）+ BLAS | ~0.01 秒 | ~0.5 秒 | 第9回以降 |
 
-`d=128` でもこの差が出る。`d=512` では差がさらに拡大する。**この体感が第9回 Julia 登場の動機だ。**
+`d=128` でもこの差が出る。`d=512` では差が一段と拡大する。**この体感が第9回 Julia 登場の動機だ。**
 
 **NumPy ベクトル化の具体的戦略**:
 
@@ -992,6 +992,10 @@ Incremental EM: 1データ点 $x_i$ を処理したら即座に $\gamma_i$ を�
 
 > Progress: 85%
 
+> **理解度チェック**
+> 1. GMMのMステップで $\mu_k = \frac{\sum_n r_{nk} x_n}{\sum_n r_{nk}}$ となる理由を、ELBOの $\mu_k$ に関する偏微分をゼロと置いて導出せよ。
+> 2. EMアルゴリズムが局所最適に収束する可能性があるとき、初期化の戦略として何が有効か。$k$-means++初期化との関係を説明せよ。
+
 ## 🔬 Z5b. 自己診断テスト — EM 算法の理解確認
 
 ### Z5b.1 記号読解テスト
@@ -1448,6 +1452,10 @@ Course I (第1-8回) は「確率モデルとその推定」という一本の�
 第8回は Course I の集大成であると同時に、Course II（変分推論 / 深層生成モデル）の**起点**でもある。Course II では「閉形式が解けない場合に何をするか」が一貫したテーマになる。
 
 > Progress: 100%
+
+> **理解度チェック**
+> 1. EMアルゴリズムの証拠下界 $\mathcal{L}(q,\theta) = \mathbb{E}_q[\log p(\mathbf{x},\mathbf{z}|\theta)] - \mathbb{E}_q[\log q(\mathbf{z})]$ において、両辺の等号条件は何か。
+> 2. Eステップで $q(\mathbf{z}) = p(\mathbf{z}|\mathbf{x},\theta^{\text{old}})$ と設定することで ELBOが対数尤度と一致する理由を KL divergence の言葉で説明せよ。
 
 
 ## PB. パラダイム転換の問い

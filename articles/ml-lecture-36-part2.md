@@ -4,6 +4,11 @@ emoji: "🔄"
 type: "tech"
 topics: ["machinelearning", "deeplearning", "ddpm", "julia", "diffusion"]
 published: true
+slug: "ml-lecture-36-part2"
+difficulty: "advanced"
+time_estimate: "90 minutes"
+languages: ["Julia", "Rust"]
+keywords: ["機械学習", "深層学習", "生成モデル"]
 ---
 
 ## 💻 4. 実装ゾーン（45分）— Julia訓練 + Rust推論
@@ -131,7 +136,7 @@ function (model::NamedTuple)(x::AbstractArray, t::Int, ps, st)
 end
 ```
 
-:::details 完全なU-Net実装 (Self-Attention付き)
+<details><summary>完全なU-Net実装 (Self-Attention付き)</summary>
 
 本格的なU-Netには16×16解像度でSelf-Attentionを追加する。以下は完全版 (MNIST では過剰):
 
@@ -157,14 +162,16 @@ function (attn::SelfAttention)(x, ps, st)
     d_head = C ÷ attn.heads
     attn_out = similar(x_flat)
 
-    for h in 1:attn.heads
-        q_h = q[:, (h-1)*d_head+1:h*d_head, :]
-        k_h = k[:, (h-1)*d_head+1:h*d_head, :]
-        v_h = v[:, (h-1)*d_head+1:h*d_head, :]
-
-        scores = batched_mul(q_h, permutedims(k_h, (2, 1, 3))) / sqrt(d_head)
-        attn_weights = softmax(scores; dims=2)
-        attn_out[:, (h-1)*d_head+1:h*d_head, :] = batched_mul(attn_weights, v_h)
+    @inbounds for h in 1:attn.heads
+        rng = (h-1)*d_head+1 : h*d_head
+        @views begin
+            q_h = q[:, rng, :]
+            k_h = k[:, rng, :]
+            v_h = v[:, rng, :]
+            scores = batched_mul(q_h, permutedims(k_h, (2, 1, 3))) / sqrt(d_head)
+            attn_weights = softmax(scores; dims=2)
+            attn_out[:, rng, :] .= batched_mul(attn_weights, v_h)
+        end
     end
 
     # Reshape back
@@ -172,7 +179,8 @@ function (attn::SelfAttention)(x, ps, st)
     return out .+ x, st  # Residual connection
 end
 ```
-:::
+
+</details>
 
 #### 4.2.3 訓練ループ
 
@@ -191,13 +199,13 @@ function train_step!(model, ps, st, opt_state, x₀, β, ᾱ, T, rng)
     x_t = sqrt(ᾱ[t]) .* x₀ .+ sqrt(1 - ᾱ[t]) .* ε
 
     # Compute loss and gradient
-    loss, (grad_ps, _) = Zygote.withgradient(ps, st) do p, s
+    loss, (∇ps, _) = Zygote.withgradient(ps, st) do p, s
         ε_pred, _ = model(x_t, t, p, s)
         sum((ε .- ε_pred).^2)  # MSE loss
     end
 
     # Update parameters
-    opt_state, ps = Optimisers.update!(opt_state, ps, grad_ps)
+    opt_state, ps = Optimisers.update!(opt_state, ps, ∇ps)
 
     return loss, ps, st, opt_state
 end
@@ -276,7 +284,7 @@ function ddim_sample(model, ps, st, x_T, ᾱ, steps; η=0.0)
         dir_xt = sqrt(1 - ᾱ[t_prev] - σ_t^2) .* ε_pred
 
         # Noise
-        noise = (η > 0) ? randn(Float32, size(x_t)) : zeros(Float32, size(x_t))
+        noise = (η > 0) ? randn(Float32, size(x_t)) : zero(x_t)
 
         # DDIM step
         x_t = sqrt(ᾱ[t_prev]) .* x₀_pred .+ dir_xt .+ σ_t .* noise
@@ -307,72 +315,66 @@ pub struct DDIMSampler {
     steps: usize,
 }
 
-impl DDIMSampler {
-    pub fn new(model_path: &str, alpha_bar: Vec<f32>, steps: usize) -> Self {
-        let session = Session::builder()
-            .unwrap()
-            .with_model_from_file(model_path)
-            .unwrap();
+type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 
-        Self { session, alpha_bar, steps }
+impl DDIMSampler {
+    pub fn new(model_path: &str, alpha_bar: Vec<f32>, steps: usize) -> Result<Self> {
+        let session = Session::builder()?
+            .with_model_from_file(model_path)?;
+        Ok(Self { session, alpha_bar, steps })
     }
 
-    pub fn sample(&self, x_t: Array4<f32>, eta: f32) -> Array4<f32> {
+    pub fn sample(&self, x_t: Array4<f32>, eta: f32) -> Result<Array4<f32>> {
+        let n = self.alpha_bar.len();
         let tau: Vec<usize> = (0..self.steps)
-            .map(|i| (i * self.alpha_bar.len() / self.steps).min(self.alpha_bar.len() - 1))
+            .map(|i| (i * n / self.steps).min(n - 1))
             .collect();
 
         let mut x = x_t;
 
         for i in (1..tau.len()).rev() {
-            let t = tau[i];
-            let t_prev = tau[i - 1];
+            let (t, t_prev) = (tau[i], tau[i - 1]);
 
             // Predict noise via ONNX model
-            let epsilon_pred = self.predict_noise(&x, t);
+            let ε_pred = self.predict_noise(&x, t)?;
 
             // DDIM step
-            x = self.ddim_step(x, epsilon_pred, t, t_prev, eta);
+            x = self.ddim_step(x, ε_pred, t, t_prev, eta);
         }
 
         // Final step
-        let epsilon_pred = self.predict_noise(&x, tau[0]);
-        let alpha_bar_t = self.alpha_bar[tau[0]];
-        let x_0 = (&x - (1.0 - alpha_bar_t).sqrt() * &epsilon_pred) / alpha_bar_t.sqrt();
+        let ε_pred = self.predict_noise(&x, tau[0])?;
+        let ᾱ_t = self.alpha_bar[tau[0]];
+        let x_0 = (&x - (1.0 - ᾱ_t).sqrt() * &ε_pred) / ᾱ_t.sqrt();
 
-        x_0
+        Ok(x_0)
     }
 
-    fn predict_noise(&self, x_t: &Array4<f32>, t: usize) -> Array4<f32> {
+    fn predict_noise(&self, x_t: &Array4<f32>, t: usize) -> Result<Array4<f32>> {
         // Convert to ONNX input
-        let x_input = Value::from_array(x_t.view()).unwrap();
-        let t_input = Value::from_array(ndarray::arr0(t as f32).view()).unwrap();
+        let x_input = Value::from_array(x_t.view())?;
+        let t_input = Value::from_array(ndarray::arr0(t as f32).view())?;
 
         // Run inference
-        let outputs = self.session.run(vec![x_input, t_input]).unwrap();
-        let epsilon = outputs[0].try_extract_tensor::<f32>().unwrap();
+        let outputs = self.session.run(vec![x_input, t_input])?;
+        let ε = outputs[0].try_extract_tensor::<f32>()?;
 
-        epsilon.to_owned().into_dimensionality().unwrap()
+        Ok(ε.to_owned().into_dimensionality()?)
     }
 
-    fn ddim_step(&self, x_t: Array4<f32>, epsilon: Array4<f32>, t: usize, t_prev: usize, eta: f32) -> Array4<f32> {
-        let alpha_bar_t = self.alpha_bar[t];
-        let alpha_bar_prev = self.alpha_bar[t_prev];
+    fn ddim_step(&self, x_t: Array4<f32>, ε: Array4<f32>, t: usize, t_prev: usize, η: f32) -> Array4<f32> {
+        let (ᾱ_t, ᾱ_prev) = (self.alpha_bar[t], self.alpha_bar[t_prev]);
 
         // Predicted x_0
-        let x_0_pred = (&x_t - (1.0 - alpha_bar_t).sqrt() * &epsilon) / alpha_bar_t.sqrt();
+        let x_0_pred = (&x_t - (1.0 - ᾱ_t).sqrt() * &ε) / ᾱ_t.sqrt();
 
         // Variance
-        let sigma_t = eta * ((1.0 - alpha_bar_prev) / (1.0 - alpha_bar_t)).sqrt()
-            * (1.0 - alpha_bar_t / alpha_bar_prev).sqrt();
+        let σ_t = η * ((1.0 - ᾱ_prev) / (1.0 - ᾱ_t)).sqrt()
+            * (1.0 - ᾱ_t / ᾱ_prev).sqrt();
 
-        // Direction
-        let dir_xt = (1.0 - alpha_bar_prev - sigma_t.powi(2)).sqrt() * &epsilon;
-
-        // DDIM step
-        let x_prev = alpha_bar_prev.sqrt() * x_0_pred + dir_xt;
-
-        x_prev
+        // Direction + DDIM step
+        let dir_xt = (1.0 - ᾱ_prev - σ_t.powi(2)).sqrt() * &ε;
+        ᾱ_prev.sqrt() * x_0_pred + dir_xt
     }
 }
 ```
@@ -414,11 +416,11 @@ fn main() {
     let alpha_bar: Vec<f32> = load_alpha_bar_from_file("alpha_bar.json");
 
     // Create sampler
-    let sampler = ddim::DDIMSampler::new("tiny_ddpm.onnx", alpha_bar, 50);
+    let sampler = ddim::DDIMSampler::new("tiny_ddpm.onnx", alpha_bar, 50).unwrap();
 
     // Sample from noise
     let x_T = Array4::random((1, 1, 28, 28), StandardNormal);
-    let x_0 = sampler.sample(x_T, 0.0);  // Deterministic (eta=0)
+    let x_0 = sampler.sample(x_T, 0.0).unwrap();  // Deterministic (η=0)
 
     println!("Generated image shape: {:?}", x_0.shape());
     save_image(&x_0, "generated.png");
@@ -442,9 +444,7 @@ fn save_image(x: &Array4<f32>, path: &str) {
 | $\boldsymbol{\mu}_\theta = \frac{1}{\sqrt{\alpha_t}} (\mathbf{x}_t - \frac{\beta_t}{\sqrt{1-\bar{\alpha}_t}} \boldsymbol{\epsilon}_\theta)$ | `μ = (1 / sqrt(α[t])) .* (x_t .- (β[t] / sqrt(1 - ᾱ[t])) .* ε_pred)` | `mu = (x_t - (beta_t / (1.0 - alpha_bar_t).sqrt()) * epsilon_pred) / alpha_t.sqrt()` |
 | $\mathbf{x}_{t-1} = \sqrt{\bar{\alpha}_{t-1}} \mathbf{x}_0 + \sqrt{1-\bar{\alpha}_{t-1}} \boldsymbol{\epsilon}_\theta$ | `x_prev = sqrt(ᾱ[t_prev]) .* x₀_pred .+ sqrt(1 - ᾱ[t_prev]) .* ε_pred` | `x_prev = alpha_bar_prev.sqrt() * x_0_pred + (1.0 - alpha_bar_prev).sqrt() * epsilon_pred` |
 
-:::message
-**進捗: 70% 完了** Julia訓練 + Rust推論の実装完了。Zone 5で実験へ。
-:::
+> **Note:** **進捗: 70% 完了** Julia訓練 + Rust推論の実装完了。Zone 5で実験へ。
 
 ---
 
@@ -459,9 +459,9 @@ using MLDatasets, MLUtils
 train_data, train_labels = MNIST.traindata(Float32)
 test_data, test_labels = MNIST.testdata(Float32)
 
-# Normalize to [-1, 1]
-train_data = (train_data .* 2.0) .- 1.0
-test_data = (test_data .* 2.0) .- 1.0
+# Normalize to [-1, 1] in-place
+@. train_data = train_data * 2f0 - 1f0
+@. test_data  = test_data  * 2f0 - 1f0
 
 # Reshape to (H, W, C, B)
 train_data = reshape(train_data, 28, 28, 1, :)
@@ -516,8 +516,7 @@ function plot_samples(samples, title)
     grid = plot(layout=(4, 4), size=(800, 800), title=title)
 
     for i in 1:min(n, 16)
-        img = samples[:, :, 1, i]
-        img = (img .+ 1.0) ./ 2.0  # [-1, 1] → [0, 1]
+        @views img = @. (samples[:, :, 1, i] + 1f0) / 2f0
         plot!(grid, subplot=i, Gray.(img'), axis=false, ticks=false)
     end
 
@@ -552,14 +551,11 @@ function test_reconstruction(model, ps, st, x₀, β, ᾱ, T)
 end
 
 # Test on 100 samples
-mse_sum = 0.0
-for i in 1:100
-    x₀ = test_data[:, :, :, i:i]
-    mse = test_reconstruction(model, ps_trained, st_trained, x₀, β, ᾱ, T)
-    mse_sum += mse
-end
-
-avg_mse = mse_sum / 100
+avg_mse = mean(
+    test_reconstruction(model, ps_trained, st_trained,
+                        @view(test_data[:, :, :, i:i]), β, ᾱ, T)
+    for i in 1:100
+)
 println("Average reconstruction MSE: $avg_mse")
 ```
 
@@ -592,7 +588,7 @@ function plot_training_curves(loss_history, lr_schedule)
 end
 
 # Example: Cosine decay
-lr_schedule = [1e-3 * cos(π * epoch / (2 * 10)) for epoch in 0:10]
+lr_schedule = @. 1e-3 * cos(π * (0:10) / 20)
 plot_training_curves(loss_history, lr_schedule)
 ```
 
@@ -616,19 +612,19 @@ function train_step_with_clip!(model, ps, st, opt_state, x₀, β, ᾱ, T, rng; 
     ε = randn(rng, Float32, size(x₀))
     x_t = sqrt(ᾱ[t]) .* x₀ .+ sqrt(1 - ᾱ[t]) .* ε
 
-    loss, (grad_ps, _) = Zygote.withgradient(ps, st) do p, s
+    loss, (∇ps, _) = Zygote.withgradient(ps, st) do p, s
         ε_pred, _ = model(x_t, t, p, s)
         sum((ε .- ε_pred).^2)
     end
 
     # Clip gradients
-    grad_norm = sqrt(sum(sum(abs2, g) for g in grad_ps))
-    if grad_norm > clip_norm
-        grad_ps = map(g -> g .* (clip_norm / grad_norm), grad_ps)
+    ∇norm = sqrt(sum(sum(abs2, g) for g in ∇ps))
+    if ∇norm > clip_norm
+        ∇ps = map(g -> g .* (clip_norm / ∇norm), ∇ps)
     end
 
-    opt_state, ps = Optimisers.update!(opt_state, ps, grad_ps)
-    return loss, ps, st, opt_state, grad_norm
+    opt_state, ps = Optimisers.update!(opt_state, ps, ∇ps)
+    return loss, ps, st, opt_state, ∇norm
 end
 ```
 
@@ -648,7 +644,7 @@ end
 
 function update_ema!(ema::EMAWeights, ps)
     for (shadow, current) in zip(ema.shadow_ps, ps)
-        shadow .= ema.decay .* shadow .+ (1 - ema.decay) .* current
+        @. shadow = ema.decay * shadow + (1 - ema.decay) * current
     end
 end
 
@@ -866,7 +862,7 @@ plot!(1:T, log.(snr_zt), label="Zero Terminal SNR", lw=2)
 
 ### 5.5 自己診断テスト
 
-:::details Q1: Forward Process の閉形式解を導出せよ
+<details><summary>Q1: Forward Process の閉形式解を導出せよ</summary>
 
 **問題**: $q(\mathbf{x}_t \mid \mathbf{x}_{t-1}) = \mathcal{N}(\sqrt{\alpha_t} \mathbf{x}_{t-1}, (1-\alpha_t) \mathbf{I})$ から、$q(\mathbf{x}_t \mid \mathbf{x}_0)$ を導出せよ。
 
@@ -875,9 +871,10 @@ plot!(1:T, log.(snr_zt), label="Zero Terminal SNR", lw=2)
 $$
 q(\mathbf{x}_t \mid \mathbf{x}_0) = \mathcal{N}(\sqrt{\bar{\alpha}_t} \mathbf{x}_0, (1-\bar{\alpha}_t) \mathbf{I})
 $$
-:::
 
-:::details Q2: ε-prediction と x₀-prediction の変換式を示せ
+</details>
+
+<details><summary>Q2: ε-prediction と x₀-prediction の変換式を示せ</summary>
 
 **問題**: $\mathbf{x}_t = \sqrt{\bar{\alpha}_t} \mathbf{x}_0 + \sqrt{1-\bar{\alpha}_t} \boldsymbol{\epsilon}$ から、$\mathbf{x}_0$ を $\boldsymbol{\epsilon}$ で表せ。
 
@@ -892,9 +889,10 @@ $$
 $$
 \boldsymbol{\epsilon} = \frac{\mathbf{x}_t - \sqrt{\bar{\alpha}_t} \mathbf{x}_0}{\sqrt{1-\bar{\alpha}_t}}
 $$
-:::
 
-:::details Q3: DDIM の決定論性を説明せよ
+</details>
+
+<details><summary>Q3: DDIM の決定論性を説明せよ</summary>
 
 **問題**: DDIMが決定論的サンプリングを実現する理由は？
 
@@ -905,9 +903,10 @@ $$
 $$
 
 ノイズ項 $\sigma_t \boldsymbol{\epsilon}_t = 0$ → 同じ $\mathbf{x}_T$ から常に同じ $\mathbf{x}_0$ が生成される。
-:::
 
-:::details Q4: VLB の3項を説明せよ
+</details>
+
+<details><summary>Q4: VLB の3項を説明せよ</summary>
 
 **問題**: $L_\text{VLB} = L_T + \sum_{t=2}^T L_{t-1} + L_0$ の各項の意味は？
 
@@ -916,20 +915,25 @@ $$
 - $L_T = D_\text{KL}(q(\mathbf{x}_T \mid \mathbf{x}_0) \| p(\mathbf{x}_T))$: 最終ノイズが標準正規分布に近いか
 - $L_{t-1} = D_\text{KL}(q(\mathbf{x}_{t-1} \mid \mathbf{x}_t, \mathbf{x}_0) \| p_\theta(\mathbf{x}_{t-1} \mid \mathbf{x}_t))$: Reverse Processの精度
 - $L_0 = -\log p_\theta(\mathbf{x}_0 \mid \mathbf{x}_1)$: 再構成項
-:::
 
-:::details Q5: SNR視点でNoise Scheduleを評価せよ
+</details>
+
+<details><summary>Q5: SNR視点でNoise Scheduleを評価せよ</summary>
 
 **問題**: Linear schedule $\beta_t = 10^{-4} + (t-1)/(T-1) \cdot (0.02 - 10^{-4})$ の問題点は？
 
 **解答**: $\bar{\alpha}_T > 0$ → SNR$(T) > 0$ (Zero Terminal SNR を満たさない [^5])。訓練と推論の不一致が生じる。**解決策**: Cosine scheduleまたはRescaling。
-:::
 
-:::message
-**進捗: 85% 完了** 実験完了。自己診断テストで理解を確認。Zone 6で発展へ。
-:::
+</details>
+
+> **Note:** **進捗: 85% 完了** 実験完了。自己診断テストで理解を確認。Zone 6で発展へ。
 
 ---
+
+> Progress: 85%
+> **理解度チェック**
+> 1. DDPM Julia実装で累積積 $\bar{\alpha}_t = \prod_{s=1}^t \alpha_s$ を数値安定に計算するためlog空間を使う理由と、その実装パターンを述べよ。
+> 2. DDIM決定論的サンプリング（$\eta=0$）と確率的サンプリング（$\eta=1$）の違いをコードの対応変数と数式で示せ。
 
 ## 🚀 6. 発展ゾーン（20分）— 高次サンプリング & 最新研究
 
@@ -955,7 +959,7 @@ $$
 
 **結果**: 10-20ステップで高品質生成。
 
-:::details DPM-Solver++ 実装 (Julia)
+<details><summary>DPM-Solver++ 実装 (Julia)</summary>
 
 ```julia
 # DPM-Solver++ (2nd order)
@@ -964,25 +968,26 @@ function dpm_solver_step(model, ps, st, x_t, t, t_prev, ᾱ)
     ε_t, _ = model(x_t, t, ps, st)
 
     # Predict x₀
-    x₀_t = (x_t - sqrt(1 - ᾱ[t]) * ε_t) / sqrt(ᾱ[t])
+    x₀_t  = @. (x_t - sqrt(1 - ᾱ[t]) * ε_t) / sqrt(ᾱ[t])
 
     # Half step
-    t_mid = (t + t_prev) ÷ 2
-    x_mid = sqrt(ᾱ[t_mid]) * x₀_t + sqrt(1 - ᾱ[t_mid]) * ε_t
+    t_mid  = (t + t_prev) ÷ 2
+    x_mid  = @. sqrt(ᾱ[t_mid]) * x₀_t + sqrt(1 - ᾱ[t_mid]) * ε_t
 
     # Predict noise at t_mid
     ε_mid, _ = model(x_mid, t_mid, ps, st)
 
     # Predict x₀ at t_mid
-    x₀_mid = (x_mid - sqrt(1 - ᾱ[t_mid]) * ε_mid) / sqrt(ᾱ[t_mid])
+    x₀_mid = @. (x_mid - sqrt(1 - ᾱ[t_mid]) * ε_mid) / sqrt(ᾱ[t_mid])
 
     # Final step (using x₀_mid as better estimate)
-    x_prev = sqrt(ᾱ[t_prev]) * x₀_mid + sqrt(1 - ᾱ[t_prev]) * ε_mid
+    x_prev = @. sqrt(ᾱ[t_prev]) * x₀_mid + sqrt(1 - ᾱ[t_prev]) * ε_mid
 
     return x_prev
 end
 ```
-:::
+
+</details>
 
 #### 6.1.2 UniPC (Zhao+ 2023)
 
@@ -1051,17 +1056,17 @@ function ddim_step_cfg(model, ps, st, x_t, t, t_prev, ᾱ, y, w; η=0.0)
     ε_uncond, _ = model(x_t, t, nothing, ps, st)
 
     # CFG formula
-    ε_guided = (1 + w) * ε_cond - w * ε_uncond
+    ε_guided = @. (1 + w) * ε_cond - w * ε_uncond
 
     # DDIM step with guided ε
-    ᾱ_t = ᾱ[t]
+    ᾱ_t    = ᾱ[t]
     ᾱ_prev = (t_prev > 0) ? ᾱ[t_prev] : 1.0
 
-    x₀_pred = (x_t - sqrt(1 - ᾱ_t) * ε_guided) / sqrt(ᾱ_t)
-    σ_t = η * sqrt((1 - ᾱ_prev) / (1 - ᾱ_t)) * sqrt(1 - ᾱ_t / ᾱ_prev)
-    dir_xt = sqrt(1 - ᾱ_prev - σ_t^2) * ε_guided
+    x₀_pred = @. (x_t - sqrt(1 - ᾱ_t) * ε_guided) / sqrt(ᾱ_t)
+    σ_t     = η * sqrt((1 - ᾱ_prev) / (1 - ᾱ_t)) * sqrt(1 - ᾱ_t / ᾱ_prev)
+    dir_xt  = @. sqrt(1 - ᾱ_prev - σ_t^2) * ε_guided
 
-    x_prev = sqrt(ᾱ_prev) * x₀_pred + dir_xt
+    x_prev  = @. sqrt(ᾱ_prev) * x₀_pred + dir_xt
     return x_prev
 end
 ```
@@ -1164,15 +1169,12 @@ function ddpm_inpaint(model, ps, st, x_T, mask, known_region, β, α, ᾱ, T)
         ε_pred, _ = model(x_t, t, ps, st)
 
         # DDPM reverse step
-        μ = (x_t - (1 - α[t]) / sqrt(1 - ᾱ[t]) * ε_pred) / sqrt(α[t])
-        σ = sqrt((1 - ᾱ[t-1]) / (1 - ᾱ[t]) * (1 - α[t]))
-        z = (t > 1) ? randn(size(x_t)) : zeros(size(x_t))
-        x_t_next = μ + σ * z
+        μ  = @. (x_t - (1 - α[t]) / sqrt(1 - ᾱ[t]) * ε_pred) / sqrt(α[t])
+        σ  = sqrt((1 - ᾱ[t-1]) / (1 - ᾱ[t]) * (1 - α[t]))
+        z  = (t > 1) ? randn(Float32, size(x_t)) : zero(x_t)
 
         # Replace known region (preserve known pixels)
-        x_t_next = mask .* x_t_next .+ (1 .- mask) .* known_region
-
-        x_t = x_t_next
+        x_t = @. mask * (μ + σ * z) + (1 - mask) * known_region
     end
 
     return x_t
@@ -1203,10 +1205,10 @@ function ddpm_super_resolution(model, ps, st, x_T, x_low_res, β, α, ᾱ, T)
         ε_pred, _ = model(x_input, t, ps, st)
 
         # DDPM step
-        μ = (x_t - (1 - α[t]) / sqrt(1 - ᾱ[t]) * ε_pred) / sqrt(α[t])
+        μ = @. (x_t - (1 - α[t]) / sqrt(1 - ᾱ[t]) * ε_pred) / sqrt(α[t])
         σ = sqrt((1 - ᾱ[t-1]) / (1 - ᾱ[t]) * (1 - α[t]))
-        z = (t > 1) ? randn(size(x_t)) : zeros(size(x_t))
-        x_t = μ + σ * z
+        z = (t > 1) ? randn(Float32, size(x_t)) : zero(x_t)
+        x_t = @. μ + σ * z
     end
 
     return x_t
@@ -1389,27 +1391,27 @@ impl DDPMInference {
         Ok(epsilon.into_dimensionality::<ndarray::Ix4>()?)
     }
 
-    pub fn ddim_sample(&self, x_t: Array4<f32>, steps: usize, eta: f32) -> Result<Array4<f32>, Box<dyn std::error::Error>> {
+    pub fn ddim_sample(&self, x_t: Array4<f32>, steps: usize, η: f32) -> Result<Array4<f32>, Box<dyn std::error::Error>> {
         let mut x = x_t;
         let T = self.alpha_bar.len();
         let step_indices: Vec<usize> = (0..steps).map(|i| T * i / steps).collect();
 
         for i in (1..step_indices.len()).rev() {
-            let t = step_indices[i];
-            let t_prev = step_indices[i - 1];
+            let (t, t_prev) = (step_indices[i], step_indices[i - 1]);
 
             // Predict noise
-            let epsilon = self.predict_noise(&x, t)?;
+            let ε = self.predict_noise(&x, t)?;
 
             // DDIM step
-            let alpha_bar_t = self.alpha_bar[t];
-            let alpha_bar_prev = self.alpha_bar[t_prev];
+            let ᾱ_t    = self.alpha_bar[t];
+            let ᾱ_prev = self.alpha_bar[t_prev];
 
-            let x_0_pred = (&x - (1.0 - alpha_bar_t).sqrt() * &epsilon) / alpha_bar_t.sqrt();
-            let sigma_t = eta * ((1.0 - alpha_bar_prev) / (1.0 - alpha_bar_t)).sqrt() * (1.0 - alpha_bar_t / alpha_bar_prev).sqrt();
-            let dir_xt = (1.0 - alpha_bar_prev - sigma_t.powi(2)).sqrt() * &epsilon;
+            let x_0_pred = (&x - (1.0 - ᾱ_t).sqrt() * &ε) / ᾱ_t.sqrt();
+            let σ_t = η * ((1.0 - ᾱ_prev) / (1.0 - ᾱ_t)).sqrt()
+                         * (1.0 - ᾱ_t / ᾱ_prev).sqrt();
+            let dir_xt = (1.0 - ᾱ_prev - σ_t.powi(2)).sqrt() * &ε;
 
-            x = alpha_bar_prev.sqrt() * x_0_pred + dir_xt;
+            x = ᾱ_prev.sqrt() * x_0_pred + dir_xt;
         }
 
         Ok(x)
@@ -1427,7 +1429,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Sample
     let x_t = Array4::<f32>::from_shape_fn((1, 1, 28, 28), |_| rand::random::<f32>());
     let x_0 = ddpm.ddim_sample(x_t, 50, 0.0)?;
-
     println!("Generated sample shape: {:?}", x_0.shape());
     Ok(())
 }
@@ -1468,11 +1469,14 @@ graph LR
 | **Consistency Models** | 1ステップ生成で品質維持 | [arXiv:2303.01469](https://arxiv.org/abs/2303.01469) (Song+ 2023) |
 | **Flow Matching** | ODEベースの新しい定式化 | [arXiv:2210.02747](https://arxiv.org/abs/2210.02747) (Lipman+ 2022) |
 
-:::message
-**進捗: 95% 完了** 高次サンプリング・Improved DDPM・Guidanceを概観。Zone 7で総括へ。
-:::
+> **Note:** **進捗: 95% 完了** 高次サンプリング・Improved DDPM・Guidanceを概観。Zone 7で総括へ。
 
 ---
+
+> Progress: 95%
+> **理解度チェック**
+> 1. DDPMの最適収束レート $O(d/T)$（arXiv:2510.27562）において $d$ が指す量と、収束を保証するステップ数 $T$ の選び方の指針を述べよ。
+> 2. Cosineスケジュールが Linearより高SNR領域で有利で、低SNR領域で差が縮まる理由を $\bar{\alpha}_t$ のグラフの形状と対応させて説明せよ。
 
 ## 🎓 6. 振り返り + 統合ゾーン（30分）— まとめ & 次回予告
 
@@ -1499,7 +1503,7 @@ $$
 
 ### 7.2 FAQ
 
-:::details Q1: DDPMとScore Matchingの違いは？
+<details><summary>Q1: DDPMとScore Matchingの違いは？</summary>
 
 **A**: **本質的に同じ** (Section 3.10)。DDPMは離散時刻、Score Matchingは連続時刻。数式:
 
@@ -1508,27 +1512,32 @@ $$
 $$
 
 ノイズ予測 = スコア予測 (rescaled)。
-:::
 
-:::details Q2: なぜ $L_\text{simple}$ が $L_\text{VLB}$ より優れる？
+</details>
+
+<details><summary>Q2: なぜ $L_\text{simple}$ が $L_\text{VLB}$ より優れる？</summary>
 
 **A**: $L_\text{VLB}$ の重み $\frac{\beta_t^2}{2\sigma_t^2 \alpha_t (1-\bar{\alpha}_t)}$ は、低ノイズ領域を過重視 → 知覚品質低下。$L_\text{simple}$ は全時刻を均等に学習 → FID改善。
-:::
 
-:::details Q3: DDIM の $\eta$ パラメータの意味は？
+</details>
+
+<details><summary>Q3: DDIM の $\eta$ パラメータの意味は？</summary>
 
 **A**: $\eta = 0$: 決定論的 (同じ $\mathbf{x}_T$ → 同じ $\mathbf{x}_0$)。$\eta = 1$: DDPM風 (確率的)。中間値で制御可能。
-:::
 
-:::details Q4: Cosine schedule vs Linear schedule の違いは？
+</details>
+
+<details><summary>Q4: Cosine schedule vs Linear schedule の違いは？</summary>
 
 **A**: **Cosine** (推奨): SNR緩やかに減少、訓練安定、Zero Terminal SNRに近い。**Linear**: 古い、$\bar{\alpha}_T > 0$ で訓練/推論不一致。
-:::
 
-:::details Q5: U-Net の Self-Attention はどこに配置？
+</details>
+
+<details><summary>Q5: U-Net の Self-Attention はどこに配置？</summary>
 
 **A**: **16×16以下の低解像度** でのみ。計算量 $O(N^2)$ のため、高解像度では省略。MNISTでは28×28なので、1層のみで十分。
-:::
+
+</details>
 
 ### 7.3 学習スケジュール (1週間プラン)
 
@@ -1558,9 +1567,7 @@ $$
 
 **接続**: DDPM離散 → SDE連続 → Flow Matching統一 (第38回)。
 
-:::message
-**進捗: 100% 完了** 🏆 第36回完了！DDPM理論・実装・実験を完全マスター。第37回でSDE連続時間へ。
-:::
+> **Note:** **進捗: 100% 完了** 🏆 第36回完了！DDPM理論・実装・実験を完全マスター。第37回でSDE連続時間へ。
 
 ---
 
@@ -1588,27 +1595,27 @@ DDPM [^1] (2020) は1000ステップ。だが2021年のDDIM [^2] で50ステッ�
 
 [^1]: Ho, J., Jain, A., & Abbeel, P. (2020). Denoising Diffusion Probabilistic Models. *NeurIPS 2020*. [arXiv:2006.11239](https://arxiv.org/abs/2006.11239)
 
-@[card](https://arxiv.org/abs/2006.11239)
+<https://arxiv.org/abs/2006.11239>
 
 [^2]: Song, J., Meng, C., & Ermon, S. (2020). Denoising Diffusion Implicit Models. *ICLR 2021*. [arXiv:2010.02502](https://arxiv.org/abs/2010.02502)
 
-@[card](https://arxiv.org/abs/2010.02502)
+<https://arxiv.org/abs/2010.02502>
 
 [^3]: Nichol, A., & Dhariwal, P. (2021). Improved Denoising Diffusion Probabilistic Models. *ICML 2021*. [arXiv:2102.09672](https://arxiv.org/abs/2102.09672)
 
-@[card](https://arxiv.org/abs/2102.09672)
+<https://arxiv.org/abs/2102.09672>
 
 [^4]: Lu, C., Zhou, Y., Bao, F., Chen, J., Li, C., & Zhu, J. (2022). DPM-Solver++: Fast Solver for Guided Sampling of Diffusion Probabilistic Models. *NeurIPS 2022*. [arXiv:2211.01095](https://arxiv.org/abs/2211.01095)
 
-@[card](https://arxiv.org/abs/2211.01095)
+<https://arxiv.org/abs/2211.01095>
 
 [^5]: Lin, S., Liu, B., Li, J., & Yang, X. (2023). Common Diffusion Noise Schedules and Sample Steps are Flawed. *WACV 2024*. [arXiv:2305.08891](https://arxiv.org/abs/2305.08891)
 
-@[card](https://arxiv.org/abs/2305.08891)
+<https://arxiv.org/abs/2305.08891>
 
 [^6]: Song, Y., Sohl-Dickstein, J., Kingma, D. P., Kumar, A., Ermon, S., & Poole, B. (2020). Score-Based Generative Modeling through Stochastic Differential Equations. *ICLR 2021*. [arXiv:2011.13456](https://arxiv.org/abs/2011.13456)
 
-@[card](https://arxiv.org/abs/2011.13456)
+<https://arxiv.org/abs/2011.13456>
 
 ### 教科書
 
@@ -1617,26 +1624,13 @@ DDPM [^1] (2020) は1000ステップ。だが2021年のDDIM [^2] で50ステッ�
 
 ---
 
-## 記法規約
+## 著者リンク
 
-| 記号 | 意味 |
-|:-----|:-----|
-| $\mathbf{x}_0$ | データ分布からのサンプル |
-| $\mathbf{x}_t$ | 時刻 $t$ のノイズ付き画像 |
-| $\mathbf{x}_T$ | 純粋なノイズ $\sim \mathcal{N}(0, \mathbf{I})$ |
-| $\boldsymbol{\epsilon}$ | ガウスノイズ $\sim \mathcal{N}(0, \mathbf{I})$ |
-| $\beta_t$ | ノイズスケジュール (noise schedule) |
-| $\alpha_t$ | $1 - \beta_t$ |
-| $\bar{\alpha}_t$ | $\prod_{i=1}^t \alpha_i$ (累積積) |
-| $\text{SNR}(t)$ | Signal-to-Noise Ratio = $\bar{\alpha}_t / (1-\bar{\alpha}_t)$ |
-| $q(\mathbf{x}_t \mid \mathbf{x}_{t-1})$ | Forward Process (固定) |
-| $p_\theta(\mathbf{x}_{t-1} \mid \mathbf{x}_t)$ | Reverse Process (学習対象) |
-| $\boldsymbol{\epsilon}_\theta(\mathbf{x}_t, t)$ | ノイズ予測ネットワーク (U-Net) |
-| $\boldsymbol{\mu}_\theta(\mathbf{x}_t, t)$ | Reverse Processの平均 |
-| $\sigma_t^2$ | Reverse Processの分散 |
-| $\tilde{\boldsymbol{\mu}}_t, \tilde{\beta}_t$ | 真のReverse分布の平均・分散 (ベイズ反転) |
-| $L_\text{VLB}$ | Variational Lower Bound |
----
+- Blog: https://fumishiki.dev
+- X: https://x.com/fumishiki
+- LinkedIn: https://www.linkedin.com/in/fumitakamurakami
+- GitHub: https://github.com/fumishiki
+- Hugging Face: https://huggingface.co/fumishiki
 
 ## ライセンス
 

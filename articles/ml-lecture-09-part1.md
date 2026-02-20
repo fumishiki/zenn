@@ -4,6 +4,11 @@ emoji: "🧠"
 type: "tech"
 topics: ["machinelearning", "deeplearning", "variationalinference", "rust", "python"]
 published: true
+slug: "ml-lecture-09-part1"
+difficulty: "advanced"
+time_estimate: "90 minutes"
+languages: ["Python", "Rust"]
+keywords: ["機械学習", "深層学習", "生成モデル"]
 ---
 
 
@@ -14,12 +19,12 @@ published: true
 > 本講義から、Course I（数学基礎編）で獲得した武器を使い、生成モデルの理論と実装に挑む。
 > **新言語登場**: 🦀 Rust初登場 — Python地獄→ゼロコピーで50x高速化の衝撃を体感。
 
-:::message
-**前提知識**: Course I 第1-8回完了
-**到達目標**: NN基礎習得、変分推論・ELBOの完全理解、Rust初体験でゼロコピーの威力を実感
-**所要時間**: 約3時間
-**進捗**: Course II 全体の10% (1/10回)
-:::
+> **Note:** **前提知識**: Course I 第1-8回完了
+> **到達目標**: NN基礎習得、変分推論・ELBOの完全理解、Rust初体験でゼロコピーの威力を実感
+> **所要時間**: 約3時間
+> **進捗**: Course II 全体の10% (1/10回)
+
+> **📖 この記事は前編（理論編）です** 実装編は [【後編】第9回](/articles/ml-lecture-09-part2) をご覧ください。
 
 ---
 
@@ -29,9 +34,10 @@ published: true
 import numpy as np
 
 # ELBO = E[log p(x|z)] - KL[q(z|x) || p(z)]
-z = np.random.randn(100, 10)  # サンプル100個、潜在次元10
-recon_loss = -np.mean(np.sum(z**2, axis=1))  # 再構成項(簡易版)
-kl_loss = 0.5 * np.mean(np.sum(z**2, axis=1))  # KL正則化項(ガウス仮定)
+z = np.random.randn(100, 10)          # サンプル100個、潜在次元10
+z_sq = (z**2).sum(axis=1)            # 各サンプルの ||z||^2（再利用）
+recon_loss = -z_sq.mean()            # 再構成項(簡易版)
+kl_loss = 0.5 * z_sq.mean()         # KL正則化項(ガウス仮定)
 elbo = recon_loss - kl_loss
 print(f"ELBO = {elbo:.4f}  (再構成: {recon_loss:.4f}, KL: {kl_loss:.4f})")
 ```
@@ -48,40 +54,13 @@ $$
 
 これが **変分オートエンコーダ(VAE)** の損失関数。第10回で完全展開する。
 
-:::message
-**進捗: 3%完了** — ELBOの"形"を見た。次は数式の裏側へ。
-:::
+> **Note:** **進捗: 3%完了** — ELBOの"形"を見た。次は数式の裏側へ。
 
 ---
 
 ## 🎮 1. 体験ゾーン（10分）— NN基礎×3 & ELBOの全体像
 
 ### 1.1 MLP (Multi-Layer Perceptron) — 全結合層の積み重ね
-
-```python
-import numpy as np
-
-def relu(x):
-    return np.maximum(0, x)
-
-def mlp_forward(x, W1, b1, W2, b2):
-    """2層MLP: x -> h1 -> y"""
-    h1 = relu(x @ W1 + b1)  # 隠れ層: ReLU活性化
-    y = h1 @ W2 + b2         # 出力層: 線形
-    return y
-
-# パラメータ初期化
-d_in, d_hidden, d_out = 784, 128, 10  # MNIST: 28x28=784 -> 128 -> 10
-W1 = np.random.randn(d_in, d_hidden) * 0.01
-b1 = np.zeros(d_hidden)
-W2 = np.random.randn(d_hidden, d_out) * 0.01
-b2 = np.zeros(d_out)
-
-# フォワード
-x = np.random.randn(32, 784)  # バッチサイズ32
-logits = mlp_forward(x, W1, b1, W2, b2)
-print(f"出力shape: {logits.shape}")  # (32, 10)
-```
 
 **数式**:
 $$
@@ -95,18 +74,6 @@ $$
 
 ### 1.2 CNN (Convolutional Neural Network) — 平行移動等変性
 
-```python
-# 畳み込み演算の直感(1D簡易版)
-x = np.array([1, 2, 3, 4, 5])
-kernel = np.array([0.5, 1.0, 0.5])
-
-# 手動畳み込み
-output = []
-for i in range(len(x) - len(kernel) + 1):
-    output.append(np.sum(x[i:i+len(kernel)] * kernel))
-print(f"Convolution output: {output}")  # [2.0, 3.0, 4.0]
-```
-
 **数式** (2D畳み込み):
 $$
 (\mathbf{X} * \mathbf{K})_{ij} = \sum_{m,n} \mathbf{X}_{i+m, j+n} \mathbf{K}_{m,n}
@@ -117,27 +84,6 @@ $$
 **限界の予告**: 受容野が有限 → 大域的文脈の獲得が困難 → Attentionへ(第14回で回収)。
 
 ### 1.3 RNN (Recurrent Neural Network) — 隠れ状態の逐次更新
-
-```python
-def rnn_step(x_t, h_prev, W_xh, W_hh, b_h):
-    """RNNの1ステップ: h_t = tanh(x_t W_xh + h_{t-1} W_hh + b_h)"""
-    h_t = np.tanh(x_t @ W_xh + h_prev @ W_hh + b_h)
-    return h_t
-
-# パラメータ
-d_input, d_hidden = 50, 128
-W_xh = np.random.randn(d_input, d_hidden) * 0.01
-W_hh = np.random.randn(d_hidden, d_hidden) * 0.01
-b_h = np.zeros(d_hidden)
-
-# 時系列処理
-seq_length = 10
-h = np.zeros(d_hidden)
-for t in range(seq_length):
-    x_t = np.random.randn(d_input)
-    h = rnn_step(x_t, h, W_xh, W_hh, b_h)
-print(f"最終隠れ状態: {h[:5]}")  # 最初の5次元のみ表示
-```
 
 **数式**:
 $$
@@ -194,11 +140,14 @@ $$
 | **化石への道** | CNN/RNNは後にAttentionに置き換わる(第14回) |
 | **ELBO** | $\log p(\mathbf{x}) \geq \mathcal{L}$ — 計算不能な対数尤度を下から近似 |
 
-:::message
-**進捗: 10%完了** — NNの基礎とELBOの全体像を掴んだ。次は動機と位置づけ。
-:::
+> **Note:** **進捗: 10%完了** — NNの基礎とELBOの全体像を掴んだ。次は動機と位置づけ。
 
 ---
+
+> Progress: 10%
+> **理解度チェック**
+> 1. MLP/CNN/RNNの「致命的限界」をそれぞれ1文で述べよ。勾配消失・受容野・逐次処理のうち、どれがどのアーキテクチャの問題か？
+> 2. ELBOの2項分解 $\mathcal{L} = \mathbb{E}_{q}[\log p(\mathbf{x}|\mathbf{z})] - D_\text{KL}(q \| p)$ において、KL項がゼロに近づくとき何が起きるか直感的に説明せよ。
 
 ## 🧩 2. 直感ゾーン（15分）— コース概論と学習戦略
 
@@ -269,13 +218,6 @@ graph TD
 
 **トロイの木馬戦術**:
 
-```
-第1-4回:  🐍 Python信頼       「数式がそのまま読める」
-第5-8回:  🐍💢 不穏な影       「%timeit で計測...遅くない？」
-第9回:    🐍🔥→🦀 Rust登場    「50x速い！...だがCUDA直書き？苦痛...」
-第10回:   ⚡ Julia登場         「数式が1対1...こんなに綺麗に書けるの？」
-第11-18回: ⚡🦀 役割分担定着    「訓練=Julia、推論=Rust」
-```
 
 **今回の体験内容**:
 
@@ -334,11 +276,14 @@ graph TD
 | **言語移行** | 第9回 Rust初登場 → 第10回 Julia登場 |
 | **差別化** | 松尾研の完全上位互換 (理論×実装×最新) |
 
-:::message
-**進捗: 20%完了** — コース全体の位置づけを理解。次は数式修行へ。
-:::
+> **Note:** **進捗: 20%完了** — コース全体の位置づけを理解。次は数式修行へ。
 
 ---
+
+> Progress: 20%
+> **理解度チェック**
+> 1. Course I（第1-8回）で学んだ「Jensen不等式」がELBO導出のどのステップで登場するか、式 $\log \mathbb{E}_q[f(\mathbf{z})] \geq \mathbb{E}_q[\log f(\mathbf{z})]$ を参照して説明せよ。
+> 2. 変分推論が「MCMC(正確だが遅い)に対する高速代替」として機能する理由を、近似事後分布 $q_\phi(\mathbf{z}|\mathbf{x})$ の役割から述べよ。
 
 ## 📐 3. 数式修行ゾーン（60分）— 理論の完全展開
 
@@ -534,9 +479,6 @@ $$
 
 **CNNの典型構造**:
 
-```
-Conv → ReLU → (Conv → ReLU) × N → MaxPool → ... → Flatten → MLP → Output
-```
 
 #### 3.2.5 CNNから化石への道
 
@@ -1109,17 +1051,18 @@ $$
 | **Information Bottleneck** | 圧縮と予測のトレードオフ / β-VAE への伏線 |
 | **Boss Battle** | Course I 数学でELBOを完全分解 — 全てがつながった |
 
-:::message
-**進捗: 50%完了** — 数式修行完了！次は実装へ。
-:::
+> **Note:** **進捗: 50%完了** — 数式修行完了！次は実装へ。
 
 ---
 
+> Progress: 50%
+> **理解度チェック**
+> 1. Reparameterization Trick $\mathbf{z} = \mu + \sigma \odot \epsilon, \; \epsilon \sim \mathcal{N}(0, I)$ がREINFORCEより分散が低い理由を、勾配 $\nabla_\phi \mathbb{E}_{q_\phi}[\cdot]$ の推定量として説明せよ。
+> 2. Mean-Field近似 $q(\mathbf{z}) = \prod_i q_i(z_i)$ の「最適解」$q_i^*(z_i) \propto \exp(\mathbb{E}_{j \neq i}[\log p(\mathbf{z}, \mathbf{x})])$ は何を意味するか、Coordinate Ascent VIの更新ステップと対応させて述べよ。
+
 ## 補遺 — 最新の変分推論研究 (2023-2025)
 
-:::message
-**変分推論の進化**: VAEの基礎理論（2013年）から10年以上が経過し、Normalizing Flows・Amortization Gap縮小・高次元スケーリングなど、実用的な改善が続いている[^20][^21][^22]。本節では最新研究のエッセンスを紹介。
-:::
+> **Note:** **変分推論の進化**: VAEの基礎理論（2013年）から10年以上が経過し、Normalizing Flows・Amortization Gap縮小・高次元スケーリングなど、実用的な改善が続いている[^20][^21][^22]。本節では最新研究のエッセンスを紹介。
 
 ### 補遺1 — Normalizing Flows による柔軟な事後分布
 
@@ -1192,24 +1135,6 @@ Jacobian は下三角行列となり、$\det J = \exp\left(\sum_i s(\mathbf{z}_{
 
 #### VAE with Normalizing Flows のアルゴリズム
 
-```plaintext
-# エンコーダ
-μ_φ(x), log_σ_φ(x) = Encoder(x)
-z_0 ~ N(μ_φ, diag(σ_φ²))
-
-# Normalizing Flows
-for k=1 to K:
-    z_k = f_k(z_{k-1})
-    log_det_J += log|det(∂f_k/∂z_{k-1})|
-
-# ELBO with Flow
-log q_K(z_K|x) = log q_0(z_0|x) - log_det_J
-ELBO = E_{q_K}[log p(x|z_K)] - D_KL(q_K(z|x) || p(z))
-      ≈ log p(x|z_K) - [log q_K(z_K|x) - log p(z_K)]
-
-# デコーダ
-x̂ = Decoder(z_K)
-```
 
 #### 実証結果（2024年研究[^21]）
 
@@ -1240,19 +1165,6 @@ $$
 
 **アイデア**: エンコーダの出力を初期値とし、テスト時に数ステップの勾配上昇を実行:
 
-```plaintext
-# 訓練時
-μ_0, log_σ_0 = Encoder(x)  # Amortized初期化
-ELBO_loss = -ELBO(x; μ_0, log_σ_0)
-
-# テスト時
-μ, log_σ = Encoder(x)
-for i=1 to T:
-    μ, log_σ ← μ + α ∇_{μ,log_σ} ELBO(x; μ, log_σ)  # 個別最適化
-
-z ~ N(μ, diag(exp(2*log_σ)))
-x̂ = Decoder(z)
-```
 
 **効果**:
 - $T=0$ (通常VAE): Gap = 5.2 nats
@@ -1438,24 +1350,7 @@ $$
 $$
 
 **スケジュール例**:
-```python
-def beta_schedule(epoch, total_epochs, beta_max=1.0, warmup_epochs=10):
-    """KL項の重みを徐々に増加"""
-    if epoch < warmup_epochs:
-        return beta_max * (epoch / warmup_epochs)
-    return beta_max
 
-# 訓練ループ
-for epoch in range(total_epochs):
-    beta = beta_schedule(epoch, total_epochs)
-    for x in dataloader:
-        z, mu, logvar = encode(x)
-        x_recon = decode(z)
-        recon_loss = -log_likelihood(x, x_recon)
-        kl_loss = kl_divergence(mu, logvar)
-        loss = recon_loss + beta * kl_loss
-        loss.backward()
-```
 
 **効果**:
 - 初期: $\beta \approx 0$ → エンコーダが情報豊富な $\mathbf{z}$ を学習
@@ -1471,13 +1366,6 @@ $$
 \mathcal{L}_{\text{free-bits}} = \mathbb{E}_q [\log p(\mathbf{x}|\mathbf{z})] - \sum_{i=1}^d \max(D_{\text{KL}}(q_i \| p_i), \lambda)
 $$
 
-```python
-def free_bits_kl(mu, logvar, free_bits=2.0):
-    """次元ごとに KL ≥ free_bits を保証"""
-    kl_per_dim = 0.5 * (mu**2 + logvar.exp() - logvar - 1)
-    kl_clamped = torch.clamp(kl_per_dim, min=free_bits)
-    return kl_clamped.sum(dim=-1)
-```
 
 **推奨値**: $\lambda = 2.0$ nats（各次元が最低2ビットの情報を保持）。
 
@@ -1489,17 +1377,6 @@ $$
 \mathbf{W}_{\text{reg}} = \frac{\mathbf{W}}{\sigma_{\max}(\mathbf{W})} \cdot \text{clip}(\sigma_{\max}(\mathbf{W}), 0.9, 1.1)
 $$
 
-```python
-import torch.nn.utils.spectral_norm as spectral_norm
-
-class FlowLayer(nn.Module):
-    def __init__(self, dim):
-        super().__init__()
-        self.weight = spectral_norm(nn.Linear(dim, dim))
-
-    def forward(self, z):
-        return self.weight(z)
-```
 
 **効果**: Jacobian の行列式が $[10^{-5}, 10^5]$ の範囲に収まり、勾配が安定。
 
@@ -1509,28 +1386,6 @@ $$
 \log p(\mathbf{x}) \geq \mathcal{L}_K = \mathbb{E}_{\mathbf{z}_{1:K} \sim q} \left[ \log \frac{1}{K} \sum_{k=1}^K \frac{p(\mathbf{x}, \mathbf{z}_k)}{q(\mathbf{z}_k|\mathbf{x})} \right]
 $$
 
-```python
-def iwae_elbo(x, encoder, decoder, K=50):
-    """K サンプルによる IWAE objective"""
-    # エンコード
-    mu, logvar = encoder(x)  # shape: (batch, latent_dim)
-
-    # K個のサンプルを生成
-    eps = torch.randn(K, *mu.shape)  # (K, batch, latent_dim)
-    z = mu + eps * (0.5 * logvar).exp()
-
-    # ログ尤度と事前分布
-    log_p_x_z = decoder.log_prob(x.unsqueeze(0), z)  # (K, batch)
-    log_p_z = -0.5 * (z**2).sum(dim=-1)  # (K, batch)
-    log_q_z_x = -0.5 * ((z - mu)**2 / logvar.exp() + logvar).sum(dim=-1)
-
-    # Importance weights
-    log_w = log_p_x_z + log_p_z - log_q_z_x  # (K, batch)
-
-    # log-sum-exp の安定計算
-    iwae_elbo = torch.logsumexp(log_w, dim=0) - np.log(K)  # (batch,)
-    return -iwae_elbo.mean()  # 負号（最大化→最小化）
-```
 
 **効果**: $K=1$ (標準ELBO) → $K=50$ で log-likelihood が $\sim$10 nats 改善。
 
@@ -1551,33 +1406,6 @@ $$
 \mathcal{L} = \mathbb{E}_{q} [\log p(\mathbf{x}|\mathbf{z}_1)] - D_{\text{KL}}(q(\mathbf{z}_1|\mathbf{x}) \| p(\mathbf{z}_1|\mathbf{z}_2)) - D_{\text{KL}}(q(\mathbf{z}_2|\mathbf{z}_1) \| p(\mathbf{z}_2))
 $$
 
-```python
-class HierarchicalVAE(nn.Module):
-    def __init__(self):
-        super().__init__()
-        self.enc_z1 = Encoder(input_dim, z1_dim)
-        self.enc_z2 = Encoder(z1_dim, z2_dim)
-        self.dec_z1 = Decoder(z2_dim, z1_dim)
-        self.dec_x = Decoder(z1_dim, input_dim)
-
-    def elbo(self, x):
-        # Bottom-up encoding
-        mu1, logvar1 = self.enc_z1(x)
-        z1 = reparameterize(mu1, logvar1)
-        mu2, logvar2 = self.enc_z2(z1)
-        z2 = reparameterize(mu2, logvar2)
-
-        # Top-down decoding
-        mu1_prior, logvar1_prior = self.dec_z1(z2)
-        x_recon = self.dec_x(z1)
-
-        # ELBO terms
-        recon = -log_likelihood(x, x_recon)
-        kl_z1 = kl_divergence(mu1, logvar1, mu1_prior, logvar1_prior)
-        kl_z2 = kl_divergence(mu2, logvar2)  # N(0,I) prior
-
-        return recon + kl_z1 + kl_z2
-```
 
 **応用**: 画像（ピクセル・テクスチャ・オブジェクト）、音声（波形・フォルマント・韻律）の階層表現。
 
@@ -1585,22 +1413,6 @@ class HierarchicalVAE(nn.Module):
 
 離散 $\mathbf{z} \in \{0, 1\}^d$ の場合、勾配が不連続 → Gumbel-Softmax や Straight-Through を使用。
 
-```python
-def straight_through_bernoulli(logits):
-    """Forward: 離散サンプリング, Backward: 連続近似"""
-    # Forward
-    probs = torch.sigmoid(logits)
-    z_hard = (probs > 0.5).float()
-
-    # Straight-through: 勾配は probs に流す
-    z = z_hard - probs.detach() + probs
-    return z
-
-# 訓練
-logits = encoder(x)
-z = straight_through_bernoulli(logits)  # {0, 1}^d
-x_recon = decoder(z)
-```
 
 **理論的根拠**: REINFORCE の分散削減版。バイアスはあるが、実用上は有効。
 
@@ -1612,13 +1424,6 @@ $$
 
 $T > 1$ で分散が増加 → 探索が活発化。
 
-```python
-def tempered_sample(mu, logvar, temperature=1.5):
-    """温度パラメータで分散を調整"""
-    std_tempered = (0.5 * logvar).exp() * np.sqrt(temperature)
-    eps = torch.randn_like(mu)
-    return mu + std_tempered * eps
-```
 
 **使い分け**:
 - 訓練初期: $T=2.0$ （多様なサンプルを探索）
@@ -1762,25 +1567,25 @@ Rate-Distortion 理論との対応:
 ### 主要論文
 
 [^20]: Rezende, D. J., & Mohamed, S. (2015). Variational Inference with Normalizing Flows. *ICML 2015*.
-@[card](https://arxiv.org/abs/1505.05770)
+<https://arxiv.org/abs/1505.05770>
 
 [^21]: Akram, A., Lee, J., & Shelton, C. R. (2024). Stable Training of Normalizing Flows for High-dimensional Variational Inference.
-@[card](https://arxiv.org/abs/2402.16408)
+<https://arxiv.org/abs/2402.16408>
 
 [^22]: Vafaii, H., Galor, D., Yates, J. L., Butts, D. A., & Pillow, J. W. (2024). Poisson Variational Autoencoder. *NeurIPS 2024*.
-@[card](https://proceedings.neurips.cc/paper_files/paper/2024/hash/4f3cb9576dc99d62b80726690453716f-Abstract-Conference.html)
+<https://proceedings.neurips.cc/paper_files/paper/2024/hash/4f3cb9576dc99d62b80726690453716f-Abstract-Conference.html>
 
 [^23]: van den Berg, R., Hasenclever, L., Tomczak, J. M., & Welling, M. (2018). Sylvester Normalizing Flows for Variational Inference. *UAI 2018*.
-@[card](https://arxiv.org/abs/1803.05649)
+<https://arxiv.org/abs/1803.05649>
 
 [^24]: Kim, Y., Wiseman, S., Miller, A. C., Sontag, D., & Rush, A. M. (2021). Reducing the Amortization Gap in Variational Autoencoders: A Bayesian Random Function Approach.
-@[card](https://arxiv.org/abs/2102.03151)
+<https://arxiv.org/abs/2102.03151>
 
 [^25]: Zhang, Y., Williamson, S. A., & Murphy, S. A. (2023). Variational Inference for Longitudinal Data Using Normalizing Flows.
-@[card](https://arxiv.org/abs/2303.14220)
+<https://arxiv.org/abs/2303.14220>
 
-[^26]: Ramesh, P., Doucet, A., & Teh, Y. W. (2024). Variational Autoencoders for Efficient Simulation-Based Inference.
-@[card](https://arxiv.org/abs/2411.14511)
+[^26]: Nautiyal, M., et al. (2024). Variational Autoencoders for Efficient Simulation-Based Inference.
+<https://arxiv.org/abs/2411.14511>
 
 ### 追加文献
 
@@ -1795,6 +1600,14 @@ Rate-Distortion 理論との対応:
 ---
 
 ---
+
+## 著者リンク
+
+- Blog: https://fumishiki.dev
+- X: https://x.com/fumishiki
+- LinkedIn: https://www.linkedin.com/in/fumitakamurakami
+- GitHub: https://github.com/fumishiki
+- Hugging Face: https://huggingface.co/fumishiki
 
 ## ライセンス
 

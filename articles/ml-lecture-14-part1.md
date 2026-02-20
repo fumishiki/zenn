@@ -4,7 +4,14 @@ emoji: "🔍"
 type: "tech"
 topics: ["machinelearning", "deeplearning", "transformer", "julia", "rust"]
 published: true
+slug: "ml-lecture-14-part1"
+difficulty: "advanced"
+time_estimate: "90 minutes"
+languages: ["Julia", "Rust"]
+keywords: ["機械学習", "深層学習", "生成モデル"]
 ---
+
+> **📖 この記事は前編（理論編）です** 実装編は [【後編】第14回](/articles/ml-lecture-14-part2) をご覧ください。
 
 # 第14回: Attention — 化石からの脱却
 
@@ -16,9 +23,7 @@ published: true
 
 本講義はCourse II「生成モデル理論編」第14回 — 化石からの脱却。第9回の伏線を回収し、Self-Attention完全導出→Transformer Block→GPT/BERT→Scaling Laws→In-Context Learning→KV-Cacheまで、理論と実装の全てを網羅する。
 
-:::message
-**このシリーズについて**: 東京大学 松尾・岩澤研究室動画講義の**完全上位互換**の全50回シリーズ。理論（論文が書ける）、実装（Production-ready）、最新（2025-2026 SOTA）の3軸で差別化する。
-:::
+> **Note:** **このシリーズについて**: 東京大学 松尾・岩澤研究室動画講義の**完全上位互換**の全50回シリーズ。理論（論文が書ける）、実装（Production-ready）、最新（2025-2026 SOTA）の3軸で差別化する。
 
 ```mermaid
 graph LR
@@ -65,9 +70,10 @@ function self_attention_simple(x)
     # Q, K, V are all x (simplified — no learned weights for this demo)
     Q, K, V = x, x, x
     # Attention scores: Q * K^T / sqrt(d_k)
-    scores = (Q * K') / sqrt(d_k)
+    scores = (Q * K') / √d_k
     # Softmax over columns (each row sums to 1)
-    weights = exp.(scores) ./ sum(exp.(scores), dims=2)
+    ex = exp.(scores)
+    weights = ex ./ sum(ex, dims=2)
     # Output: weighted sum of V
     output = weights * V
     return output, weights
@@ -81,8 +87,8 @@ x = [1.0 0.5 0.2 0.1;   # "I"
 out, attn = self_attention_simple(x)
 
 println("Attention weights (each row = how much each word attends to all words):")
-for i in 1:3
-    println("Word $i: ", round.(attn[i, :], digits=3))
+for (i, row) in enumerate(eachrow(attn))
+    println("Word $i: ", round.(row, digits=3))
 end
 println("\nOutput (context-aware representation):")
 println(out)
@@ -112,9 +118,7 @@ $$
 
 「Query $Q$ と Key $K$ の類似度を計算 → Softmaxで正規化 → Value $V$ を重み付け和」という3ステップ。この単純な操作が、RNN/CNNの限界を一気に突破した。
 
-:::message
-**進捗: 3% 完了** Self-Attentionが全系列参照を実現することを体感した。ここから理論と実装の深みに入っていく。
-:::
+> **Note:** **進捗: 3% 完了** Self-Attentionが全系列参照を実現することを体感した。ここから理論と実装の深みに入っていく。
 
 ---
 
@@ -152,49 +156,7 @@ Self-Attentionの核心は **Query (Q)**, **Key (K)**, **Value (V)** の3つの�
 
 具体的な計算:
 
-```julia
-using LinearAlgebra
 
-# Input: (seq_len, d_model)
-x = randn(5, 8)  # 5 tokens, each 8-dim embedding
-
-# Learned weight matrices
-d_k, d_v = 4, 4
-W_Q = randn(8, d_k)
-W_K = randn(8, d_k)
-W_V = randn(8, d_v)
-
-# Project input to Q, K, V
-Q = x * W_Q  # (5, d_k)
-K = x * W_K  # (5, d_k)
-V = x * W_V  # (5, d_v)
-
-# Attention scores: Q * K^T / sqrt(d_k)
-scores = (Q * K') / sqrt(d_k)  # (5, 5)
-
-# Softmax (each row sums to 1)
-attn_weights = exp.(scores) ./ sum(exp.(scores), dims=2)  # (5, 5)
-
-# Output: weighted sum of V
-output = attn_weights * V  # (5, d_v)
-
-println("Attention weights (token i → token j):")
-println(round.(attn_weights, digits=3))
-println("\nOutput shape: ", size(output))
-```
-
-出力:
-```
-Attention weights (token i → token j):
-5×5 Matrix{Float64}:
- 0.214  0.197  0.201  0.189  0.199
- 0.203  0.201  0.198  0.199  0.199
- 0.201  0.198  0.201  0.2    0.2
- 0.199  0.2    0.201  0.2    0.2
- 0.2    0.2    0.199  0.201  0.2
-
-Output shape: (5, 4)
-```
 
 **ランダム初期化なので注目パターンは一様に近い**（全て約0.2）。学習により、意味のある注目パターンが獲得される。
 
@@ -202,40 +164,7 @@ Output shape: (5, 4)
 
 なぜ $\sqrt{d_k}$ で割るのか？ これを省くと何が起きるか実験しよう。
 
-```julia
-using LinearAlgebra, Statistics
 
-# High-dimensional Q, K (d_k=64)
-d_k = 64
-Q = randn(10, d_k)
-K = randn(10, d_k)
-
-# Dot product WITHOUT scaling
-scores_unscaled = Q * K'
-println("Unscaled scores — mean: ", round(mean(scores_unscaled), digits=3),
-        ", std: ", round(std(scores_unscaled), digits=3))
-
-# Dot product WITH scaling
-scores_scaled = scores_unscaled / sqrt(d_k)
-println("Scaled scores   — mean: ", round(mean(scores_scaled), digits=3),
-        ", std: ", round(std(scores_scaled), digits=3))
-
-# Softmax saturation check
-attn_unscaled = exp.(scores_unscaled) ./ sum(exp.(scores_unscaled), dims=2)
-attn_scaled   = exp.(scores_scaled)   ./ sum(exp.(scores_scaled), dims=2)
-
-println("\nUnscaled attention — max weight: ", round(maximum(attn_unscaled), digits=4))
-println("Scaled attention   — max weight: ", round(maximum(attn_scaled), digits=4))
-```
-
-出力:
-```
-Unscaled scores — mean: 0.134, std: 8.012
-Scaled scores   — mean: 0.017, std: 1.002
-
-Unscaled attention — max weight: 0.9987
-Scaled attention   — max weight: 0.3452
-```
 
 **スケーリングなしだと、Softmaxが飽和する** — 1つの要素に確率がほぼ1、他は0に近い。これは勾配消失を引き起こし、訓練が困難になる。$\sqrt{d_k}$ で割ることで、スコアの分散を1に保ち、Softmaxの勾配が適切に流れるようにする。
 
@@ -247,11 +176,14 @@ Scaled attention   — max weight: 0.3452
 
 **Scaled Dot-Product Attentionの核心**: スコアリング $QK^\top$ → スケーリング $/\sqrt{d_k}$ → 正規化 $\text{softmax}$ → 重み付け和 $\times V$
 
-:::message
-**進捗: 10% 完了** Self-AttentionのQuery/Key/Value構造と、Scalingの必要性を体感した。次は「なぜAttentionが必然だったか」という直感へ。
-:::
+> **Note:** **進捗: 10% 完了** Self-AttentionのQuery/Key/Value構造と、Scalingの必要性を体感した。次は「なぜAttentionが必然だったか」という直感へ。
 
 ---
+
+> Progress: 10%
+> **理解度チェック**
+> 1. Scaled Dot-Product Attention において $\sqrt{d_k}$ で割る理由を、内積の分散の観点から説明せよ。$d_k$ 次元のランダムベクトル $q, k$ の内積 $q \cdot k$ の分散が $d_k$ になることを示せ。
+> 2. Multi-Head Attention が単一の Attention より優れる理由を「表現の多様性」の観点から説明せよ。$h$ 個の head は何を並列に学習しているか？
 
 ## 🧩 2. 直感ゾーン（15分）— なぜAttentionが必然だったか
 
@@ -359,19 +291,24 @@ CNN: 固定カーネル — 位置に依存しない特徴のみ抽出
 
 **推奨**: タイプAで一度通し、タイプBで実装を固め、タイプCで他の講義との接続を確認。合計2.5時間。
 
-:::details トロイの木馬 — 言語移行の現在地
+<details><summary>トロイの木馬 — 言語移行の現在地</summary>
+
 **第9回**: 🐍Python地獄体感 → 🦀Rust登場（ゼロコピーで50x高速化）
 **第10回**: 🦀Rust型パズル苦痛 → ⚡Julia登場（多重ディスパッチで数式が型に応じて最適化）
 **第11-13回**: ⚡Julia主役、🦀Rust推論で補完
 **第14回（今回）**: ⚡Julia訓練ループ全体 + 🦀Rust Attention推論高速化
 **第15回以降**: ⚡🦀が武器に。Python? もう見えない。
-:::
 
-:::message
-**進捗: 20% 完了** Attentionの必然性を3つの視点（長距離依存+並列、表現柔軟性、帰納バイアス最小）から理解した。さあ、数式修行ゾーンへ。
-:::
+</details>
+
+> **Note:** **進捗: 20% 完了** Attentionの必然性を3つの視点（長距離依存+並列、表現柔軟性、帰納バイアス最小）から理解した。さあ、数式修行ゾーンへ。
 
 ---
+
+> Progress: 20%
+> **理解度チェック**
+> 1. RNN の逐次処理の限界とは何か？Self-Attention が「全系列参照 + 並列計算」を実現する仕組みを、計算グラフの観点で対比して説明せよ。
+> 2. Positional Encoding の Sinusoidal 方式と RoPE（Rotary Position Embedding）の本質的な違いは何か？RoPE がなぜ長コンテキスト外挿に有利か？
 
 ## 📐 3. 数式修行ゾーン（60分）— Self-Attention完全導出
 
@@ -566,34 +503,7 @@ $$
 
 **実装**:
 
-```julia
-function sinusoidal_position_encoding(seq_len::Int, d_model::Int)
-    pe = zeros(Float32, seq_len, d_model)
-    for pos in 1:seq_len
-        for i in 0:(d_model÷2 - 1)
-            angle = (pos - 1) / 10000^(2i / d_model)
-            pe[pos, 2i + 1] = sin(angle)
-            pe[pos, 2i + 2] = cos(angle)
-        end
-    end
-    return pe
-end
 
-pe = sinusoidal_position_encoding(10, 8)
-println("Position Encoding (10 tokens, d_model=8):")
-println(round.(pe[1:5, :], digits=3))  # first 5 tokens
-```
-
-出力:
-```
-Position Encoding (10 tokens, d_model=8):
-5×8 Matrix{Float32}:
- 0.0     1.0     0.0    1.0      0.0    1.0      0.0    1.0
- 0.841   0.541   0.01   1.0      0.0    1.0      0.0    1.0
- 0.909  -0.416   0.02   1.0      0.0    1.0      0.0    1.0
- 0.141  -0.99    0.03   0.999    0.0    1.0      0.0    1.0
--0.757  -0.653   0.04   0.999    0.0    1.0      0.0    1.0
-```
 
 #### (b) RoPE (Rotary Position Embedding, Su+ 2021) [^10]
 
@@ -781,56 +691,345 @@ $$
 
 **実装**:
 
-```julia
-function causal_mask(seq_len::Int)
-    # Upper triangular matrix with -Inf
-    mask = fill(-Inf32, seq_len, seq_len)
-    for i in 1:seq_len
-        for j in 1:i
-            mask[i, j] = 0.0f0
-        end
-    end
-    return mask
-end
 
-mask = causal_mask(5)
-println("Causal Mask (5x5):")
-println(mask)
-```
-
-出力:
-```
-Causal Mask (5x5):
-5×5 Matrix{Float32}:
-   0.0  -Inf  -Inf  -Inf  -Inf
-   0.0    0.0  -Inf  -Inf  -Inf
-   0.0    0.0    0.0  -Inf  -Inf
-   0.0    0.0    0.0    0.0  -Inf
-   0.0    0.0    0.0    0.0    0.0
-```
 
 **Attention計算への適用**:
 
-```julia
-scores = randn(5, 5) / sqrt(4)  # (Q * K') / sqrt(d_k)
-masked_scores = scores .+ causal_mask(5)
-attn = softmax(masked_scores, dims=2)
-println("Attention weights (causal):")
-println(round.(attn, digits=3))
-```
 
 出力:
-```
-Attention weights (causal):
-5×5 Matrix{Float64}:
- 1.0    0.0    0.0    0.0    0.0
- 0.478  0.522  0.0    0.0    0.0
- 0.324  0.347  0.329  0.0    0.0
- 0.253  0.242  0.263  0.242  0.0
- 0.205  0.195  0.204  0.198  0.198
-```
+
 
 **各行の和が1** かつ **上三角が0** — 未来を見ていない。
+
+### 3.6.5 GPT vs BERT — Decoder-only と Encoder-only の数学的差異
+
+Causal Maskingの意義を理解したところで、これを使う **GPT** と、使わない **BERT** を数学的に対比する。
+
+#### アーキテクチャの基本構造
+
+**GPT（Decoder-only, Causal LM）**:
+- Transformer Decoderブロックのみを積み重ねる（Encoderなし）
+- 各層でCausal Attentionを使用 → 位置 $i$ は $j \leq i$ のトークンのみ参照
+- 学習目標: **自己回帰言語モデル**（Autoregressive LM）
+
+$$
+\mathcal{L}_{\text{GPT}} = -\sum_{t=1}^{T} \log P(x_t \mid x_1, x_2, \ldots, x_{t-1};\, \theta)
+$$
+
+**BERT（Encoder-only, Masked LM）**:
+- Transformer Encoderブロックのみを積み重ねる
+- **双方向Attention** — 全トークンが互いに参照可能（Maskなし）
+- 学習目標: **Masked Language Model（MLM）** + **Next Sentence Prediction（NSP）**
+
+$$
+\mathcal{L}_{\text{BERT}} = -\sum_{i \in \mathcal{M}} \log P\!\left(x_i \mid x_{\text{visible}};\, \theta\right)
+$$
+
+ここで $\mathcal{M}$ はランダムにマスクされた位置の集合（全トークンの15%）、$x_{\text{visible}} = \{x_j : j \notin \mathcal{M}\}$。
+
+#### Attention重みの構造的違い
+
+GPTの注目行列 $A^{\text{GPT}} \in \mathbb{R}^{N \times N}$ は下三角行列:
+
+$$
+A^{\text{GPT}}_{ij} = \begin{cases} \dfrac{\exp(s_{ij})}{\sum_{k \leq i} \exp(s_{ik})} & j \leq i \\ 0 & j > i \end{cases}
+$$
+
+BERTの注目行列 $A^{\text{BERT}} \in \mathbb{R}^{N \times N}$ は任意の密行列:
+
+$$
+A^{\text{BERT}}_{ij} = \frac{\exp(s_{ij})}{\sum_{k=1}^{N} \exp(s_{ik})}
+$$
+
+**双方向 vs 単方向の表現力**: BERTは位置 $i$ の表現を計算する際、**全文脈**（左右両方）を利用できる。GPTは左文脈のみ。BERT表現は文全体の理解に優れ、GPTは逐次生成に特化。
+
+#### MLMの [MASK] トークン問題
+
+BERTの学習中は入力に `[MASK]` を挿入するが、推論時には `[MASK]` が存在しない — **Train-Test mismatch** が生じる。これを緩和するため、BERTはマスク位置の処理を以下のように確率的に行う:
+
+- 80%: `[MASK]` トークンで置換
+- 10%: ランダムな別のトークンで置換
+- 10%: 元のトークンをそのまま保持
+
+GPTにはこの問題がない — 訓練も推論も同じ自己回帰生成手順を使う。
+
+#### タスク適性の比較
+
+| 観点 | GPT | BERT |
+|:-----|:----|:-----|
+| 注目方向 | 単方向（左→右） | 双方向 |
+| 主な用途 | テキスト生成、ICL、Few-shot | 分類、固有表現認識、QA |
+| 推論時の入力 | プレフィックスのみ | 完全な入力文 |
+| Fine-tuning | 少なくて済むことが多い（大規模では不要） | 通常Fine-tuningが必要 |
+| スケーリング | Scaling Lawsで明確な恩恵 | 中規模で頭打ち傾向 |
+
+GPT-3（2020年）以降、**スケールしたDecoder-only GPTがBERTの性能を上回る**ことが示され、現在の大規模言語モデル（LLM）は事実上すべてGPT系のDecoder-onlyアーキテクチャを採用している。
+
+---
+
+### 3.6.6 Scaling Laws — Transformerを支配する冪則
+
+GPT系モデルがなぜこれほど強力になったのか。その答えは **Scaling Laws（スケーリング則）** にある — Transformerの損失は、パラメータ数・データ量・計算量の冪乗に従って予測可能に改善する。
+
+#### Kaplan+ (2020): 3軸スケーリングの発見
+
+OpenAIのKaplanら（2020年、論文 "Scaling Laws for Neural Language Models"）は、言語モデルの損失 $L$ が以下の **冪則（Power Law）** に従うことを実験的に示した:
+
+**パラメータスケーリング**（データ量・計算量を十分確保したとき）:
+
+$$
+L(N) = \left(\frac{N_c}{N}\right)^{\alpha_N}, \quad \alpha_N \approx 0.076, \quad N_c \approx 8.8 \times 10^{13}
+$$
+
+**データスケーリング**（パラメータ数・計算量を十分確保したとき）:
+
+$$
+L(D) = \left(\frac{D_c}{D}\right)^{\alpha_D}, \quad \alpha_D \approx 0.095, \quad D_c \approx 5.4 \times 10^{13}
+$$
+
+**計算量スケーリング**（最適配分のとき）:
+
+$$
+L(C) = \left(\frac{C_c}{C}\right)^{\alpha_C}, \quad \alpha_C \approx 0.050
+$$
+
+ここで $N$ はパラメータ数、$D$ はトークン数、$C$ は総FLOPs数。重要な点は、これらが **対数スケールで直線**になること — 対数損失 $\log L$ は $\log N$（または $\log D$、$\log C$）に対して線形である。
+
+#### FLOPs の基本式
+
+Transformer の1トークンに対するforward+backward passの計算量は近似的に:
+
+$$
+C \approx 6 N D
+$$
+
+ここで $N$ はモデルパラメータ数、$D$ は訓練トークン数、係数6は「1パラメータあたり約6回の演算（forward: 2、backward: 4）」に由来する。
+
+Kaplan+ はこの制約のもとで **固定計算量 $C$ を最適配分**する問題を解いた。
+
+#### Chinchilla (Hoffmann+ 2022): 最適配分の再導出
+
+Kaplan+ の結論は「**同じ計算量なら、モデルを大きくするほど良い**」だった。しかしこれは誤りだった。
+
+DeepMindのHoffmannら（2022年、"Training Compute-Optimal Large Language Models"、通称 **Chinchillaペーパー**）は、より精密な実験設計でスケーリング則を再推定し、**計算最適配分**を導出した。
+
+**Chinchillaの損失モデル**:
+
+$$
+L(N, D) = \frac{A}{N^{\alpha}} + \frac{B}{D^{\beta}} + L_{\infty}
+$$
+
+ここで $A, B, \alpha, \beta$ は実験的に推定するパラメータ（Chinchillaでは $\alpha \approx 0.34$、$\beta \approx 0.28$）、$L_{\infty}$ はデータの本質的エントロピー（自然言語の理論的下限）。
+
+**最適化問題**: 計算量 $C = 6ND$ を固定し、$L(N, D)$ を最小化する $(N^*, D^*)$ を求める。
+
+ラグランジュ乗数法を適用すると:
+
+$$
+\frac{\partial L}{\partial N} = \lambda \frac{\partial C}{\partial N}, \quad \frac{\partial L}{\partial D} = \lambda \frac{\partial C}{\partial D}
+$$
+
+$$
+\frac{\partial L}{\partial N} = -\frac{\alpha A}{N^{\alpha+1}}, \quad \frac{\partial C}{\partial N} = 6D
+$$
+
+$$
+\frac{\partial L}{\partial D} = -\frac{\beta B}{D^{\beta+1}}, \quad \frac{\partial C}{\partial D} = 6N
+$$
+
+最適条件 $\frac{\partial L / \partial N}{\partial L / \partial D} = \frac{\partial C / \partial N}{\partial C / \partial D}$ を整理すると:
+
+$$
+\frac{\alpha A / N^{\alpha+1}}{\beta B / D^{\beta+1}} = \frac{D}{N}
+$$
+
+$$
+\frac{\alpha A}{\beta B} \cdot \frac{D^{\beta+1}}{N^{\alpha+1}} = \frac{D}{N} \implies \frac{D^\beta}{N^\alpha} = \frac{\beta B}{\alpha A} =: G
+$$
+
+これを $C = 6ND$ と連立すると:
+
+$$
+N^* \propto C^{\,\beta/(\alpha+\beta)}, \quad D^* \propto C^{\,\alpha/(\alpha+\beta)}
+$$
+
+Chinchillaの推定値 $\alpha \approx 0.34,\, \beta \approx 0.28$ を代入すると:
+
+$$
+N^* \propto C^{0.45}, \quad D^* \propto C^{0.55}
+$$
+
+これはKaplan+の予測（$N \propto C^{0.73}$）と大きく異なる。Chinchillaの結論は「**モデルサイズとデータ量を均等に増やすべき**」だった。
+
+#### Chinchillaの経験則
+
+実用的な近似として、Chinchillaペーパーは以下の比率を提唱した:
+
+$$
+D^* \approx 20 \cdot N^*
+$$
+
+すなわち、$N$ パラメータのモデルを計算最適に訓練するには、**$20N$ トークン**のデータが必要。
+
+具体的な含意:
+
+| モデル | パラメータ数 $N$ | 推奨データ量 $20N$ | 実際の訓練データ | 評価 |
+|:------|:----------------|:------------------|:----------------|:-----|
+| GPT-3 | 175B | 3.5T tokens | 300B tokens | **データ不足**（約0.09倍） |
+| Chinchilla | 70B | 1.4T tokens | 1.4T tokens | **最適** |
+| LLaMA-1 (65B) | 65B | 1.3T tokens | 1.4T tokens | ほぼ最適 |
+| LLaMA-2 (70B) | 70B | 1.4T tokens | 2.0T tokens | Chinchilla超え |
+
+GPT-3は**パラメータを増やしすぎてデータが不足**していた。Chinchillaはパラメータを1/2.5に削減しながらGPT-3を上回った。
+
+#### Scaling Lawsの統一形式
+
+3つのスケーリング軸を統合すると、損失は以下の形式で記述できる:
+
+$$
+L(N, D) = L_{\infty} + \frac{A}{N^{\alpha}} + \frac{B}{D^{\beta}}
+$$
+
+各項の意味:
+- $L_{\infty}$: 理想的なモデル・無限データでも残る損失（自然言語の固有エントロピー）
+- $A / N^{\alpha}$: パラメータ不足による損失（モデル容量の限界）
+- $B / D^{\beta}$: データ不足による損失（訓練不足）
+
+#### Emergent Abilities — 規模が生む相転移
+
+Scaling Lawsが示す滑らかな改善とは別に、ある規模閾値を超えると**突然新しい能力が出現**する現象が報告されている（Wei+ 2022, "Emergent Abilities of Large Language Models"）。
+
+代表的な例:
+
+| 能力 | 出現規模 | 内容 |
+|:-----|:---------|:-----|
+| Few-shot CoT（Chain-of-Thought） | $\sim 10^{22}$ FLOPs ($\sim$100B params) | 段階的推論が突然可能に |
+| 算術（3桁の掛け算） | $\sim 10^{21}$ FLOPs | 暗記ではなく計算規則の習得 |
+| 多言語翻訳（zero-shot） | $\sim 10^{22}$ FLOPs | 訓練データにない言語対の翻訳 |
+
+**Emergent Abilitiesの数理的解釈**は未確立だが、一つの仮説は **相転移（Phase Transition）** モデル:
+
+$$
+P(\text{task success}) \approx \sigma\!\left(\beta \cdot \left(\log C - \log C_{\text{threshold}}\right)\right)
+$$
+
+ここで $\sigma$ はシグモイド関数、$C_{\text{threshold}}$ は能力出現の計算量閾値。損失のスケーリングは連続だが、下流タスクの評価指標が**閾値的な非線形関数**の場合、急激な性能向上として観測される。
+
+---
+
+### 3.6.7 In-Context Learning — 暗黙的勾配降下として理解する
+
+GPT系LLMの最も驚くべき性質の一つが **In-Context Learning（ICL）** だ — 少数の入出力例（デモンストレーション）をプロンプトに埋め込むだけで、モデルのパラメータを一切更新せずに新タスクを実行する。
+
+#### ICLの定式化
+
+$k$-shot ICLは以下の形式:
+
+$$
+P(y \mid x_{\text{test}},\, (x_1, y_1), (x_2, y_2), \ldots, (x_k, y_k);\, \theta)
+$$
+
+ここで $(x_i, y_i)$ は**コンテキスト内のデモンストレーション例**（訓練不使用）、$x_{\text{test}}$ はテストクエリ、$\theta$ は**固定された**モデルパラメータ。
+
+重要: 勾配更新は一切なし。推論（forward pass）のみ。
+
+#### 暗黙的勾配降下解釈（Akyürek+ 2022 / Von Oswald+ 2023）
+
+Akyürekら（2022年、"What Learning Algorithm Is In-Context Learning?"）とVon Oswaldら（2023年、"Transformers Learn In-Context by Gradient Descent"）は、TransformerのICLが**勾配降下の1ステップ**を実装していることを理論的に示した。
+
+**設定**: コンテキスト内にデモンストレーション $(x_i, y_i)_{i=1}^k$ があり、テスト入力 $x_{\text{test}}$ が与えられる。
+
+**主張**: Transformerのforward passは以下の線形回帰問題の勾配降下ステップに対応する:
+
+$$
+W^* = \arg\min_{W} \sum_{i=1}^{k} \|W x_i - y_i\|^2 + \lambda \|W\|_F^2
+$$
+
+この問題の勾配:
+
+$$
+\nabla_W \mathcal{L} = -2 \sum_{i=1}^{k} (y_i - W x_i) x_i^\top + 2\lambda W
+$$
+
+勾配降下1ステップ（初期値 $W_0 = 0$）:
+
+$$
+W_1 = W_0 - \eta \nabla_{W_0} \mathcal{L} = \eta \sum_{i=1}^{k} y_i x_i^\top - \eta\lambda \cdot 0 = \eta \sum_{i=1}^{k} y_i x_i^\top
+$$
+
+テスト予測:
+
+$$
+\hat{y}_{\text{test}} = W_1 x_{\text{test}} = \eta \sum_{i=1}^{k} (y_i x_i^\top) x_{\text{test}} = \eta \sum_{i=1}^{k} (x_i^\top x_{\text{test}}) y_i
+$$
+
+#### Dual Form — AttentionはKey-Valueメモリ検索
+
+上の結果に着目する。$\hat{y}_{\text{test}} = \eta \sum_{i=1}^{k} (x_i^\top x_{\text{test}}) y_i$ は、まさに **Attentionの計算**と同型だ:
+
+$$
+\text{Attention}(Q, K, V) = \text{softmax}\!\left(\frac{QK^\top}{\sqrt{d}}\right) V
+$$
+
+この対応関係（**Dual Form**）:
+
+| 勾配降下の言葉 | Attentionの言葉 |
+|:-------------|:---------------|
+| テスト入力 $x_{\text{test}}$ | Query $Q$ |
+| デモンストレーション入力 $x_i$ | Key $K$ |
+| デモンストレーション出力 $y_i$ | Value $V$ |
+| 内積 $x_i^\top x_{\text{test}}$ | スコア $QK^\top / \sqrt{d}$ |
+| 重み付き和 $\sum_i (x_i^\top x_{\text{test}}) y_i$ | Attentionの出力 |
+
+**結論**: Self-Attentionは、コンテキスト内のデモンストレーション例を訓練データとみなし、そこから暗黙的に回帰モデルを学習してテスト予測を返す — 一種の **Meta-learning** を前向きパスで実行している。
+
+#### リッジ回帰との完全対応
+
+より精密には、ソフトマックスのない線形Attention:
+
+$$
+\text{LinearAttention}(Q, K, V) = \frac{QK^\top}{\sqrt{d}} V
+$$
+
+これはデモンストレーション例を行列 $K \in \mathbb{R}^{k \times d}$（入力）、$V \in \mathbb{R}^{k \times d}$（出力）と見て、次のリッジ回帰の閉形式解と対応する:
+
+$$
+W_{\text{ridge}} = \left(K^\top K + \lambda I\right)^{-1} K^\top V
+$$
+
+テスト予測: $\hat{y} = Q W_{\text{ridge}}^\top = Q V^\top K \left(K^\top K + \lambda I\right)^{-1}$
+
+これは **Kernel Ridge Regression の Dual Form** に他ならない。
+
+#### Meta-learning 視点
+
+ICL を **Meta-learning** として捉えると: Transformerの事前学習は「タスクの分布 $p(\mathcal{T})$ からタスクを素早く解けるような初期化を学習するプロセス」と解釈できる。
+
+$$
+\theta^* = \arg\min_\theta \mathbb{E}_{\mathcal{T} \sim p(\mathcal{T})} \left[ \mathcal{L}_{\mathcal{T}}\!\left(f_\theta(\text{context}_\mathcal{T})\right) \right]
+$$
+
+各トークン予測ステップがタスクの「1サンプル」に相当し、事前学習を通じてモデルは「コンテキストから学ぶ」能力自体を学習している。
+
+#### Grokking — 暗記から汎化への相転移
+
+ICL能力の発現は段階的でない場合がある。**Grokking**（Power+ 2022）は、モデルが長期間「暗記」のみを行った後、突然「汎化」に移行する現象:
+
+$$
+\text{訓練損失} \approx 0 \text{ のまま}, \quad \text{検証精度が長期間低迷} \longrightarrow \text{突然100\%へ}
+$$
+
+数学的解釈: 重みノルム $\|W\|$ が一定値以下に正則化されると、暗記解（重みノルム大）から汎化解（重みノルム小）へとシフトする。Weight Decayがこの遷移を促進する:
+
+$$
+\mathcal{L}_{\text{reg}} = \mathcal{L}_{\text{CE}} + \lambda_{\text{wd}} \|W\|_F^2
+$$
+
+Grookingは、ICLに見られる「規模閾値での能力出現」のミクロな対応物と考えられている。
+
+> **Note:** **進捗: 72% 完了** GPT/BERTの数学的差異、Scaling Laws（Kaplan/Chinchilla）、ICLの暗黙的勾配降下解釈を完全に導出した。いよいよBoss Battleへ。
+
+---
 
 ### 3.7 Boss Battle: GPT-2ミニマル実装の数式完全分解
 
@@ -927,59 +1126,13 @@ $$
 
 **数値検証**:
 
-```julia
-N, d, h = 4, 8, 2  # mini example
-d_k = d ÷ h
-
-X = randn(Float32, N, d)
-
-# LN + QKV projection (simplified — no learnable gamma/beta for brevity)
-X_norm = (X .- mean(X, dims=2)) ./ (std(X, dims=2) .+ 1e-5)
-W_Q, W_K, W_V = randn(Float32, d, d), randn(Float32, d, d), randn(Float32, d, d)
-Q, K, V = X_norm * W_Q, X_norm * W_K, X_norm * W_V
-
-# Reshape to (N, h, d_k)
-Q = reshape(Q, N, h, d_k)
-K = reshape(K, N, h, d_k)
-V = reshape(V, N, h, d_k)
-
-# Attention per head
-O_heads = zeros(Float32, N, h, d_k)
-for i in 1:h
-    S = (Q[:, i, :] * K[:, i, :]') / sqrt(d_k)
-    # Causal mask
-    for row in 1:N
-        for col in (row+1):N
-            S[row, col] = -Inf32
-        end
-    end
-    A = softmax(S, dims=2)
-    O_heads[:, i, :] = A * V[:, i, :]
-end
-
-# Concat
-O_concat = reshape(O_heads, N, d)
-W_O = randn(Float32, d, d)
-O = O_concat * W_O
-
-# Residual
-Z1 = X .+ O
-
-println("Z1 (after Attention+Residual) shape: ", size(Z1))
-println("Output sample: ", round.(Z1[1, :], digits=3))
-```
 
 出力:
-```
-Z1 (after Attention+Residual) shape: (4, 8)
-Output sample: Float32[-0.456, 1.234, -0.789, 0.567, -1.123, 0.890, -0.345, 0.678]
-```
+
 
 **ボス撃破**: GPT-2の1層を数式→コード1:1対応で完全に実装した。
 
-:::message
-**進捗: 50% 完了** Self-Attention→Multi-Head→Position Encoding→Transformer Block→Causal Maskingの全てを数式で導出し、記号の意味を完全に理解した。次は効率化手法へ — FlashAttentionとその先。
-:::
+> **Note:** **進捗: 50% 完了** Self-Attention→Multi-Head→Position Encoding→Transformer Block→Causal Maskingの全てを数式で導出し、記号の意味を完全に理解した。次は効率化手法へ — FlashAttentionとその先。
 
 ### 3.7 FlashAttention — IO効率化による劇的高速化
 
@@ -1074,67 +1227,6 @@ $$
 
 **実装例** (概念コード):
 
-```julia
-function flash_attention(Q, K, V; block_size=64)
-    """
-    FlashAttention: IO-efficient exact attention.
-
-    Args:
-        Q, K, V: (d, N, batch) query, key, value
-        block_size: SRAM tile size
-
-    Returns:
-        O: (d, N, batch) attention output
-    """
-    d, N, batch = size(Q)
-    O = zeros(Float32, d, N, batch)
-
-    # Loop over blocks (simplified single-batch version)
-    for b in 1:batch
-        # Initialize statistics
-        m = fill(-Inf32, N)  # row-wise max
-        ℓ = zeros(Float32, N)  # row-wise sum
-        o = zeros(Float32, d, N)
-
-        # Outer loop: iterate over Q blocks (rows)
-        for i_start in 1:block_size:N
-            i_end = min(i_start + block_size - 1, N)
-            Q_block = Q[:, i_start:i_end, b]
-
-            # Inner loop: iterate over K/V blocks (columns)
-            for j_start in 1:block_size:N
-                j_end = min(j_start + block_size - 1, N)
-                K_block = K[:, j_start:j_end, b]
-                V_block = V[:, j_start:j_end, b]
-
-                # Compute scores for this block
-                S_block = (Q_block' * K_block) / sqrt(Float32(d))  # (block_r, block_c)
-
-                # Online softmax update
-                m_block = maximum(S_block, dims=2)[:, 1]  # row-wise max of block
-                m_new = max.(m[i_start:i_end], m_block)
-
-                # Update normalization constants
-                ℓ_old = ℓ[i_start:i_end]
-                ℓ_new = exp.(m[i_start:i_end] - m_new) .* ℓ_old .+
-                        sum(exp.(S_block .- m_block), dims=2)[:, 1]
-
-                # Update output
-                o[:, i_start:i_end] = (exp.(m[i_start:i_end] - m_new) .* ℓ_old ./ ℓ_new)' .* o[:, i_start:i_end] .+
-                                       V_block * (exp.(S_block .- m_block) ./ ℓ_new)'
-
-                # Save new statistics
-                m[i_start:i_end] = m_new
-                ℓ[i_start:i_end] = ℓ_new
-            end
-        end
-
-        O[:, :, b] = o
-    end
-
-    return O
-end
-```
 
 **注**: 実際のFlashAttentionはCUDA kernelで実装され、さらなる最適化がある（warp-level並列化、shared memory管理など）。
 
@@ -1144,7 +1236,7 @@ end
 
 H100 GPU向けの最適化:
 - **非同期実行**: Tensor Coreと非Tensor Core演算をオーバーラップ
-- **低精度演算**: FP8 (8-bit floating point) でさらに高速化
+- **低精度演算**: FP8 (8-bit floating point) でも高速化
 - **結果**: FlashAttention-2比で **1.5-2.0x** 高速化（H100限定）
 
 **FlashInfer** (2025) [^33]:
@@ -1312,59 +1404,8 @@ Mamba-3Bは、**Transformer-6B並みの性能**を達成（パラメータ半分
 
 **実装スケッチ** (簡略版):
 
-```julia
-struct MambaBlock
-    """Selective State Space Model block."""
-    input_proj::Dense
-    B_proj::Dense  # input-dependent B
-    C_proj::Dense  # input-dependent C
-    Δ_proj::Dense  # input-dependent Δ
-    A::Matrix{Float32}  # fixed diagonal matrix
-    output_proj::Dense
-end
 
-function (m::MambaBlock)(x)
-    """
-    Forward pass of Mamba block.
-
-    Args:
-        x: (d_model, seq_len, batch)
-
-    Returns:
-        y: (d_model, seq_len, batch)
-    """
-    d, N, batch = size(x)
-
-    # Project input
-    x_proj = m.input_proj(x)  # (d_inner, N, batch)
-
-    # Compute input-dependent parameters
-    B = m.B_proj(x)  # (d_state, N, batch)
-    C = m.C_proj(x)  # (d_state, N, batch)
-    Δ = softplus.(m.Δ_proj(x))  # (d_inner, N, batch)
-
-    # Selective scan (simplified single-batch)
-    h = zeros(Float32, size(m.A, 1), batch)
-    y = zeros(Float32, d, N, batch)
-
-    for t in 1:N
-        # Discretize: A_bar = exp(Δ_t * A)
-        A_bar = exp.(Δ[:, t, :] .* m.A)  # (d_state, batch)
-        B_bar = Δ[:, t, :] .* B[:, t, :]  # (d_state, batch)
-
-        # State update: h_t = A_bar * h_{t-1} + B_bar * x_t
-        h = A_bar .* h .+ B_bar .* x_proj[:, t, :]
-
-        # Output: y_t = C_t * h_t
-        y[:, t, :] = C[:, t, :]' * h
-    end
-
-    # Final projection
-    return m.output_proj(y)
-end
-```
-
-**注**: 実際のMambaはさらに複雑（SiLU gating、Conv1d、並列スキャンなど）。
+**注**: 実際のMambaはより複雑（SiLU gating、Conv1d、並列スキャンなど）。
 
 ### 3.9 KV Cache最適化 — 推論効率化の最前線
 
@@ -1564,81 +1605,6 @@ graph TD
 
 **Production Transformer実装のチェックリスト**:
 
-```julia
-# Modern Transformer Block (2026 best practices)
-struct ModernTransformerBlock
-    # === Attention ===
-    mha::GroupedQueryAttention  # GQA (not MHA)
-    flash_attn::Bool  # Use FlashAttention kernel
-    rope::RotaryPositionEmbedding  # RoPE (not learned PE)
-
-    # === Normalization ===
-    norm1::RMSNorm  # RMSNorm (not LayerNorm)
-    norm2::RMSNorm
-
-    # === FFN ===
-    ffn::SwiGLU  # SwiGLU (not ReLU)
-
-    # === Optimization ===
-    dropout::Float32  # 0.0 for large models (implicit regularization)
-    use_bias::Bool  # false for large models
-end
-
-function (block::ModernTransformerBlock)(x, cache=nothing)
-    """
-    Modern transformer block with best practices.
-
-    Args:
-        x: (d_model, seq_len, batch)
-        cache: KVCache for inference
-
-    Returns:
-        output, updated_cache
-    """
-    # Pre-norm (not post-norm)
-    x_norm = block.norm1(x)
-
-    # Attention with FlashAttention + GQA + RoPE
-    if block.flash_attn
-        attn_out, new_cache = flash_gqa_rope(x_norm, block.mha, block.rope, cache)
-    else
-        attn_out, new_cache = standard_gqa_rope(x_norm, block.mha, block.rope, cache)
-    end
-
-    # Residual connection
-    x = x + attn_out
-
-    # FFN with pre-norm
-    x_norm2 = block.norm2(x)
-    ffn_out = block.ffn(x_norm2)
-
-    # Residual connection
-    x = x + ffn_out
-
-    return x, new_cache
-end
-
-# RMSNorm (simpler than LayerNorm, same performance)
-function rmsnorm(x; eps=1e-6)
-    """Root Mean Square Normalization."""
-    rms = sqrt(mean(x.^2, dims=1) .+ eps)
-    return x ./ rms
-end
-
-# SwiGLU activation (better than ReLU/GELU)
-function swiglu(x, W_gate, W_up, W_down)
-    """
-    SwiGLU: Swish-Gated Linear Unit.
-
-    Better than FFN with ReLU in LLMs.
-    """
-    gate = swish(W_gate * x)  # swish(x) = x * sigmoid(x)
-    up = W_up * x
-    return W_down * (gate .* up)
-end
-
-swish(x) = x .* sigmoid(x)
-```
 
 **推奨設定** (2026年標準):
 
@@ -1651,186 +1617,77 @@ swish(x) = x .* sigmoid(x)
 | Bias | なし（大規模） | パラメータ削減、性能同等 |
 | Dropout | 0.0（大規模） | Data augmentation + 暗黙的正則化で十分 |
 
-:::message
-**進捗: 75% 完了** FlashAttentionのIO最適化、Mambaの選択的状態空間、GQA/QCQAのKV Cache削減まで、Attention効率化の最前線を完全理解した。Part 2で実装と実験へ。
-:::
+> **Note:** **進捗: 75% 完了** FlashAttentionのIO最適化、Mambaの選択的状態空間、GQA/QCQAのKV Cache削減まで、Attention効率化の最前線を完全理解した。Part 2で実装と実験へ。
 
 ---
+
+> Progress: 50%
+> **理解度チェック**
+> 1. Chinchilla スケーリング則（Hoffmann et al. 2022）が示した「最適なデータ量 $D$ とパラメータ数 $N$ の関係」を述べよ。GPT-3 はこの観点でどのような問題があったか？
+> 2. In-Context Learning（ICL）の「暗黙的勾配降下」解釈とは何か？Transformer の Forward Pass がなぜ少数ショット学習に等価な操作を行うと考えられるか？
 
 ## 📚 参考文献 (Part 1追加分)
 
 ### FlashAttention系列
 
 [^30]: Dao, T., Fu, D. Y., Ermon, S., Rudra, A., & Ré, C. (2022). FlashAttention: Fast and Memory-Efficient Exact Attention with IO-Awareness. In NeurIPS.
-@[card](https://arxiv.org/abs/2205.14135)
+<https://arxiv.org/abs/2205.14135>
 
 [^31]: Dao, T. (2023). FlashAttention-2: Faster Attention with Better Parallelism and Work Partitioning. arXiv preprint.
-@[card](https://arxiv.org/abs/2307.08691)
+<https://arxiv.org/abs/2307.08691>
 
 [^32]: Shah, J., Bikshandi, G., Zhang, Y., Thakkar, V., Ramani, P., & Dao, T. (2024). FlashAttention-3: Fast and Accurate Attention with Asynchrony and Low-precision. arXiv preprint.
-@[card](https://arxiv.org/abs/2407.08608)
+<https://arxiv.org/abs/2407.08608>
 
-[^33]: Chen, Z., Ye, Y., Liang, Y., Zhang, B., Han, J., Chen, T., ... & Zheng, L. (2025). FlashInfer: Efficient and Customizable Attention Engine for LLM Serving. arXiv preprint.
-@[card](https://arxiv.org/abs/2501.01005)
+[^33]: Ye, Z., Chen, L., Lai, R., Lin, W., Zhang, Y., Wang, S., Chen, T., et al. (2025). FlashInfer: Efficient and Customizable Attention Engine for LLM Serving. arXiv preprint.
+<https://arxiv.org/abs/2501.01005>
 
 ### State Space Models & Mamba
 
 [^34]: Gu, A., & Dao, T. (2023). Mamba: Linear-Time Sequence Modeling with Selective State Spaces. arXiv preprint.
-@[card](https://arxiv.org/abs/2312.00752)
+<https://arxiv.org/abs/2312.00752>
 
 ### KV Cache最適化
 
 [^35]: Ainslie, J., Lee-Thorp, J., de Jong, M., Zemlyanskiy, Y., Lebrón, F., & Sanghai, S. (2023). GQA: Training Generalized Multi-Query Transformer Models from Multi-Head Checkpoints. In EMNLP.
-@[card](https://arxiv.org/abs/2305.13245)
+<https://arxiv.org/abs/2305.13245>
 
 [^36]: Yin, Z., Liu, Y., Wang, X., & Zhang, L. (2024). QCQA: Quality and Capacity-aware Grouped Query Attention. arXiv preprint.
-@[card](https://arxiv.org/abs/2406.10247)
+<https://arxiv.org/abs/2406.10247>
 
-[^37]: Anonymous. (2024). Expected Attention: KV Cache Compression by Estimating Attention. Under review.
-@[card](https://arxiv.org/abs/2510.00636)
+[^37]: Devoto, A., et al. (2024). Expected Attention: KV Cache Compression by Estimating Attention from Future Queries Distribution.
+<https://arxiv.org/abs/2510.00636>
 
 ### 補足資料
 
 **Sparse & Linear Attention**:
 - Child, R., Gray, S., Radford, A., & Sutskever, I. (2019). Generating Long Sequences with Sparse Transformers. arXiv preprint.
-@[card](https://arxiv.org/abs/1904.10509)
+<https://arxiv.org/abs/1904.10509>
 
 - Choromanski, K., Likhosherstov, V., Dohan, D., Song, X., Gane, A., Sarlos, T., ... & Weller, A. (2021). Rethinking Attention with Performers. In ICLR.
-@[card](https://arxiv.org/abs/2009.14794)
+<https://arxiv.org/abs/2009.14794>
 
 - Zaheer, M., Guruganesh, G., Dubey, A., Ainslie, J., Alberti, C., Ontanon, S., ... & Ahmed, A. (2020). Big Bird: Transformers for Longer Sequences. In NeurIPS.
-@[card](https://arxiv.org/abs/2007.14062)
+<https://arxiv.org/abs/2007.14062>
 
 **Position Encoding**:
 - Su, J., Lu, Y., Pan, S., Murtadha, A., Wen, B., & Liu, Y. (2021). RoFormer: Enhanced Transformer with Rotary Position Embedding. arXiv preprint.
-@[card](https://arxiv.org/abs/2104.09864)
+<https://arxiv.org/abs/2104.09864>
 
 **Hybrid Architectures**:
 - Lieber, O., Lenz, B., Bata, H., Cohen, G., Osin, J., Dalmedigos, I., ... & Shoham, Y. (2024). Jamba: A Hybrid Transformer-Mamba Language Model. arXiv preprint.
-@[card](https://arxiv.org/abs/2403.19887)
+<https://arxiv.org/abs/2403.19887>
 
 - Peng, B., Alcaide, E., Anthony, Q., Albalak, A., Arcadinho, S., Cao, H., ... & Zhu, Y. (2023). RWKV: Reinventing RNNs for the Transformer Era. In EMNLP.
-@[card](https://arxiv.org/abs/2305.13048)
+<https://arxiv.org/abs/2305.13048>
 
-### 3.11 コード実装例: FlashAttention風の最適化
+## 著者リンク
 
-最後に、FlashAttentionの核心アイデアを凝縮した教育的実装を示す:
-
-```julia
-using CUDA
-
-function naive_attention_memory_analysis(seq_len, d_model)
-    """Analyze memory usage of naive attention."""
-    # Q, K, V: (d_model, seq_len)
-    qkv_memory = 3 * seq_len * d_model * 4  # bytes (Float32)
-
-    # S = Q * K^T: (seq_len, seq_len)
-    scores_memory = seq_len * seq_len * 4
-
-    # P = softmax(S): (seq_len, seq_len)
-    probs_memory = seq_len * seq_len * 4
-
-    total_memory = qkv_memory + scores_memory + probs_memory
-    peak_memory = qkv_memory + scores_memory  # S and P not concurrent
-
-    println("Sequence length: $seq_len")
-    println("QKV memory: $(round(qkv_memory / 1e9, digits=2)) GB")
-    println("Scores matrix: $(round(scores_memory / 1e9, digits=2)) GB")
-    println("Total intermediate: $(round(total_memory / 1e9, digits=2)) GB")
-    println("Memory bottleneck: $(seq_len^2 * 4 / 1e9) GB for NxN matrix")
-end
-
-# Example: 8K context
-naive_attention_memory_analysis(8192, 512)
-
-# Output:
-# Sequence length: 8192
-# QKV memory: 0.05 GB
-# Scores matrix: 0.27 GB  ← Bottleneck!
-# Total intermediate: 0.59 GB
-# Memory bottleneck: 0.27 GB for NxN matrix
-```
-
-**FlashAttention的な最適化** (概念実装):
-
-```julia
-function tiled_attention_demo(Q, K, V; block_size=64)
-    """
-    Demonstrate tiled attention computation (educational).
-
-    Real FlashAttention uses CUDA kernels with warp-level optimization.
-    """
-    d, N = size(Q)
-    O = zeros(Float32, d, N)
-
-    # Outer loop: process Q in blocks
-    for q_start in 1:block_size:N
-        q_end = min(q_start + block_size - 1, N)
-        Q_block = Q[:, q_start:q_end]  # Load to "SRAM"
-
-        # Initialize accumulators for this Q block
-        O_block = zeros(Float32, d, q_end - q_start + 1)
-        max_scores = fill(-Inf32, q_end - q_start + 1)
-        sum_exp = zeros(Float32, q_end - q_start + 1)
-
-        # Inner loop: process K, V in blocks
-        for kv_start in 1:block_size:N
-            kv_end = min(kv_start + block_size - 1, N)
-            K_block = K[:, kv_start:kv_end]  # Load to "SRAM"
-            V_block = V[:, kv_start:kv_end]
-
-            # Compute attention scores for this tile
-            scores = (Q_block' * K_block) / sqrt(Float32(d))  # (q_block_size, kv_block_size)
-
-            # Online max and softmax (numerical stability)
-            new_max = maximum(scores, dims=2)[:, 1]
-            max_scores_updated = max.(max_scores, new_max)
-
-            # Update normalization
-            correction = exp.(max_scores - max_scores_updated)
-            sum_exp = sum_exp .* correction .+ sum(exp.(scores .- new_max), dims=2)[:, 1]
-
-            # Update output (weighted sum of V)
-            O_block = O_block .* correction' .+ V_block * exp.(scores .- new_max)'
-
-            max_scores = max_scores_updated
-        end
-
-        # Normalize output
-        O[:, q_start:q_end] = O_block ./ sum_exp'
-    end
-
-    return O
-end
-
-# Test correctness
-Q_test = randn(Float32, 64, 256)
-K_test = randn(Float32, 64, 256)
-V_test = randn(Float32, 64, 256)
-
-O_naive = standard_attention(Q_test, K_test, V_test)
-O_tiled = tiled_attention_demo(Q_test, K_test, V_test, block_size=64)
-
-println("Correctness check: ", maximum(abs.(O_naive - O_tiled)))
-# Output: Correctness check: 2.3e-6  ← Numerical precision tolerance
-```
-
-**重要な洞察**:
-1. **メモリ階層を意識する**: HBM ↔ SRAM の往復を最小化
-2. **オンライン統計**: Softmaxの正規化定数を逐次更新（全データ保持不要）
-3. **タイル化**: 大きな行列を小ブロックに分割し、SRAM内で完結
-
-Production FlashAttentionはこれに加えて:
-- Warp-level並列化（32 threads/warp）
-- Shared memory管理
-- Kernel融合（複数操作を1 kernelに）
-- レジスタ最適化
-
-を実装している。詳細は公式実装（C++/CUDA）を参照。
-
----
-
----
+- Blog: https://fumishiki.dev
+- X: https://x.com/fumishiki
+- LinkedIn: https://www.linkedin.com/in/fumitakamurakami
+- GitHub: https://github.com/fumishiki
+- Hugging Face: https://huggingface.co/fumishiki
 
 ## ライセンス
 

@@ -4,6 +4,11 @@ emoji: "🎙️"
 type: "tech"
 topics: ["machinelearning", "deeplearning", "audio", "julia", "tts"]
 published: true
+slug: "ml-lecture-44-part2"
+difficulty: "advanced"
+time_estimate: "90 minutes"
+languages: ["Julia", "Rust"]
+keywords: ["機械学習", "深層学習", "生成モデル"]
 ---
 ## 💻 4. 実装ゾーン（45分）— 3言語で音声生成パイプライン
 
@@ -31,20 +36,10 @@ using Flux, Zygote, FFTW, Statistics, Random, ProgressMeter
 
 # --- Dataset: 2 phonemes → sine waves ---
 function generate_phoneme_dataset(n_samples=100, duration=1.0, sample_rate=8000)
-    t = 0:1/sample_rate:duration-1/sample_rate
-    X_text = []  # Text labels (0 or 1)
-    X_audio = []  # Audio waveforms
-
-    for _ in 1:n_samples
-        phoneme = rand(0:1)  # 0 = 'a', 1 = 'i'
-        freq = phoneme == 0 ? 220.0 : 440.0  # A3 vs A4
-
-        audio = sin.(2π * freq * t)
-        push!(X_text, phoneme)
-        push!(X_audio, Float32.(audio))
-    end
-
-    return X_text, X_audio
+    t        = 0:1/sample_rate:duration-1/sample_rate
+    phonemes = [rand(0:1) for _ in 1:n_samples]
+    audios   = [Float32.(sin.(2π .* (p == 0 ? 220.0 : 440.0) .* t)) for p in phonemes]
+    return phonemes, audios
 end
 
 # --- Flow Matching Model ---
@@ -66,59 +61,32 @@ function FlowMatchingTTS(vocab_size=2, audio_dim=8000, hidden_dim=128)
 end
 
 function (m::FlowMatchingTTS)(x_t, t, phoneme_id)
-    # x_t: (audio_dim,)
-    # t: scalar time
-    # phoneme_id: integer (0 or 1)
-
-    text_emb = m.text_emb(phoneme_id + 1)  # +1 for 1-indexing
-    text_emb_expanded = repeat(text_emb, length(x_t) ÷ length(text_emb))
-
-    input = vcat(x_t, text_emb_expanded[1:length(x_t)], [t])
-    v = m.velocity(input)
-    return v
+    emb = m.text_emb(phoneme_id + 1)
+    m.velocity(vcat(x_t, repeat(emb, length(x_t) ÷ length(emb))[1:length(x_t)], [t]))
 end
 
 # --- Training ---
 function train_flow_tts(n_epochs=50, n_samples=100)
-    # Dataset
     X_text, X_audio = generate_phoneme_dataset(n_samples)
     audio_dim = length(X_audio[1])
-
-    # Model
     model = FlowMatchingTTS(2, audio_dim, 64)
-    opt = Flux.Adam(1e-3)
+    opt   = Flux.Adam(1e-3)
+    ps    = Flux.params(model)
 
     @showprogress for epoch in 1:n_epochs
-        losses = []
-
-        for i in 1:n_samples
-            # Sample t ~ Uniform(0, 1)
-            t = rand(Float32)
-
-            # x0 ~ N(0, I), x1 = real audio
-            x0 = randn(Float32, audio_dim)
-            x1 = X_audio[i]
-
-            # x_t = (1-t)*x0 + t*x1
-            x_t = (1 - t) .* x0 .+ t .* x1
-
-            # Target velocity: u_t = x1 - x0
+        losses = map(1:n_samples) do i
+            t   = rand(Float32)
+            x0  = randn(Float32, audio_dim)
+            x1  = X_audio[i]
+            x_t = @. (1 - t) * x0 + t * x1
             u_t = x1 .- x0
-
-            # Gradient step
-            grads = gradient(Flux.params(model)) do
-                v_pred = model(x_t, t, X_text[i])
-                loss = mean((v_pred .- u_t).^2)
-                return loss
+            grads = gradient(ps) do
+                mean((model(x_t, t, X_text[i]) .- u_t).^2)
             end
-
-            Flux.Optimise.update!(opt, Flux.params(model), grads)
-            push!(losses, mean((model(x_t, t, X_text[i]) .- u_t).^2))
+            Flux.Optimise.update!(opt, ps, grads)
+            mean((model(x_t, t, X_text[i]) .- u_t).^2)
         end
-
-        if epoch % 10 == 0
-            println("Epoch $epoch: Loss = $(mean(losses))")
-        end
+        epoch % 10 == 0 && println("Epoch $epoch: Loss = $(mean(losses))")
     end
 
     return model
@@ -126,17 +94,12 @@ end
 
 # --- Sampling ---
 function sample_flow_tts(model, phoneme_id, steps=10, audio_dim=8000)
-    x0 = randn(Float32, audio_dim)
+    x  = randn(Float32, audio_dim)
     dt = 1.0f0 / steps
-    x_t = copy(x0)
-
     for step in 1:steps
-        t = step * dt
-        v = model(x_t, t, phoneme_id)
-        x_t = x_t .+ v .* dt
+        x .+= model(x, step * dt, phoneme_id) .* dt
     end
-
-    return x_t
+    return x
 end
 
 # --- Main ---
@@ -198,9 +161,13 @@ $$
 x_t = (1-t)x_0 + t x_1 \quad \Leftrightarrow \quad \text{x_t = (1 - t) .* x0 .+ t .* x1}
 $$
 
+- shape: $x_0, x_1, x_t \in \mathbb{R}^{8000}$（8kHz × 1秒 = 8000サンプル）、$t \in [0,1]$ スカラー
+
 $$
 u_t = x_1 - x_0 \quad \Leftrightarrow \quad \text{u_t = x1 .- x0}
 $$
+
+- shape: $u_t \in \mathbb{R}^{8000}$（条件付きベクトル場 = 直線経路上の速度、定数ベクトル）
 
 $$
 \mathcal{L} = \|\mathbf{v}_\theta - \mathbf{u}_t\|^2 \quad \Leftrightarrow \quad \text{loss = mean((v_pred .- u_t).^2)}
@@ -237,8 +204,6 @@ use candle_core::{Device, Result, Tensor};
 use candle_nn::{Module, VarBuilder, VarMap};
 use hound;
 use rand::Rng;
-use std::fs::File;
-use std::io::BufWriter;
 
 // Flow Matching inference
 fn flow_matching_sample(
@@ -248,51 +213,32 @@ fn flow_matching_sample(
     audio_dim: usize,
     device: &Device,
 ) -> Result<Tensor> {
-    // x0 ~ N(0, I)
     let mut rng = rand::thread_rng();
-    let x0_vec: Vec<f32> = (0..audio_dim).map(|_| rng.gen::<f32>() - 0.5).collect();
-    let mut x_t = Tensor::from_vec(x0_vec, audio_dim, device)?;
-
+    let x0: Vec<f32> = (0..audio_dim).map(|_| rng.gen::<f32>() - 0.5).collect();
     let dt = 1.0 / steps as f32;
 
-    for step in 1..=steps {
-        let t = step as f32 * dt;
-        let t_tensor = Tensor::from_vec(vec![t], 1, device)?;
-
-        // v = model(x_t, t, phoneme_emb)
-        let input = Tensor::cat(&[&x_t, phoneme_emb, &t_tensor], 0)?;
-        let v = model.forward(&input)?;
-
-        // x_t = x_t + v * dt
-        let v_scaled = v.affine(dt, 0.0)?;
-        x_t = (&x_t + &v_scaled)?;
-    }
-
-    Ok(x_t)
-end
+    (1..=steps).try_fold(Tensor::from_vec(x0, audio_dim, device)?, |x, step| {
+        let t = Tensor::from_vec(vec![step as f32 * dt], 1, device)?;
+        let v = model.forward(&Tensor::cat(&[&x, phoneme_emb, &t], 0)?)?;
+        &x + &v.affine(dt, 0.0)?
+    })
+}
 
 fn main() -> Result<()> {
     println!("【Rust Audio Inference】");
 
-    // Device
     let device = Device::Cpu;
 
-    // Dummy model (placeholder)
-    // In practice: load trained model weights from Julia
     let varmap = VarMap::new();
-    let vb = VarBuilder::from_varmap(&varmap, candle_core::DType::F32, &device);
+    let _vb = VarBuilder::from_varmap(&varmap, candle_core::DType::F32, &device);
 
-    // Dummy phoneme embedding
     let phoneme_emb = Tensor::zeros(64, candle_core::DType::F32, &device)?;
 
-    // Sampling (placeholder)
     println!("Sampling audio with Flow Matching...");
     // let audio_tensor = flow_matching_sample(&model, &phoneme_emb, 10, 8000, &device)?;
 
-    // Dummy audio for demo
     let audio_vec: Vec<f32> = (0..8000).map(|i| (i as f32 / 8000.0).sin()).collect();
 
-    // Write WAV file
     let spec = hound::WavSpec {
         channels: 1,
         sample_rate: 8000,
@@ -300,12 +246,10 @@ fn main() -> Result<()> {
         sample_format: hound::SampleFormat::Int,
     };
 
-    let mut writer = hound::WavWriter::create("output.wav", spec).unwrap();
-    for &sample in &audio_vec {
-        let amplitude = i16::MAX as f32;
-        writer.write_sample((sample * amplitude) as i16).unwrap();
-    }
-    writer.finalize().unwrap();
+    let mut writer = hound::WavWriter::create("output.wav", spec)?;
+    audio_vec.iter()
+        .try_for_each(|&s| writer.write_sample((s * i16::MAX as f32) as i16))?;
+    writer.finalize()?;
 
     println!("Audio saved to output.wav");
     println!("→ Rust: ゼロコピー推論 + 低レイテンシ");
@@ -323,6 +267,8 @@ cargo run --release
 - **Candle**: Rust-native neural network framework（PyTorch-like API）
 - **Zero-copy**: Tensor 操作が allocation を最小化
 - **Low latency**: リアルタイム推論に最適（<10ms）
+
+> **⚠️ Warning:** Candle の API は PyTorch より制約が多い。特に in-place 操作（`x += v`）は Tensor の ownership rules により使えないことが多い。代わりに `x = (x + v)?` のように新しい Tensor を返す関数型スタイルで書くこと。
 
 ### 4.3 Elixir: 分散音声配信
 
@@ -355,31 +301,23 @@ defmodule AudioServer do
 
   # TTS エンドポイント
   post "/tts" do
-    # Parse JSON body
-    {:ok, body, conn} = Plug.Conn.read_body(conn)
-    params = Jason.decode!(body)
-    text = params["text"]
-    phoneme_id = String.to_integer(params["phoneme_id"] || "0")
+    with {:ok, body, conn} <- Plug.Conn.read_body(conn) do
+      params     = Jason.decode!(body)
+      phoneme_id = params |> Map.get("phoneme_id", "0") |> String.to_integer()
+      audio_data = call_rust_inference(params["text"], phoneme_id)
 
-    # Call Rust inference (via Port)
-    audio_data = call_rust_inference(text, phoneme_id)
-
-    # Return WAV file
-    conn
-    |> put_resp_content_type("audio/wav")
-    |> send_resp(200, audio_data)
+      conn
+      |> put_resp_content_type("audio/wav")
+      |> send_resp(200, audio_data)
+    end
   end
 
   match _ do
     send_resp(conn, 404, "Not found")
   end
 
-  # Call Rust via Port (simplified)
-  defp call_rust_inference(text, phoneme_id) do
-    # In production: Port communication with Rust binary
-    # For demo: return dummy WAV
-    File.read!("priv/dummy.wav")
-  end
+  defp call_rust_inference(_text, _phoneme_id),
+    do: File.read!("priv/dummy.wav")
 end
 
 # Start server
@@ -387,12 +325,8 @@ defmodule AudioServer.Application do
   use Application
 
   def start(_type, _args) do
-    children = [
-      {Plug.Cowboy, scheme: :http, plug: AudioServer, options: [port: 4000]}
-    ]
-
-    opts = [strategy: :one_for_one, name: AudioServer.Supervisor]
-    Supervisor.start_link(children, opts)
+    [{Plug.Cowboy, scheme: :http, plug: AudioServer, options: [port: 4000]}]
+    |> Supervisor.start_link(strategy: :one_for_one, name: AudioServer.Supervisor)
   end
 end
 ```
@@ -414,6 +348,8 @@ curl -X POST http://localhost:4000/tts \
 - **OTP**: Supervision tree で耐障害性
 - **Port**: Rust バイナリと通信（FFI より安全）
 - **分散**: ノード間で音声生成タスクを分散
+
+> **⚠️ Warning:** Elixir の `Port` 経由で Rust を呼ぶと、バイナリプロトコルの設計が必要になる。音声データ（float32 配列）を byte stream に変換する際、エンディアン（little/big）と長さヘッダーを必ず明示すること。プロトコルのミスマッチは無音や雑音の原因になる。
 
 ### 4.4 3言語統合パイプライン
 
@@ -454,9 +390,7 @@ println()
 println("→ Production-ready 音声生成システム")
 ```
 
-:::message
-**ここまでで全体の85%完了！** Zone 4 完走。Julia で Flow Matching TTS を訓練、Rust でリアルタイム推論、Elixir で分散配信するパイプラインを構築した。次は Zone 5 — 実験ゾーンで、実際に音声を生成し、評価する。
-:::
+> **Note:** **ここまでで全体の85%完了！** Zone 4 完走。Julia で Flow Matching TTS を訓練、Rust でリアルタイム推論、Elixir で分散配信するパイプラインを構築した。次は Zone 5 — 実験ゾーンで、実際に音声を生成し、評価する。
 
 ---
 
@@ -468,37 +402,50 @@ println("→ Production-ready 音声生成システム")
 
 以下の記号・用語を自分の言葉で説明できるか？（各2-3文）
 
-:::details Q1: VQ (Vector Quantization)
+<details><summary>Q1: VQ (Vector Quantization)</summary>
 
 **Answer**:
 Vector Quantization は連続的な潜在表現 $z_e$ を離散的なコードブック $\{e_k\}_{k=1}^K$ のエントリに置き換える手法だ。各 $z_e^{(i)}$ を最近傍 $e_{k^*} = \arg\min_k \|z_e^{(i)} - e_k\|$ に quantize し、インデックス $k^*$ を離散トークンとして記録する。VQ-VAE では Straight-Through Estimator で勾配を近似し、End-to-End 訓練を可能にする。
-:::
 
-:::details Q2: RVQ (Residual Vector Quantization)
+</details>
+
+<details><summary>Q2: RVQ (Residual Vector Quantization)</summary>
 
 **Answer**:
 RVQ は単一 VQ の限界（表現力不足）を、複数段階の量子化で解決する。第1段階で $z_q^{(1)}$ を得た後、残差 $r^{(1)} = z_e - z_q^{(1)}$ を第2段階で量子化し、これを $N_q$ 段階反復する。最終的な量子化表現は $z_q = \sum_{n=1}^{N_q} z_q^{(n)}$ となり、$K^{N_q}$ 個の有効エントリを持つ階層的表現が得られる。
-:::
 
-:::details Q3: Flow Matching の条件付き確率パス $p_t(\mathbf{x} | \mathbf{x}_0, \mathbf{x}_1)$
+</details>
+
+<details><summary>Q3: Flow Matching の条件付き確率パス $p_t(\mathbf{x} | \mathbf{x}_0, \mathbf{x}_1)$</summary>
 
 **Answer**:
 条件付き確率パスは、ノイズ $\mathbf{x}_0$ からデータ $\mathbf{x}_1$ への補間分布 $p_t$ を定義する。線形補間では $\mu_t = (1-t)\mathbf{x}_0 + t\mathbf{x}_1$, $\sigma_t = 0$ とし、$p_t(\mathbf{x} | \mathbf{x}_0, \mathbf{x}_1) = \delta(\mathbf{x} - \mu_t)$ （決定論的）となる。この conditional path の marginal $p_t(\mathbf{x}) = \int p_t(\mathbf{x} | \mathbf{x}_0, \mathbf{x}_1) p_0(\mathbf{x}_0) p_1(\mathbf{x}_1) d\mathbf{x}_0 d\mathbf{x}_1$ が、データ分布 $p_0 \to p_1$ への変換を記述する。
-:::
 
-:::details Q4: Repetition Aware Sampling
+</details>
+
+<details><summary>Q4: Repetition Aware Sampling</summary>
 
 **Answer**:
 Repetition Aware Sampling は autoregressive LM のデコード時に、直近 $W$ トークンの出現回数 $\text{count}(k, x_{<t})$ をカウントし、logits を $\text{logits}'_k = \text{logits}_k - \lambda \cdot \text{count}(k)$ でペナルティ化する。これにより、繰り返しトークン（phoneme repetition）の確率を down-weight し、"hehehe-llo" のような不自然な出力を防ぐ。VALL-E 2 で導入され、human parity 達成に寄与した。
-:::
 
-:::details Q5: FAD (Fréchet Audio Distance) vs KAD (Kernel Audio Distance)
+</details>
+
+<details><summary>Q5: FAD (Fréchet Audio Distance) vs KAD (Kernel Audio Distance)</summary>
 
 **Answer**:
 FAD は音声埋め込み $e_r, e_g$ をガウス分布 $\mathcal{N}(\mu_r, \Sigma_r)$, $\mathcal{N}(\mu_g, \Sigma_g)$ と仮定し、Fréchet距離 $\|\mu_r - \mu_g\|^2 + \text{Tr}(\Sigma_r + \Sigma_g - 2(\Sigma_r \Sigma_g)^{1/2})$ で評価する。しかし実際の埋め込みは非ガウス分布であり、小サンプルで不安定だ。
 
 KAD は MMD（Maximum Mean Discrepancy）に基づき、polynomial kernel $k(x,y) = (1 + \langle x,y \rangle)^d$ で分布間距離を計算する。Distribution-free（ガウス仮定不要）、unbiased（U-statistic）、small-sample stable という利点があり、2025年以降 FAD を置き換える流れにある。
-:::
+
+**KAD の U-statistic 展開**:
+
+$$
+\text{KAD}(P, Q) = \mathbb{E}_{x,x' \sim P}[k(x,x')] - 2\mathbb{E}_{x \sim P, y \sim Q}[k(x,y)] + \mathbb{E}_{y,y' \sim Q}[k(y,y')]
+$$
+
+サンプル $\{x_i\}_{i=1}^m \sim P$, $\{y_j\}_{j=1}^n \sim Q$ を使った不偏推定量: 3つの期待値を各々サンプルペアの平均で推定。KAD = 0 iff $P = Q$（polynomial kernel が universal であるため）。
+
+</details>
 
 ### 5.2 実装チャレンジ
 
@@ -510,6 +457,8 @@ KAD は MMD（Maximum Mean Discrepancy）に基づき、polynomial kernel $k(x,y
 - Encoder: Conv1D with stride 320（24000 / 75）
 - Codebook: 1024 entries, 128 dimensions
 - Decoder: TransposedConv1D
+
+**数値検算**: stride=320 → 24000/320 = 75 frames ✅。Codebook サイズ 1024 → 各トークンは $\log_2(1024) = 10$ bits。1秒 = 75 × 10 = 750 bits → 24kHz × 16bit PCM の 384,000 bits から見ると 512倍圧縮。EnCodec RVQ×8（75 token/sec × 8 codebook × 10 bits = 6000 bits/sec）と比べると WavTokenizer は 8倍スパース → Codec LM が扱うシーケンスが大幅短縮。
 
 ```julia
 # Challenge 1: WavTokenizer VQ
@@ -537,6 +486,8 @@ end
 #### Challenge 3: KAD 実装
 
 **課題**: Polynomial kernel ($d=3$) を用いた KAD を実装し、real vs generated embeddings の距離を計算せよ。
+
+**数値の確認**: 同一分布の場合 KAD ≈ 0。ランダムに生成した embeddings（real $\neq$ generated）では KAD > 0 になることを assert で確認すること。$k(x,x) = (1 + \|x\|^2)^3 > 1$（CLIP 埋め込みは L2-normalized なので $\|x\|=1$ → $k(x,x) = 2^3 = 8$）。
 
 ```julia
 # Challenge 3: KAD implementation
@@ -570,11 +521,15 @@ end
 
 **ヒント**: VALL-E 2 / CosyVoice のアプローチを参考に。
 
+**数値の期待値**: F5-TTS で 3秒プロンプトからの話者類似度（SECS score）は 0.85〜0.92 が典型。0.7 以下なら話者埋め込みの抽出か条件付けが失敗している。SECS = cosine similarity of speaker embedding（x-vector/ECAPA-TDNN）で計算。
+
 #### 5.4.2 Long-form Music Generation
 
 **課題**: Stable Audio のアプローチ（DiT + Timing embeddings）で、3分の音楽を生成せよ。
 
 **ヒント**: Latent diffusion（VAE latent space）で計算量削減。
+
+**計算量の試算**: 22kHz × 180 秒 = 3,960,000 waveform サンプル → VAE で $\times 1/512$ 圧縮 → latent は約 7,734 フレーム。DiT の $O(N^2)$ で $N=7,734$ → $7,734^2 \approx 6 \times 10^7$（原音声の $3,960,000^2$ より 26,000 倍以下）。これが Latent Diffusion が「長い音楽を生成できる理由」。
 
 #### 5.4.3 Audio Style Transfer
 
@@ -582,11 +537,19 @@ end
 
 **ヒント**: FACodec で content/prosody を分離。
 
-:::message
-**ここまでで全体の100%完了（実験ゾーン完走）！** 自己診断テストと実装チャレンジを通じて、音声生成の理解度を確認した。次は Zone 6 — 発展ゾーンで、音声生成の研究フロンティアを探る。
-:::
+**難易度の背景**: Audio Style Transfer は TTS よりも難しい。TTS は text → audio の「順方向」だが、Style Transfer は audio → (content, style) → audio の「逆方向 + 再合成」。FACodec の分離品質が最終結果の上限になるため、まず FACodec の各属性（content/prosody/timbre/acoustic）を個別に出力して分離精度を確認してから進めること。
+
+> **Note:** **ここまでで全体の100%完了（実験ゾーン完走）！** 自己診断テストと実装チャレンジを通じて、音声生成の理解度を確認した。次は Zone 6 — 発展ゾーンで、音声生成の研究フロンティアを探る。
 
 ---
+
+
+> Progress: 85%
+> **理解度チェック**
+> 1. WavTokenizerが75トークン/秒の単一VQで高品質を保てる理由を、EnCodecのRVQ×4との比較で説明せよ。
+>    - *ヒント*: 情報量は同じでも、どちらの表現がDecoderに渡す際の誤差伝播が小さいか考えよ。
+> 2. VALL-E 2のRepetition Aware Samplingが音素繰り返しを防ぐ仕組みを、$\text{logits}'_k = \text{logits}_k - \lambda \cdot \text{count}(k)$の式で説明せよ。
+>    - *ヒント*: $\lambda = 0$ の場合と $\lambda \to \infty$ の場合の挙動をそれぞれ述べよ。
 
 ## 🚀 6. 発展ゾーン（30分）— 音声生成の研究フロンティア + まとめ
 
@@ -631,6 +594,8 @@ graph TD
 3. **Few-shot learning**: 3秒 → 1秒プロンプトで話者クローン
 4. **Cross-lingual transfer**: 英語訓練モデルが日本語も生成
 
+**Real-time TTS の技術的課題**: RTF < 1.0 はストリーミング配信の要件。現状 ZipVoice で RTF=0.02（GPU）だが、CPU では RTF≈0.5〜2.0。音声アシスタントの応答遅延 = TTS latency → 体感品質に直結。TTFT（Time to First Token）を 100ms 以下にすることが 2026 年の目標。
+
 ```julia
 println("\n【Zero-shot TTS の進化予測】")
 println("2024-2025: Human parity 達成（VALL-E 2 / F5-TTS）")
@@ -660,6 +625,8 @@ println("  3. Controllability: 韻律・感情・スタイルの独立制御")
 - **Hierarchical generation**: Structure (intro/verse/chorus) → Fill details
 - **Symbolic + audio**: MIDI（symbolic）→ Audio 統合生成
 - **Diffusion vs Flow**: Stable Audio（Diffusion）vs MusicGen（AR LM）の収束
+
+**Long-term coherence の数理的障壁**: 3分の楽曲は 22kHz × 180 秒 = 3,960,000 サンプル。EnCodec で圧縮しても 150 token/sec × 180 = 27,000 トークン。Transformer の self-attention は $O(n^2)$ → 27,000² ≈ 7.3 億の attention weight → メモリ 3 GB（fp16）。現行 LM のコンテキスト長では全体を一度に処理できないため、スライディングウィンドウや RNN ハイブリッドが研究課題になっている。
 
 ### 6.4 Audio評価指標の未来
 
@@ -718,6 +685,8 @@ println("Goal: 人間評価との相関 R > 0.9")
 - **Opt-in dataset**: アーティストが明示的に許可したデータのみ使用
 - **Royalty system**: AI生成楽曲の収益を元データ提供者に分配
 
+**技術的な Watermarking**: 現在、AudioSeal（Meta, 2024）が音声に知覚不可能な透かしを埋め込む技術として注目。$< 100$ ms の遅延で適用可能、雑音・圧縮・速度変換に対しても 95%+ の検出精度。「生成された音声である」ことの証明に必要な技術基盤が整いつつある。
+
 ```julia
 println("\n【Audio 生成の倫理課題】")
 println("Deepfake 音声:")
@@ -764,7 +733,7 @@ println("→ 技術的進歩と法的枠組みの協調が必須")
 | **Hugging Face** | Pre-trained models | [HF: Audio Models](https://huggingface.co/models?pipeline_tag=text-to-audio) |
 | **Awesome Audio** | Curated list | [GitHub: Awesome-Audio](https://github.com/AI-secure/Awesome-Audio-Synthesis) |
 
-:::details Glossary — 本講義の重要用語
+<details><summary>Glossary — 本講義の重要用語</summary>
 
 - **VQ-VAE**: Vector Quantized Variational Autoencoder — 連続潜在表現を離散トークンに量子化
 - **RVQ**: Residual Vector Quantization — 残差を複数回量子化する階層的手法
@@ -779,7 +748,8 @@ println("→ 技術的進歩と法的枠組みの協調が必須")
 - **FAD**: Fréchet Audio Distance — ガウス仮定の音声評価指標
 - **KAD**: Kernel Audio Distance — distribution-free 評価指標（MMD-based）
 - **CLAP**: Contrastive Language-Audio Pretraining — Text-audio alignment 評価
-:::
+
+</details>
 
 ```mermaid
 graph TD
@@ -806,9 +776,7 @@ graph TD
     style A fill:#ffd700
 ```
 
-:::message
-**ここまでで全体の95%完了！** Zone 6 完走。音声生成の研究フロンティア（Codec進化・TTS次世代・Music課題・評価指標・倫理問題）を把握した。次は Zone 7 — 振り返りゾーンで、全体を総括する。
-:::
+> **Note:** **ここまでで全体の95%完了！** Zone 6 完走。音声生成の研究フロンティア（Codec進化・TTS次世代・Music課題・評価指標・倫理問題）を把握した。次は Zone 7 — 振り返りゾーンで、全体を総括する。
 
 ---
 
@@ -839,7 +807,11 @@ graph TD
 - 10ステップで並列生成 → 15x高速
 - Alignment-free（テキストをパディング）
 
-**本質**: Diffusion の訓練簡略化（simulation-free）が速度と品質を両立
+**Alignment-free の意義**: 従来の TTS（FastSpeech2 等）はテキスト → 音声フレームのアライメント（どの音素がどのフレームに対応するか）を事前に求める必要があった。F5-TTS はテキストを音声長にパディングして同じ入力長にする → アライメント不要。Duration Model のみで音声長を決定し、後は Flow が自動で対応付けを学習。
+
+**本質**: Diffusion の訓練簡略化（simulation-free）が速度と品質を両立。Flow Matching は ODE の全軌跡を計算（simulate）せずに、時刻 $t$ でのサンプルから直接速度場を学習できるため「simulation-free」と呼ばれる。
+
+**数値で確認**: F5-TTS の 10ステップ（ODE積分）は DDPM の 1000ステップに相当するが、OT-CFM の直線経路により 1/10 のステップで同精度の積分が可能。具体的には NFE(Number of Function Evaluations) = 10 vs 1000 → 100倍のモデル呼び出し削減。ZipVoice は NFE=1（蒸留後）→ 10倍削減。
 
 #### 洞察3: Codec LM の限界とハイブリッド化
 
@@ -861,6 +833,10 @@ graph TD
 
 **本質**: 機械学習の評価は「仮定の少なさ」へ向かう（FID → KID → KAD）
 
+**数値検算**: KAD は polynomial kernel $k(x,y) = (1 + \langle x,y \rangle)^d$ の U-statistic。$n$ サンプルで KAD の標準誤差 $\propto 1/\sqrt{n}$、一方 FAD の共分散行列推定誤差 $\propto d/\sqrt{n}$（$d$ は埋め込み次元）。CLAP の $d=512$ なら FAD は KAD の $\sqrt{512} \approx 23$ 倍のサンプル数が必要。
+
+**なぜ FAD でも長年使われてきたか**: ガウス仮定が成立する「中程度の品質の音声」では FAD と KAD はほぼ同じ順位付けをする。問題が顕在化するのは「高品質・多様な音声（VALL-E 2, F5-TTS）」を評価するとき。この段階で初めて非ガウス性が効いてくる。評価指標は「指標が測れない何かを測ろうとするとき」に限界が見えてくる。
+
 ```julia
 println("\n【第44回の4大洞察】")
 println("1. Neural Audio Codec: 音声の離散化革命")
@@ -878,35 +854,42 @@ println("   → Distribution-free（仮定の少なさ = 汎用性）")
 
 ### 6.8 FAQ — 音声生成でよくある疑問
 
-:::details Q1: WavTokenizer と EnCodec、どちらを使うべき？
+<details><summary>Q1: WavTokenizer と EnCodec、どちらを使うべき？</summary>
 
 **Answer**:
 用途による。**EnCodec**（RVQ x4）は品質重視・MusicGen互換が利点。**WavTokenizer**（VQ x1）は推論速度・メモリ効率が利点。2025年以降の新規プロジェクトでは WavTokenizer が推奨（単一VQの簡潔さ + SOTA品質）。
-:::
 
-:::details Q2: F5-TTS と VALL-E 2、どちらが優れているか？
+</details>
+
+<details><summary>Q2: F5-TTS と VALL-E 2、どちらが優れているか？</summary>
 
 **Answer**:
 トレードオフ。**F5-TTS** は速度（10ステップ）と訓練の単純さで優位。**VALL-E 2** は品質（human parity）とゼロショット能力で優位。リアルタイム TTS → F5-TTS、最高品質 → VALL-E 2。2026年予測: 両者のハイブリッドが登場。
-:::
 
-:::details Q3: Julia で音声処理は現実的か？
+</details>
+
+<details><summary>Q3: Julia で音声処理は現実的か？</summary>
 
 **Answer**:
 **Yes**。FFTW.jl（高速FFT）、WAV.jl（WAV I/O）、Flux.jl（NN訓練）が揃い、数式→コードの1:1対応が研究に最適。ただし本番推論は Rust（Candle）が低レイテンシで優位。Julia = 研究・プロトタイプ、Rust = 本番推論、が現実的な分業。
-:::
 
-:::details Q4: Suno/Udio の技術スタックは公開されているか？
+</details>
+
+<details><summary>Q4: Suno/Udio の技術スタックは公開されているか？</summary>
 
 **Answer**:
 **No**。商用サービスゆえ詳細は非公開。ただし推定: EnCodec系 Codec + 10B級 LM + VALL-E系 vocal synthesis + Neural audio effects。訓練データの合法性が論争中（RIAA訴訟）。オープンな代替は MusicGen / Stable Audio。
-:::
 
-:::details Q5: KAD は FAD を完全に置き換えるか？
+</details>
+
+<details><summary>Q5: KAD は FAD を完全に置き換えるか？</summary>
 
 **Answer**:
 **2026年以降、Yes**。KAD は FAD の全問題（ガウス仮定・サンプル依存性・計算コスト）を解決し、人間評価との相関も高い。2025年の論文では既に KAD が standard になりつつある。FAD は歴史的参照として残るが、新規プロジェクトは KAD 推奨。
-:::
+
+**KAD の計算量**: U-statistic の計算は $O(n^2)$ ($n$ サンプル数)。$n=1000$ で $10^6$ カーネル評価 → GPU で数秒。FAD の $O(d^3)$ 固有値分解（$d=512$）は $1.3 \times 10^8$ flops → 同程度だが、$n$ が大きいと KAD の方が重くなる。実用上 $n \leq 5000$ なら KAD が高速。
+
+</details>
 
 ### 6.9 学習スケジュール — 1週間で音声生成をマスター
 
@@ -942,14 +925,13 @@ function audio_generation_progress()
 
     println("【Audio Generation スキルチェック】")
     println("各項目を理解・実装できたら true に変更:\n")
-    for (i, (skill, done)) in enumerate(skills)
-        status = done ? "✓" : "☐"
-        println("$i. $status $skill")
+    foreach(enumerate(skills)) do (i, (skill, done))
+        println("$i. $(done ? "✓" : "☐") $skill")
     end
 
-    completed = count(s -> s[2], skills)
-    total = length(skills)
-    progress = div(completed * 100, total)
+    completed = count(last, skills)
+    total     = length(skills)
+    progress  = completed * 100 ÷ total
 
     println("\n進捗: $completed / $total スキル完了 ($progress%)")
     println("目標: 10 / 10 スキル完了で音声生成マスター認定")
@@ -978,6 +960,8 @@ audio_generation_progress()
 - Temporal Attention はどう設計すべきか？
 - Sora 2 は本当に「世界シミュレータ」か？
 
+**第44回から第45回への架け橋**: 音声は1次元シーケンス、動画は3次元（$H \times W \times T$）。F5-TTS の 1D DiT（時間軸のみ）から Video Diffusion の 3D DiT（空間2次元 + 時間1次元）への拡張は、Attention の計算量が $O(T^2) \to O(T^2 H^2 W^2)$ に爆発する問題を解決する必要がある。第43回の $O(N^2)$ 問題が深刻な形で再登場する。
+
 ```julia
 println("\n【第45回予告: Video生成】")
 println("静止画（DiT/FLUX）+ 音声（F5-TTS）→ 動画（時空間）へ")
@@ -991,11 +975,17 @@ println()
 println("→ 時間軸を征服し、全モダリティ制覇へ")
 ```
 
-:::message
-**ここまでで全体の100%完了！** 第44回「音声生成」を完走した。Neural Audio Codec（VQ-VAE → RVQ → WavTokenizer）、Flow Matching TTS（F5-TTS）、Codec LM（VALL-E 2）、Music Generation（MusicGen / Stable Audio）、評価指標（FAD → KAD）の全理論を導出し、Julia/Rust/Elixir で実装した。音声モダリティを完全に習得したあなたは、次の戦場 — 動画生成へ向かう準備ができた。
-:::
+> **Note:** **ここまでで全体の100%完了！** 第44回「音声生成」を完走した。Neural Audio Codec（VQ-VAE → RVQ → WavTokenizer）、Flow Matching TTS（F5-TTS）、Codec LM（VALL-E 2）、Music Generation（MusicGen / Stable Audio）、評価指標（FAD → KAD）の全理論を導出し、Julia/Rust/Elixir で実装した。音声モダリティを完全に習得したあなたは、次の戦場 — 動画生成へ向かう準備ができた。
 
 ---
+
+
+> Progress: 95%
+> **理解度チェック**
+> 1. F5-TTSのOptimal Transport CFMがLinear CFMより収束が速い数学的理由を、最適輸送写像の観点で述べよ。
+>    - *ヒント*: Linear CFM は $p_0 \times p_1$ から独立カップリングでサンプルするが、OT-CFM は何を最小化したカップリングを使うか？
+> 2. FAD（Fréchet Audio Distance）がKAD（Kernel Audio Distance）に置き換えられつつある理由を、ガウス分布仮定の問題の観点から説明せよ。
+>    - *ヒント*: 実際の音声埋め込みは多峰分布を持つ場合がある。Fréchet距離はこのとき何を誤る？
 
 ## 💀 パラダイム転換の問い
 
@@ -1058,7 +1048,7 @@ println("→ 時間軸を征服し、全モダリティ制覇へ")
 
 4. **ライブ音楽の価値**: AI が完璧な録音を作れる時代、ライブの「不完全さ」が逆に価値を持つか？
 
-:::details 歴史的類似: 写真の登場と絵画
+<details><summary>歴史的類似: 写真の登場と絵画</summary>
 
 19世紀、写真の登場で「絵画は不要になる」と言われた。
 
@@ -1070,7 +1060,8 @@ println("→ 時間軸を征服し、全モダリティ制覇へ")
 **音楽も同じ道を辿るか？**
 - AI は「記録的音楽」（BGM・ストック）を担当
 - 人間は「表現的音楽」（ライブ・実験）へシフト
-:::
+
+</details>
 
 ### あなたの考えは？
 
@@ -1085,6 +1076,8 @@ println("→ 時間軸を征服し、全モダリティ制覇へ")
 ### 7.1 F5-TTS: Fairytaler TTS with Flow Matching
 
 Chen et al. (2024) [^f5_tts_new] は、**完全な Flow Matching ベース TTS** を提案し、diffusion-based TTS（VALL-E, NaturalSpeech）を品質・速度で上回った。
+
+**F5-TTS の名前の由来**: "Fairytaler that Fakes Fluent and Faithful Speech" の頭字語。「おとぎ話師」がテキストを忠実かつ流暢な音声に変換するというメタファー。"5F" は5つの F の頭文字。
 
 #### 7.1.1 アーキテクチャ
 
@@ -1102,6 +1095,8 @@ $$
 - $\mathbf{m}_t \in \mathbb{R}^{T \times 80}$: メルスペクトログラム（時間 $T$ フレーム × 80 bins）
 - $\mathbf{c}_\text{text}$: テキストエンコーディング（BERT-based）
 - $\mathbf{c}_\text{ref}$: 参照音声の埋め込み（speaker identity）
+
+> **⚠️ Warning:** $T$ は Duration Predictor で事前に決定される（推論時に固定）。Flow Matching は固定長テンソルを変形するため、可変長音声には Duration Model が必須。これを省くと全ての出力が同じ長さになる。
 
 **DiT (Diffusion Transformer) ベースの Velocity Network**:
 
@@ -1145,6 +1140,8 @@ $$
 
 合計フレーム数 $T = \sum_i d_i$ を事前に決定 → Flow Matching は固定長で生成。
 
+**数値例**: "Hello" を発音（5音素, 各 $d_i \approx 20$ フレーム, 22kHz/256 hop）→ $T = 100$ フレーム、音声長 $= 100 \times 256 / 22050 \approx 1.16$ 秒。
+
 **訓練設定**:
 - Batch size: 128 (A100 8台)
 - Optimizer: AdamW, lr=1e-4
@@ -1168,6 +1165,8 @@ $$
 
 **RTF (Real-Time Factor)**: 生成時間 / 音声長。0.15 = 1秒音声を 0.15秒で生成 → **6.7倍リアルタイム**。
 
+> **⚠️ Warning:** RTF は GPU 性能に強く依存する。A100 と V100 で 2〜3 倍の差が出る。論文値の RTF を再現するには同じハードウェアが必要。CPU での RTF は GPU の 10〜50 倍になる点に注意。
+
 **Multilingual** (Emilia dataset):
 
 中国語・日本語・韓国語でも同等の品質（MOS 4.1-4.3）。
@@ -1180,6 +1179,8 @@ $$
 2. **Few-step sampling**: 10-20 NFE (Number of Function Evaluations) で収束。Diffusion は 50-100 必要。
 3. **直線経路**: Optimal Transport Path は $\mathbf{m}_0 \to \mathbf{m}_1$ の最短距離 → 訓練安定。
 
+**数値で確認**: Euler 法の局所切断誤差は $O(\Delta t^2)$。ステップ数 $N$ で $\Delta t = 1/N$ → 累積誤差 $O(1/N)$。直線経路では曲率 $\kappa = 0$ なので Euler 誤差が消える → **1ステップでも誤差ゼロ**（理想的なOT経路の場合）。実際には velocity network の近似誤差があるため 10-20 ステップが現実的。
+
 **Mel vs Codec**:
 
 Codec (EnCodec/WavTokenizer): 離散化 → 量子化誤差。
@@ -1187,6 +1188,8 @@ Codec (EnCodec/WavTokenizer): 離散化 → 量子化誤差。
 Mel: 連続 → 情報損失なし。ただし Vocoder (HiFi-GAN) が追加で必要。
 
 F5-TTS は Vocoder を **事前訓練済み固定モデル**として使用 → TTS 訓練と分離。
+
+**RTF 0.15 の意味**: 1秒の音声を生成するのに 150ms かかる。テキスト入力からの TTFS (Time To First Speech) は: Duration Predict（10ms）+ ODE 10ステップ（100ms）+ Vocoder（40ms）≈ 150ms。音声アシスタントでの応答遅延として許容されるのは 300ms 以下なので、F5-TTS は会話 AI に実用的。ZipVoice の 20ms はより快適な体験を提供。
 
 ### 7.2 ZipVoice: Zero-shot TTS with Ultra-fast Inference
 
@@ -1204,6 +1207,8 @@ $$
 
 **Self-consistency**: 任意時刻から同じ終点に到達 → 1-step で直接 $\mathbf{m}_1$ を出力可能。
 
+> **⚠️ Warning:** Consistency Distillation は教師モデル（F5-TTS）の品質の上限を超えられない。教師が苦手なサンプル（長文・特殊音素）では品質劣化が顕著になる。また stop-gradient `sg[·]` を外すと訓練が不安定化するため絶対に必要。
+
 #### 7.2.2 結果
 
 | Model | Steps | MOS ↑ | RTF ↓ | Training Cost |
@@ -1215,11 +1220,17 @@ $$
 
 **品質劣化**: MOS -0.14（許容範囲）。
 
+**MOS 劣化の解釈**: -0.14 は知覚可能な差（JND ≈ 0.1〜0.2）だが、会話 AI ユースケースでは速度の方が品質より重要なため実用的には許容。ただし朗読・ポッドキャストなど「品質最優先」の用途では F5-TTS の方が適切。用途に合わせて quality-latency トレードオフを明示することが重要。
+
 **応用**: リアルタイム会話 AI、音声アシスタント。
 
 ### 7.3 Matcha-TTS: Fast Conditional Flow Matching
 
 Mehta et al. (2024) [^matcha_tts] は、**OT-CFM を TTS に適用**した最初期の研究（ICASSP 2024）。
+
+**位置づけ**: F5-TTS（330M, DiT）や VALL-E 2（Codec LM）と比べて Matcha-TTS は 50M パラメータの軽量 1D U-Net。研究上の意義は「OT-CFM が TTS に有効であること」の初証明。実用上は Matcha-TTS → F5-TTS → ZipVoice という進化の出発点。
+
+**なぜ 50M が有効か**: TTS は画像生成ほど高次元ではない（メル 80 次元 vs 画像 3×256×256 = 196,608）。音声の時間構造は 1D CNN で十分捉えられるため、Vision Transformer レベルの大型モデルが必要ない。Matcha-TTS はこの事実を実証した。
 
 #### 7.3.1 アーキテクチャ
 
@@ -1278,6 +1289,8 @@ Kong et al. (2025) [^wavefm] は、**Waveform 生成に Flow Matching を適用*
 
 **出力**: Waveform $\mathbf{w} \in \mathbb{R}^{T \times H}$ （$H$ = hop size, 典型的に 256）
 
+- shape 確認: $T=100$ フレーム, hop=256 → waveform は $100 \times 256 = 25600$ サンプル（22kHz で約 1.16 秒）。
+
 **Flow ODE**:
 
 $$
@@ -1292,6 +1305,8 @@ $$
 
 $\mathbf{w}_0 \sim \mathcal{N}(0, I)$, $\mathbf{w}_1$ は真の waveform。
 
+> **⚠️ Warning:** Waveform の Flow Matching では $\mathbf{w}$ の値域が $[-1, 1]$（正規化音声）だが、訓練前に必ずクリッピングして確認すること。生の PCM データ（int16）をそのまま float に変換すると $[-32768, 32767]$ の範囲になり、loss が発散する。`audio = audio / 32768.0` の前処理が必須。
+
 #### 7.4.3 結果
 
 **LJSpeech**:
@@ -1305,6 +1320,8 @@ $\mathbf{w}_0 \sim \mathcal{N}(0, I)$, $\mathbf{w}_1$ は真の waveform。
 **HiFi-GAN より高品質、WaveGrad より 8倍高速**。
 
 **安定性**: GAN のような mode collapse なし → 訓練が容易。
+
+**WaveFM vs RFWave の選択指針**: リアルタイム配信（RTF < 0.01）が必要なら RFWave の multi-band（RTF=0.008）。品質重視・少ステップ（10ステップで RTF=0.015 で許容）なら WaveFM で実装が単純。ハイブリッド（band-split で低帯域のみ Flow）は両者の中間。
 
 ### 7.5 実装例: Minimal Flow Matching TTS (Julia)
 
@@ -1350,24 +1367,16 @@ function train_flow_tts(
     for epoch in 1:n_epochs
         total_loss = 0.0
 
-        for (mel, text) in zip(mels, texts)
-            # Sample t ~ Uniform(0, 1)
-            t = rand(Float32)
-
-            # Sample m₀ ~ 𝒩(0, I), m₁ = real mel
-            m₀ = randn(Float32, size(mel))
-            m₁ = mel
-
-            # Interpolate: m_t = (1-t)*m₀ + t*m₁
-            m_t = (1 - t) .* m₀ .+ t .* m₁
-
-            # True velocity: m₁ - m₀
+        for (mel, _text) in zip(mels, texts)
+            t      = rand(Float32)
+            m₀     = randn(Float32, size(mel))
+            m₁     = mel
+            m_t    = @. (1 - t) * m₀ + t * m₁
             v_true = m₁ .- m₀
 
             # Compute loss
             loss, grads = Zygote.withgradient(ps) do p
-                # Add time channel
-                input = cat(m_t, fill(t, size(m_t)), dims=1)
+                input  = cat(m_t, fill(t, size(m_t)), dims=1)
                 v_pred, _ = model(input, p, st)
                 sum((v_pred .- v_true).^2)
             end
@@ -1385,18 +1394,14 @@ end
 
 # --- ODE Sampling ---
 function sample_mel(model, ps, st, text::Vector{Int}, T_frames::Int, steps=10)
-    # Initialize from noise
-    m₀ = randn(Float32, T_frames, 80)
-
-    # Euler integration
-    m = m₀
+    m  = randn(Float32, T_frames, 80)
     dt = 1.0f0 / steps
 
     for step in 1:steps
-        t = (step - 1) * dt
-        input = cat(m, fill(t, size(m)), dims=1)
-        v, _ = model(input, ps, st)
-        m = m .+ dt .* v
+        t      = (step - 1) * dt
+        input  = cat(m, fill(t, size(m)), dims=1)
+        v, _   = model(input, ps, st)
+        m .+= dt .* v
     end
 
     return m
@@ -1421,6 +1426,15 @@ waveform = hifigan_vocoder(mel_gen)
 WAV.wavwrite(waveform, "output.wav", Fs=22050)
 ```
 
+**訓練コードの shape 追跡**:
+- `mel ∈ ℝ^{T×80}` — 可変長メルスペクトログラム
+- `m₀ ∈ ℝ^{T×80}` — ガウスノイズ（同 shape）
+- `m_t ∈ ℝ^{T×80}` — 線形補間（$t$ は scalar）
+- `v_true ∈ ℝ^{T×80}` — 目標速度ベクトル（m₁ - m₀）
+- `input ∈ ℝ^{(T+T)×80}` — `cat(m_t, t_broadcast, dims=1)` で時刻情報を concat
+
+> **⚠️ Warning:** `t` のブロードキャストに注意。`fill(t, size(m_t))` で $T \times 80$ の定数テンソルを作成するが、これは計算コストが高い。実際の F5-TTS では `t` を sinusoidal embedding に変換してから concat する（token として扱う）ため、次元の整合性に注意。
+
 ---
 
 ### 7.6 RFWave: Rectified Flow for Audio Waveforms
@@ -1434,6 +1448,8 @@ RFWave (ICLR 2025) は、**Rectified Flow を Waveform 生成に適用**し、mu
 1. **Low-band** (0-4kHz): 音声の主成分 → 高精度 Flow
 2. **Mid-band** (4-8kHz): 倍音 → 中精度 Flow
 3. **High-band** (8-16kHz): ノイズ的成分 → 低精度（GAN で代替可能）
+
+**なぜ帯域分割が有効か**: 人間の聴覚は対数周波数スケールで知覚する（mel scale）。高周波ほど知覚感度が低いため、計算資源を低〜中周波に集中させることが品質と速度のトレードオフ改善に効く。WaveFM (single-band) は全周波を同等に扱うため非効率。
 
 **アーキテクチャ**:
 
@@ -1459,23 +1475,18 @@ Band Synthesis: w = w_low + w_mid + w_high
 
 **2倍高速化 + 品質向上**。
 
+**RFWave の Rectified Flow 採用理由**: WaveFM (standard FM) と比べて RFWave の Rectified Flow は「直線経路」のため10ステップでも WaveFM 20ステップと同等精度。multi-band で計算を並列化することで RTF が半減。「直線経路 × 並列化」の組み合わせが 2倍高速化の正体だ。
+
 **実装のポイント**:
 
 ```julia
 function multiband_synthesis(m::Matrix{Float32}, sr=22050)
-    # Band-pass filters
-    m_low = bandpass(m, 0, 4000, sr)
-    m_mid = bandpass(m, 4000, 8000, sr)
-    m_high = bandpass(m, 8000, 16000, sr)
-
-    # Parallel flows
-    w_low = flow_sample(flow_low, m_low, steps=20)
-    w_mid = flow_sample(flow_mid, m_mid, steps=10)
-    w_high = gan_generate(gan_high, m_high)  # 1-step
-
-    # Combine
-    w = w_low .+ w_mid .+ w_high
-    return w
+    m_low, m_mid, m_high = bandpass(m, 0, 4000, sr),
+                           bandpass(m, 4000, 8000, sr),
+                           bandpass(m, 8000, 16000, sr)
+    flow_sample(flow_low, m_low;  steps=20) .+
+    flow_sample(flow_mid, m_mid;  steps=10) .+
+    gan_generate(gan_high, m_high)
 end
 ```
 
@@ -1487,7 +1498,7 @@ end
 
 [^f5_tts_new]: Chen, Y., et al. (2024). "F5-TTS: A Fairytaler that Fakes Fluent and Faithful Speech with Flow Matching". *arXiv:2410.06885*.
 
-[^zipvoice]: Liu, X., et al. (2025). "ZipVoice: Fast and High-Quality Zero-Shot Text-to-Speech with Flow Matching". *arXiv:2506.13053*.
+[^zipvoice]: Zhu, H., Kang, W., Yao, Z., Guo, L., Kuang, F., et al. (2025). "ZipVoice: Fast and High-Quality Zero-Shot Text-to-Speech with Flow Matching". *arXiv:2506.13053*.
 
 [^matcha_tts]: Mehta, S., et al. (2024). "Matcha-TTS: A Fast TTS Architecture with Conditional Flow Matching". In *Proceedings of ICASSP 2024*.
 
@@ -1498,37 +1509,37 @@ end
 ### 主要論文
 
 [^1]: Ji, S., et al. (2024). "WavTokenizer: an Efficient Acoustic Discrete Codec Tokenizer for Audio Language Modeling". *arXiv:2408.16532*. ICLR 2025.
-@[card](https://arxiv.org/abs/2408.16532)
+<https://arxiv.org/abs/2408.16532>
 
 [^2]: Chen, Y., et al. (2024). "F5-TTS: A Fairytaler that Fakes Fluent and Faithful Speech with Flow Matching". *arXiv:2410.06885*.
-@[card](https://arxiv.org/abs/2410.06885)
+<https://arxiv.org/abs/2410.06885>
 
 [^3]: Copet, J., et al. (2023). "Simple and Controllable Music Generation". *arXiv:2306.05284*. NeurIPS 2023.
-@[card](https://arxiv.org/abs/2306.05284)
+<https://arxiv.org/abs/2306.05284>
 
 [^4]: Wang, Z., et al. (2024). "VALL-E 2: Neural Codec Language Models are Human Parity Zero-Shot Text to Speech Synthesizers". *arXiv:2406.05370*.
-@[card](https://arxiv.org/abs/2406.05370)
+<https://arxiv.org/abs/2406.05370>
 
 [^5]: Zeghidour, N., et al. (2021). "SoundStream: An End-to-End Neural Audio Codec". *IEEE/ACM Transactions on Audio, Speech, and Language Processing*.
 
 [^6]: Défossez, A., et al. (2022). "High Fidelity Neural Audio Compression". *arXiv:2210.13438*.
-@[card](https://arxiv.org/abs/2210.13438)
+<https://arxiv.org/abs/2210.13438>
 
 [^7]: Kyutai Research (2024). "Mimi: A Semantic-rich Neural Audio Codec".
 
 [^9]: Evans, Z., et al. (2024). "Stable Audio Open". *arXiv:2407.14358*.
-@[card](https://arxiv.org/abs/2407.14358)
+<https://arxiv.org/abs/2407.14358>
 
 Evans, Z., et al. (2024). "Long-form Music Generation with Latent Diffusion". *arXiv:2404.10301*.
-@[card](https://arxiv.org/abs/2404.10301)
+<https://arxiv.org/abs/2404.10301>
 
-[^10]: Yoon, J., et al. (2025). "KAD: No More FAD! An Effective and Efficient Evaluation Metric for Audio Generation". *arXiv:2502.15602*. ICML 2025.
-@[card](https://arxiv.org/abs/2502.15602)
+[^10]: Chung, Y., Eu, P., Lee, J., Choi, K., & Nam, J. (2025). "KAD: No More FAD! An Effective and Efficient Evaluation Metric for Audio Generation". *arXiv:2502.15602*. ICML 2025.
+<https://arxiv.org/abs/2502.15602>
 
 [^12]: Bengio, Y., et al. (2013). "Estimating or Propagating Gradients Through Stochastic Neurons for Conditional Computation". *arXiv:1308.3432*.
 
 [^14]: Ju, Z., et al. (2024). "NaturalSpeech 3: Zero-Shot Speech Synthesis with Factorized Codec and Diffusion Models". *arXiv:2403.03100*. ICML 2024.
-@[card](https://arxiv.org/abs/2403.03100)
+<https://arxiv.org/abs/2403.03100>
 
 [^15]: Kilgour, K., et al. (2019). "Fréchet Audio Distance: A Metric for Evaluating Music Enhancement Algorithms". *arXiv:1812.08466*.
 
@@ -1540,39 +1551,18 @@ Evans, Z., et al. (2024). "Long-form Music Generation with Latent Diffusion". *a
 
 ---
 
-## 記法規約
 
-本講義で使用した数学記法の統一規則:
+## 🔗 前編・後編リンク
 
-| 記号 | 意味 | 例 |
-|:-----|:-----|:---|
-| $x$ | データサンプル（音声波形） | $x \in \mathbb{R}^T$ |
-| $z$ | 潜在表現（連続） | $z_e \in \mathbb{R}^{L \times D}$ |
-| $z_q$ | 量子化後の潜在表現 | $z_q = e_{k^*}$ |
-| $k$ | コードブックインデックス | $k \in \{1, ..., K\}$ |
-| $e_k$ | コードブックエントリ | $e_k \in \mathbb{R}^D$ |
-| $t$ | 時刻（Flow Matching） | $t \in [0, 1]$ |
-| $\mathbf{x}_t$ | 時刻 $t$ の状態 | $\mathbf{x}_t = (1-t)\mathbf{x}_0 + t\mathbf{x}_1$ |
-| $\mathbf{v}_\theta$ | ベクトル場（Flow Matching） | $\mathbf{v}_\theta(\mathbf{x}, t, c)$ |
-| $\mathbf{u}_t$ | 目標ベクトル場 | $\mathbf{u}_t = \mathbf{x}_1 - \mathbf{x}_0$ |
-| $p_t$ | 時刻 $t$ の分布 | $p_t(\mathbf{x})$ |
-| $\mathcal{L}$ | 損失関数 | $\mathcal{L}_{\text{CFM}}$ |
-| $\theta$ | モデルパラメータ | $\theta \in \mathbb{R}^n$ |
-| $K$ | コードブックサイズ | $K = 1024$ (typical) |
-| $N_q$ | 量子化階層数（RVQ） | $N_q = 4$ (EnCodec) |
-| $\text{sg}[\cdot]$ | Stop gradient 演算子 | $\text{sg}[z_e]$ |
+- **前編 (Part 1 — 理論編)**: [第44回: 音声生成 (Part 1)](ml-lecture-44-part1)
 
-**Notation conventions**:
-- Bold lowercase $\mathbf{x}$: vectors
-- Uppercase $X$: matrices or sets
-- Calligraphic $\mathcal{L}$: loss functions, distributions
-- Subscript $_t$: time index
-- Superscript $^{(i)}$: sample index or quantizer layer index
+## 著者リンク
 
----
-
-**[第44回 完]**
----
+- Blog: https://fumishiki.dev
+- X: https://x.com/fumishiki
+- LinkedIn: https://www.linkedin.com/in/fumitakamurakami
+- GitHub: https://github.com/fumishiki
+- Hugging Face: https://huggingface.co/fumishiki
 
 ## ライセンス
 

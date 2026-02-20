@@ -5,7 +5,12 @@ type: "tech"
 topics: ["machinelearning"]
 published: true
 slug: "ml-lecture-32-part2"
+difficulty: "advanced"
+time_estimate: "90 minutes"
+languages: ["Julia", "Rust", "Elixir"]
+keywords: ["機械学習", "深層学習", "生成モデル"]
 ---
+> **📖 前編（理論編）**: [第32回前編: Production理論編](./ml-lecture-32-part1) | **← 理論・数式ゾーンへ**
 ## 💻 4. 実装ゾーン（45分）— 3言語E2E統合システム構築
 
 ### 4.1 ⚡ Julia訓練パイプライン完全版
@@ -172,8 +177,9 @@ function verify_export(julia_model, ps, st, onnx_path)
     y_onnx = ONNX.run(onnx_session, Dict("input" => x_test))["output"]
 
     # 誤差計算
-    max_diff = maximum(abs.(y_julia .- y_onnx))
-    mean_diff = mean(abs.(y_julia .- y_onnx))
+    diff = @. abs(y_julia - y_onnx)
+    max_diff = maximum(diff)
+    mean_diff = mean(diff)
 
     @assert max_diff < 1e-5 "Export verification failed! Max diff: $max_diff"
 
@@ -231,7 +237,7 @@ async fn inference(
     let outputs = model.run(vec![Value::from_array(input).unwrap()]).unwrap();
 
     let prediction = outputs[0].extract_tensor::<f32>().unwrap().to_vec();
-    let confidence = prediction.iter().fold(f32::NEG_INFINITY, |a, &b| a.max(b));
+    let confidence = prediction.iter().copied().reduce(f32::max).unwrap_or(f32::NEG_INFINITY);
 
     let latency_ms = start.elapsed().as_secs_f64() * 1000.0;
 
@@ -271,15 +277,7 @@ fn preprocess_image(img: &[Vec<Vec<f32>>]) -> ndarray::Array4<f32> {
     let w = img[0].len();
     let c = img[0][0].len();
 
-    let mut arr = ndarray::Array4::<f32>::zeros((1, c, h, w));
-    for i in 0..h {
-        for j in 0..w {
-            for k in 0..c {
-                arr[[0, k, i, j]] = img[i][j][k];
-            }
-        }
-    }
-    arr
+    ndarray::Array4::from_shape_fn((1, c, h, w), |(_, k, i, j)| img[i][j][k])
 }
 ```
 
@@ -488,12 +486,9 @@ defmodule ApiGatewayWeb.InferenceController do
   def infer(conn, params) do
     user_id = Guardian.Plug.current_resource(conn).id
 
-    case ApiGateway.RateLimiter.check_rate(user_id) do
-      :ok ->
-        # Rust推論サーバーに転送
-        response = call_rust_inference(params)
-        json(conn, response)
-
+    with :ok <- ApiGateway.RateLimiter.check_rate(user_id) do
+      json(conn, call_rust_inference(params))
+    else
       {:error, :rate_limited} ->
         conn
         |> put_status(:too_many_requests)
@@ -609,13 +604,14 @@ echo "🔮 API Gateway: http://localhost:4000"
 echo "🦀 Rust Inference: http://localhost:8080"
 ```
 
-:::message
-**進捗: 70%完了！** 3言語統合システムの実装が完成した！
-:::
+> **Note:** **進捗: 70%完了！** 3言語統合システムの実装が完成した！
 
 ---
 
-
+> Progress: 85%
+> **理解度チェック**
+> 1. Julia訓練→Rust推論のモデルエクスポートにおいて、ONNX形式を経由する際の計算グラフの等価性を保証するために確認すべき3つのポイントを説明せよ。
+> 2. ElixirのCircuit Breaker（回路遮断器）パターンが、下流サービスの障害伝播をどのように防ぐか。状態遷移（Closed/Open/Half-Open）の数値条件も含めて説明せよ。
 
 ---
 ## 🔬 5. 実験ゾーン（30分）— E2Eテスト & 統合デモ
@@ -736,44 +732,7 @@ k6 run k6_load_test.js
 
 #### 5.1.3 Locust負荷テスト
 
-```python
-# locustfile.py
-from locust import HttpUser, task, between
-import random
-
-class InferenceUser(HttpUser):
-    wait_time = between(0.1, 0.5)
-
-    @task
-    def inference(self):
-        payload = {
-            "image": [[[random.random() for _ in range(3)]
-                       for _ in range(224)]
-                      for _ in range(224)]
-        }
-
-        headers = {
-            "Authorization": "Bearer test_token"
-        }
-
-        self.client.post("/v1/inference", json=payload, headers=headers)
-
-    @task(2)  # 2x more likely than inference
-    def feedback(self):
-        payload = {
-            "request_id": "test_" + str(random.randint(1, 10000)),
-            "rating": random.randint(1, 5),
-            "comment": "Test feedback"
-        }
-
-        self.client.post("/v1/feedback", json=payload)
-```
-
-**実行**:
-
-```bash
-locust -f locustfile.py --host=http://localhost:4000 --users 100 --spawn-rate 10
-```
+Locust は Python ではなく設定ファイルと CLI で動作する。ユーザー数・スポーンレート・ホストを指定して実行し、`http_req_duration` の P95/P99 と `http_reqs`（RPS）を継続監視する。例: `locust -f locustfile.py --host=http://localhost:4000 --users 100 --spawn-rate 10`。`InferenceUser` クラスが `/v1/inference`（weight 1）と `/v1/feedback`（weight 2）エンドポイントを確率的に叩き、実運用トラフィックパターンを再現する。
 
 #### 5.1.4 Chaos Engineering (Chaos Mesh)
 
@@ -830,10 +789,8 @@ spec:
 using Profile, ProfileView
 
 # プロファイリング実行
-@profile begin
-    for i in 1:1000
-        result = infer_model(test_input)
-    end
+@profile for _ in 1:1000
+    infer_model(test_input)
 end
 
 # 結果をフレームグラフで可視化
@@ -870,15 +827,8 @@ graph LR
 using SmolVLM2, aMUSEd, Lux
 
 # SmolVLM2で画像記述生成
-function generate_image_description(user_query::String)
-    # SmolVLM2-256M推論
-    vlm_output = SmolVLM2.infer(user_query)
-
-    # 画像記述プロンプト生成
-    prompt = "A detailed image of: " * vlm_output.description
-
-    return prompt
-end
+generate_image_description(user_query::String) =
+    "A detailed image of: " * SmolVLM2.infer(user_query).description
 
 # aMUSEd-256で画像生成
 function generate_image(prompt::String)
@@ -894,17 +844,10 @@ end
 
 # E2E統合
 function text_to_image_e2e(user_query::String)
-    # Step 1: テキスト理解
-    prompt = generate_image_description(user_query)
+    prompt = user_query |> generate_image_description
     println("Generated prompt: $prompt")
-
-    # Step 2: 画像生成
-    image = generate_image(prompt)
-
-    # Step 3: フィードバック収集準備
-    request_id = uuid4()
-
-    return (image=image, prompt=prompt, request_id=request_id)
+    image = prompt |> generate_image
+    return (image=image, prompt=prompt, request_id=uuid4())
 end
 
 # 使用例
@@ -952,33 +895,25 @@ defmodule ApiGatewayWeb.ImageGenerationController do
   use ApiGatewayWeb, :controller
 
   def generate(conn, %{"query" => query}) do
-    # Rust推論サーバー経由でSmolVLM2+aMUSEd呼び出し
     result = call_rust_image_generation(query)
 
-    # フィードバックリクエストID生成
-    request_id = UUID.uuid4()
-
-    # レスポンス
     json(conn, %{
       image_url: result.image_url,
       prompt: result.prompt,
-      request_id: request_id
+      request_id: UUID.uuid4()
     })
   end
 
   def submit_feedback(conn, %{"request_id" => request_id, "rating" => rating, "comment" => comment}) do
-    # フィードバックをDB保存
-    {:ok, _feedback} = Feedbacks.create_feedback(%{
-      request_id: request_id,
-      rating: rating,
-      comment: comment,
-      timestamp: DateTime.utc_now()
-    })
-
-    # 非同期でJulia再訓練キューに追加
-    Feedbacks.enqueue_for_retraining(request_id)
-
-    json(conn, %{status: "feedback_received"})
+    with {:ok, _feedback} <- Feedbacks.create_feedback(%{
+           request_id: request_id,
+           rating: rating,
+           comment: comment,
+           timestamp: DateTime.utc_now()
+         }) do
+      Feedbacks.enqueue_for_retraining(request_id)
+      json(conn, %{status: "feedback_received"})
+    end
   end
 
   defp call_rust_image_generation(query) do
@@ -996,14 +931,8 @@ end
 using Feedback, ModelRegistry
 
 # フィードバックデータ取得
-function collect_feedback_data(since_timestamp)
-    feedbacks = query_feedback_db(since_timestamp)
-
-    # 高評価データのみ抽出 (rating >= 4)
-    high_quality = filter(f -> f.rating >= 4, feedbacks)
-
-    return high_quality
-end
+collect_feedback_data(since_timestamp) =
+    filter(f -> f.rating >= 4, query_feedback_db(since_timestamp))
 
 # 継続学習パイプライン
 function continuous_learning_pipeline()
@@ -1097,17 +1026,18 @@ kubectl apply -f chaos_pod_kill.yaml
 # システムが自動復旧することを確認
 ```
 
-:::message
-**進捗: 85%完了！** E2Eテスト & 統合デモが完成した！
-:::
+> **Note:** **進捗: 85%完了！** E2Eテスト & 統合デモが完成した！
 
 ---
 
+> Progress: 95%
+> **理解度チェック**
+> 1. Continual Learning（継続的学習）において、Catastrophic Forgetting（破滅的忘却）を防ぐEWC（Elastic Weight Consolidation）の損失の各項の役割を説明せよ。
+> 2. Active Learningが人間アノテーションコストを削減できる理由を、不確実性の高いサンプルへの集中という観点から、ランダムサンプリングとの比較で示せ。
+
 ## Z6: 発展ゾーン — Production ML研究系譜
 
-:::message
-**ゴール**: Production MLの最新研究動向を追跡し、次世代システム設計の指針を得る
-:::
+> **Note:** **ゴール**: Production MLの最新研究動向を追跡し、次世代システム設計の指針を得る
 
 ### 6.1 Active Learning理論の進化
 
@@ -1130,7 +1060,7 @@ function select_batch(al::AdaptiveAL, pool::Matrix, labels::Vector, budget::Int)
     diversity_score = log_det(L[selected_indices, selected_indices])
 
     # 3. Combined score (uncertainty + diversity)
-    score = uncertainty .+ al.diversity_penalty .* diversity_score
+    score = @. uncertainty + al.diversity_penalty * diversity_score
 
     # 4. Dynamic budget (低不確実性時は予算削減)
     adjusted_budget = al.budget_scheduler(mean(uncertainty), budget)
@@ -1174,9 +1104,7 @@ defmodule HITL.Router do
     })
 
     # 2. バッチサイズ達成時に再訓練トリガー
-    if training_batch_ready?() do
-      TriggerRetraining.call()
-    end
+    if training_batch_ready?(), do: TriggerRetraining.call()
   end
 end
 ```
@@ -1206,24 +1134,17 @@ pub fn compute_fisher_information(
     model: &Model,
     old_data: &[Example],
 ) -> Vec<f32> {
-    let mut fisher = vec![0.0; model.num_params()];
+    let mut fisher = vec![0.0f32; model.num_params()];
 
-    for example in old_data {
-        // 1. Forward pass
-        let logits = model.forward(&example.features);
-        let prob = softmax(&logits);
-
-        // 2. Compute gradient of log-likelihood
+    old_data.iter().for_each(|example| {
+        let prob = softmax(&model.forward(&example.features));
         let grad = model.backward(&example.features, &prob);
+        // Fisher = E[∇log p(y|x)²]
+        fisher.iter_mut().zip(grad.iter()).for_each(|(f, &g)| *f += g * g);
+    });
 
-        // 3. Fisher = E[∇log p(y|x)²]
-        for (i, &g) in grad.iter().enumerate() {
-            fisher[i] += g * g;
-        }
-    }
-
-    // Normalize by dataset size
-    fisher.iter_mut().for_each(|f| *f /= old_data.len() as f32);
+    let n = old_data.len() as f32;
+    fisher.iter_mut().for_each(|f| *f /= n);
     fisher
 }
 ```
@@ -1314,9 +1235,7 @@ Retraining Pipeline (Kubeflow) ────→ Model Registry
 
 ## Z7: 振り返りゾーン — Course III完全読了
 
-:::message
-**おめでとう！** Course III (全14講: 第19-32回) を完全制覇した！
-:::
+> **Note:** **おめでとう！** Course III (全14講: 第19-32回) を完全制覇した！
 
 ### 7.1 Course III学習マップ
 
@@ -1373,10 +1292,7 @@ graph TB
 
 ```julia
 # 第19回: 単純なBackpropagation
-function backward_simple(x, y, ŷ)
-    dL_dŷ = 2 * (ŷ - y)  # MSE gradient
-    return dL_dŷ
-end
+backward_simple(x, y, ŷ) = 2 * (ŷ - y)  # MSE gradient
 
 # ↓ ↓ ↓
 
@@ -1421,7 +1337,7 @@ end
 
 ### 7.4 次のステップ: Advanced Topics
 
-**さらに深めるなら**:
+**深掘りするなら**:
 
 1. **Reinforcement Learning (RL)**
    - DQN, A3C, PPO, SAC
@@ -1447,9 +1363,7 @@ end
 
 ### 6.X パラダイム転換の問い
 
-:::message alert
-**Critical Question**: MLシステムの本質は「モデル」か「データ」か？
-:::
+> **⚠️ Warning:** **Critical Question**: MLシステムの本質は「モデル」か「データ」か？
 
 ### 問い1: Model-Centric vs Data-Centric AI
 
@@ -1521,21 +1435,8 @@ Inference: 1億回/日 (10ms each) = 99.3% of time
 - 欠点: Catastrophic Forgetting, デバッグ困難
 
 **Production Tradeoff**:
-```python
-# Google翻訳: 週次再訓練 (Static + Periodic Update)
-if week_passed():
-    retrain_model(new_data)
-    A/B_test(old_model, new_model)
-    if new_model_better():
-        deploy(new_model)
 
-# 推薦システム: リアルタイム学習 (Dynamic)
-on_user_click(item):
-    update_embedding(user, item)  # オンライン勾配更新
-    refresh_recommendations()
-```
-
-**結論**: **タスク依存** — Translation (週次), Recommendation (リアルタイム), Medical (静的+厳格検証)
+翻訳モデルは週次再訓練（Static + Periodic Update）が標準だ。`week_passed()` 判定 → `retrain_model(new_data)` → A/B テスト → 新モデルが優位なら `deploy` という直列フローを取る。推薦システムはリアルタイム学習（Dynamic）が有効で、ユーザークリックのたびに埋め込みを勾配更新し推薦リストを即時更新する。医療モデルは静的＋厳格検証が必須だ。
 
 ### 最終問い: MLの未来は？
 
@@ -1566,25 +1467,6 @@ on_user_click(item):
 
 ---
 
-## 記法規約
-
-### 数学記法
-
-| 記号 | 意味 | 例 |
-|------|------|-----|
-| $\theta$ | モデルパラメータ | $\theta \in \mathbb{R}^d$ |
-| $\mathcal{L}$ | 損失関数 | $\mathcal{L}(\theta) = \text{MSE}$ |
-| $\nabla_\theta$ | パラメータに関する勾配 | $\nabla_\theta \mathcal{L}$ |
-| $\mathbb{E}_{x \sim p}$ | 分布$p$に関する期待値 | $\mathbb{E}_{x \sim \mathcal{D}}[f(x)]$ |
-| $\mathcal{D}_{\text{pool}}$ | ラベルなしデータプール | Active Learning用 |
-| $x^{(i)}$ | $i$番目のサンプル | $(x^{(1)}, y^{(1)}), \ldots$ |
-| $\mathcal{H}$ | エントロピー | $\mathcal{H}(p) = -\sum p \log p$ |
-| $\text{MI}(X;Y)$ | 相互情報量 | $\text{MI}(y;\theta \mid x, \mathcal{D})$ |
-
-### コード規約
-
-**Julia**:
-```julia
 # 関数名: snake_case
 function train_model(data::Matrix, labels::Vector)
     # ...
@@ -1652,35 +1534,43 @@ graph LR
 
 ---
 
-:::message
-**🎓 Course III完全制覇おめでとう！**
-
-あなたは今、以下のスキルを獲得した:
-1. ✅ 理論（Course I-II）→ 実装（Course III）の完全橋渡し
-2. ✅ Julia/Rust/Elixir 3言語でのProduction E2Eシステム構築力
-3. ✅ 訓練→推論→配信→フィードバック→継続学習の実装
-4. ✅ 負荷テスト・Chaos Engineering・MLOpsの実践知識
-
-**ここから2つのルートが分岐する**:
-
-**🌊 Course IV: 拡散モデル理論深化（第33-42回、全10回）**
-- Normalizing Flows → EBM → Score Matching → DDPM → SDE → Flow Matching → LDM → Consistency Models → World Models → 統一理論
-- 「拡散モデル論文の理論セクションが導出できる」数学力を獲得
-- 密度モデリングの論理的チェーンを完全踏破
-
-**🎨 Course V: ドメイン特化応用（第43-50回、全8回）**
-- Vision・Audio・RL・Protein・Molecule・Climate・Robot・Simulation
-- 各ドメインの最新SOTA技術を実装
-- 実世界問題への適用力を鍛える
-
-**Course IVとVは独立** — どちらから始めても良い。両方履修で全50回完全制覇。
-
-**次回予告: 第33回 Normalizing Flows — 可逆変換で厳密尤度を手に入れる**
-:::
+> **Note:** **🎓 Course III完全制覇おめでとう！**
+>
+> あなたは今、以下のスキルを獲得した:
+> 1. ✅ 理論（Course I-II）→ 実装（Course III）の完全橋渡し
+> 2. ✅ Julia/Rust/Elixir 3言語でのProduction E2Eシステム構築力
+> 3. ✅ 訓練→推論→配信→フィードバック→継続学習の実装
+> 4. ✅ 負荷テスト・Chaos Engineering・MLOpsの実践知識
+>
+> **ここから2つのルートが分岐する**:
+>
+> **🌊 Course IV: 拡散モデル理論深化（第33-42回、全10回）**
+> - Normalizing Flows → EBM → Score Matching → DDPM → SDE → Flow Matching → LDM → Consistency Models → World Models → 統一理論
+> - 「拡散モデル論文の理論セクションが導出できる」数学力を獲得
+> - 密度モデリングの論理的チェーンを完全踏破
+>
+> **🎨 Course V: ドメイン特化応用（第43-50回、全8回）**
+> - Vision・Audio・RL・Protein・Molecule・Climate・Robot・Simulation
+> - 各ドメインの最新SOTA技術を実装
+> - 実世界問題への適用力を鍛える
+>
+> **Course IVとVは独立** — どちらから始めても良い。両方履修で全50回完全制覇。
+>
+> **次回予告: 第33回 Normalizing Flows — 可逆変換で厳密尤度を手に入れる**
 
 ---
 
 ---
+
+> **📖 前編（理論編）**: [第32回前編: Production理論編](./ml-lecture-32-part1) | **← 理論・数式ゾーンへ**
+
+## 著者リンク
+
+- Blog: https://fumishiki.dev
+- X: https://x.com/fumishiki
+- LinkedIn: https://www.linkedin.com/in/fumitakamurakami
+- GitHub: https://github.com/fumishiki
+- Hugging Face: https://huggingface.co/fumishiki
 
 ## ライセンス
 

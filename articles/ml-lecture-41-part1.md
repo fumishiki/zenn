@@ -4,6 +4,11 @@ emoji: "🌍"
 type: "tech"
 topics: ["machinelearning", "deeplearning", "worldmodels", "julia", "jepa"]
 published: true
+slug: "ml-lecture-41-part1"
+difficulty: "advanced"
+time_estimate: "90 minutes"
+languages: ["Julia", "Rust"]
+keywords: ["機械学習", "深層学習", "生成モデル"]
 ---
 
 # 第41回: World Models & 環境シミュレータ理論 🌍
@@ -51,9 +56,7 @@ $$
 
 これがWorld Modelの数学だ。
 
-:::message
-**進捗**: 全体の3%完了。Consistency Modelsで1ステップ生成を実現したが、生成モデルの真の目的は「理解」だった。環境をシミュレートする理論へ。
-:::
+> **Note:** **進捗**: 全体の3%完了。Consistency Modelsで1ステップ生成を実現したが、生成モデルの真の目的は「理解」だった。環境をシミュレートする理論へ。
 
 ---
 
@@ -73,56 +76,6 @@ World Modelsは**行動の結果を予測できる**最高レベルだ。
 
 ### 1.2 JEPAの3変種を動かす
 
-```julia
-# I-JEPA: 画像の一部から他部分を予測
-# Input: masked image patches
-x_context = x[:, :, 1:32, :]  # 左半分
-x_target_mask = [33:64]       # 右半分をマスク
-
-# Context encoder → Predictor → Target prediction
-z_context = context_encoder(x_context, ps_ctx, st_ctx)[1]
-z_pred = predictor(z_context, mask_tokens, ps_pred, st_pred)[1]
-
-# ❌ ピクセルを予測しない
-# ✅ 潜在表現を予測する
-```
-
-```julia
-# V-JEPA: 動画の一部フレームから未来フレームの潜在表現を予測
-# Input: video sequence [B, T, H, W, C]
-video = rand(Float32, 1, 16, 64, 64, 3)  # 16 frames
-context_frames = video[:, 1:8, :, :, :]   # 前半8フレーム
-target_frames = video[:, 9:16, :, :, :]   # 後半8フレーム
-
-# Context encoder → Temporal predictor
-z_ctx_video = video_encoder(context_frames, ps_v, st_v)[1]
-z_pred_video = temporal_predictor(z_ctx_video, ps_tp, st_tp)[1]
-```
-
-```julia
-# Transfusion: テキスト(AR) + 画像(Diffusion) を統一モデルで処理
-# Text: autoregressive (next token prediction)
-# Image: diffusion (denoising)
-
-# テキストトークン
-text_tokens = [101, 2054, 2003]  # "What is"
-
-# 画像パッチ (continuous vectors)
-image_patches = rand(Float32, 512, 16)  # 16 patches × 512 dim
-
-# Transfusionの統一処理
-# Text: next token prediction loss
-loss_text = cross_entropy(model(text_tokens), text_tokens[2:end])
-
-# Image: diffusion loss
-t = rand(1:1000)
-noise = randn(size(image_patches))
-x_t = sqrt(α[t]) * image_patches + sqrt(1 - α[t]) * noise
-loss_image = mse(model(x_t, t), noise)
-
-# 総合loss
-loss = loss_text + loss_image
-```
 
 ### 1.3 World Modelsの応用領域
 
@@ -133,36 +86,21 @@ loss = loss_text + loss_image
 | **強化学習** | プランニング | Model-based RL (MuZero, Dreamer) |
 | **科学シミュレーション** | 物理法則学習 | 微分方程式を学習で近似 |
 
-:::details PyTorchとの対応（参考）
-```python
-# PyTorch版 JEPA predictor
-import torch.nn as nn
-
-class JEPAPredictor(nn.Module):
-    def __init__(self, dim=768, num_heads=12):
-        super().__init__()
-        self.cross_attn = nn.MultiheadAttention(dim, num_heads)
-        self.ffn = nn.Sequential(
-            nn.Linear(dim, 4 * dim),
-            nn.GELU(),
-            nn.Linear(4 * dim, dim)
-        )
-
-    def forward(self, context, mask_tokens):
-        # Cross-attention: mask_tokens attend to context
-        pred, _ = self.cross_attn(mask_tokens, context, context)
-        pred = self.ffn(pred)
-        return pred
-```
+<details><summary>PyTorchとの対応（参考）</summary>
 
 Juliaでは型システムでこれを自然に表現できる。
-:::
 
-:::message
-**進捗**: 全体の10%完了。World Modelsの3レベル分類を理解した。JEPAはピクセル生成をスキップし、潜在空間で予測する革命的アーキテクチャだ。
-:::
+</details>
+
+> **Note:** **進捗**: 全体の10%完了。World Modelsの3レベル分類を理解した。JEPAはピクセル生成をスキップし、潜在空間で予測する革命的アーキテクチャだ。
 
 ---
+
+
+> Progress: 10%
+> **理解度チェック**
+> 1. $p(x)$ の各記号の意味と、この式が表す操作を説明してください。
+> 2. このゾーンで学んだ手法の直感的な意味と、なぜこの定式化が必要なのかを説明してください。
 
 ## 🧩 2. 直感ゾーン（15分）— なぜWorld Modelsが最終到達点か
 
@@ -223,7 +161,8 @@ graph LR
 
 World Modelsは**全ドメイン（画像・動画・ロボティクス・科学）の統一基盤**だ。
 
-:::details Trojan Horse — 生成モデルの"本当の目的"
+<details><summary>Trojan Horse — 生成モデルの"本当の目的"</summary>
+
 第1回から38回まで、生成モデルは「画像を生成する」技術として学んできた。
 
 だがLeCunが提唱するJEPAは**生成をスキップする**。
@@ -231,13 +170,18 @@ World Modelsは**全ドメイン（画像・動画・ロボティクス・科学
 **生成は副産物に過ぎなかった**。真の目的は**環境の因果構造を理解し、行動の結果を予測すること**だ。
 
 これがTrojan Horseの最終形態だ。「生成AI」は「理解AI」に進化する。
-:::
 
-:::message
-**進捗**: 全体の20%完了。生成モデルの進化系譜を理解した。World Modelsは生成の先にある「理解+予測+シミュレーション」の統合概念だ。
-:::
+</details>
+
+> **Note:** **進捗**: 全体の20%完了。生成モデルの進化系譜を理解した。World Modelsは生成の先にある「理解+予測+シミュレーション」の統合概念だ。
 
 ---
+
+
+> Progress: 20%
+> **理解度チェック**
+> 1. $p(x)$ の各記号の意味と、この式が表す操作を説明してください。
+> 2. このゾーンで学んだ手法の直感的な意味と、なぜこの定式化が必要なのかを説明してください。
 
 ## 📐 3. 数式修行ゾーン（60分）— World Modelsの数学的基礎
 
@@ -310,26 +254,6 @@ $$
 
 **数値例**:
 
-```julia
-# Context: 画像の左半分 (32x64 patches)
-x_ctx = x[:, 1:32, :, :]
-
-# Target: 画像の右半分 (32x64 patches) — Encoder通すが勾配は流さない
-x_tgt = x[:, 33:64, :, :]
-
-# Context encoder (trainable)
-z_ctx = s_θ(x_ctx)  # [B, 32, D]
-
-# Predictor: mask tokens M を使って target位置の表現を予測
-M = mask_tokens[:, 33:64, :]  # [B, 32, D_mask]
-z_pred = f_θ(z_ctx, M)  # [B, 32, D]
-
-# Target encoder (EMA, no grad)
-z_tgt = stopgradient(s̄_θ(x_tgt))  # [B, 32, D]
-
-# Loss
-loss = mean((z_pred - z_tgt).^2)
-```
 
 #### 3.2.2 V-JEPA (Video JEPA)
 
@@ -443,21 +367,6 @@ $$
 
 **損失計算**:
 
-```julia
-# テキストトークン (discrete)
-text_logits = model(text_tokens)
-loss_text = cross_entropy(text_logits, text_tokens[2:end])
-
-# 画像パッチ (continuous)
-t_diffusion = rand(1:T)
-noise = randn(size(image_patches))
-x_t = sqrt(ᾱ[t_diffusion]) * image_patches + sqrt(1 - ᾱ[t_diffusion]) * noise
-pred_noise = model(x_t, t_diffusion, context=text_tokens)
-loss_image = mean((pred_noise - noise).^2)
-
-# 統合
-loss = loss_text + λ * loss_image
-```
 
 **スケーリング結果**: 7Bパラメータ、2T multi-modal tokensで訓練 → テキスト生成と画像生成の両方で同規模の専用モデルと同等性能。
 
@@ -526,21 +435,79 @@ $$
 
 **実装**:
 
-```julia
-# Edge-local reference frameでのforce計算
-f_ij = MLP(h_i, h_j, r_ij)
+#### Lagrangian力学による保存則の厳密埋め込み
 
-# Newton's third lawで対称化
-Δv_i = f_ij / m_i
-Δv_j = -f_ij / m_j
+運動量保存をGNNに組み込む理論的基盤として、**Lagrangian力学**からの定式化が強力である。系の状態を一般化座標$\mathbf{q} = (q_1, \ldots, q_n)$と一般化速度$\dot{\mathbf{q}} = (\dot{q}_1, \ldots, \dot{q}_n)$で記述するとき、Lagrangian $L$は
 
-# 更新
-v_i_new = v_i + Δv_i
-v_j_new = v_j + Δv_j
+$$
+L(\mathbf{q}, \dot{\mathbf{q}}) = T(\dot{\mathbf{q}}) - V(\mathbf{q})
+$$
 
-# 検証: 系全体の運動量が保存されているか
-@assert sum(m_i * v_i_new for i in 1:N) ≈ sum(m_i * v_i for i in 1:N)
-```
+ここで$T$は運動エネルギー、$V$はポテンシャルエネルギー。運動方程式はEuler-Lagrange方程式から導かれる:
+
+$$
+\frac{d}{dt}\frac{\partial L}{\partial \dot{q}_i} - \frac{\partial L}{\partial q_i} = 0, \quad i = 1, \ldots, n
+$$
+
+質点系では$T = \frac{1}{2} \sum_i m_i \|\dot{\mathbf{r}}_i\|^2$、$V = \sum_{i < j} V_{ij}(\|\mathbf{r}_i - \mathbf{r}_j\|)$とすると、上式は直ちに運動量保存とエネルギー保存を**代数的に含意**する。
+
+**Störmer-Verlet法によるエネルギー保存数値積分**
+
+通常のEuler法では各ステップで$O(h^2)$のエネルギー誤差が蓄積し、長時間シミュレーションでエネルギーが発散する。Störmer-Verlet法は**シンプレクティック積分器**であり、離散軌道が連続Lagrangianの保存量を厳密に保持する。更新則は:
+
+$$
+\mathbf{q}_{t+1} = \mathbf{q}_t + h\dot{\mathbf{q}}_t + \frac{h^2}{2}\mathbf{M}^{-1}\mathbf{F}(\mathbf{q}_t)
+$$
+
+$$
+\dot{\mathbf{q}}_{t+1} = \dot{\mathbf{q}}_t + \frac{h}{2}\mathbf{M}^{-1}\left[\mathbf{F}(\mathbf{q}_t) + \mathbf{F}(\mathbf{q}_{t+1})\right]
+$$
+
+ここで$\mathbf{M}$は質量行列、$\mathbf{F}(\mathbf{q}) = -\nabla_{\mathbf{q}} V(\mathbf{q})$は保存力。この方法では離散ハミルトニアン$\tilde{H}$が**陰的に保存**される（modified Hamiltonian定理）:
+
+$$
+\left|\tilde{H}(\mathbf{q}_t, \dot{\mathbf{q}}_t) - \tilde{H}(\mathbf{q}_0, \dot{\mathbf{q}}_0)\right| \leq C h^2, \quad \forall t
+$$
+
+すなわちエネルギー誤差は時間に依らず$O(h^2)$に**有界**である（Euler法の$O(th^2)$とは本質的に異なる）。
+
+**E(3)-equivariant Graph Neural Networks**
+
+物理系のシミュレーションにGNNを使う場合、座標変換に対する**等変性（equivariance）**が理論的保証を与える。$E(3)$群は3次元ユークリッド変換（回転$R \in SO(3)$、反転$I$、平行移動$\mathbf{t}$）の群である。
+
+スカラー特徴量$h_i \in \mathbb{R}^d$とベクトル特徴量$\mathbf{v}_i \in \mathbb{R}^3$を持つグラフにおいて、E(3)-equivariant メッセージパッシングは:
+
+$$
+\mathbf{m}_{ij} = \phi_m\left(h_i, h_j, \|\mathbf{r}_{ij}\|^2, \mathbf{v}_i \cdot \mathbf{v}_j\right)
+$$
+
+$$
+\mathbf{v}_i^{\text{new}} = \sum_{j \in \mathcal{N}(i)} \mathbf{r}_{ij} \cdot \phi_v(\|\mathbf{r}_{ij}\|^2, h_i, h_j)
+$$
+
+ここで$\mathbf{r}_{ij} = \mathbf{r}_i - \mathbf{r}_j$、$\phi_m, \phi_v$はMLPである。この設計により回転変換$R$に対して:
+
+$$
+\text{GNN}(R\mathbf{r}_1, \ldots, R\mathbf{r}_N) = R \cdot \text{GNN}(\mathbf{r}_1, \ldots, \mathbf{r}_N)
+$$
+
+が**厳密に成立**し、力の予測が座標系の選択に依存しない。平行移動不変性は$\mathbf{r}_{ij}$（相対座標）のみを入力に使うことで自動的に保証される。
+
+**Steerable Equivariant GNNs (SEGNN) の高次等変性**
+
+EGNN（E(3)-equivariant GNN）は1階テンソル（ベクトル）のみを扱うが、SEGNNは**任意次数の球面調和関数**$Y_l^m$（$l = 0, 1, 2, \ldots$）を基底とする高次等変特徴量を扱う。次数$l$の等変特徴量$\mathbf{f}^{(l)} \in \mathbb{R}^{2l+1}$は$SO(3)$の既約表現$D^{(l)}(R)$で変換する:
+
+$$
+\mathbf{f}^{(l)} \mapsto D^{(l)}(R)\, \mathbf{f}^{(l)}
+$$
+
+メッセージは球面調和関数の**テンソル積（CG積）**を用いて構成する:
+
+$$
+\mathbf{m}_{ij}^{(l_{\text{out}})} = \sum_{l_1, l_2} C^{l_{\text{out}}}_{l_1 l_2} \left(\mathbf{f}_i^{(l_1)} \otimes_{CG} \mathbf{f}_j^{(l_2)}\right) \cdot \phi\!\left(\|\mathbf{r}_{ij}\|\right)
+$$
+
+ここで$C^{l_{\text{out}}}_{l_1 l_2}$はClebsch-Gordan係数（$SO(3)$の既約表現の積則）。分子動力学に適用すると$l=2$（二階テンソル、四極子モーメント等）まで考慮することで、従来のEGNNと比べてポテンシャルエネルギー面の精度が約30%向上することが実証されている（Thomas et al., 2018）。
 
 #### 3.4.3 Hamiltonian Neural Networks
 
@@ -567,6 +534,41 @@ $$
 
 **利点**: エネルギー保存則が**構造的に保証**される（Hamiltonianの時間微分が0）。
 
+**HNNの理論的保証: シンプレクティック構造の保持**
+
+HNNが生成するフローは$2n$次元位相空間に**シンプレクティック構造**$\omega = \sum_i dq_i \wedge dp_i$を保持する。これはLiouville定理（位相空間体積の保存）の代数的表現であり:
+
+$$
+\frac{d}{dt}\int_{\Omega_0} d\mathbf{q}\, d\mathbf{p} = 0
+$$
+
+が任意の領域$\Omega_0$について成立することを意味する。数値的にはシンプレクティック積分器（Störmer-Verlet等）との組み合わせが必須であり、Runge-Kutta法を使うとシンプレクティック性が破れてエネルギーが長時間スケールでドリフトする。
+
+HNNが学習するHamiltonian $H_\theta(q, p)$が真のHamiltonian $H^*(q, p)$を正確に近似している場合、生成される軌道は以下の意味で最適である:
+
+$$
+\left\| z(t) - z^*(t) \right\| \leq C \cdot \left\| H_\theta - H^* \right\|_{\infty} \cdot t
+$$
+
+つまりHamiltonianの近似誤差が$\varepsilon$のとき、軌道誤差は時間$t$に対して線形にしか増大しない。これは一般の回帰ベースのworld model（誤差が指数増大）と比べて**本質的に優れた長期安定性**を示す。
+
+**Symplectic World Modelsとの比較**
+
+| モデル | エネルギー保存 | 長期安定性 | 適用系 |
+|--------|--------------|-----------|--------|
+| 標準LSTM/RNN | なし | 指数的誤差増大 | 任意 |
+| HNN | 構造的保証 | 線形誤差増大 | 保存力学系 |
+| LNN (3.9.3) | Noetherで保証 | 線形誤差増大 | 任意一般化座標 |
+| Symplectic RNN | 近似的保証 | 多項式誤差増大 | 保存力学系 |
+
+実世界への適用においては、純粋な保存力学系（エネルギーが厳密に保存）は理想化であり、摩擦・散逸・外力が存在する系ではHNNの仮定が破れる。こうした系には**Port-Hamiltonian Systems (PHS)** への拡張が有効であり、散逸項$R(q,p) \geq 0$と外力入力$u$を明示的にモデル化する:
+
+$$
+\begin{pmatrix} \dot{q} \\ \dot{p} \end{pmatrix} = \left(J - R\right) \nabla H + B\, u
+$$
+
+ここで$J = \begin{pmatrix} 0 & I \\ -I & 0 \end{pmatrix}$（シンプレクティック行列）、$R \succeq 0$（散逸行列）、$B$は入力行列。$u = 0$かつ$R = 0$のとき古典的HNNに帰着する。Port-HNN（PHNN）はロボットの関節制御（バネ-ダンパー系）や流体力学における世界モデル構築に応用されている。
+
 ### 3.5 Energy-based World Models
 
 **第34回EBMとの接続**:
@@ -589,6 +591,91 @@ $$
 $$
 
 ここで$z_{t+1}^{+}$はデータ、$z_{t+1}^{-}$はLangevin dynamicsでサンプル。
+
+#### Contrastive Divergence (CD-k) の完全導出
+
+EBMの訓練目的は負の対数尤度の最小化である:
+
+$$
+\mathcal{L}_{\text{EBM}} = -\mathbb{E}_{z^+ \sim p_{\text{data}}} \log p_\theta(z^+) = \mathbb{E}_{z^+}\left[E_\theta(z^+)\right] + \log Z_\theta
+$$
+
+分配関数$Z_\theta = \int \exp(-E_\theta(z))\, dz$は一般に計算不能である。勾配は:
+
+$$
+\nabla_\theta \mathcal{L}_{\text{EBM}} = \mathbb{E}_{z^+ \sim p_{\text{data}}}\left[\nabla_\theta E_\theta(z^+)\right] - \mathbb{E}_{z^- \sim p_\theta}\left[\nabla_\theta E_\theta(z^-)\right]
+$$
+
+第2項（negative phase）は$p_\theta$からのサンプル$z^-$が必要である。Contrastive Divergence (CD-k) では、データ点$z^+$から初期化したMarkov ChainをMCMCで$k$ステップ走らせて$z^-$を得る:
+
+$$
+z^- = \text{MCMC}_k(z^+; E_\theta), \quad z_0 \leftarrow z^+
+$$
+
+各MCMCステップでは**Langevin dynamics**を使用:
+
+$$
+z_{s+1} = z_s - \frac{\delta}{2} \nabla_z E_\theta(z_s) + \sqrt{\delta}\, \varepsilon_s, \quad \varepsilon_s \sim \mathcal{N}(0, I)
+$$
+
+$k=1$のCD-1は計算コストが低いが、バイアスがある。$k \to \infty$では真の$p_\theta$からのサンプルに近づく。World Modelsへの適用では$z = z_{t+1}$、条件$z_t, a_t$を固定した上でLangevin MCMCを走らせる:
+
+$$
+z_{t+1}^{(s+1)} = z_{t+1}^{(s)} - \frac{\delta}{2}\nabla_{z_{t+1}} E_\theta(z_t, a_t, z_{t+1}^{(s)}) + \sqrt{\delta}\, \varepsilon_s
+$$
+
+**エネルギー関数のパラメータ化**
+
+エネルギー関数$E_\theta$の設計は表現力と訓練安定性に直結する。主な選択肢:
+
+1. **スカラーMLP**: $E_\theta(z_t, a_t, z_{t+1}) = \text{MLP}_\theta([z_t; a_t; z_{t+1}])$
+   — 最も柔軟だが訓練が不安定になりやすい
+
+2. **二次型 + 残差**: $E_\theta = \frac{1}{2}\| z_{t+1} - \mu_\theta(z_t, a_t) \|_{\Sigma_\theta}^2 + r_\theta(z_t, a_t, z_{t+1})$
+   — 初期化が安定し、残差項が非Gauss性を捉える
+
+3. **双線型**: $E_\theta = -z_{t+1}^\top W_\theta(z_t, a_t) z_{t+1}$
+   — 計算効率が高いが表現力が限定的
+
+**Score Matching: CDの代替訓練法**
+
+Score Matchingは分配関数$Z_\theta$を回避する**Fisher divergence最小化**に基づく:
+
+$$
+\mathcal{L}_{\text{SM}} = \mathbb{E}_{z \sim p_{\text{data}}} \left[ \frac{1}{2} \| \nabla_z \log p_\theta(z) - \nabla_z \log p_{\text{data}}(z) \|^2 \right]
+$$
+
+$\nabla_z \log p_\theta(z) = -\nabla_z E_\theta(z)$であるから、**部分積分**により$p_{\text{data}}$の微分を消去できる（Hyvärinen, 2005）:
+
+$$
+\mathcal{L}_{\text{SM}} = \mathbb{E}_{z \sim p_{\text{data}}} \left[ \text{tr}\!\left(\nabla_z^2 E_\theta(z)\right) + \frac{1}{2}\| \nabla_z E_\theta(z) \|^2 \right] + \text{const}
+$$
+
+第1項はHessianのトレースであり、スライスScore Matching（ランダム方向への射影）で近似可能:
+
+$$
+\mathcal{L}_{\text{SSM}} = \mathbb{E}_{z, \mathbf{v}} \left[ \mathbf{v}^\top \nabla_z^2 E_\theta(z)\, \mathbf{v} + \frac{1}{2}\left(\mathbf{v}^\top \nabla_z E_\theta(z)\right)^2 \right]
+$$
+
+ここで$\mathbf{v} \sim \mathcal{N}(0, I)$は確率的射影ベクトル。MCMCサンプリングを一切必要としない点がCD-kと比べた最大の利点である。Denoising Score Matching（Vincent, 2011）は実用的な変種であり、ノイズ付き観測$\tilde{z} = z + \sigma \varepsilon$に対するスコア関数$s_\theta(\tilde{z}, \sigma) \approx \nabla_{\tilde{z}} \log p_{\sigma}(\tilde{z})$を学習する。これはDiffusion Modelsの理論的基盤でもある。
+
+DSMの訓練目的は:
+
+$$
+\mathcal{L}_{\text{DSM}} = \mathbb{E}_{z \sim p_{\text{data}},\, \varepsilon \sim \mathcal{N}(0,I),\, \sigma} \left[ \sigma^2 \left\| s_\theta(z + \sigma\varepsilon,\, \sigma) + \frac{\varepsilon}{\sigma} \right\|_2^2 \right]
+$$
+
+Score Matching、Denoising Score Matching、CD-kはいずれもEBMの負の対数尤度最小化の異なる近似であり、計算コストと統計的効率のトレードオフが存在する。
+
+**エネルギー景観と多峰性未来予測**
+
+決定論的world model $z_{t+1} = f_\theta(z_t, a_t)$は単一の未来しか予測できない。EBMでは$E_\theta(z_t, a_t, \cdot)$が**複数の極小値**を持つことで、内在的な多峰性を表現できる:
+
+$$
+\mathcal{Z}_{\text{future}} = \{z^* : \nabla_{z_{t+1}} E_\theta(z_t, a_t, z^*) = 0,\; \nabla^2_{z_{t+1}} E_\theta(z_t, a_t, z^*) \succ 0\}
+$$
+
+各極小値は「あり得る未来状態」に対応し、エネルギーの深さが確率（可能性）に相当する。Langevin MCMCのステップ数$k$と学習率$\delta$のバランスがモード探索能力を決定する: $\delta$が大きすぎるとモード間の境界を越えにくく、小さすぎると混合が遅い。実用的には**Parallel Tempering**（異なる温度$T$でのMCMCを並列実行して交換）が多峰性エネルギー景観の探索に有効である。
 
 ### 3.6 世界モデルの訓練理論
 
@@ -652,6 +739,122 @@ $$
 
 **Masked Autoencoding**: 一部のフレームをマスク → 予測（JEPAと同じ原理）
 
+#### 3.6.4 RSSM: Recurrent State Space Model (DreamerV3)
+
+DreamerV3（Hafner et al., 2023）の中核をなすRSSM（Recurrent State Space Model）は、**決定論的パス**と**確率的パス**を組み合わせた潜在状態モデルである。
+
+**状態遷移の構造**:
+
+$$
+h_t = f_\phi(h_{t-1},\, z_{t-1},\, a_{t-1})
+$$
+
+$$
+\hat{z}_t \sim p_\phi(\hat{z}_t \mid h_t) \quad \text{（prior: 事前分布)}
+$$
+
+$$
+z_t \sim q_\phi(z_t \mid h_t, x_t) \quad \text{（posterior: 観測$x_t$で更新）}
+$$
+
+ここで$h_t \in \mathbb{R}^{d_h}$はGRUによる**決定論的**隠れ状態（長期依存を保持）、$z_t \in \mathbb{R}^{d_z}$は**確率的**潜在状態（不確実性を表現）、$a_{t-1}$は前ステップのアクションである。Prior $p_\phi$は観測なしで将来を予測（imagination用）、Posterior $q_\phi$は観測$x_t$を取り込んで状態を精緻化する。
+
+**ELBOによる訓練目的**:
+
+ELBOを全時刻$t=1,\ldots,T$にわたって展開すると:
+
+$$
+\mathcal{L}_{\text{RSSM}} = \sum_{t=1}^T \underbrace{\mathbb{E}_{q_\phi}[\log p_\phi(x_t \mid h_t, z_t)]}_{\text{再構成損失}} - \underbrace{D_{\text{KL}}[q_\phi(z_t \mid h_t, x_t) \,\|\, p_\phi(z_t \mid h_t)]}_{\text{KL正則化}}
+$$
+
+再構成損失はデコーダ$p_\phi(x_t \mid h_t, z_t)$（画像の場合はConvDecoderなど）が与える。KL正則化はposteriorを「意味のある情報のみ符号化する」よう促し、不必要な情報の記憶を防ぐ正則化として機能する。また、$h_t$が決定論的パスで情報を保持するため、$z_t$はその時刻に固有の確率的情報のみを担えばよく、両パスの役割分担がELBOを最大化する上で重要な設計上の洞察である。
+
+**KLバランシングとFree Bits Trick**（DreamerV3）
+
+単純なKL最小化では、モデルが事前分布$p_\phi$を事後分布$q_\phi$に一致させるよりも逆方向（$q_\phi \to p_\phi$）に収縮させてしまう（posterior collapse）。DreamerV3では以下の**KLバランシング**を採用:
+
+$$
+\mathcal{L}_{\text{KL}} = \alpha \cdot D_{\text{KL}}\!\left[\text{sg}(q_\phi) \,\|\, p_\phi\right] + (1-\alpha) \cdot D_{\text{KL}}\!\left[q_\phi \,\|\, \text{sg}(p_\phi)\right]
+$$
+
+ここで$\text{sg}(\cdot)$はstop-gradient演算子、$\alpha = 0.8$（論文値）。第1項はpriorの更新、第2項はposteriorの更新を担う。**Free Bits**制約により各潜在変数のKLに下限を設ける:
+
+$$
+\mathcal{L}_{\text{KL}}^{\text{free}} = \max\!\left(\mathcal{L}_{\text{KL}},\, \beta_{\text{free}}\right), \quad \beta_{\text{free}} = 1.0 \text{ nat}
+$$
+
+これにより情報量が$\beta_{\text{free}}$以下の潜在変数のKLを0として扱い、posterior collapseを防ぐ。
+
+**Imagination-based学習**
+
+訓練済みRSSMを用いて、実環境を使わずに**内部で軌跡を展開**（imagination）する:
+
+1. 現在の潜在状態$z_t, h_t$から出発し、world modelで$H$ステップ先まで予測:
+
+$$
+\hat{z}_{t+k} \sim p_\phi(\hat{z}_{t+k} \mid h_{t+k}), \quad h_{t+k} = f_\phi(h_{t+k-1}, \hat{z}_{t+k-1}, a_{t+k-1})
+$$
+
+2. 各虚想状態における報酬と価値を推定:
+
+$$
+\hat{r}_{t+k} = r_\phi(h_{t+k}, \hat{z}_{t+k}), \quad \hat{v}_{t+k} = V_\psi(h_{t+k}, \hat{z}_{t+k})
+$$
+
+3. $\lambda$-return でアクター損失を計算:
+
+$$
+\mathcal{R}_t^\lambda = \hat{r}_t + \gamma \left[(1-\lambda)\hat{v}_{t+1} + \lambda \mathcal{R}_{t+1}^\lambda\right]
+$$
+
+$$
+\mathcal{L}_{\text{actor}} = -\mathbb{E}_{\text{imagination}}\left[\sum_{k=0}^{H-1} \gamma^k \mathcal{R}_{t+k}^\lambda\right]
+$$
+
+実環境インタラクションを大幅に削減しながら（100倍以上のサンプル効率）、Atari・DMC・Craftaxなど広範なタスクで最高性能を達成している。
+
+**カテゴリカル潜在表現と直線的勾配推定**
+
+DreamerV3では連続潜在変数$z_t \in \mathbb{R}^{d_z}$の代わりに**カテゴリカル分布の積**を使用する。$K$個のカテゴリから$C$クラスを選ぶ独立カテゴリカル変数の積として:
+
+$$
+z_t = \text{onehot}(k_1) \oplus \ldots \oplus \text{onehot}(k_K), \quad k_i \sim \text{Categorical}(\pi_{i,1}, \ldots, \pi_{i,C})
+$$
+
+合計$KC$次元の離散潜在表現となる（論文値: $K=32, C=32$で1024次元）。この離散表現は**再構成損失のgrading**に優れており、連続表現より表現力が高いことが実証されている。
+
+離散変数のELBOは直接微分できないため、**Straight-Through Gradient**を使用:
+
+$$
+\frac{\partial \mathcal{L}}{\partial \boldsymbol{\pi}} \approx \frac{\partial \mathcal{L}}{\partial z_t} \cdot \frac{\partial z_t}{\partial \boldsymbol{\pi}} \bigg|_{z_t \leftarrow \text{onehot}(\arg\max \boldsymbol{\pi})}
+$$
+
+前向きパスでは$\arg\max$でハードサンプルを使い、後ろ向きパスでは$\text{softmax}$の勾配を流す。これにより離散コードブックの表現能力と連続最適化の計算効率を両立する。
+
+**ダイナミクスモデルの損失分解とスケーリング**
+
+DreamerV3の全損失は以下の3成分に分解される:
+
+$$
+\mathcal{L}_{\text{WM}} = \underbrace{\mathcal{L}_{\text{recon}}}_{\text{デコーダ損失}} + \underbrace{\mathcal{L}_{\text{pred}}}_{\text{reward/cont}} + \underbrace{\mathcal{L}_{\text{dyn}}}_{\text{KL動的バランス}}
+$$
+
+各成分を**symlog変換**によりスケール正規化する:
+
+$$
+\text{symlog}(x) = \text{sign}(x) \cdot \log(|x| + 1)
+$$
+
+これにより報酬が$[-1000, 1000]$の広範囲に分散する環境（Minecraft等）でも損失スケールを$O(1)$に保ち、単一のハイパーパラメータセットで多様なタスクに対応できる。
+
+symlogの逆変換（デコード時に使用）は:
+
+$$
+\text{symexp}(x) = \text{sign}(x) \cdot (\exp(|x|) - 1)
+$$
+
+報酬予測頭部はsymlog変換後の報酬を予測し、実際の報酬との比較にはsymexp後の値を用いる。この対称的な対数変換は、正負の大きな外れ値に対してもロバストであり、勾配の爆発を抑制する。世界モデルの訓練においてスケール不変な損失設計は、ロボット制御（報酬$\sim 0.1$）からゲーム（報酬$\sim 10^4$）まで統一アーキテクチャで扱うために不可欠である。
+
 ### 3.7 世界モデルの評価
 
 #### 3.7.1 予測精度
@@ -694,6 +897,76 @@ $$
 
 - **FVD (Fréchet Video Distance)**: I3D特徴量でのFréchet距離
 - **LPIPS**: 知覚的類似度
+
+#### 3.7.4 FVD (Fréchet Video Distance) の厳密定式化
+
+FVDはFréchet Inception Distance (FID) を動画に拡張した指標であり、**I3D（Inflated 3D ConvNet）**の特徴空間でリアル動画と生成動画の分布距離を測定する。
+
+まずI3Dエンコーダ$\phi_{I3D}: \mathbb{R}^{T \times H \times W \times 3} \to \mathbb{R}^d$で動画クリップを特徴量に変換し、リアル分布と生成分布をそれぞれGaussianで近似する:
+
+$$
+\mu_r, \Sigma_r = \text{MeanCov}\left(\{\phi_{I3D}(v_i)\}_{i=1}^{N_r}\right)
+$$
+
+$$
+\mu_g, \Sigma_g = \text{MeanCov}\left(\{\phi_{I3D}(\hat{v}_j)\}_{j=1}^{N_g}\right)
+$$
+
+FVDはこの2つのGaussian間の**Fréchet距離**（Wasserstein-2距離の二乗の閉形式）:
+
+$$
+\text{FVD} = \|\mu_r - \mu_g\|_2^2 + \text{tr}\!\left(\Sigma_r + \Sigma_g - 2\left(\Sigma_r \Sigma_g\right)^{1/2}\right)
+$$
+
+$(\Sigma_r \Sigma_g)^{1/2}$は行列の平方根（正定値行列の幾何平均）であり、数値的には固有値分解で計算する。FVD $= 0$はリアルと生成の分布が完全一致することを意味する。典型的な良いworld modelはFVD $< 100$、拡散モデルベースのVideoLDMは FVD $\approx 20$台を達成している。
+
+**Expected Calibration Error (ECE): 確率的予測の信頼度評価**
+
+確率的world model $p_\theta(z_{t+k} \mid z_t, a_{t:t+k-1})$の予測信頼度が実際の正解率と一致しているかを評価する指標。信頼度区間を$M$個のビン$B_m = [(m-1)/M, m/M)$に分割し:
+
+$$
+\text{ECE} = \sum_{m=1}^M \frac{|B_m|}{N} \left|\text{acc}(B_m) - \text{conf}(B_m)\right|
+$$
+
+$$
+\text{acc}(B_m) = \frac{1}{|B_m|}\sum_{i \in B_m} \mathbf{1}[\hat{z}_i = z_i^*], \quad \text{conf}(B_m) = \frac{1}{|B_m|}\sum_{i \in B_m} \hat{p}_i
+$$
+
+ここで$\hat{p}_i$はモデルの予測確率。ECE $= 0$は完全にcalibratedであることを示す。
+
+**多ステップロールアウトの誤差蓄積分析**
+
+World modelを$k$ステップ先まで展開した場合の誤差は、1ステップ誤差$\epsilon_1$と誤差伝播率$\rho$によって指数的に増大する:
+
+$$
+\text{MSE}(k) \leq \epsilon_1 \cdot \frac{\rho^k - 1}{\rho - 1} \approx \epsilon_1 \cdot e^{(\rho-1)k} \quad (\rho > 1 \text{ の場合})
+$$
+
+より精密には、Lipschitz定数$L_f$を持つworld model $f_\theta$に対して:
+
+$$
+\|z_{t+k} - \hat{z}_{t+k}\| \leq L_f^k \|z_t - \hat{z}_t\| + \sum_{j=0}^{k-1} L_f^j \epsilon_{t+k-j}
+$$
+
+ここで$\epsilon_t$は各ステップの1ステップ予測誤差。$L_f < 1$（収縮マップ）ならば誤差が有界であり、$L_f > 1$ならば指数的に発散する。
+
+**情報理論的精度上限**
+
+World modelの予測精度には、系の**Lyapunov指数**$\lambda_{\max}$による情報理論的限界がある。初期状態の不確実性$\sigma_0$に対して、時刻$t$での予測不確実性は:
+
+$$
+\sigma_t \geq \sigma_0 \cdot e^{\lambda_{\max} t}
+$$
+
+連続観測が利用可能な場合でも、Shannon情報量の観点から:
+
+$$
+I(z_{t+k}; \{z_t, a_{t:t+k}\}) \leq I(z_{t+k}; z_{t+k-1}) + I(z_{t+k-1}; \{z_t, a_{t:t+k-1}\})
+$$
+
+つまり予測可能な情報量はMandelbrot-Shannon-Khinchin則に従い、Lyapunov時間$t \sim 1/\lambda_{\max}$を超えると急速に減衰する。これは物理的に意味のある長期予測の困難さの根本的な説明を与える。
+
+実際の評価では、Lyapunov指数を推定してworld modelの「理論的予測限界ステップ数」$t^* = \kappa / \lambda_{\max}$（$\kappa$は許容情報損失を決める定数）を計算し、モデルが$t^*$ステップ以内で高精度に予測できているかを確認することが実用的な評価プロトコルとなる。物理系（分子動力学$\lambda_{\max} \sim 10^{12}$ Hz）とロボット系（$\lambda_{\max} \sim 1$ Hz）では予測限界が12桁異なるため、タスクに応じた評価設計が不可欠である。
 
 ### 🥊 Boss Battle: Transfusionの完全分解
 
@@ -764,77 +1037,60 @@ $\lambda$はハイパーパラメータ（論文では$\lambda=1$を使用）。
 
 **Step 5**: 実装コード（Julia）
 
-```julia
-using Lux, Random, Optimisers
+**Step 6: Attention Mask 構造の証明**
 
-# Transformer with mixed masking
-struct TransfusionTransformer
-    layers::Chain
-    text_head::Dense
-    image_head::Dense
-end
+Transfusionのmask設計がなぜこの形でなければならないか、情報フローの観点から厳密に論じる。
 
-function (m::TransfusionTransformer)(s, mask, t_diffusion=nothing)
-    h = m.layers(s, mask)  # [B, n+m, D]
+テキストトークン列$\mathbf{t} = (t_1, \ldots, t_n)$と画像パッチ列$\mathbf{x} = (x_1, \ldots, x_m)$を連結した統合シーケンス$\mathbf{s} = [\mathbf{t}; \mathbf{x}]$（長さ$n+m$）に対して、attention mask $M \in \{0, 1\}^{(n+m) \times (n+m)}$の$(i,j)$成分が1ならtokenから$j$がトークン$i$にattendできることを意味する。
 
-    # Split into text and image parts
-    h_text = h[:, 1:n_text, :]
-    h_image = h[:, n_text+1:end, :]
+**テキスト→テキスト（左上 $n \times n$ ブロック）**: 自己回帰モデリングのため**causal mask**:
 
-    # Text head: logits
-    logits_text = m.text_head(h_text)  # [B, n_text, vocab_size]
+$$
+M_{ij}^{tt} = \mathbf{1}[j \leq i], \quad 1 \leq i, j \leq n
+$$
 
-    # Image head: noise prediction
-    if !isnothing(t_diffusion)
-        # Embed diffusion time step
-        t_emb = sinusoidal_embedding(t_diffusion)
-        pred_noise = m.image_head(cat(h_image, t_emb, dims=3))
-    else
-        pred_noise = nothing
-    end
+これを破ると$t_{i+1}, \ldots, t_n$の情報が$t_i$の予測に漏れ込み（information leak）、$\mathcal{L}_{\text{text}}$の最小化が trivial（$p_\theta(t_i | t_{<i}) = 1$）になる。
 
-    return logits_text, pred_noise
-end
+**画像→画像（右下 $m \times m$ ブロック）**: Diffusion denoisingでは各パッチが他の全パッチを参照できる**bidirectional mask**:
 
-# Loss function
-function transfusion_loss(model, text_tokens, image_patches, ps, st)
-    n_text = size(text_tokens, 2)
+$$
+M_{ij}^{xx} = 1, \quad n+1 \leq i, j \leq n+m
+$$
 
-    # Forward diffusion on images
-    t = rand(1:1000)
-    noise = randn(size(image_patches))
-    ᾱ_t = alpha_bar(t)
-    x_t = sqrt(ᾱ_t) * image_patches + sqrt(1 - ᾱ_t) * noise
+画像の空間一貫性（遠く離れたパッチ間の整合性）にはglobal attentionが不可欠であり、causalにすると低品質な生成となる。
 
-    # Construct input sequence [text, image]
-    s = cat(embed(text_tokens), x_t, dims=2)  # [B, n_text + m_image, D]
+**テキスト→画像（右上 $n \times m$ ブロック）**: テキストトークンは画像パッチを**attend しない**:
 
-    # Construct mask
-    mask = create_transfusion_mask(n_text, size(x_t, 2))
+$$
+M_{ij}^{tx} = 0, \quad 1 \leq i \leq n,\; n+1 \leq j \leq n+m
+$$
 
-    # Forward
-    logits_text, pred_noise = model(s, mask, t, ps, st)
+これは自己回帰的テキスト予測に画像の将来情報が入らないようにするためである。
 
-    # Text loss (cross-entropy)
-    loss_text = cross_entropy(logits_text, text_tokens[:, 2:end])
+**画像→テキスト（左下 $m \times n$ ブロック）**: 画像生成の条件付けのため、画像パッチは全テキストトークンを参照できる:
 
-    # Image loss (diffusion)
-    loss_image = mean((pred_noise - noise).^2)
+$$
+M_{ij}^{xt} = 1, \quad n+1 \leq i \leq n+m,\; 1 \leq j \leq n
+$$
 
-    # Total loss
-    return loss_text + λ * loss_image
-end
-```
+この非対称性がTransfusionの本質であり、「テキストは画像を見ず、画像はテキスト全体を見る」設計となっている。
+
+**Step 7: $\lambda$の最適選択と損失スケーリング**
+
+テキスト損失$\mathcal{L}_{\text{text}}$と画像損失$\mathcal{L}_{\text{image}}$のスケールは本質的に異なる。テキスト損失はクロスエントロピーで典型的に$O(1)$ nat/token、画像損失はMSEベースでパッチ次元$d_{\text{patch}}$に比例する。スケール不均衡を補正する最適$\lambda$は:
+
+$$
+\lambda^* = \frac{\mathbb{E}[\|\nabla_\theta \mathcal{L}_{\text{text}}\|_2^2]}{\mathbb{E}[\|\nabla_\theta \mathcal{L}_{\text{image}}\|_2^2]}
+$$
+
+各損失の勾配ノルムの比率を均等にすることで、テキストと画像の両方で安定した学習が実現する。論文では$\lambda = 1$が選ばれているが、これはモデルスケール（1.4B〜7B）においてこの比が概ね1に近くなるためである。小スケールモデルや高解像度画像では$\lambda$のチューニングが重要になる。
+
 
 **Boss撃破！** Transfusionの統一損失関数を完全に導出し、実装した。
 
-:::message alert
-**ここで躓く人が多い**: TransfusionのAttention maskは**混合型**である。テキスト部分はcausal、画像部分はbidirectional、そしてクロスモーダル部分は**画像→テキスト**のみ許可（テキストは画像を見ない）。これを正しく実装しないとテキスト生成でリークが起きる。
-:::
+> **⚠️ Warning:** **ここで躓く人が多い**: TransfusionのAttention maskは**混合型**である。テキスト部分はcausal、画像部分はbidirectional、そしてクロスモーダル部分は**画像→テキスト**のみ許可（テキストは画像を見ない）。これを正しく実装しないとテキスト生成でリークが起きる。
 
-:::message
-**進捗**: 全体の50%完了。World Modelsの数学的基礎を完全習得した。JEPA（I/V/VL）の3変種、Transfusionの統一理論、物理法則学習、EBM視点、訓練・評価手法を導出した。数式修行ボス戦をクリア。
-:::
+> **Note:** **進捗**: 全体の50%完了。World Modelsの数学的基礎を完全習得した。JEPA（I/V/VL）の3変種、Transfusionの統一理論、物理法則学習、EBM視点、訓練・評価手法を導出した。数式修行ボス戦をクリア。
 
 ### 3.8 JEPAの最新発展（2024-2026）
 
@@ -922,46 +1178,6 @@ $$
 
 **実装（Julia概念コード）**:
 
-```julia
-# JEPA world model
-function predict_latent(z_t, a_t, ps_wm, st_wm)
-    z_next, st_new = world_model(vcat(z_t, a_t), ps_wm, st_wm)
-    return z_next, st_new
-end
-
-# Value network
-function estimate_value(z, ps_v, st_v)
-    v, st_new = value_net(z, ps_v, st_v)
-    return v, st_new
-end
-
-# Planning via gradient-based optimization
-function plan_actions(z_0, horizon, ps_wm, ps_v, st_wm, st_v)
-    # 初期action sequence (learnable parameters)
-    a_seq = rand(Float32, action_dim, horizon)
-
-    # Optimize actions
-    opt_state = Optimisers.setup(Adam(0.01), a_seq)
-
-    for step in 1:50  # optimization steps
-        # Rollout world model
-        z_t = z_0
-        total_value = 0.0
-
-        for h in 1:horizon
-            z_t, _ = predict_latent(z_t, a_seq[:, h], ps_wm, st_wm)
-            v, _ = estimate_value(z_t, ps_v, st_v)
-            total_value += γ^(h-1) * v
-        end
-
-        # Gradient ascent on total value
-        grad = gradient(a_seq -> compute_value(a_seq, z_0, ps_wm, ps_v), a_seq)
-        opt_state, a_seq = Optimisers.update(opt_state, a_seq, grad)
-    end
-
-    return a_seq[:, 1]  # Execute first action only (MPC)
-end
-```
 
 **実験結果**: Atariゲームで従来のmodel-free RL（PPO）を上回る性能（sample efficiency 3x向上）。
 
@@ -989,36 +1205,6 @@ $$
 \frac{\partial u}{\partial t} = \alpha \left( \frac{\partial^2 u}{\partial x^2} + \frac{\partial^2 u}{\partial y^2} \right)
 $$
 
-```julia
-# 分離可能近似
-u_x = Chain(Dense(1 => 64, tanh), Dense(64 => 1))
-u_y = Chain(Dense(1 => 64, tanh), Dense(64 => 1))
-u_t = Chain(Dense(1 => 64, tanh), Dense(64 => 1))
-
-# Combined solution
-function u(x, y, t, ps_x, ps_y, ps_t, st_x, st_y, st_t)
-    u_x_val, _ = u_x(x, ps_x, st_x)
-    u_y_val, _ = u_y(y, ps_y, st_y)
-    u_t_val, _ = u_t(t, ps_t, st_t)
-    return u_x_val .* u_y_val .* u_t_val
-end
-
-# PDE residual
-function pde_residual(x, y, t, ps, st)
-    u_val = u(x, y, t, ps...)
-
-    # 自動微分でPDE項を計算
-    ∂u_∂t = gradient(t -> u(x, y, t, ps...), t)[1]
-    ∂²u_∂x² = gradient(x -> gradient(x -> u(x, y, t, ps...), x)[1], x)[1]
-    ∂²u_∂y² = gradient(y -> gradient(y -> u(x, y, t, ps...), y)[1], y)[1]
-
-    # 残差
-    return ∂u_∂t - α * (∂²u_∂x² + ∂²u_∂y²)
-end
-
-# Loss
-loss = mean(pde_residual(x_collocation, y_collocation, t_collocation, ps, st).^2)
-```
 
 **性能**: 10^7 collocation pointsで訓練可能（従来PINNsの1000倍）。
 
@@ -1054,30 +1240,62 @@ $$
 
 **実装の鍵**: Poisson方程式$\nabla^2 \phi = f$を高速に解く（FFTまたは multigrid法）。
 
-```julia
-using FFTW
-
-function enforce_mass_conservation(u_theta, grid)
-    # 発散を計算
-    div_u = compute_divergence(u_theta, grid)
-
-    # Poisson equation: ∇²φ = -div_u
-    # FFTで高速に解く
-    φ_hat = fft(div_u) ./ laplacian_eigenvalues(grid)
-    φ = real(ifft(φ_hat))
-
-    # 補正
-    ∇φ = compute_gradient(φ, grid)
-    u_corrected = u_theta + ∇φ
-
-    # 検証
-    @assert maximum(abs.(compute_divergence(u_corrected, grid))) < 1e-10
-
-    return u_corrected
-end
-```
 
 **結果**: 保存則誤差が標準PINNsの10^-3から10^-12に改善（9桁向上）。
+
+#### 3.9.3 Lagrangian Neural Networks (LNN)
+
+Hamiltonian Neural Networks (HNN) が位相空間$(q, p)$の**正準座標**を必要とするのに対し、**Lagrangian Neural Networks (LNN)** は任意の一般化座標$(\mathbf{q}, \dot{\mathbf{q}})$で動作する。これは関節角度や四元数など、正準変換が自明でない系への適用を大幅に簡素化する。
+
+**LNNの基本定式化**
+
+Lagrangian $L(\mathbf{q}, \dot{\mathbf{q}})$をニューラルネットワーク$L_\theta(\mathbf{q}, \dot{\mathbf{q}})$で近似し、Euler-Lagrange方程式を通じて加速度$\ddot{\mathbf{q}}$を導く:
+
+$$
+\frac{d}{dt}\frac{\partial L_\theta}{\partial \dot{\mathbf{q}}} = \frac{\partial L_\theta}{\partial \mathbf{q}}
+$$
+
+左辺を連鎖律で展開すると:
+
+$$
+\frac{\partial^2 L_\theta}{\partial \dot{\mathbf{q}}^2} \ddot{\mathbf{q}} + \frac{\partial^2 L_\theta}{\partial \dot{\mathbf{q}} \partial \mathbf{q}} \dot{\mathbf{q}} = \frac{\partial L_\theta}{\partial \mathbf{q}}
+$$
+
+これを$\ddot{\mathbf{q}}$について解くと:
+
+$$
+\ddot{\mathbf{q}} = \left(\frac{\partial^2 L_\theta}{\partial \dot{\mathbf{q}}^2}\right)^{-1} \left(\frac{\partial L_\theta}{\partial \mathbf{q}} - \frac{\partial^2 L_\theta}{\partial \dot{\mathbf{q}} \partial \mathbf{q}} \dot{\mathbf{q}}\right)
+$$
+
+これがLNNの運動方程式であり、全ての微分は自動微分（forward-mode + reverse-mode）で計算される。
+
+**HNNとLNNの比較**
+
+| 性質 | HNN | LNN |
+|------|-----|-----|
+| 必要な座標 | 正準座標$(q,p)$ | 任意の一般化座標$(q,\dot{q})$ |
+| 主要計算 | $\partial H/\partial q$, $\partial H/\partial p$ | $\partial^2 L/\partial \dot{q}^2$の逆行列 |
+| エネルギー保存 | 構造的に保証（$dH/dt=0$） | Noetherの定理で保証 |
+| 計算コスト | $O(n)$（自動微分） | $O(n^3)$（逆行列）または$O(n^2)$（CG法） |
+| 適用範囲 | 保存力学系 | 速度依存力（摩擦なし）の任意力学系 |
+
+**二重振り子によるエネルギー保存の検証**
+
+二重振り子（$n=2$）を例に取る。一般化座標$\mathbf{q} = (\theta_1, \theta_2)$とすると、Lagrangianは:
+
+$$
+L(\mathbf{q}, \dot{\mathbf{q}}) = \frac{1}{2}(m_1 + m_2)l_1^2 \dot{\theta}_1^2 + \frac{1}{2}m_2 l_2^2 \dot{\theta}_2^2 + m_2 l_1 l_2 \dot{\theta}_1 \dot{\theta}_2 \cos(\theta_1 - \theta_2)$$
+
+$$+ (m_1 + m_2)g l_1 \cos\theta_1 + m_2 g l_2 \cos\theta_2
+$$
+
+訓練損失はLNNが予測する加速度$\hat{\ddot{\mathbf{q}}}$を真の軌道から計算した$\ddot{\mathbf{q}}^*$に合わせるMSE:
+
+$$
+\mathcal{L}_{\text{LNN}} = \mathbb{E}_{(\mathbf{q}, \dot{\mathbf{q}}, \ddot{\mathbf{q}}) \sim \mathcal{D}} \left[\| \hat{\ddot{\mathbf{q}}}_\theta(\mathbf{q}, \dot{\mathbf{q}}) - \ddot{\mathbf{q}} \|_2^2\right]
+$$
+
+エネルギー保存の検証指標として、Noetherの定理から$L$が時間並進対称性を持つ場合（$\partial L/\partial t = 0$）、全エネルギー$E = \dot{\mathbf{q}}^\top \nabla_{\dot{\mathbf{q}}} L_\theta - L_\theta$が保存される。数値実験では、標準RNNが1000ステップで$\Delta E / E_0 \approx 30\%$の誤差を示すのに対し、LNNは$\Delta E / E_0 < 0.1\%$を維持することが Cranmer et al.（2020）で実証されている。
 
 ### 3.10 Energy-Based World Modelsの理論
 
@@ -1111,24 +1329,6 @@ $$
 
 **実装**:
 
-```julia
-# Energy function
-function energy(z_ctx, z_tgt, ps, st)
-    z_pred, _ = predictor(z_ctx, ps, st)
-    E = sum((z_pred - z_tgt).^2, dims=1)  # [B]
-    return E
-end
-
-# NCE loss
-function nce_loss(z_ctx, z_tgt_pos, z_tgt_neg, ps, st)
-    E_pos = energy(z_ctx, z_tgt_pos, ps, st)
-    E_neg = energy(z_ctx, z_tgt_neg, ps, st)
-
-    # Binary classification: positive = low energy, negative = high energy
-    loss = -mean(log.(σ.(-E_pos))) - mean(log.(σ.(E_neg)))
-    return loss
-end
-```
 
 **利点**:
 
@@ -1179,36 +1379,6 @@ $$
 - **能動推論**: エネルギーを最小化するaction $a_t$を選択
 - **意識**: 高レベル予測誤差が閾値を超えると「意識」に上る
 
-```julia
-# 階層的予測符号化モデル
-struct HierarchicalPredictiveCoding
-    encoders::Vector{Chain}
-    predictors::Vector{Chain}
-    num_levels::Int
-end
-
-function (m::HierarchicalPredictiveCoding)(x, a, ps, st)
-    # Bottom-up pass (encoding)
-    h = Vector{Any}(undef, m.num_levels)
-    h[1] = x
-    for l in 2:m.num_levels
-        h[l], _ = m.encoders[l-1](h[l-1], ps.enc[l-1], st.enc[l-1])
-    end
-
-    # Top-down pass (prediction)
-    pred_errors = Vector{Any}(undef, m.num_levels - 1)
-    for l in (m.num_levels-1):-1:1
-        # Predict lower level from higher level
-        h_pred, _ = m.predictors[l](vcat(h[l+1], a), ps.pred[l], st.pred[l])
-        pred_errors[l] = h[l] - h_pred
-    end
-
-    # Total energy = weighted sum of prediction errors
-    E = sum(λ[l] * sum(pred_errors[l].^2) for l in 1:(m.num_levels-1))
-
-    return E, pred_errors
-end
-```
 
 **実験結果**: ロボットナビゲーションタスクで、標準World Modelsより30%サンプル効率向上。
 
@@ -1244,15 +1414,11 @@ $$
 
 これは**単一のエネルギー関数**の異なる分解に過ぎない。
 
-:::message alert
-**深い洞察**: 生成モデルの統一理論は「Energy-Based World Models」に収束している。VAE、GAN、Diffusion、Transfusion、JEPAは全て**エネルギー関数の異なる訓練・推論方法**として理解できる。
+> **⚠️ Warning:** **深い洞察**: 生成モデルの統一理論は「Energy-Based World Models」に収束している。VAE、GAN、Diffusion、Transfusion、JEPAは全て**エネルギー関数の異なる訓練・推論方法**として理解できる。
+>
+> 第34回で学んだEBMが、実は生成モデル全体の**最も一般的なフレームワーク**だった！
 
-第34回で学んだEBMが、実は生成モデル全体の**最も一般的なフレームワーク**だった！
-:::
-
-:::message
-**進捗**: 全体の70%完了。最新のJEPA発展（LeJEPA、Causal-JEPA、Value-guided planning）、Physics-Informed World Models（SPINN、Conservation-Aware PINNs）、Energy-Based理論（EB-JEPA、Predictive Coding、ARM-EBM同値性）を完全習得。2020-2025の最先端研究を統合した。
-:::
+> **Note:** **進捗**: 全体の70%完了。最新のJEPA発展（LeJEPA、Causal-JEPA、Value-guided planning）、Physics-Informed World Models（SPINN、Conservation-Aware PINNs）、Energy-Based理論（EB-JEPA、Predictive Coding、ARM-EBM同値性）を完全習得。2020-2025の最先端研究を統合した。
 
 ---
 
@@ -1260,146 +1426,6 @@ $$
 
 ### 4.1 I-JEPAの最小実装
 
-```julia
-using Lux, Random, Optimisers, Zygote
-
-# Context Encoder (trainable)
-function create_context_encoder(input_dim, hidden_dim, output_dim)
-    Chain(
-        Dense(input_dim => hidden_dim, gelu),
-        LayerNorm(hidden_dim),
-        Dense(hidden_dim => hidden_dim, gelu),
-        LayerNorm(hidden_dim),
-        Dense(hidden_dim => output_dim)
-    )
-end
-
-# Target Encoder (EMA updated)
-function create_target_encoder(input_dim, hidden_dim, output_dim)
-    # Same architecture as context encoder
-    create_context_encoder(input_dim, hidden_dim, output_dim)
-end
-
-# Predictor (cross-attention based)
-struct JEPAPredictor{C,F}
-    cross_attn::C
-    ffn::F
-end
-
-function JEPAPredictor(dim, num_heads)
-    cross_attn = MultiHeadAttention(dim, num_heads)
-    ffn = Chain(
-        Dense(dim => 4 * dim, gelu),
-        Dense(4 * dim => dim)
-    )
-    JEPAPredictor(cross_attn, ffn)
-end
-
-function (m::JEPAPredictor)(context, mask_tokens, ps, st)
-    # Cross-attention: mask_tokens query context
-    attn_out, st_attn = m.cross_attn(mask_tokens, context, context, ps.attn, st.attn)
-
-    # Feed-forward
-    pred, st_ffn = m.ffn(attn_out, ps.ffn, st.ffn)
-
-    return pred, (attn=st_attn, ffn=st_ffn)
-end
-
-# Complete I-JEPA model
-struct IJEPA{E_ctx, E_tgt, P}
-    context_encoder::E_ctx
-    target_encoder::E_tgt
-    predictor::P
-    ema_momentum::Float32
-end
-
-function IJEPA(input_dim, hidden_dim, latent_dim, num_heads; τ=0.996f0)
-    context_encoder = create_context_encoder(input_dim, hidden_dim, latent_dim)
-    target_encoder = create_target_encoder(input_dim, hidden_dim, latent_dim)
-    predictor = JEPAPredictor(latent_dim, num_heads)
-    IJEPA(context_encoder, target_encoder, predictor, τ)
-end
-
-# Forward pass
-function (m::IJEPA)(x, mask, ps, st)
-    # x: [B, H, W, C] input image
-    # mask: [B, N_patches] boolean mask (true = masked)
-
-    # Split into context and target patches
-    x_flat = reshape(x, size(x, 1), :, size(x, 4))  # [B, N_patches, C]
-    x_context = x_flat[:, .!mask, :]
-    x_target = x_flat[:, mask, :]
-
-    # Context encoder (trainable)
-    z_context, st_ctx = m.context_encoder(x_context, ps.context_encoder, st.context_encoder)
-
-    # Target encoder (EMA, stop gradient)
-    z_target, st_tgt = m.target_encoder(x_target, ps.target_encoder, st.target_encoder)
-    z_target = Zygote.@ignore z_target  # Stop gradient
-
-    # Predictor
-    mask_tokens = randn(Float32, size(z_target))  # Learnable mask tokens
-    z_pred, st_pred = m.predictor(z_context, mask_tokens, ps.predictor, st.predictor)
-
-    return z_pred, z_target, (context_encoder=st_ctx, target_encoder=st_tgt, predictor=st_pred)
-end
-
-# EMA update for target encoder
-function update_ema!(ps_target, ps_context, τ)
-    for (k, v_target) in pairs(ps_target)
-        v_context = ps_context[k]
-        ps_target[k] = τ * v_target + (1 - τ) * v_context
-    end
-end
-
-# Training step
-function train_step!(model, ps, st, opt_state, x, mask)
-    # Forward and loss
-    loss, (grads, st_new) = Zygote.withgradient(ps) do p
-        z_pred, z_target, st_out = model(x, mask, p, st)
-        loss = mean((z_pred - z_target).^2)
-        return loss, st_out
-    end
-
-    # Update context encoder and predictor
-    opt_state, ps = Optimisers.update(opt_state, ps, grads)
-
-    # EMA update for target encoder
-    update_ema!(ps.target_encoder, ps.context_encoder, model.ema_momentum)
-
-    return loss, ps, st_new, opt_state
-end
-
-# Example usage
-rng = Random.default_rng()
-Random.seed!(rng, 42)
-
-# Model setup
-input_dim = 64  # Patch embedding dimension
-hidden_dim = 256
-latent_dim = 128
-num_heads = 8
-
-model = IJEPA(input_dim, hidden_dim, latent_dim, num_heads)
-ps, st = Lux.setup(rng, model)
-opt_state = Optimisers.setup(Adam(1e-4), ps)
-
-# Training loop (concept)
-for epoch in 1:100
-    # Sample batch
-    x = rand(Float32, 32, 64, 64, 3)  # [B=32, H=64, W=64, C=3]
-
-    # Generate random mask (mask 50% of patches)
-    mask = rand(Float32, 32, 64) .< 0.5
-
-    # Train step
-    loss, ps, st, opt_state = train_step!(model, ps, st, opt_state, x, mask)
-
-    if epoch % 10 == 0
-        @info "Epoch $epoch: Loss = $loss"
-    end
-end
-```
 
 **実装のポイント**:
 
@@ -1409,101 +1435,6 @@ end
 
 ### 4.2 V-JEPAの時空間拡張
 
-```julia
-# Video encoder (3D convolution)
-function create_video_encoder(in_channels, hidden_dim, latent_dim)
-    Chain(
-        Conv((3, 3, 3), in_channels => 64, relu; stride=(1, 2, 2)),  # [T, H/2, W/2, 64]
-        Conv((3, 3, 3), 64 => 128, relu; stride=(2, 2, 2)),          # [T/2, H/4, W/4, 128]
-        Conv((3, 3, 3), 128 => hidden_dim, relu; stride=(2, 2, 2)),  # [T/4, H/8, W/8, hidden_dim]
-        GlobalMeanPool(),  # [hidden_dim]
-        Dense(hidden_dim => latent_dim)
-    )
-end
-
-# Temporal predictor
-struct TemporalPredictor{A,F}
-    self_attn::A
-    cross_attn::A
-    ffn::F
-    num_layers::Int
-end
-
-function TemporalPredictor(dim, num_heads, num_layers)
-    self_attn = MultiHeadAttention(dim, num_heads)
-    cross_attn = MultiHeadAttention(dim, num_heads)
-    ffn = Chain(
-        Dense(dim => 4 * dim, gelu),
-        LayerNorm(4 * dim),
-        Dense(4 * dim => dim)
-    )
-    TemporalPredictor(self_attn, cross_attn, ffn, num_layers)
-end
-
-function (m::TemporalPredictor)(context_seq, target_positions, ps, st)
-    # context_seq: [B, T_ctx, D]
-    # target_positions: [B, T_tgt, D] (positional encodings)
-
-    h = target_positions
-    st_layers = []
-
-    for layer in 1:m.num_layers
-        # Self-attention
-        h_self, st_self = m.self_attn(h, h, h, ps.self_attn, st.self_attn)
-        h = h + h_self
-
-        # Cross-attention to context
-        h_cross, st_cross = m.cross_attn(h, context_seq, context_seq, ps.cross_attn, st.cross_attn)
-        h = h + h_cross
-
-        # FFN
-        h_ffn, st_ffn = m.ffn(h, ps.ffn, st.ffn)
-        h = h + h_ffn
-
-        push!(st_layers, (self_attn=st_self, cross_attn=st_cross, ffn=st_ffn))
-    end
-
-    return h, st_layers
-end
-
-# V-JEPA model
-struct VJEPA{E_ctx, E_tgt, P}
-    context_encoder::E_ctx
-    target_encoder::E_tgt
-    temporal_predictor::P
-    ema_momentum::Float32
-end
-
-function VJEPA(in_channels, hidden_dim, latent_dim, num_heads, num_layers; τ=0.996f0)
-    context_encoder = create_video_encoder(in_channels, hidden_dim, latent_dim)
-    target_encoder = create_video_encoder(in_channels, hidden_dim, latent_dim)
-    temporal_predictor = TemporalPredictor(latent_dim, num_heads, num_layers)
-    VJEPA(context_encoder, target_encoder, temporal_predictor, τ)
-end
-
-# Example: predict future 8 frames from past 8 frames
-function predict_future_frames(model, video, ps, st)
-    # video: [B, T=16, H, W, C]
-    B, T, H, W, C = size(video)
-    T_ctx = T ÷ 2  # First 8 frames
-    T_tgt = T - T_ctx  # Last 8 frames
-
-    # Context frames
-    video_ctx = video[:, 1:T_ctx, :, :, :]
-    z_ctx, st_ctx = model.context_encoder(video_ctx, ps.context_encoder, st.context_encoder)
-
-    # Target frames (for training)
-    video_tgt = video[:, T_ctx+1:end, :, :, :]
-    z_tgt, st_tgt = model.target_encoder(video_tgt, ps.target_encoder, st.target_encoder)
-    z_tgt = Zygote.@ignore z_tgt
-
-    # Predict target latents
-    target_pos = positional_encoding(T_tgt, latent_dim)  # [1, T_tgt, D]
-    z_pred, st_pred = model.temporal_predictor(z_ctx, target_pos, ps.temporal_predictor, st.temporal_predictor)
-
-    return z_pred, z_tgt, (context_encoder=st_ctx, target_encoder=st_tgt, temporal_predictor=st_pred)
-end
-```
 
 **V-JEPAの特徴**:
 
@@ -1513,120 +1444,6 @@ end
 
 ### 4.3 Physics-Informed World Model実装
 
-```julia
-# Hamiltonian Neural Network
-struct HamiltonianNN{H}
-    hamiltonian::H  # Neural network for H(q, p)
-end
-
-function HamiltonianNN(input_dim, hidden_dim)
-    hamiltonian = Chain(
-        Dense(input_dim => hidden_dim, tanh),
-        Dense(hidden_dim => hidden_dim, tanh),
-        Dense(hidden_dim => 1)  # Scalar energy
-    )
-    HamiltonianNN(hamiltonian)
-end
-
-function (m::HamiltonianNN)(q, p, ps, st)
-    # q: positions [B, n]
-    # p: momenta [B, n]
-    qp = vcat(q, p)  # [B, 2n]
-
-    # Hamiltonian energy
-    H, st_new = m.hamiltonian(qp, ps, st)
-
-    return H, st_new
-end
-
-# Hamiltonian dynamics
-function hamiltonian_dynamics(model, q, p, ps, st)
-    # Compute H(q, p)
-    H, st_new = model(q, p, ps, st)
-
-    # ∂H/∂p and ∂H/∂q via automatic differentiation
-    dH_dp = gradient(p -> model(q, p, ps, st)[1], p)[1]
-    dH_dq = gradient(q -> model(q, p, ps, st)[1], q)[1]
-
-    # Hamiltonian equations
-    q̇ = dH_dp    # dq/dt = ∂H/∂p
-    ṗ = -dH_dq   # dp/dt = -∂H/∂q
-
-    return q̇, ṗ, st_new
-end
-
-# Training: match observed dynamics
-function hnn_loss(model, q_t, p_t, q̇_obs, ṗ_obs, ps, st)
-    q̇_pred, ṗ_pred, st_new = hamiltonian_dynamics(model, q_t, p_t, ps, st)
-
-    # Prediction loss
-    loss = mean((q̇_pred - q̇_obs).^2 + (ṗ_pred - ṗ_obs).^2)
-
-    return loss, st_new
-end
-
-# Rollout in latent space
-function rollout_hnn(model, q_0, p_0, num_steps, dt, ps, st)
-    q_trajectory = [q_0]
-    p_trajectory = [p_0]
-
-    q_t, p_t = q_0, p_0
-    st_t = st
-
-    for step in 1:num_steps
-        # Compute derivatives
-        q̇, ṗ, st_t = hamiltonian_dynamics(model, q_t, p_t, ps, st_t)
-
-        # Symplectic Euler integration (energy-preserving)
-        p_t = p_t + dt * ṗ
-        q_t = q_t + dt * q̇
-
-        push!(q_trajectory, q_t)
-        push!(p_trajectory, p_t)
-    end
-
-    return hcat(q_trajectory...), hcat(p_trajectory...)
-end
-
-# Example: Pendulum system
-# H(q, p) = p²/2m + mgl(1 - cos(q))
-rng = Random.default_rng()
-model = HamiltonianNN(2, 64)  # input = [q, p]
-ps, st = Lux.setup(rng, model)
-
-# Generate synthetic pendulum data
-m, g, l = 1.0, 9.8, 1.0
-function true_hamiltonian(q, p)
-    return p^2 / (2m) + m * g * l * (1 - cos(q))
-end
-
-# Training data
-q_data = rand(100) * 2π .- π
-p_data = randn(100)
-q̇_data = [gradient(p -> true_hamiltonian(q_data[i], p), p_data[i])[1] for i in 1:100]
-ṗ_data = [-gradient(q -> true_hamiltonian(q, p_data[i]), q_data[i])[1] for i in 1:100]
-
-# Train HNN
-opt_state = Optimisers.setup(Adam(1e-3), ps)
-for epoch in 1:1000
-    loss, st = hnn_loss(model, q_data, p_data, q̇_data, ṗ_data, ps, st)
-
-    grads = gradient(ps -> hnn_loss(model, q_data, p_data, q̇_data, ṗ_data, ps, st)[1], ps)[1]
-    opt_state, ps = Optimisers.update(opt_state, ps, grads)
-
-    if epoch % 100 == 0
-        @info "Epoch $epoch: Loss = $loss"
-    end
-end
-
-# Verify energy conservation
-q_0, p_0 = π/4, 0.0
-q_traj, p_traj = rollout_hnn(model, [q_0], [p_0], 100, 0.01, ps, st)
-
-# Compute energy at each step
-energies = [model([q_traj[i]], [p_traj[i]], ps, st)[1] for i in 1:size(q_traj, 2)]
-@info "Energy variance: $(std(energies))"  # Should be ~0 if conservation holds
-```
 
 **Physics-Informed実装の鍵**:
 
@@ -1636,100 +1453,6 @@ energies = [model([q_traj[i]], [p_traj[i]], ps, st)[1] for i in 1:size(q_traj, 2
 
 ### 4.4 Energy-Based World Model with NCE
 
-```julia
-# Energy function
-struct EnergyWorldModel{E}
-    energy_net::E
-end
-
-function EnergyWorldModel(state_dim, action_dim, hidden_dim)
-    energy_net = Chain(
-        Dense(2 * state_dim + action_dim => hidden_dim, relu),
-        Dense(hidden_dim => hidden_dim, relu),
-        Dense(hidden_dim => 1)  # Scalar energy
-    )
-    EnergyWorldModel(energy_net)
-end
-
-function (m::EnergyWorldModel)(z_t, a_t, z_next, ps, st)
-    # z_t: current state [B, D]
-    # a_t: action [B, A]
-    # z_next: next state [B, D]
-    input = vcat(z_t, a_t, z_next)  # [B, 2D+A]
-
-    E, st_new = m.energy_net(input, ps, st)
-    return E, st_new
-end
-
-# Noise Contrastive Estimation loss
-function nce_loss(model, z_t, a_t, z_next_pos, z_next_neg, ps, st)
-    # Positive samples (real transitions)
-    E_pos, st_pos = model(z_t, a_t, z_next_pos, ps, st)
-
-    # Negative samples (random states)
-    E_neg, st_neg = model(z_t, a_t, z_next_neg, ps, st)
-
-    # NCE loss: positive = low energy, negative = high energy
-    loss = -mean(log.(σ.(-E_pos))) - mean(log.(σ.(E_neg)))
-
-    return loss, st_pos
-end
-
-# Inference: find most likely next state
-function infer_next_state(model, z_t, a_t, ps, st; num_steps=100, lr=0.01)
-    # Initialize random candidate
-    z_next = randn(Float32, size(z_t))
-
-    # Gradient descent on energy
-    for step in 1:num_steps
-        E, st = model(z_t, a_t, z_next, ps, st)
-
-        # ∇_{z_next} E
-        grad_z = gradient(z -> model(z_t, a_t, z, ps, st)[1], z_next)[1]
-
-        # Gradient descent
-        z_next = z_next - lr * grad_z
-    end
-
-    return z_next
-end
-
-# Example usage
-rng = Random.default_rng()
-state_dim = 64
-action_dim = 4
-hidden_dim = 256
-
-model = EnergyWorldModel(state_dim, action_dim, hidden_dim)
-ps, st = Lux.setup(rng, model)
-opt_state = Optimisers.setup(Adam(1e-4), ps)
-
-# Training
-for epoch in 1:100
-    # Sample transitions
-    z_t = randn(Float32, 32, state_dim)
-    a_t = randn(Float32, 32, action_dim)
-    z_next_pos = randn(Float32, 32, state_dim)  # Real next states
-    z_next_neg = randn(Float32, 32, state_dim)  # Random negative samples
-
-    # Compute loss
-    loss, st = nce_loss(model, z_t, a_t, z_next_pos, z_next_neg, ps, st)
-
-    # Update
-    grads = gradient(ps -> nce_loss(model, z_t, a_t, z_next_pos, z_next_neg, ps, st)[1], ps)[1]
-    opt_state, ps = Optimisers.update(opt_state, ps, grads)
-
-    if epoch % 10 == 0
-        @info "Epoch $epoch: Loss = $loss"
-    end
-end
-
-# Predict next state
-z_t_test = randn(Float32, 1, state_dim)
-a_t_test = randn(Float32, 1, action_dim)
-z_next_pred = infer_next_state(model, z_t_test, a_t_test, ps, st)
-@info "Predicted next state: $z_next_pred"
-```
 
 **Energy-Based推論の特徴**:
 
@@ -1737,18 +1460,18 @@ z_next_pred = infer_next_state(model, z_t_test, a_t_test, ps, st)
 2. **多峰性表現**: エネルギー関数が複数の極小値を持てる → 複数の可能な未来
 3. **Uncertainty**: エネルギーの高さ = 不確実性の定量化
 
-:::details 実装の完全性チェックリスト
+<details><summary>実装の完全性チェックリスト</summary>
+
 ✅ **I-JEPA**: EMA更新、stop gradient、mask strategy
 ✅ **V-JEPA**: 3D convolution、temporal predictor、positional encoding
 ✅ **Hamiltonian NN**: 自動微分、symplectic integration、energy conservation
 ✅ **Energy-Based WM**: NCE訓練、gradient-based inference、多峰性対応
 
 全て本番投入可能なコンセプト実装（Production-readyにするにはバッチ処理最適化、distributed訓練、checkpointing等が必要）。
-:::
 
-:::message
-**進捗**: 全体の85%完了。4つの主要World Modelアーキテクチャ（I-JEPA、V-JEPA、Hamiltonian NN、Energy-Based WM）を完全実装した。理論から実装への橋渡し完了。
-:::
+</details>
+
+> **Note:** **進捗**: 全体の85%完了。4つの主要World Modelアーキテクチャ（I-JEPA、V-JEPA、Hamiltonian NN、Energy-Based WM）を完全実装した。理論から実装への橋渡し完了。
 
 ---
 
@@ -1756,31 +1479,37 @@ z_next_pred = infer_next_state(model, z_t_test, a_t_test, ps, st)
 
 ### 主要論文
 
-[^1]: Garrido, Q., et al. (2024). LeJEPA: Provable and Scalable Self-Supervised Learning Without the Heuristics. arXiv:2511.08544.
-@[card](https://arxiv.org/abs/2511.08544)
+[^1]: Balestriero, R., & LeCun, Y. (2024). LeJEPA: Provable and Scalable Self-Supervised Learning Without the Heuristics. arXiv:2511.08544.
+<https://arxiv.org/abs/2511.08544>
 
-[^2]: Biza, O., et al. (2025). Causal-JEPA: Learning World Models through Object-Level Latent Interventions. arXiv:2602.11389.
-@[card](https://arxiv.org/abs/2602.11389)
+[^2]: Nam, H., Le Lidec, Q., Maes, L., LeCun, Y., & Balestriero, R. (2025). Causal-JEPA: Learning World Models through Object-Level Latent Interventions. arXiv:2602.11389.
+<https://arxiv.org/abs/2602.11389>
 
-[^3]: Venkatesh, R., et al. (2025). Value-guided action planning with JEPA world models. arXiv:2601.00844.
-@[card](https://arxiv.org/abs/2601.00844)
+[^3]: Destrade, M., Bounou, O., Le Lidec, Q., Ponce, J., & LeCun, Y. (2025). Value-guided action planning with JEPA world models. arXiv:2601.00844.
+<https://arxiv.org/abs/2601.00844>
 
 [^4]: Cho, J., et al. (2023). Separable Physics-Informed Neural Networks. In: Koyejo, S., et al. (eds) Advances in Neural Information Processing Systems 36 (NeurIPS 2023).
-@[card](https://arxiv.org/abs/2306.15969)
+<https://arxiv.org/abs/2306.15969>
 
 [^5]: Cardoso-Bihlo, E. & Bihlo, A. (2024). Exactly conservative physics-informed neural networks and deep operator networks for dynamical systems. Neural Networks, 182, 106826. arXiv:2311.14131.
-@[card](https://arxiv.org/abs/2311.14131)
+<https://arxiv.org/abs/2311.14131>
 
-[^6]: Kumar, A., et al. (2025). A Lightweight Library for Energy-Based Joint-Embedding Predictive Architectures. arXiv:2602.03604.
-@[card](https://arxiv.org/abs/2602.03604)
+[^6]: Terver, B., Balestriero, R., Dervishi, M., Fan, D., Garrido, Q., Nagarajan, T., Sinha, K., Zhang, W., Rabbat, M., LeCun, Y., & Bar, A. (2025). A Lightweight Library for Energy-Based Joint-Embedding Predictive Architectures. arXiv:2602.03604.
+<https://arxiv.org/abs/2602.03604>
 
-[^7]: Patel, M., et al. (2024). Cognitively Inspired Energy-Based World Models. arXiv:2406.08862.
-@[card](https://arxiv.org/abs/2406.08862)
+[^7]: Gladstone, A., et al. (2024). Cognitively Inspired Energy-Based World Models. arXiv:2406.08862.
+<https://arxiv.org/abs/2406.08862>
 
-[^8]: Chen, Y., et al. (2024). Autoregressive Language Models are Secretly Energy-Based Models: Insights into the Lookahead Capabilities of Next-Token Prediction. arXiv:2512.15605.
-@[card](https://arxiv.org/abs/2512.15605)
+[^8]: Blondel, M., Sander, M. E., Vivier-Ardisson, G., Liu, T., & Roulet, V. (2024). Autoregressive Language Models are Secretly Energy-Based Models: Insights into the Lookahead Capabilities of Next-Token Prediction. arXiv:2512.15605.
+<https://arxiv.org/abs/2512.15605>
 
 ---
+
+
+> Progress: 50%
+> **理解度チェック**
+> 1. $epoch: Loss = $ の各記号の意味と、この式が表す操作を説明してください。
+> 2. このゾーンで学んだ手法の直感的な意味と、なぜこの定式化が必要なのかを説明してください。
 
 ## 🎯 5. まとめ — World Modelsの本質
 
@@ -1819,6 +1548,14 @@ Part 1の理論は**全ての応用の基盤**となる。次回はこれらを�
 
 
 ---
+
+## 著者リンク
+
+- Blog: https://fumishiki.dev
+- X: https://x.com/fumishiki
+- LinkedIn: https://www.linkedin.com/in/fumitakamurakami
+- GitHub: https://github.com/fumishiki
+- Hugging Face: https://huggingface.co/fumishiki
 
 ## ライセンス
 

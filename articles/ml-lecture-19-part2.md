@@ -4,7 +4,14 @@ emoji: "⚡"
 type: "tech"
 topics: ["machinelearning", "julia", "rust", "elixir", "ffi"]
 published: true
+slug: "ml-lecture-19-part2"
+difficulty: "advanced"
+time_estimate: "90 minutes"
+languages: ["Julia", "Rust", "Elixir"]
+keywords: ["機械学習", "深層学習", "生成モデル"]
 ---
+
+> 📌 **前編（理論）**: [第19回 前編](./ml-lecture-19-part1)
 
 ## 💻 4. 実装ゾーン（45分）— 3言語開発環境の構築
 
@@ -643,11 +650,14 @@ jobs:
 | $p(x\|z)$ | `logpdf(dist, x)` | `dist.log_prob(x)` | N/A |
 | $z \sim \mathcal{N}(0, I)$ | `z = randn(d)` | `z = Normal::new(0.0, 1.0).sample(&mut rng)` | `:rand.normal(0.0, 1.0)` |
 
-:::message
-**進捗: 70% 完了** 3言語の開発環境を構築し、基本的な実装パターンを習得した。次は実験ゾーン — 演習課題へ。
-:::
+> **Note:** **進捗: 70% 完了** 3言語の開発環境を構築し、基本的な実装パターンを習得した。次は実験ゾーン — 演習課題へ。
 
 ---
+
+> **Progress: 85%**
+> **理解度チェック**
+> 1. `jlrs` でJuliaとRustをFFI連携するとき、GCフレーム規律を守らないと何が起きるか？
+> 2. ElixirのSupervisorが子プロセスのクラッシュを検知して再起動するまでの流れを説明せよ。
 
 ## 🔬 5. 実験ゾーン（30分）— 演習: 行列演算3言語統合
 
@@ -675,7 +685,7 @@ export matmul_kernel
 """
 function matmul_kernel(A::Matrix{Float64}, B::Matrix{Float64})
     @assert size(A, 2) == size(B, 1) "Dimension mismatch"
-    return A * B  # BLAS経由で最適化
+    A * B  # BLAS経由で最適化
 end
 
 end  # module
@@ -728,19 +738,14 @@ fn call_julia_matmul(a: Vec<f64>, a_rows: usize, a_cols: usize,
 
 fn matmul_rust(a: &[f64], m: usize, n: usize, b: &[f64], n2: usize, p: usize) -> Vec<f64> {
     assert_eq!(n, n2);
-    let mut c = vec![0.0; m * p];
-
-    for i in 0..m {
-        for j in 0..p {
-            let mut sum = 0.0;
-            for k in 0..n {
-                sum += a[i * n + k] * b[k * p + j];
-            }
-            c[i * p + j] = sum;
-        }
-    }
-
-    c
+    // 各 (i, j) の内積を iterator chain で表現
+    (0..m)
+        .flat_map(|i| {
+            (0..p).map(move |j| {
+                (0..n).map(|k| a[i * n + k] * b[k * p + j]).sum::<f64>()
+            })
+        })
+        .collect()
 }
 
 /// Elixir NIF エントリポイント
@@ -877,9 +882,7 @@ Batch results: [
 - [ ] Supervisor で耐障害性を確認できた
 - [ ] GitHub Actions CI が全テストをパスした
 
-:::message
-**進捗: 85% 完了** 演習を通じて3言語統合の実装パターンを体得した。次は発展ゾーン — 最新研究動向へ。
-:::
+> **Note:** **進捗: 85% 完了** 演習を通じて3言語統合の実装パターンを体得した。次は発展ゾーン — 最新研究動向へ。
 
 ---
 
@@ -1396,12 +1399,13 @@ $$
 
 ### 10.4 FAQ
 
-:::details Q1: Pythonで全部やるのはなぜダメ？
+<details><summary>Q1: Pythonで全部やるのはなぜダメ？</summary>
 
 A: Pythonは**遅い**（特にループ）。NumPy/PyTorchはC++/CUDA実装を呼んでいるだけで、カスタマイズ・ゼロコピー最適化が困難。訓練ループの細かい制御・推論レイテンシ最適化・分散システム設計で限界が露呈する。
-:::
 
-:::details Q2: Juliaだけで全部やれないの？
+</details>
+
+<details><summary>Q2: Juliaだけで全部やれないの？</summary>
 
 A: Juliaは訓練に最適だが、**推論配信**には不向き:
 - 起動時間（JIT warmup）が秒単位 → APIサーバー不可
@@ -1409,9 +1413,10 @@ A: Juliaは訓練に最適だが、**推論配信**には不向き:
 - 分散システム抽象化（Erlang/OTP相当）が弱い
 
 静的コンパイル（JuliaC + Trimming）で改善中だが、2025年時点ではRust推論 + Elixir配信の方が安定。
-:::
 
-:::details Q3: Rustだけで全部やれないの？
+</details>
+
+<details><summary>Q3: Rustだけで全部やれないの？</summary>
 
 A: Rustは推論に最適だが、**訓練実装**が煩雑:
 - 数式→コードの翻訳が大変（型パズル、lifetime戦争）
@@ -1419,9 +1424,10 @@ A: Rustは推論に最適だが、**訓練実装**が煩雑:
 - 研究的試行錯誤がしづらい（コンパイル時間、型制約）
 
 Rustで訓練を書くのは、「アセンブリで機械学習」に近い苦行。
-:::
 
-:::details Q4: FFIのunsafeを安全にするには？
+</details>
+
+<details><summary>Q4: FFIのunsafeを安全にするには？</summary>
 
 A: **安全な抽象化で包む**:
 
@@ -1431,9 +1437,10 @@ A: **安全な抽象化で包む**:
 4. **ドキュメント**: `// SAFETY:` コメント必須 → 意図を明示
 
 完全に安全にはできないが、**危険を最小化**できる。
-:::
 
-:::details Q5: Let It Crashは無責任では？
+</details>
+
+<details><summary>Q5: Let It Crashは無責任では？</summary>
 
 A: **むしろ責任ある設計**。全てのエラーを予測して `try-catch` で囲むのは不可能。未知のエラーで**予期しない状態**になるより、**クリーンな初期状態から再起動**の方が安全。
 
@@ -1444,7 +1451,8 @@ P(\text{Correct Recovery} \mid \text{Unknown Error}) > P(\text{Correct Recovery}
 $$
 
 既知のエラーは処理し、未知のエラーは再起動 → 現実的な戦略。
-:::
+
+</details>
 
 ### 10.5 学習スケジュール（1週間）
 
@@ -1460,40 +1468,7 @@ $$
 
 合計: 約14時間（1日2時間）
 
-### 10.6 進捗トラッカー（Python実装）
-
-```python
-# 自己評価スクリプト
-skills = {
-    "Julia環境構築": 0,       # 0-10点
-    "Rust環境構築": 0,
-    "Elixir環境構築": 0,
-    "jlrs FFI": 0,
-    "rustler FFI": 0,
-    "GenServer実装": 0,
-    "Supervisor実装": 0,
-    "GenStage実装": 0,
-    "3言語統合実装": 0
-}
-
-total = sum(skills.values())
-max_score = len(skills) * 10
-
-print(f"Course III 第19回 習得度: {total}/{max_score} ({total/max_score*100:.1f}%)")
-
-for skill, score in skills.items():
-    bar = "█" * score + "░" * (10 - score)
-    print(f"{skill:20s} [{bar}] {score}/10")
-
-if total >= 80:
-    print("\n✅ 第20回に進む準備が整いました！")
-elif total >= 50:
-    print("\n⚠️ Zone 3-5を復習してから第20回へ。")
-else:
-    print("\n❌ もう一度Zone 0から読み直すことを推奨。")
-```
-
-### 10.7 次回予告: 第20回「VAE/GAN/Transformer実装 & 分散サービング」
+### 10.6 次回予告: 第20回「VAE/GAN/Transformer実装 & 分散サービング」
 
 **第20回では**:
 
@@ -1507,9 +1482,7 @@ else:
 
 Course IIの理論（第10-18回）が、ついに手を動かして動くコードになる。
 
-:::message
-**進捗: 100% 完了** 第19回修了！3言語開発環境・FFI・分散基盤の全てを装備した。Course IIIの航海が始まる。
-:::
+> **Note:** **進捗: 100% 完了** 第19回修了！3言語開発環境・FFI・分散基盤の全てを装備した。Course IIIの航海が始まる。
 
 ---
 
@@ -1542,7 +1515,7 @@ Course IIの理論（第10-18回）が、ついに手を動かして動くコー
 
 環境構築を「面倒な準備」と見るか、「システム設計の一部」と見るか — この視点の違いが、Production品質コードと「手元で動くだけ」コードを分ける。
 
-:::details 💡 ヒント: 数学的アナロジー
+<details><summary>💡 ヒント: 数学的アナロジー</summary>
 
 環境構築 ≈ 座標系の選択。
 
@@ -1555,53 +1528,59 @@ Course IIの理論（第10-18回）が、ついに手を動かして動くコー
 - 適切な環境（Cargo.toml + lockfile）→ `cargo build` 一発
 
 環境構築 = 問題空間に適した座標系の選択。
-:::
+
+</details>
 
 ---
+
+> **Progress: 95%**
+> **理解度チェック**
+> 1. JuliaC（juliac）で静的コンパイルすると何が変わり、どんな制約があるか？
+> 2. Reactant.jl がXLAを経由してGPU/TPUコンパイルする仕組みを概説せよ。
 
 ## 参考文献
 
 ### 主要論文
 
 [^1]: Julia Language Team (2025). *Julia 1.12 Highlights*. [https://julialang.org/blog/2025/10/julia-1.12-highlights/](https://julialang.org/blog/2025/10/julia-1.12-highlights/)
-@[card](https://julialang.org/blog/2025/10/julia-1.12-highlights/)
+<https://julialang.org/blog/2025/10/julia-1.12-highlights/>
 
 [^2]: Corbet, J. (2025). *New horizons for Julia*. LWN.net. [https://lwn.net/Articles/1006117/](https://lwn.net/Articles/1006117/)
-@[card](https://lwn.net/Articles/1006117/)
+<https://lwn.net/Articles/1006117/>
 
 [^3]: JuliaLang (2025). *JuliaC.jl: CLI app for compiling and bundling julia binaries*. GitHub. [https://github.com/JuliaLang/JuliaC.jl](https://github.com/JuliaLang/JuliaC.jl)
-@[card](https://github.com/JuliaLang/JuliaC.jl)
+<https://github.com/JuliaLang/JuliaC.jl>
 
 [^4]: EnzymeAD (2025). *Reactant.jl: Optimize Julia Functions With MLIR and XLA*. GitHub. [https://github.com/EnzymeAD/Reactant.jl](https://github.com/EnzymeAD/Reactant.jl)
-@[card](https://github.com/EnzymeAD/Reactant.jl)
+<https://github.com/EnzymeAD/Reactant.jl>
 
 [^5]: LuxDL (2025). *Lux.jl: Elegant and Performant Deep Learning*. [https://lux.csail.mit.edu/](https://lux.csail.mit.edu/)
-@[card](https://lux.csail.mit.edu/)
+<https://lux.csail.mit.edu/>
 
 [^6]: JuliaCon 2025. *Accelerating Machine Learning in Julia using Lux & Reactant*. [https://pretalx.com/juliacon-2025/talk/KBVHS8/](https://pretalx.com/juliacon-2025/talk/KBVHS8/)
-@[card](https://pretalx.com/juliacon-2025/talk/KBVHS8/)
+<https://pretalx.com/juliacon-2025/talk/KBVHS8/>
 
 [^7]: rusterlium (2025). *rustler_precompiled: Precompiled NIFs for Rustler*. Hex Docs. [https://hexdocs.pm/rustler_precompiled/](https://hexdocs.pm/rustler_precompiled/)
-@[card](https://hexdocs.pm/rustler_precompiled/)
+<https://hexdocs.pm/rustler_precompiled/>
 
 [^8]: Erlang/OTP Team (2025). *OTP 27 Release Notes*. [https://www.erlang.org/patches/OTP-27.2](https://www.erlang.org/patches/OTP-27.2)
-@[card](https://www.erlang.org/patches/OTP-27.2)
+<https://www.erlang.org/patches/OTP-27.2>
 
 [^9]: Taaitaaiger (2025). *jlrs: Julia bindings for Rust*. GitHub. [https://github.com/Taaitaaiger/jlrs](https://github.com/Taaitaaiger/jlrs)
-@[card](https://github.com/Taaitaaiger/jlrs)
+<https://github.com/Taaitaaiger/jlrs>
 
 [^10]: dashbitco (2025). *Broadway: Concurrent and multi-stage data ingestion and data processing*. Hex Docs. [https://hexdocs.pm/broadway/](https://hexdocs.pm/broadway/)
-@[card](https://hexdocs.pm/broadway/)
+<https://hexdocs.pm/broadway/>
 
 [^11]: elixir-nx (2025). *Bumblebee: Pre-trained Neural Network models in Elixir*. GitHub. [https://github.com/elixir-nx/bumblebee](https://github.com/elixir-nx/bumblebee)
-@[card](https://github.com/elixir-nx/bumblebee)
+<https://github.com/elixir-nx/bumblebee>
 
 [^12]: Hewitt, C., Bishop, P., & Steiger, R. (1973). *A Universal Modular ACTOR Formalism for Artificial Intelligence*. IJCAI.
 
 [^13]: Armstrong, J., Virding, R., Wikström, C., & Williams, M. (1996). *Concurrent Programming in ERLANG*. Prentice Hall.
 
 [^14]: Bezanson, J., Edelman, A., Karpinski, S., & Shah, V. B. (2017). *Julia: A Fresh Approach to Numerical Computing*. SIAM Review, 59(1), 65-98.
-@[card](https://epubs.siam.org/doi/10.1137/141000671)
+<https://epubs.siam.org/doi/10.1137/141000671>
 
 [^15]: Matsakis, N. D., & Klock, F. S. (2014). *The Rust language*. ACM SIGAda Ada Letters, 34(3), 103-104.
 
@@ -1613,51 +1592,13 @@ Course IIの理論（第10-18回）が、ついに手を動かして動くコー
 - Gray II, J. E., & Thomas, B. (2019). *Designing Elixir Systems with OTP*. Pragmatic Bookshelf.
 - Rust Team. *The Rustonomicon: The Dark Arts of Unsafe Rust*. [Free online](https://doc.rust-lang.org/nomicon/)
 
-## 記法規約
+## 著者リンク
 
-本講義で使用した数学記号・プログラミング記法の一覧:
-
-| 記法 | 意味 | 例 |
-|:-----|:-----|:---|
-| $\mathcal{L}_A$ | 言語Aのランタイム空間 | $\mathcal{L}_{\text{Julia}}$ |
-| $\phi: A \to B$ | 言語間の構造保存写像 | $\phi: \text{Julia} \to \text{Rust}$ |
-| `#[repr(C)]` | Rust型をC-ABI準拠レイアウトに | `struct Point { x: f64, y: f64 }` |
-| `extern "C"` | C calling conventionで関数公開 | `extern "C" fn foo(x: i32) -> i32` |
-| `ccall` | JuliaからC関数を呼び出し | `ccall((:func, "lib"), Float64, (Float64,), x)` |
-| `*const T` | Rust不変生ポインタ | `*const f64` |
-| `*mut T` | Rust可変生ポインタ | `*mut f64` |
-| `&[T]` | Rustスライス（不変借用） | `&[f64]` |
-| `&mut [T]` | Rust可変スライス | `&mut [f64]` |
-| `Ptr{T}` | Julia生ポインタ | `Ptr{Float64}` |
-| $\text{addr}(A[i,j])$ | 配列要素のメモリアドレス | $\texttt{base} + (i \times n + j) \times 8$ |
-| $\text{Actor}$ | Actorモデルのプロセス | $(\text{State}, \text{Behavior}, \text{Mailbox})$ |
-| $P_i \xrightarrow{m} P_j$ | プロセス間メッセージ送信 | Process $i$ sends $m$ to Process $j$ |
-| `:ok` | Elixirアトム（定数） | GenServerの返り値 |
-| `{:ok, value}` | Elixirタプル（パターンマッチ） | 成功時の返り値 |
-| `@impl true` | Elixirコールバック実装マーカー | GenServerコールバック |
-
-**型記法**:
-
-- `T`: 型パラメータ（ジェネリック）
-- `'a`: Rustライフタイムパラメータ
-- `::`: Juliaの型注釈 / Rustのモジュールパス区切り
-- `<:`: Julia型制約（サブタイプ）
-- `where T: Trait`: Rust trait境界
-
-**数学記法**:
-
-- $\forall$: 全称量化子（すべての～について）
-- $\exists$: 存在量化子（～が存在する）
-- $\equiv$: 定義上等しい / 同値
-- $\Rightarrow$: 論理的帰結
-- $\Pr[E]$: 事象Eの確率
-- $\mathbb{E}[X]$: 確率変数Xの期待値
-
----
-
-**[← 第18回: Attention × Mamba ハイブリッド](./ml-lecture-18.md)** | **[第20回: VAE/GAN/Transformer実装 & 分散サービング →](./ml-lecture-20.md)**
-
----
+- Blog: https://fumishiki.dev
+- X: https://x.com/fumishiki
+- LinkedIn: https://www.linkedin.com/in/fumitakamurakami
+- GitHub: https://github.com/fumishiki
+- Hugging Face: https://huggingface.co/fumishiki
 
 ## ライセンス
 

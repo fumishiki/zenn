@@ -1,9 +1,14 @@
 ---
-title: "第11回: 最適輸送理論: 30秒の驚き→数式修行→実装マスター"
+title: "第11回: 最適輸送理論: 30秒の驚き→数式修行→実装マスター 【前編】理論編"
 emoji: "🚛"
 type: "tech"
 topics: ["machinelearning", "deeplearning", "optimaltransport", "julia", "rust"]
 published: true
+slug: "ml-lecture-11-part1"
+difficulty: "advanced"
+time_estimate: "90 minutes"
+languages: ["Julia", "Rust"]
+keywords: ["機械学習", "深層学習", "生成モデル"]
 ---
 
 # 第11回: 最適輸送理論 — 確率分布を運ぶ数学
@@ -14,9 +19,9 @@ published: true
 
 本講義はCourse II「生成モデル理論編」の第3回。第9回で変分推論とELBOを学び、第10回でVAEを習得した。今回は、VAEとは全く異なるアプローチ — **確率分布そのものを幾何学的に扱う** — を学ぶ。Wasserstein距離、Sinkhorn算法、そしてFlow Matchingへの橋渡しまで、一気に駆け抜ける。
 
-:::message
-**このシリーズについて**: 東京大学 松尾・岩澤研究室動画講義の**完全上位互換**の全50回シリーズ。理論（論文が書ける）、実装（Production-ready）、最新（2025-2026 SOTA）の3軸で差別化する。
-:::
+> **Note:** **このシリーズについて**: 東京大学 松尾・岩澤研究室動画講義の**完全上位互換**の全50回シリーズ。理論（論文が書ける）、実装（Production-ready）、最新（2025-2026 SOTA）の3軸で差別化する。
+
+> **📖 この記事は前編（理論編）です** 実装編は [【後編】第11回](/articles/ml-lecture-11-part2) をご覧ください。
 
 ```mermaid
 graph LR
@@ -61,8 +66,7 @@ using Distributions, LinearAlgebra
 m0, s0 = mean(μ₀), std(μ₀)
 m1, s1 = mean(μ₁), std(μ₁)
 
-W2_squared = (m1 - m0)^2 + (s1 - s0)^2
-W2 = sqrt(W2_squared)
+W2 = hypot(m1 - m0, s1 - s0)
 
 println("Wasserstein distance W₂(μ₀, μ₁) = $(round(W2, digits=3))")
 println("Distance breakdown: location = $(abs(m1-m0)), scale = $(abs(s1-s0))")
@@ -97,9 +101,7 @@ $$
 
 「結合測度 $\gamma$ のうち、周辺分布が $\mu$ と $\nu$ に一致するもの全体から、輸送コスト $\int \|x - y\|^2 d\gamma$ を最小化」という意味だ。ガウス分布の場合、この最小値には閉形式解がある。
 
-:::message
-**進捗: 3% 完了** Wasserstein距離が「分布間の距離」を定め、最適輸送写像が「最短経路での変形」を実現することを体感した。ここから理論の深みに入る。
-:::
+> **Note:** **進捗: 3% 完了** Wasserstein距離が「分布間の距離」を定め、最適輸送写像が「最短経路での変形」を実現することを体感した。ここから理論の深みに入る。
 
 ---
 
@@ -122,239 +124,180 @@ $$
 
 第1項 $\|\boldsymbol{m}_1 - \boldsymbol{m}_0\|^2$ は平均の移動コスト、第2項は共分散の「変形」コストだ。
 
-```julia
-using LinearAlgebra, Distributions, Random
-
-# 2D Gaussian parameters
-m0 = [0.0, 0.0]
-Σ0 = [1.0 0.5; 0.5 1.0]  # positive correlation
-
-m1 = [3.0, 2.0]
-Σ1 = [0.5 -0.3; -0.3 0.8]  # negative correlation
-
-# Wasserstein distance for Gaussians (Dowson & Landau 1982)
-function wasserstein2_gaussian(m0, Σ0, m1, Σ1)
-    # Location term: ||m1 - m0||²
-    loc_term = norm(m1 - m0)^2
-
-    # Covariance term: tr(Σ0 + Σ1 - 2(Σ1^(1/2) Σ0 Σ1^(1/2))^(1/2))
-    Σ1_sqrt = sqrt(Σ1)  # matrix square root
-    M = Σ1_sqrt * Σ0 * Σ1_sqrt
-    M_sqrt = sqrt(M)
-    cov_term = tr(Σ0) + tr(Σ1) - 2 * tr(M_sqrt)
-
-    return sqrt(loc_term + cov_term)
-end
-
-W2 = wasserstein2_gaussian(m0, Σ0, m1, Σ1)
-println("W₂(μ₀, μ₁) = $(round(W2, digits=3))")
-
-# Sample and transport
-Random.seed!(42)
-μ0_dist = MvNormal(m0, Σ0)
-samples = rand(μ0_dist, 500)  # 2×500 matrix
-
-# Optimal transport map for Gaussians: T(x) = m1 + A(x - m0)
-# where A = Σ1^(1/2) (Σ1^(1/2) Σ0 Σ1^(1/2))^(-1/2) Σ1^(1/2)
-Σ1_sqrt = sqrt(Σ1)
-M = Σ1_sqrt * Σ0 * Σ1_sqrt
-M_sqrt = sqrt(M)
-A = Σ1_sqrt * inv(M_sqrt) * Σ1_sqrt
-
-T(x) = m1 + A * (x - m0)
-transported = hcat([T(samples[:, i]) for i in 1:size(samples, 2)]...)
-
-# Statistics
-println("\nOriginal samples: mean=$(round.(mean(samples, dims=2)[:], digits=2))")
-println("Transported samples: mean=$(round.(mean(transported, dims=2)[:], digits=2))")
-println("Target μ₁: mean=$(m1)")
-
-# Covariance comparison
-cov_original = cov(samples, dims=2)
-cov_transported = cov(transported, dims=2)
-println("\nOriginal cov diagonal: $(round.(diag(cov_original), digits=2))")
-println("Transported cov diagonal: $(round.(diag(cov_transported), digits=2))")
-println("Target Σ₁ diagonal: $(round.(diag(Σ1), digits=2))")
-```
-
-出力:
-```
-W₂(μ₀, μ₁) = 3.742
-
-Original samples: mean=[0.01, -0.02]
-Transported samples: mean=[3.0, 2.0]
-Target μ₁: mean=[3.0, 2.0]
-
-Original cov diagonal: [1.02, 0.98]
-Transported cov diagonal: [0.49, 0.81]
-Target Σ₁ diagonal: [0.5, 0.8]
-```
-
-**平均だけでなく、共分散構造も正確に変換されている。** これはアフィン変換 $T(\boldsymbol{x}) = \boldsymbol{m}_1 + A(\boldsymbol{x} - \boldsymbol{m}_0)$ によって実現されており、行列 $A$ がガウス分布の「形状」を最適に変形する。
+**平均だけでなく、共分散構造も正確に変換されている。** これはアフィン変換 $T(\boldsymbol{x}) = \boldsymbol{m}_1 + A(\boldsymbol{x} - \boldsymbol{m}_0)$ によって実現されており、行列 $A$ がガウス分布の「形状」を最適に変形する。ここで $A = \Sigma_1^{1/2}(\Sigma_1^{1/2}\Sigma_0\Sigma_1^{1/2})^{-1/2}\Sigma_1^{1/2}$。
 
 ### 1.2 離散分布での輸送計画
 
 実際のデータは連続分布ではなく、有限個の点として与えられることが多い。このとき最適輸送は **線形計画問題** になる。
 
-```julia
-using Distributions
+**輸送計画 $\gamma_{ij}$ は「点 $x_i$ から点 $y_j$ へどれだけの質量を送るか」を表す。** 行和が $p_i$（出発地の総質量）、列和が $q_j$（到着地の総質量）に一致する制約の下で、総コスト $\sum_{ij} C_{ij} \gamma_{ij}$ を最小化する。コスト行列は $C_{ij} = \|x_i - y_j\|^2$ で定義され、小さな3×3例では手計算でも追える。
 
-# Source: 3 points with masses
-x = [0.0, 1.0, 2.0]
-p = [0.5, 0.3, 0.2]  # mass at each point
+**3×3数値例: 手計算で輸送計画を構成する**
 
-# Target: 3 points with masses
-y = [0.5, 1.5, 3.0]
-q = [0.3, 0.4, 0.3]
+出発地の質量分布 $\boldsymbol{p} = (1/3, 1/3, 1/3)$（3点均等）、到着地の質量分布 $\boldsymbol{q} = (1/2, 1/4, 1/4)$（不均等）とする。各点の座標を:
 
-# Cost matrix: C[i,j] = |x[i] - y[j]|²
-n, m = length(x), length(y)
-C = [(x[i] - y[j])^2 for i in 1:n, j in 1:m]
+$$
+x_1 = (0,0), \quad x_2 = (1,0), \quad x_3 = (0,1)
+$$
 
-println("Cost matrix C:")
-for i in 1:n
-    println("  From x[$i]=$(x[i]): ", round.(C[i, :], digits=2))
-end
+$$
+y_1 = (2,0), \quad y_2 = (2,2), \quad y_3 = (0,2)
+$$
 
-# Optimal transport plan (manually computed for small example)
-# This is a linear programming problem: min <C, γ> s.t. γ1=p, γᵀ1=q
-# For this toy example, we use a greedy approach (not optimal, just for illustration)
-γ = zeros(n, m)
+とおく。コスト行列 $C_{ij} = \|x_i - y_j\|^2$ を成分ごとに展開する:
 
-# Simple greedy assignment (NOT optimal in general)
-p_remaining = copy(p)
-q_remaining = copy(q)
+$$
+C_{11} = (0-2)^2 + (0-0)^2 = 4, \quad C_{12} = (0-2)^2 + (0-2)^2 = 8, \quad C_{13} = (0-0)^2 + (0-2)^2 = 4
+$$
 
-for iteration in 1:10  # iterate until all mass assigned
-    any(p_remaining .> 1e-10) || break
+$$
+C_{21} = (1-2)^2 + (0-0)^2 = 1, \quad C_{22} = (1-2)^2 + (0-2)^2 = 5, \quad C_{23} = (1-0)^2 + (0-2)^2 = 5
+$$
 
-    # Find cheapest unassigned pair
-    min_cost = Inf
-    best_i, best_j = 1, 1
-    for i in 1:n, j in 1:m
-        if p_remaining[i] > 1e-10 && q_remaining[j] > 1e-10 && C[i, j] < min_cost
-            min_cost = C[i, j]
-            best_i, best_j = i, j
-        end
-    end
+$$
+C_{31} = (0-2)^2 + (1-0)^2 = 5, \quad C_{32} = (0-2)^2 + (1-2)^2 = 5, \quad C_{33} = (0-0)^2 + (1-2)^2 = 1
+$$
 
-    # Assign as much mass as possible
-    mass = min(p_remaining[best_i], q_remaining[best_j])
-    γ[best_i, best_j] += mass
-    p_remaining[best_i] -= mass
-    q_remaining[best_j] -= mass
-end
+行列形式で整理すると:
 
-println("\nTransport plan γ (greedy approximation):")
-for i in 1:n
-    println("  From x[$i]: ", round.(γ[i, :], digits=2))
-end
+$$
+\boldsymbol{C} = \begin{pmatrix} 4 & 8 & 4 \\ 1 & 5 & 5 \\ 5 & 5 & 1 \end{pmatrix}
+$$
 
-# Compute transport cost
-cost = sum(C .* γ)
-println("\nTotal transport cost: $(round(cost, digits=3))")
+**輸送計画の構成**: 周辺制約 $\sum_j \gamma_{ij} = p_i$（行和）かつ $\sum_i \gamma_{ij} = q_j$（列和）を満たす $\boldsymbol{\Gamma} \in \mathbb{R}_+^{3 \times 3}$ を1つ求める。北西角法（左上エントリから貪欲に埋める手順）を適用すると:
 
-# Verify marginals
-println("\nMarginal checks:")
-println("  Row sums (should equal p): ", round.(sum(γ, dims=2)[:], digits=2), " vs ", p)
-println("  Col sums (should equal q): ", round.(sum(γ, dims=1)[:], digits=2), " vs ", q)
-```
+$$
+\boldsymbol{\Gamma}^{\text{feas}} = \begin{pmatrix} 1/3 & 0 & 0 \\ 1/6 & 1/6 & 0 \\ 0 & 1/12 & 1/4 \end{pmatrix}
+$$
 
-出力:
-```
-Cost matrix C:
-  From x[1]=0.0: [0.25, 2.25, 9.0]
-  From x[2]=1.0: [0.25, 0.25, 4.0]
-  From x[3]=2.0: [2.25, 0.25, 1.0]
+検証:
+- 行和: $1/3, \quad 1/6+1/6 = 1/3, \quad 1/12+3/12 = 1/3$ ✓
+- 列和: $1/3+1/6 = 1/2, \quad 1/6+1/12 = 1/4, \quad 1/4$ ✓
 
-Transport plan γ (greedy approximation):
-  From x[1]: [0.25, 0.25, 0.0]
-  From x[2]: [0.05, 0.15, 0.1]
-  From x[3]: [0.0, 0.0, 0.2]
+総コスト:
 
-Total transport cost: 0.575
+$$
+\langle \boldsymbol{C}, \boldsymbol{\Gamma}^{\text{feas}} \rangle = 4 \cdot \frac{1}{3} + 1 \cdot \frac{1}{6} + 5 \cdot \frac{1}{6} + 5 \cdot \frac{1}{12} + 1 \cdot \frac{1}{4}
+$$
 
-Marginal checks:
-  Row sums (should equal p): [0.5, 0.3, 0.2] vs [0.5, 0.3, 0.2]
-  Col sums (should equal q): [0.3, 0.4, 0.3] vs [0.3, 0.4, 0.3]
-```
+$$
+= \frac{16}{12} + \frac{2}{12} + \frac{10}{12} + \frac{5}{12} + \frac{3}{12} = \frac{36}{12} = 3
+$$
 
-**輸送計画 $\gamma_{ij}$ は「点 $x_i$ から点 $y_j$ へどれだけの質量を送るか」を表す。** 行和が $p_i$（出発地の総質量）、列和が $q_j$（到着地の総質量）に一致する制約の下で、総コスト $\sum_{ij} C_{ij} \gamma_{ij}$ を最小化する。
+この計画は実行可能だが最適とは限らない。最適性を保証するのが **双対問題** だ。
+
+**離散OTの双対問題 — 影の価格 (shadow prices)**:
+
+$$
+\max_{\phi \in \mathbb{R}^n, \psi \in \mathbb{R}^m} \sum_{i=1}^n p_i \phi_i + \sum_{j=1}^m q_j \psi_j \quad \text{subject to} \quad \phi_i + \psi_j \leq C_{ij} \quad \forall i, j
+$$
+
+| 記号 | 意味 |
+|:-----|:-----|
+| $\phi_i$ | 出発点 $x_i$ における影の価格: 質量1単位を $x_i$ から送り出すことの経済的価値 |
+| $\psi_j$ | 到着点 $y_j$ における影の価格: 質量1単位を $y_j$ で受け取ることの経済的価値 |
+| 制約 $\phi_i + \psi_j \leq C_{ij}$ | 裁定不在条件: 「送り出し価値 + 受け取り価値 ≤ 直接輸送コスト」 |
+
+**強双対性** (Kantorovich-Rubinstein): 主問題の最適コスト = 双対問題の最適値。これは §3.2.4 で厳密に証明する。
+
+**相補スラックネス条件** — 最適輸送計画の証拠:
+
+$$
+\gamma_{ij}^* > 0 \implies \phi_i^* + \psi_j^* = C_{ij}
+$$
+
+正の質量が経路 $(x_i \to y_j)$ を通るとき、その経路のコストと価格の合計がぴったり等しい（制約がtight）。コスト有効でない経路（$\phi_i^* + \psi_j^* < C_{ij}$）には質量が流れない。これは微分経済学の補完スラック条件そのものだ。
+
+上の数値例で確認する。双対変数の候補 $\phi^* = (0, -3, -4)$, $\psi^* = (4, 8, 4)$ を試すと:
+
+$$
+\phi_1^* + \psi_1^* = 0 + 4 = 4 = C_{11} \; \checkmark \quad (\gamma_{11}^{\text{feas}} = 1/3 > 0 \text{: tight, 整合})
+$$
+
+$$
+\phi_2^* + \psi_1^* = -3 + 4 = 1 = C_{21} \; \checkmark \quad (\gamma_{21}^{\text{feas}} = 1/6 > 0 \text{: tight, 整合})
+$$
+
+$$
+\phi_2^* + \psi_2^* = -3 + 8 = 5 = C_{22} \; \checkmark \quad (\gamma_{22}^{\text{feas}} = 1/6 > 0 \text{: tight, 整合})
+$$
+
+この双対変数の実行可能性（全制約 $\phi_i^* + \psi_j^* \leq C_{ij}$ の充足）と、双対目的値を確認することで輸送計画の最適性を検証できる。
+
+> **Note:** WGAN の1-Lipschitz判別器 $D$ は、まさしく双対ポテンシャル $\phi$ の役割を果たしている。判別器が「どの経路がコスト有効か」を学習し、生成器がそのシグナルに従って分布を変形する。§3.4 でこの接続を厳密に証明する。
 
 ### 1.3 Sinkhornアルゴリズムでエントロピー正則化OTを解く
 
-離散OTは線形計画問題だが、点の数が多いと計算コストが $O(n^3)$ になる。**Sinkhornアルゴリズム** はエントロピー項を加えて問題を平滑化し、$O(n^2)$ 反復で解を得る。
+離散OTは線形計画問題だが、点の数が多いと計算コストが $O(n^3)$ になる。**Sinkhornアルゴリズム** はエントロピー正則化項を付加した平滑化問題に帰着させ、$O(n^2)$ 反復で解を得る。
 
-```julia
-# Sinkhorn algorithm for entropic OT
-function sinkhorn(C, p, q; ε=0.1, max_iter=100, tol=1e-6)
-    n, m = size(C)
-    K = exp.(-C / ε)  # Gibbs kernel
+$$
+\text{OT}_\varepsilon(\mu, \nu) = \min_{\gamma \in \Pi(\mu,\nu)} \langle C, \gamma \rangle + \varepsilon \text{KL}(\gamma \| \mu \otimes \nu)
+$$
 
-    u = ones(n)  # dual variable
-    v = ones(m)  # dual variable
+最適解は $\gamma^* = \text{diag}(u) \cdot K \cdot \text{diag}(v)$ の形を持つ（$K_{ij} = e^{-C_{ij}/\varepsilon}$ はGibbsカーネル）。スケーリングベクトル $u, v$ はSinkhorn反復 $u \leftarrow p \oslash (Kv)$、$v \leftarrow q \oslash (K^\top u)$ で12反復程度で収束する（$\varepsilon = 0.05$ の場合）。
 
-    for iter in 1:max_iter
-        u_old = copy(u)
+**エントロピー正則化により、輸送計画が「広がる」（ゼロ要素が減る）。** $\varepsilon \to 0$ で元の線形計画問題に収束し、$\varepsilon \to \infty$ で計画が一様分布に近づく。Sinkhorn反復の各ステップは行列-ベクトル積のみで、$O(n^2)$ の計算量で収束する。
 
-        # Update u: u = p ./ (K * v)
-        u = p ./ (K * v)
+> **Note:** **進捗: 10% 完了** 1次元・2次元・離散の各ケースで最適輸送を体験し、Sinkhornアルゴリズムの効率性を確認した。次は「なぜ最適輸送が重要なのか」を理解する。
 
-        # Update v: v = q ./ (Kᵀ * u)
-        v = q ./ (K' * u)
+> Progress: 10%
+> **理解度チェック**
+> 1. MongeのOT問題 $\inf_{T: T_\#\mu=\nu} \int_X c(x, T(x)) d\mu(x)$ におけるKantorovich緩和との違いを、「決定論的輸送写像 vs 確率的結合測度」の観点から説明せよ。
+> 2. Wasserstein距離 $W_p(\mu, \nu)$ がKL/JS発散と比べて「台の不一致でも有限値」を取れる理由を、1次元の例（2つの点質量）で確認せよ。
 
-        # Check convergence
-        if norm(u - u_old, Inf) < tol
-            println("Converged in $iter iterations")
-            break
-        end
-    end
+**$\varepsilon$ の選択理論 — 有効サポートと対数域安定化**
 
-    # Transport plan: γ = diag(u) * K * diag(v)
-    γ = u .* K .* v'
+$\varepsilon$ は Sinkhorn の精度・速度・数値安定性をすべて左右するハイパーパラメータだ。その選択に理論的な根拠を与えよう。
 
-    return γ, u, v
-end
+**有効サポートのサイズ**: 閾値 $\tau > 0$ を固定したとき、輸送計画の有効サポートを:
 
-# Apply to previous example
-ε = 0.05  # regularization strength
-γ_sinkhorn, u, v = sinkhorn(C, p, q, ε=ε)
+$$
+\text{supp}_\varepsilon(\gamma^*) := \{(i,j) : \gamma_{ij}^* > e^{-\tau/\varepsilon}\}
+$$
 
-println("Sinkhorn transport plan (ε=$ε):")
-for i in 1:n
-    println("  From x[$i]: ", round.(γ_sinkhorn[i, :], digits=3))
-end
+と定義する。 $\varepsilon = \text{median}(C_{ij}) / \log n$ と設定するとき、有効サポートの要素数は $O(n \log n)$ に収まる — 全 $n^2$ エントリの大部分はほぼゼロであり、密行列演算の大半が無駄になる。この観察が §3.8.1 のSparse Sinkhornの理論的根拠だ。
 
-cost_sinkhorn = sum(C .* γ_sinkhorn)
-println("\nSinkhorn cost: $(round(cost_sinkhorn, digits=4))")
+**数値安定化 — ログドメインSinkhorn**
 
-# Entropy of plan
-entropy = -sum(γ_sinkhorn .* log.(γ_sinkhorn .+ 1e-12))
-println("Entropy: $(round(entropy, digits=4))")
+$\varepsilon$ が小さいと $K_{ij} = e^{-C_{ij}/\varepsilon}$ が機械精度以下に陥りアンダーフローを起こす。根本的な解決策は、スケーリングベクトル $u, v$ を **対数域** で管理することだ。
 
-# Total objective (cost + ε*entropy)
-objective = cost_sinkhorn - ε * entropy
-println("Total objective (cost - ε*H): $(round(objective, digits=4))")
-```
+変数変換 $f_i := \varepsilon \log u_i$, $g_j := \varepsilon \log v_j$ を施すと、Sinkhorn反復は次のように書き直せる:
 
-出力:
-```
-Converged in 12 iterations
-Sinkhorn transport plan (ε=0.05):
-  From x[1]: [0.227, 0.213, 0.06]
-  From x[2]: [0.068, 0.166, 0.066]
-  From x[3]: [0.005, 0.021, 0.174]
+$$
+f_i \leftarrow \varepsilon \log a_i - \varepsilon \cdot \text{LSE}_j\!\left(\frac{g_j - C_{ij}}{\varepsilon}\right)
+$$
 
-Sinkhorn cost: 0.5382
-Entropy: 1.9645
-Total objective (cost - ε*H): 0.4400
-```
+$$
+g_j \leftarrow \varepsilon \log b_j - \varepsilon \cdot \text{LSE}_i\!\left(\frac{f_i - C_{ij}}{\varepsilon}\right)
+$$
 
-**エントロピー正則化により、輸送計画が「広がる」（ゼロ要素が減る）。** $\varepsilon$ を小さくすると元の線形計画問題に近づき、大きくすると計画が一様に近づく。Sinkhornは各反復が行列-ベクトル積だけなので高速だ。
+ここで **Log-Sum-Exp** 演算子:
 
-:::message
-**進捗: 10% 完了** 1次元・2次元・離散の各ケースで最適輸送を体験し、Sinkhornアルゴリズムの効率性を確認した。次は「なぜ最適輸送が重要なのか」を理解する。
-:::
+$$
+\text{LSE}(\boldsymbol{x}) := \log \sum_k e^{x_k} = x_{\max} + \log \sum_k e^{x_k - x_{\max}}
+$$
+
+最後の等式が数値安定化の核心だ。$x_{\max}$ を引くことで指数の引数を非正にし、オーバーフロー・アンダーフローを回避する。元の $u, v \in \mathbb{R}_{>0}^n$ 上の反復が $f, g \in \mathbb{R}^n$ 上で行われるため、**指数爆発の問題が消える**。対数域では $\boldsymbol{\Gamma}^* = \text{diag}(e^{f/\varepsilon}) \boldsymbol{K} \text{diag}(e^{g/\varepsilon})$ の形が保たれる。
+
+> **⚠️ Warning:** $\varepsilon < 10^{-2} \cdot \text{median}(C_{ij})$ では通常のSinkhornは必ず数値崩壊する。ログドメイン反復への切り替え、または $\varepsilon = 1.0$ から始めるアニーリングスケジュールが実用的な対策だ。
+
+**収束解析 — Hilbert計量による収縮**
+
+Sinkhorn反復の収束はHilbert計量で定量化できる。$\mathbb{R}_{>0}^n$ 上のHilbert計量:
+
+$$
+d_H(\boldsymbol{u}, \boldsymbol{v}) := \log \frac{\max_i(u_i/v_i)}{\min_i(u_i/v_i)}
+$$
+
+Sinkhorn反復の各ステップはこの計量に関する **収縮写像** であり、収縮係数は:
+
+$$
+\kappa = \tanh\!\left(\frac{D}{4}\right), \quad D := \max_{i,j,k,l} \log \frac{K_{ij} K_{kl}}{K_{il} K_{kj}}
+$$
+
+ここで $D$ はGibbsカーネル $\boldsymbol{K}$ の **Hilbert直径**。$\kappa < 1$ のとき収束は線形: $d_H(u^{(t)}, u^*) \leq \kappa^t \cdot d_H(u^{(0)}, u^*)$。
+
+$\varepsilon \to \infty$ では $\boldsymbol{K} \to \boldsymbol{1}\boldsymbol{1}^\top / n^2$（ほぼ一様行列）で $D \to 0$, $\kappa \to 0$ — 数ステップで収束。逆に $\varepsilon \to 0$ では行列 $\boldsymbol{K}$ が退化し $D \to \infty$, $\kappa \to 1$ — 収束が極めて遅くなる。精度 $\delta$ を達成するのに必要な反復数は $O\!\left(\log(1/\delta) / \log(1/\kappa)\right)$ であり、$\varepsilon$ が小さいほど反復が指数的に増えることの理論的根拠だ。
 
 ---
 
@@ -483,9 +426,12 @@ graph TD
 - Wasserstein勾配流が難解なら、「JKO scheme」は第36回で詳細にやるので、今回は直感だけでOK
 - 数式が追えなくなったら、**Juliaコードを先に読む** → 具体例から逆算して数式を理解
 
-:::message
-**進捗: 20% 完了** なぜ最適輸送を学ぶのか、どう学ぶべきかが明確になった。ここから本格的な数式修行に入る。ペンと紙を用意してほしい。
-:::
+> **Note:** **進捗: 20% 完了** なぜ最適輸送を学ぶのか、どう学ぶべきかが明確になった。ここから本格的な数式修行に入る。ペンと紙を用意してほしい。
+
+> Progress: 20%
+> **理解度チェック**
+> 1. Kantorovich-Rubinstein双対性 $W_1(\mu, \nu) = \sup_{\|f\|_L \leq 1} \mathbb{E}_\mu[f] - \mathbb{E}_\nu[f]$ がWGANの損失関数の理論的根拠となる理由を述べよ。
+> 2. Sinkhorn距離のエントロピー正則化 $\text{OT}_\varepsilon(\mu, \nu) = \min_{\gamma \in \Pi(\mu,\nu)} \langle C, \gamma \rangle + \varepsilon \text{KL}(\gamma \| \mu \otimes \nu)$ において、$\varepsilon \to 0$ と $\varepsilon \to \infty$ の極限でそれぞれ何が起きるか説明せよ。
 
 ---
 
@@ -596,54 +542,9 @@ $$
 
 **数値例で確認**:
 
-```julia
-using JuMP, HiGHS
-
-# Source and target distributions
-n, m = 3, 3
-p = [0.5, 0.3, 0.2]
-q = [0.3, 0.4, 0.3]
-
-# Cost matrix (Euclidean distance squared)
-x = [0.0, 1.0, 2.0]
-y = [0.5, 1.5, 3.0]
-C = [(x[i] - y[j])^2 for i in 1:n, j in 1:m]
-
-# Linear programming formulation
-model = Model(HiGHS.Optimizer)
-set_silent(model)
-
-@variable(model, γ[1:n, 1:m] >= 0)
-
-# Objective: minimize transport cost
-@objective(model, Min, sum(C[i,j] * γ[i,j] for i in 1:n, j in 1:m))
-
-# Constraints: marginals
-@constraint(model, [i=1:n], sum(γ[i,j] for j in 1:m) == p[i])  # row sum = p
-@constraint(model, [j=1:m], sum(γ[i,j] for i in 1:n) == q[j])  # col sum = q
-
-# Solve
-optimize!(model)
-
-γ_opt = value.(γ)
-cost_opt = objective_value(model)
-
-println("Optimal transport plan:")
-for i in 1:n
-    println("  From x[$i]: ", round.(γ_opt[i, :], digits=3))
-end
-println("\nOptimal cost: $(round(cost_opt, digits=4))")
-```
 
 出力:
-```
-Optimal transport plan:
-  From x[1]: [0.3, 0.2, 0.0]
-  From x[2]: [0.0, 0.2, 0.1]
-  From x[3]: [0.0, 0.0, 0.2]
 
-Optimal cost: 0.3850
-```
 
 **Zone 1で見たGreedy近似（cost=0.575）より大幅に改善**。線形計画法は **真の最適解** を与える。
 
@@ -728,38 +629,9 @@ $W_p$ が距離であることを示す（$p \geq 1$ のとき）:
 
 **具体例**:
 
-```julia
-using Distributions
-
-# Sequence of Gaussians converging to N(0,1)
-μ_target = Normal(0.0, 1.0)
-n_steps = 10
-
-for n in 1:n_steps
-    μ_n = Normal(1.0 / n, 1.0 + 0.5 / n)  # converges to N(0, 1)
-
-    # Wasserstein distance (closed form for 1D Gaussians)
-    m_n, s_n = mean(μ_n), std(μ_n)
-    m_t, s_t = mean(μ_target), std(μ_target)
-    W2 = sqrt((m_n - m_t)^2 + (s_n - s_t)^2)
-
-    println("n=$n: μ_n = N($(round(m_n, digits=2)), $(round(s_n, digits=2))²), W₂ = $(round(W2, digits=4))")
-end
-```
 
 出力:
-```
-n=1: μ_n = N(1.0, 1.5²), W₂ = 1.118
-n=2: μ_n = N(0.5, 1.25²), W₂ = 0.559
-n=3: μ_n = N(0.33, 1.17²), W₂ = 0.381
-n=4: μ_n = N(0.25, 1.12²), W₂ = 0.289
-n=5: μ_n = N(0.2, 1.1²), W₂ = 0.235
-n=6: μ_n = N(0.17, 1.08²), W₂ = 0.198
-n=7: μ_n = N(0.14, 1.07²), W₂ = 0.172
-n=8: μ_n = N(0.12, 1.06²), W₂ = 0.152
-n=9: μ_n = N(0.11, 1.06²), W₂ = 0.136
-n=10: μ_n = N(0.1, 1.05²), W₂ = 0.124
-```
+
 
 **$W_2(\mu_n, \mu) \to 0$ が確認できる。** これは弱収束の十分条件だ。
 
@@ -904,136 +776,12 @@ $$
 
 **アルゴリズム**:
 
-```
-Initialize: u ← 1, v ← 1
-Repeat until convergence:
-    u ← p ./ (K * v)
-    v ← q ./ (K' * u)
-Return: Γ = diag(u) * K * diag(v)
-```
 
 **Julia実装（Zone 1より詳細版）**:
 
-```julia
-function sinkhorn_detailed(C, p, q; ε=0.1, max_iter=1000, tol=1e-9, log_domain=false)
-    """
-    Sinkhorn algorithm for entropic OT.
-
-    Args:
-        C: cost matrix (n × m)
-        p: source distribution (n,)
-        q: target distribution (m,)
-        ε: regularization parameter
-        log_domain: if true, use log-domain stabilization
-
-    Returns:
-        γ: transport plan
-        history: convergence history
-    """
-    n, m = size(C)
-    K = exp.(-C / ε)  # Gibbs kernel
-
-    if log_domain
-        # Log-domain stabilization (more stable for small ε)
-        log_K = -C / ε
-        log_u = zeros(n)
-        log_v = zeros(m)
-
-        history = Float64[]
-
-        for iter in 1:max_iter
-            log_u_old = copy(log_u)
-
-            # u = p ./ (K * v)  →  log_u = log_p - log(K * v)
-            log_Kv = logsumexp(log_K .+ log_v', dims=2)[:]
-            log_u = log.(p) .- log_Kv
-
-            # v = q ./ (Kᵀ * u)  →  log_v = log_q - log(Kᵀ * u)
-            log_Ku = logsumexp(log_K' .+ log_u', dims=2)[:]
-            log_v = log.(q) .- log_Ku
-
-            # Check convergence
-            err = maximum(abs.(log_u - log_u_old))
-            push!(history, err)
-
-            if err < tol
-                println("Converged in $iter iterations (log-domain)")
-                break
-            end
-        end
-
-        # Reconstruct γ
-        γ = exp.(log_u .+ log_K .+ log_v')
-    else
-        # Standard domain
-        u = ones(n)
-        v = ones(m)
-
-        history = Float64[]
-
-        for iter in 1:max_iter
-            u_old = copy(u)
-
-            u = p ./ (K * v)
-            v = q ./ (K' * u)
-
-            err = norm(u - u_old, Inf)
-            push!(history, err)
-
-            if err < tol
-                println("Converged in $iter iterations")
-                break
-            end
-        end
-
-        γ = u .* K .* v'
-    end
-
-    return γ, history
-end
-
-# Helper: log-sum-exp for numerical stability
-function logsumexp(x; dims=nothing)
-    if dims === nothing
-        x_max = maximum(x)
-        return x_max + log(sum(exp.(x .- x_max)))
-    else
-        x_max = maximum(x, dims=dims)
-        return x_max .+ log.(sum(exp.(x .- x_max), dims=dims))
-    end
-end
-
-# Test
-using LinearAlgebra
-
-n, m = 50, 50
-p = ones(n) / n
-q = ones(m) / m
-
-x = range(0, 1, length=n)
-y = range(0, 1, length=m)
-C = [(xi - yj)^2 for xi in x, yj in y]
-
-# Small ε: closer to unregularized OT
-γ1, hist1 = sinkhorn_detailed(C, p, q, ε=0.01, log_domain=true)
-cost1 = sum(C .* γ1)
-
-# Large ε: more regularization
-γ2, hist2 = sinkhorn_detailed(C, p, q, ε=0.1, log_domain=false)
-cost2 = sum(C .* γ2)
-
-println("\nε=0.01: cost = $(round(cost1, digits=6)), converged in $(length(hist1)) iters")
-println("ε=0.1:  cost = $(round(cost2, digits=6)), converged in $(length(hist2)) iters")
-```
 
 出力:
-```
-Converged in 47 iterations (log-domain)
-Converged in 15 iterations
 
-ε=0.01: cost = 0.166672, converged in 47 iters
-ε=0.1:  cost = 0.168334, converged in 15 iters
-```
 
 **観察**:
 - $\varepsilon$ が小さいほど元のOTに近い（コストが小さい）が、収束が遅い
@@ -1106,13 +854,9 @@ $$
 
 これが **JKO scheme** (Jordan-Kinderlehrer-Otto) の基盤であり、Diffusion Modelの理論的背景の1つだ [^5]。
 
-:::message alert
-**ここが最大の峠**: Displacement convexityとWasserstein勾配流は、測度論と変分法の両方の知識が必要。完全理解を目指さず、「Wasserstein空間でも凸性が定義でき、勾配流が導かれる」という直感を掴めばOK。詳細は **第36回 Flow Matching統一理論** で再訪する。
-:::
+> **⚠️ Warning:** **ここが最大の峠**: Displacement convexityとWasserstein勾配流は、測度論と変分法の両方の知識が必要。完全理解を目指さず、「Wasserstein空間でも凸性が定義でき、勾配流が導かれる」という直感を掴めばOK。詳細は **第36回 Flow Matching統一理論** で再訪する。
 
-:::message
-**進捗: 50% 完了** ボス戦クリア！ Monge問題からKantorovich緩和、Wasserstein距離、双対性、Sinkhorn算法、そして幾何学的視点まで一気に駆け抜けた。ここから実装で理論を血肉化する。
-:::
+> **Note:** **進捗: 50% 完了** ボス戦クリア！ Monge問題からKantorovich緩和、Wasserstein距離、双対性、Sinkhorn算法、そして幾何学的視点まで一気に駆け抜けた。ここから実装で理論を血肉化する。
 
 ### 3.7 Neural Optimal Transport — ニューラルネットで最適輸送を学習する
 
@@ -1160,77 +904,6 @@ $$
 
 **Julia実装例**:
 
-```julia
-using Flux, Zygote
-
-struct ICNN
-    """Input-Convex Neural Network for optimal transport potential."""
-    Wz::Vector{Matrix{Float32}}  # non-negative weights (z-path)
-    Wx::Vector{Matrix{Float32}}  # unconstrained weights (x-skip)
-    b::Vector{Vector{Float32}}   # biases
-end
-
-function (m::ICNN)(x::AbstractVector)
-    """Forward pass: convex function φ(x)."""
-    z = x
-    for i in 1:length(m.Wz)
-        # Enforce non-negativity: abs(Wz) or softplus
-        Wz_pos = abs.(m.Wz[i])
-
-        # Convex layer: z_{i+1} = σ(Wz_pos * z_i + Wx_i * x + b_i)
-        z = softplus.(Wz_pos * z .+ m.Wx[i] * x .+ m.b[i])
-    end
-    return sum(z)  # scalar output
-end
-
-softplus(x) = log(1 + exp(x))
-
-# Initialize ICNN
-function create_icnn(input_dim, hidden_dims)
-    n_layers = length(hidden_dims)
-    Wz = [randn(Float32, hidden_dims[i], i == 1 ? input_dim : hidden_dims[i-1]) for i in 1:n_layers]
-    Wx = [randn(Float32, hidden_dims[i], input_dim) for i in 1:n_layers]
-    b = [zeros(Float32, hidden_dims[i]) for i in 1:n_layers]
-    return ICNN(Wz, Wx, b)
-end
-
-# Dual objective for W2 distance
-function dual_objective(icnn, μ_samples, ν_samples)
-    """Maximize: E_μ[φ(x)] - E_ν[φ*(y)]"""
-    # Primal term
-    primal_term = mean([icnn(x) for x in eachcol(μ_samples)])
-
-    # Dual term: φ*(y) ≈ max_x [⟨y, x⟩ - φ(x)] (approximated via sampling)
-    dual_term = mean([
-        maximum([dot(y, x) - icnn(x) for x in eachcol(μ_samples)])
-        for y in eachcol(ν_samples)
-    ])
-
-    return primal_term - dual_term
-end
-
-# Training (simplified, use proper optimizer in practice)
-icnn = create_icnn(2, [16, 16])
-μ_samples = randn(Float32, 2, 100)  # 2D Gaussian
-ν_samples = randn(Float32, 2, 100) .+ [3.0, 0.0]  # shifted Gaussian
-
-# Gradient ascent (maximize dual)
-opt = Flux.setup(Adam(0.01), icnn)
-for epoch in 1:100
-    loss, grads = Flux.withgradient(icnn) do m
-        -dual_objective(m, μ_samples, ν_samples)  # negate for minimization
-    end
-    Flux.update!(opt, icnn, grads[1])
-
-    if epoch % 20 == 0
-        println("Epoch $epoch: Dual value = $(round(-loss, digits=3))")
-    end
-end
-
-# Optimal transport map: T(x) = ∇φ(x)
-T(x) = gradient(icnn, x)[1]
-println("\nTransport map at x=[0,0]: T([0,0]) = $(round.(T([0.0f0, 0.0f0]), digits=2))")
-```
 
 **課題**:
 - 凸共役 $\phi^*$ の計算が高コスト
@@ -1263,51 +936,6 @@ $$
 
 **実装スケッチ**:
 
-```julia
-using Flux, Statistics
-
-# Simplified Transformer Encoder for point clouds
-struct OTEncoder
-    embed::Dense           # Point embedding
-    transformer::Chain     # Self-attention layers
-    pool::Dense            # Aggregation to fixed vector
-end
-
-function (enc::OTEncoder)(points::Matrix)
-    """
-    Encode point cloud to fixed-length vector.
-    Input: points (d × n) - n points in d dimensions
-    Output: z (latent_dim,) - fixed-length embedding
-    """
-    # Embed each point
-    embedded = enc.embed.(eachcol(points))  # n × embed_dim
-
-    # Self-attention (simplified - use proper Transformer in practice)
-    attended = enc.transformer(hcat(embedded...))  # embed_dim × n
-
-    # Pool to fixed size (mean pooling)
-    pooled = mean(attended, dims=2)[:]  # latent_dim
-
-    return enc.pool(pooled)
-end
-
-# Training loss: match Euclidean distance to W2 distance
-function wormhole_loss(encoder, μ_batch, ν_batch, w2_targets)
-    """
-    μ_batch: batch of distributions (each is d × n matrix)
-    ν_batch: corresponding target distributions
-    w2_targets: ground truth W2 distances (from Sinkhorn or closed-form)
-    """
-    z_μ = [encoder(μ) for μ in μ_batch]
-    z_ν = [encoder(ν) for ν in ν_batch]
-
-    # Euclidean distances in latent space
-    euclidean_dists = [norm(z_μ[i] - z_ν[i]) for i in 1:length(μ_batch)]
-
-    # Match to W2 targets
-    return mean((euclidean_dists .- w2_targets).^2)
-end
-```
 
 **実験結果** (Uscidda & Cuturi, 2024 [^11]):
 - ImageNet画像のOT距離を **50倍高速化**（Sinkhornと比較）
@@ -1331,50 +959,6 @@ Korotin et al. (2021) [^12] は、Neural OTソルバーの性能を定量評価�
 
 **数値実験（ガウス分布の例）**:
 
-```julia
-using Distributions, LinearAlgebra, Statistics
-
-# Ground truth W2 for Gaussians
-function gaussian_w2(m0, Σ0, m1, Σ1)
-    loc_term = norm(m1 - m0)^2
-    Σ1_sqrt = sqrt(Σ1)
-    M = Σ1_sqrt * Σ0 * Σ1_sqrt
-    cov_term = tr(Σ0) + tr(Σ1) - 2 * tr(sqrt(M))
-    return sqrt(loc_term + cov_term)
-end
-
-# True optimal transport map for Gaussians
-function gaussian_ot_map(m0, Σ0, m1, Σ1)
-    Σ1_sqrt = sqrt(Σ1)
-    M = Σ1_sqrt * Σ0 * Σ1_sqrt
-    A = Σ1_sqrt * inv(sqrt(M)) * Σ1_sqrt
-    return x -> m1 + A * (x - m0)
-end
-
-# Benchmark: 2D Gaussians
-m0, Σ0 = [0.0, 0.0], [1.0 0.5; 0.5 1.0]
-m1, Σ1 = [3.0, 2.0], [0.5 -0.3; -0.3 0.8]
-
-# Ground truth
-W2_true = gaussian_w2(m0, Σ0, m1, Σ1)
-T_true = gaussian_ot_map(m0, Σ0, m1, Σ1)
-
-println("True W2 distance: $(round(W2_true, digits=4))")
-
-# Sample test points
-μ = MvNormal(m0, Σ0)
-test_samples = rand(μ, 100)
-
-# Evaluate true map
-transported_true = hcat([T_true(test_samples[:, i]) for i in 1:size(test_samples, 2)]...)
-ν = MvNormal(m1, Σ1)
-
-# Push-forward error (via sample statistics)
-mean_error = norm(mean(transported_true, dims=2)[:] - m1)
-cov_error = norm(cov(transported_true, dims=2) - Σ1)
-
-println("Push-forward error: mean = $(round(mean_error, digits=4)), cov = $(round(cov_error, digits=4))")
-```
 
 ### 3.8 Sinkhorn算法の最新発展 — 高速化と一般化
 
@@ -1400,83 +984,9 @@ $$
 
 **Julia実装**:
 
-```julia
-using SparseArrays, LinearAlgebra
-
-function sparse_sinkhorn(C, p, q; ε=0.1, τ=nothing, max_iter=100, tol=1e-6)
-    """
-    Sparse Sinkhorn algorithm.
-
-    Args:
-        C: cost matrix (n × m)
-        τ: sparsity threshold (default: 5ε)
-    """
-    n, m = size(C)
-    τ = τ === nothing ? 5ε : τ
-
-    # Create sparse Gibbs kernel
-    K_dense = exp.(-C / ε)
-    mask = C .< τ  # keep only close pairs
-    K = sparse(K_dense .* mask)
-
-    println("Sparsity: $(nnz(K)) / $(n*m) = $(round(nnz(K)/(n*m)*100, digits=2))%")
-
-    u = ones(n)
-    v = ones(m)
-
-    for iter in 1:max_iter
-        u_old = copy(u)
-
-        # Sparse matrix-vector products
-        u = p ./ (K * v)
-        v = q ./ (K' * u)
-
-        if norm(u - u_old, Inf) < tol
-            println("Converged in $iter iterations")
-            break
-        end
-    end
-
-    # Reconstruct transport plan (sparse)
-    γ = Diagonal(u) * K * Diagonal(v)
-
-    return γ
-end
-
-# Test on 2D grid
-n = 100
-x = range(0, 1, length=n)
-y = range(0, 1, length=n)
-
-# Grid distributions
-p = ones(n) / n
-q = ones(n) / n
-
-# Cost: Euclidean distance
-C = [(xi - yj)^2 for xi in x, yj in y]
-
-# Sparse Sinkhorn
-@time γ_sparse = sparse_sinkhorn(C, p, q, ε=0.01, τ=0.1)
-
-# Compare with dense Sinkhorn
-println("\nDense Sinkhorn:")
-@time γ_dense, _ = sinkhorn_detailed(C, p, q, ε=0.01)
-
-println("\nCost difference: $(abs(sum(C .* γ_sparse) - sum(C .* γ_dense)))")
-```
 
 **出力例**:
-```
-Sparsity: 2970 / 10000 = 29.70%
-Converged in 18 iterations
-  0.008 seconds (sparse)
 
-Dense Sinkhorn:
-Converged in 35 iterations
-  0.045 seconds (dense)
-
-Cost difference: 3.2e-5
-```
 
 **スパース化で5倍以上の高速化、精度はほぼ同等！**
 
@@ -1496,70 +1006,6 @@ $$
 
 **実装**:
 
-```julia
-using Random, LinearAlgebra
-
-function nystrom_approximation(K, r)
-    """Nyström low-rank approximation of kernel matrix."""
-    n, m = size(K)
-
-    # Sample r columns
-    idx = randperm(m)[1:r]
-    C = K[:, idx]  # n × r
-    W = K[idx, idx]  # r × r
-
-    # Approximation: K ≈ C * W^(-1) * C'
-    # For Sinkhorn, we need K = U * V'
-    W_sqrt_inv = inv(sqrt(W))
-    U = C * W_sqrt_inv
-    V = K'[:, randperm(n)[1:r]] * W_sqrt_inv  # simplified
-
-    return U, V
-end
-
-function lowrank_sinkhorn(C, p, q; ε=0.1, rank=10, max_iter=100, tol=1e-6)
-    """Low-rank Sinkhorn via Nyström approximation."""
-    n, m = size(C)
-    K = exp.(-C / ε)
-
-    # Low-rank factorization
-    U, V = nystrom_approximation(K, rank)
-    println("Rank-$rank approximation: storage $(rank*(n+m)) vs $(n*m)")
-
-    u = ones(n)
-    v = ones(m)
-
-    for iter in 1:max_iter
-        u_old = copy(u)
-
-        # K*v ≈ U*(V'*v)
-        u = p ./ (U * (V' * v))
-        v = q ./ (V * (U' * u))
-
-        if norm(u - u_old, Inf) < tol
-            println("Converged in $iter iterations")
-            break
-        end
-    end
-
-    # Transport plan (low-rank)
-    γ_factors = (u .* U, v .* V)  # γ ≈ (u.*U) * (v.*V)'
-
-    return γ_factors
-end
-
-# Test
-n, m = 200, 200
-p = rand(n); p = p / sum(p)
-q = rand(m); q = q / sum(q)
-
-C = rand(n, m)
-
-@time γ_lr = lowrank_sinkhorn(C, p, q, ε=0.05, rank=20)
-println("Low-rank memory: $(20*(200+200)) = $(20*400) elements")
-println("Dense memory: $(200*200) = $(200^2) elements")
-println("Compression ratio: $(round(200^2 / (20*400), digits=1))x")
-```
 
 **結果**: ランク20で **5倍のメモリ削減** + **3倍の高速化**、精度は98%以上維持。
 
@@ -1581,47 +1027,6 @@ $$
 
 **一般化Sinkhorn**:
 
-```julia
-# f-divergence Sinkhorn (generalized)
-function f_sinkhorn(C, p, q, f, f_conjugate; ε=0.1, max_iter=100, tol=1e-6)
-    """
-    Generalized Sinkhorn with f-divergence regularization.
-
-    Args:
-        f: convex function (e.g., t -> t*log(t) for KL)
-        f_conjugate: convex conjugate of f
-    """
-    n, m = size(C)
-
-    # Dual variables
-    α = zeros(n)
-    β = zeros(m)
-
-    for iter in 1:max_iter
-        α_old = copy(α)
-
-        # Update via f-divergence dual
-        # (Exact form depends on f - simplified here)
-        for i in 1:n
-            α[i] = -ε * log(sum(q[j] * exp((-C[i,j] - β[j]) / ε) for j in 1:m))
-        end
-
-        for j in 1:m
-            β[j] = -ε * log(sum(p[i] * exp((-C[i,j] - α[i]) / ε) for i in 1:n))
-        end
-
-        if norm(α - α_old, Inf) < tol
-            println("f-Sinkhorn converged in $iter iterations")
-            break
-        end
-    end
-
-    # Reconstruct plan
-    γ = [p[i] * q[j] * exp((-C[i,j] - α[i] - β[j]) / ε) for i in 1:n, j in 1:m]
-
-    return γ
-end
-```
 
 **応用**: $\chi^2$ divergenceは **robust OT** に有用（外れ値に対して頑健）。
 
@@ -1694,34 +1099,6 @@ $$
 
 **実装スケッチ**:
 
-```julia
-# Pseudo-code for OT-based graph similarity
-function graph_ot_similarity(G1, G2, gnn)
-    """
-    Compute OT distance between graph embeddings.
-
-    Args:
-        G1, G2: graphs
-        gnn: graph neural network
-    """
-    # Embed nodes
-    H1 = gnn(G1)  # |V1| × d
-    H2 = gnn(G2)  # |V2| × d
-
-    # Uniform weights (can use degree-based weights)
-    p = ones(size(H1, 1)) / size(H1, 1)
-    q = ones(size(H2, 1)) / size(H2, 1)
-
-    # Cost matrix: pairwise Euclidean distances
-    C = [norm(H1[i, :] - H2[j, :])^2 for i in 1:size(H1,1), j in 1:size(H2,1)]
-
-    # Sinkhorn OT
-    γ, _ = sinkhorn(C, p, q, ε=0.1)
-
-    # W2 distance
-    return sqrt(sum(C .* γ))
-end
-```
 
 ### 3.10 実践的なTips — OTを使う際の落とし穴と対策
 
@@ -1734,29 +1111,6 @@ end
 2. **Warmstart**: $\varepsilon = 1.0$ から始め、徐々に小さくする（annealing）
 3. **Log-domain安定化**: $\varepsilon < 0.01$ なら必須
 
-```julia
-# ε-annealing
-function annealed_sinkhorn(C, p, q; ε_start=1.0, ε_end=0.01, steps=10, max_iter=100)
-    u, v = ones(size(C, 1)), ones(size(C, 2))
-
-    for (i, ε) in enumerate(range(ε_start, ε_end, length=steps))
-        println("Step $i: ε = $(round(ε, digits=3))")
-
-        K = exp.(-C / ε)
-        for _ in 1:max_iter
-            u_old = copy(u)
-            u = p ./ (K * v)
-            v = q ./ (K' * u)
-            if norm(u - u_old, Inf) < 1e-6
-                break
-            end
-        end
-    end
-
-    K_final = exp.(-C / ε_end)
-    return u .* K_final .* v'
-end
-```
 
 #### 3.10.2 不均衡分布への対応 (Unbalanced OT)
 
@@ -1774,44 +1128,6 @@ $$
 
 **実装**:
 
-```julia
-function unbalanced_sinkhorn(C, p, q; ε=0.1, τ1=1.0, τ2=1.0, max_iter=100, tol=1e-6)
-    """
-    Unbalanced OT via Sinkhorn.
-
-    Args:
-        τ1, τ2: marginal relaxation parameters (larger = more relaxation)
-    """
-    n, m = size(C)
-    K = exp.(-C / ε)
-
-    u = ones(n)
-    v = ones(m)
-
-    for iter in 1:max_iter
-        u_old = copy(u)
-
-        # Soft marginal constraints
-        u = (p ./ (K * v)) .^ (τ1 / (τ1 + ε))
-        v = (q ./ (K' * u)) .^ (τ2 / (τ2 + ε))
-
-        if norm(u - u_old, Inf) < tol
-            println("Unbalanced Sinkhorn converged in $iter iterations")
-            break
-        end
-    end
-
-    γ = u .* K .* v'
-
-    # Check mass conservation
-    mass_p = sum(γ, dims=2)[:]
-    mass_q = sum(γ, dims=1)[:]
-    println("Source mass error: $(norm(mass_p - p))")
-    println("Target mass error: $(norm(mass_q - q))")
-
-    return γ
-end
-```
 
 #### 3.10.3 高次元データでの次元削減
 
@@ -1823,43 +1139,342 @@ end
 2. **PCAで前処理**: 主要な $k$ 次元のみ使用
 3. **Learned metrics**: ニューラルネットで距離を学習
 
-```julia
-# Sliced Wasserstein (simplified)
-function sliced_wasserstein(X, Y; n_projections=100)
-    """
-    Sliced Wasserstein distance for high-dimensional samples.
 
-    Args:
-        X, Y: sample matrices (d × n)
-        n_projections: number of random 1D projections
-    """
-    d = size(X, 1)
-    distances = Float64[]
+> **Note:** **進捗: 60% 完了** Neural OT、Sinkhorn最新手法、Flow Matching・Diffusion・Graphへの応用まで、2020-2025年の最新研究を網羅した。Part 2で実装と実験に進む。
 
-    for _ in 1:n_projections
-        # Random direction
-        θ = randn(d)
-        θ = θ / norm(θ)
+### 3.11 Sliced Wasserstein距離 — 高次元OTの実用的近似
 
-        # Project samples
-        X_proj = θ' * X
-        Y_proj = θ' * Y
+#### 3.11.1 定義と動機
 
-        # 1D Wasserstein (sort and compute L1 distance)
-        X_sorted = sort(X_proj)
-        Y_sorted = sort(Y_proj)
-        w1 = mean(abs.(X_sorted - Y_sorted))
+Wasserstein距離はデータ分布の幾何学的性質を忠実に反映するが、高次元では計算コストが現実的でない。$d = 1000$ の埋め込み空間で $n = 10^4$ サンプルを扱うと、Sinkhornでさえ $O(n^2)$ のメモリが限界になる。しかも $W_p$ のサンプル推定誤差は $O(n^{-2/d})$ — $d > 10$ では収束が実用的に無意味なほど遅い。
 
-        push!(distances, w1)
-    end
+解決策の一つが **Sliced Wasserstein距離 (SW)** だ。アイデアは単純で美しい: 高次元分布を無数の **1次元射影** に分解し、1次元では閉形式解が存在することを利用する。
 
-    return mean(distances)
-end
-```
+$\mathbb{S}^{d-1}$ を $d$ 次元単位球面、$\pi^\theta: \mathbb{R}^d \to \mathbb{R}$ を方向 $\theta \in \mathbb{S}^{d-1}$ への1次元射影:
 
-:::message
-**進捗: 60% 完了** Neural OT、Sinkhorn最新手法、Flow Matching・Diffusion・Graphへの応用まで、2020-2025年の最新研究を網羅した。Part 2で実装と実験に進む。
-:::
+$$
+\pi^\theta(\boldsymbol{x}) := \langle \boldsymbol{x}, \theta \rangle
+$$
+
+$\pi^\theta_\sharp \mu$ は $\mu$ を方向 $\theta$ に射影した1次元分布。**$p$-Sliced Wasserstein距離**:
+
+$$
+\text{SW}_p(\mu, \nu) := \left( \int_{\mathbb{S}^{d-1}} W_p^p(\pi^\theta_\sharp \mu, \pi^\theta_\sharp \nu) \, d\sigma(\theta) \right)^{1/p}
+$$
+
+ここで $\sigma$ は $\mathbb{S}^{d-1}$ 上の一様測度（表面積で正規化）。
+
+| 記号 | 読み | 意味 |
+|:-----|:-----|:-----|
+| $\pi^\theta_\sharp \mu$ | パイ シータ シャープ ミュー | 方向 $\theta$ への射影による $\mu$ のpush-forward（1次元分布） |
+| $\mathbb{S}^{d-1}$ | $d-1$ 次元球面 | $\{\theta \in \mathbb{R}^d : \|\theta\| = 1\}$ |
+| $d\sigma(\theta)$ | ディー シグマ シータ | $\mathbb{S}^{d-1}$ 上の一様測度 |
+
+#### 3.11.2 1次元Wasserstein距離の閉形式導出
+
+1次元の $W_p$ には **分位関数**（逆累積分布関数）を使った閉形式がある。これがSWの計算効率の根源だ。
+
+**定理** (1D OT = 単調再配置):
+
+$\mu, \nu \in \mathcal{P}_p(\mathbb{R})$ の累積分布関数を $F_\mu, F_\nu$、分位関数を $F_\mu^{-1}, F_\nu^{-1}: (0,1) \to \mathbb{R}$ とすると:
+
+$$
+W_p^p(\mu, \nu) = \int_0^1 \left| F_\mu^{-1}(t) - F_\nu^{-1}(t) \right|^p dt
+$$
+
+**証明のスケッチ**:
+
+1次元では、輸送計画 $\gamma \in \Pi(\mu, \nu)$ の中で最適なものは **単調再配置** (monotone rearrangement):
+
+$$
+T^*(x) = F_\nu^{-1}(F_\mu(x))
+$$
+
+$T^*$ が最適な理由は **rearrangement inequality**（Lorentz不等式）による:
+
+$$
+x_1 \leq x_2, \; y_1 \leq y_2 \implies |x_1 - y_2|^p + |x_2 - y_1|^p \geq |x_1 - y_1|^p + |x_2 - y_2|^p \quad (p \geq 1)
+$$
+
+「交差する輸送経路は常にコスト非効率」という直感だ。1次元でのみ成立するこの単調性が、Monge問題（§3.1）が1次元で trivialに解けて高次元で難しい理由でもある。
+
+変数変換 $t = F_\mu(x)$（単調だから微分可能 a.e.、$dx = dF_\mu^{-1}(t)/dt \cdot dt$）で積分を $[0,1]$ 上に変換:
+
+$$
+\int_\mathbb{R} |x - T^*(x)|^p d\mu(x) = \int_0^1 |F_\mu^{-1}(t) - F_\nu^{-1}(t)|^p dt \quad \square
+$$
+
+> **Note:** 離散の場合（$\mu = \frac{1}{n}\sum_i \delta_{x_i}$, $\nu = \frac{1}{n}\sum_j \delta_{y_j}$）、分位関数の差は **ソート後の差** に対応する: $W_p^p = \frac{1}{n}\sum_k |x_{(k)} - y_{(k)}|^p$（$x_{(k)}, y_{(k)}$ はソート済み系列）。これが $O(n\log n)$ で計算できる所以だ。
+
+**ガウス分布の閉形式**:
+
+$\mu = \mathcal{N}(m_0, \sigma_0^2)$, $\nu = \mathcal{N}(m_1, \sigma_1^2)$ のとき $F_\mu^{-1}(t) = m_0 + \sigma_0 \Phi^{-1}(t)$（$\Phi^{-1}$ = 標準正規分位関数）。
+
+$$
+W_2^2 = \int_0^1 \left|(m_1 - m_0) + (\sigma_1 - \sigma_0)\Phi^{-1}(t)\right|^2 dt
+$$
+
+$$
+= (m_1 - m_0)^2 + 2(m_1-m_0)(\sigma_1-\sigma_0)\underbrace{\int_0^1 \Phi^{-1}(t)dt}_{=0} + (\sigma_1-\sigma_0)^2\underbrace{\int_0^1 (\Phi^{-1}(t))^2 dt}_{=\mathbb{E}[Z^2]=1}
+$$
+
+$$
+= (m_1 - m_0)^2 + (\sigma_1 - \sigma_0)^2
+$$
+
+Zone 0 の Julia コードで使った公式が、ここから厳密に導出された。
+
+#### 3.11.3 $\text{SW}_p$ は距離である
+
+**定理**: $\text{SW}_p$ は $\mathcal{P}_p(\mathbb{R}^d)$ 上の距離である。
+
+非負性・対称性・三角不等式は $W_p$ が距離であること（§3.3.2）から容易に従う。非自明なのは**同一律**のみだ。
+
+$\text{SW}_p(\mu, \nu) = 0$ を仮定する。すると $d\sigma$-a.e. の $\theta$ に対し $W_p(\pi^\theta_\sharp \mu, \pi^\theta_\sharp \nu) = 0$、すなわち $\pi^\theta_\sharp \mu = \pi^\theta_\sharp \nu$（全方向の1次元射影が一致）。
+
+**Cramér-Wold 定理**: 任意の $\theta \in \mathbb{S}^{d-1}$ で $\pi^\theta_\sharp \mu = \pi^\theta_\sharp \nu$ ならば $\mu = \nu$。
+
+証明の骨格: 確率測度の特性関数 $\hat{\mu}(\boldsymbol{t}) = \int e^{i\langle \boldsymbol{t}, \boldsymbol{x}\rangle} d\mu(\boldsymbol{x})$ において、$\boldsymbol{t} = r\theta$ ($r \in \mathbb{R}$, $\theta \in \mathbb{S}^{d-1}$) とおけば $\hat{\mu}(r\theta) = \widehat{\pi^\theta_\sharp \mu}(r)$（$\pi^\theta_\sharp \mu$ の1次元特性関数）。全方向の射影が一致するから $\hat{\mu}(\boldsymbol{t}) = \hat{\nu}(\boldsymbol{t})$ for all $\boldsymbol{t}$、よって $\mu = \nu$。$\square$
+
+#### 3.11.4 計算量とサンプル複雑性の比較
+
+**モンテカルロ近似**: $L$ 個のランダム方向 $\{\theta_l\}_{l=1}^L \sim \text{Uniform}(\mathbb{S}^{d-1})$ を使う。
+
+$$
+\widehat{\text{SW}}_p^p(\mu, \nu) = \frac{1}{L} \sum_{l=1}^L W_p^p(\pi^{\theta_l}_\sharp \hat{\mu}_n, \pi^{\theta_l}_\sharp \hat{\nu}_n)
+$$
+
+ここで $\hat{\mu}_n = \frac{1}{n}\sum_i \delta_{x_i}$, $\hat{\nu}_n = \frac{1}{n}\sum_j \delta_{y_j}$ は経験分布。
+
+**計算量**（$n = m$ の場合）:
+- 射影: $O(Lnd)$（内積 $\langle x_i, \theta_l \rangle$ の計算）
+- ソート＋差分: $O(Ln\log n)$（各方向でソート）
+- 合計: $O(Ln(d + \log n))$
+
+対してSinkhornは $O(n^2/\varepsilon)$（密行列演算）。$n = 10^4$, $d = 128$, $L = 200$ で比較すると:
+- Sinkhorn: $O(10^8)$ 演算、メモリ $n^2 \times 4\text{ bytes} = 400\text{ MB}$（実用限界）
+- SW: $O(3 \times 10^8)$ 演算だがベクトル演算で高速、メモリ $O(Lnd) \ll n^2$
+
+**サンプル複雑性**: 分布 $\mu, \nu$ を $n$ サンプルで推定したときの収束速度:
+
+$$
+\mathbb{E}[|\text{SW}_p(\hat{\mu}_n, \hat{\nu}_n) - \text{SW}_p(\mu, \nu)|] = O(n^{-1/2})
+$$
+
+これは次元 $d$ に**依存しない**。対して $W_p$ の収束速度は $O(n^{-2/d})$ — $d = 100$ では $n > 10^{100}$ サンプルが必要になる計算になる。サンプル効率の観点で SW は圧倒的に有利だ。
+
+> **⚠️ Warning:** $\text{SW}_p(\mu, \nu) \leq C_{d,p} \cdot W_p(\mu, \nu)$ という上界が成立する（射影の非膨張性による）が、逆の不等式は成立しない。SW が小さくても $W_p$ は大きい可能性がある。生成モデルの損失関数として使う場合、SW がゼロに収束しても元の $W_p$ が十分小さい保証はなく、生成分布の「射影上での一致」しか担保されない。
+
+#### 3.11.5 Max-Sliced Wasserstein と実用比較
+
+全方向を平均する代わりに最大値を取る変種がある:
+
+$$
+\text{Max-SW}_p(\mu, \nu) := \max_{\theta \in \mathbb{S}^{d-1}} W_p(\pi^\theta_\sharp \mu, \pi^\theta_\sharp \nu)
+$$
+
+「最も差が大きい方向」を見つける問題は勾配上昇法で解ける。$\text{Max-SW}_p \geq \text{SW}_p$ であり識別力が高い一方、最適 $\theta^*$ の探索に $O(L_{\text{iter}} \times n \log n)$（$L_{\text{iter}}$ = 勾配ステップ数）かかる。
+
+**主要手法の比較表**:
+
+| 手法 | 計算量 | サンプル効率 | 幾何学的情報 | 主な用途 |
+|:-----|:-------|:------------|:------------|:---------|
+| $W_2$ (Sinkhorn) | $O(n^2/\varepsilon)$ | $O(n^{-2/d})$ | 完全保存 | 小規模精密比較 ($n \leq 5000$) |
+| $\text{SW}_2$ | $O(Ln\log n)$ | $O(n^{-1/2})$ | 方向平均 | 生成モデル訓練 (SWD-GAN, SWAE) |
+| $\text{Max-SW}_2$ | $O(L_{\text{iter}} n\log n)$ | $O(n^{-1/2})$ | 最劣方向 | 高識別力比較 |
+| FID ($W_2$ のガウス近似) | $O(nd^2)$ | 高（パラメトリック） | ガウス近似のみ | 画像生成品質評価 |
+| KID (カーネルMMD) | $O(n^2)$ | $O(n^{-1/2})$ | カーネル依存 | FIDより不偏 |
+
+Sliced Wasserstein Autoencoder (Kolouri et al., 2018) はVAEのKL項を $\text{SW}_2$ で置換し、モード崩壊を軽減する。点群比較（3D形状解析、ShapeNetなど）でも $\text{SW}_2$ が標準指標として使われている。
+
+<details><summary>導出: 1次元W₂のガウス分布閉形式を0から追う</summary>
+
+$\mu = \mathcal{N}(m_0, \sigma_0^2)$, $\nu = \mathcal{N}(m_1, \sigma_1^2)$ の 1D-$W_2^2$ を分位関数から手計算する。
+
+**Step 1 — 分位関数を書き下す**:
+
+$$F_\mu^{-1}(t) = m_0 + \sigma_0 \Phi^{-1}(t), \quad F_\nu^{-1}(t) = m_1 + \sigma_1 \Phi^{-1}(t)$$
+
+ここで $\Phi^{-1}$ は標準正規分布の分位関数（probit 関数）。
+
+**Step 2 — 差を計算する**:
+
+$$F_\mu^{-1}(t) - F_\nu^{-1}(t) = (m_0 - m_1) + (\sigma_0 - \sigma_1)\Phi^{-1}(t)$$
+
+**Step 3 — 二乗して積分**:
+
+$$W_2^2 = \int_0^1 \left[(m_0 - m_1) + (\sigma_0 - \sigma_1)\Phi^{-1}(t)\right]^2 dt$$
+
+展開する:
+
+$$= (m_0 - m_1)^2 \int_0^1 dt + 2(m_0-m_1)(\sigma_0-\sigma_1)\int_0^1 \Phi^{-1}(t) dt + (\sigma_0 - \sigma_1)^2 \int_0^1 [\Phi^{-1}(t)]^2 dt$$
+
+**Step 4 — 各積分を評価**:
+
+- $\int_0^1 dt = 1$（自明）
+- $\int_0^1 \Phi^{-1}(t) dt = \mathbb{E}[Z] = 0$（$Z \sim \mathcal{N}(0,1)$ の平均）
+- $\int_0^1 [\Phi^{-1}(t)]^2 dt = \mathbb{E}[Z^2] = \text{Var}(Z) + (\mathbb{E}[Z])^2 = 1 + 0 = 1$
+
+**Step 5 — 代入**:
+
+$$W_2^2(\mathcal{N}(m_0,\sigma_0^2), \mathcal{N}(m_1,\sigma_1^2)) = (m_0-m_1)^2 + (\sigma_0-\sigma_1)^2$$
+
+多次元ガウス $\mathcal{N}(\boldsymbol{m}_0, \Sigma_0)$ への拡張は §1.1 の Bures 計量の式になる。1次元と違い各方向で分散スケールが異なるため、行列の平方根 $(\Sigma_1^{1/2}\Sigma_0\Sigma_1^{1/2})^{1/2}$ が必要になる。
+
+</details>
+
+### 3.12 確率フローODEとWasserstein勾配流の完全接続
+
+#### 3.12.1 確率フローODEとSDEの等価性
+
+Score-based Diffusion Model（§3.9.2参照）の背後には、SDEとODEの驚くべき等価性がある。
+
+Forward SDE（OU過程）:
+
+$$
+d\boldsymbol{x}_t = -\frac{1}{2}\boldsymbol{x}_t \, dt + d\boldsymbol{w}_t
+$$
+
+（$\boldsymbol{w}_t$ は標準ブラウン運動、時刻 $T \to \infty$ で $p_T \approx \mathcal{N}(0, I)$）
+
+これと **同一の周辺分布** $\{p_t\}_{t \geq 0}$ を生成する確率フローODE（Song et al., 2021 [^5]）:
+
+$$
+\frac{d\boldsymbol{x}}{dt} = -\frac{1}{2}\boldsymbol{x} - \frac{1}{2}\nabla_{\boldsymbol{x}} \log p_t(\boldsymbol{x})
+$$
+
+一般の SDE $d\boldsymbol{x} = \boldsymbol{f}(\boldsymbol{x}, t) dt + g(t) d\boldsymbol{w}$ に対し、等価な確率フローODEは:
+
+$$
+\frac{d\boldsymbol{x}}{dt} = \boldsymbol{f}(\boldsymbol{x}, t) - \frac{1}{2} g(t)^2 \nabla_{\boldsymbol{x}} \log p_t(\boldsymbol{x})
+$$
+
+**なぜ等価か？** 両者が同一の Fokker-Planck 方程式を満たすからだ:
+
+$$
+\partial_t p_t = -\nabla \cdot (p_t \boldsymbol{f}) + \frac{g(t)^2}{2} \Delta p_t
+$$
+
+ODE側はこれを連続の方程式 $\partial_t p_t + \nabla \cdot (p_t v_t) = 0$ として解釈し、速度場 $v_t = \boldsymbol{f} - \frac{g^2}{2}\nabla \log p_t$ を定める。SDEはランダム経路を生成するが、ODE は決定論的経路を生成しながら **分布としては同じ** $p_t$ を実現する。
+
+#### 3.12.2 Benamou-Brenier公式と連続の方程式
+
+連続の方程式は OT の幾何学と深く結びついている。Benamou-Brenier (2000) の公式:
+
+$$
+W_2^2(\mu_0, \mu_1) = \inf_{\{(\mu_t, v_t)\}} \int_0^1 \int_{\mathbb{R}^d} \|v_t(\boldsymbol{x})\|^2 d\mu_t(\boldsymbol{x}) \, dt
+$$
+
+制約: $\partial_t \mu_t + \nabla \cdot (\mu_t v_t) = 0$, $\mu|_{t=0} = \mu_0$, $\mu|_{t=1} = \mu_1$。
+
+これは $W_2^2(\mu_0, \mu_1)$ を「2分布間を連続の方程式に沿って繋ぐ最小エネルギー経路問題」として表現している。測度 $\mu_t$ の「速さ」は $L^2(\mu_t)$ ノルム $\int \|v_t\|^2 d\mu_t$ で測られ、その時間積分が輸送コストになる。
+
+この公式が教えること: **Flow Matching で学習する速度場 $v_\theta$ の理想形は Benamou-Brenier の最適速度場**であり、それがまさに OT 速度場 $v_t^*(\boldsymbol{x}) = (T^*(\boldsymbol{x}) - \boldsymbol{x}) / (1 - t)$（直線経路の速度）に対応する。
+
+#### 3.12.3 JKO scheme — Wasserstein勾配流の離散化
+
+汎関数 $F: \mathcal{P}_2(\mathbb{R}^d) \to \mathbb{R}$ の **Wasserstein勾配流** は「$W_2$ 距離を使って $F$ を勾配降下する確率測度の時間発展」として定義される:
+
+$$
+\partial_t \mu_t = -\text{grad}_{W_2} F(\mu_t)
+$$
+
+Jordan-Kinderlehrer-Otto (JKO, 1998) はこれを離散時間近似で厳密に定義した:
+
+$$
+\mu_{k+1} = \arg\min_{\mu \in \mathcal{P}_2} \left\{ \frac{W_2^2(\mu_k, \mu)}{2\tau} + F(\mu) \right\}
+$$
+
+| 記号 | 意味 |
+|:-----|:-----|
+| $\tau$ | 時間刻み幅 ($\tau \to 0$ の極限で連続勾配流に収束) |
+| $W_2^2(\mu_k, \mu) / (2\tau)$ | 近接項: 前ステップからの「測度の移動量」ペナルティ |
+| $F(\mu)$ | 最小化したい汎関数 |
+
+これはユークリッド空間での **近接点法** $x_{k+1} = \arg\min_x \{\frac{\|x_k - x\|^2}{2\tau} + f(x)\}$ と全く同じ構造だ — ただし測度空間 $\mathcal{P}_2$ 上で行われる。
+
+**KL divergenceの場合**: $F(\mu) = D_{\text{KL}}(\mu \| \pi)$ とすると、JKO schemeは $\tau \to 0$ で **Fokker-Planck方程式**に収束する:
+
+$$
+\partial_t p = \nabla \cdot \left( p \nabla \log \frac{p}{\pi} \right)
+$$
+
+これを展開すると $\partial_t p = \Delta p - \nabla \cdot (p \nabla \log \pi)$。定常分布は $p = \pi$（$\partial_t p = 0$ のとき）。
+
+つまり: **Langevin dynamics は KL divergence の Wasserstein 勾配流だ**。MCMC の収束理論が $W_2$ 距離を使って書けるのはこのためだ。
+
+| 汎関数 $F(\mu)$ | Wasserstein勾配流の定常分布 | 対応する偏微分方程式 |
+|:----------------|:---------------------------|:--------------------|
+| $D_{\text{KL}}(\mu \| \pi)$ | $\pi$（目標分布） | Fokker-Planck方程式 |
+| $\int \nabla V \cdot d\mu$（ポテンシャル） | $\delta_{\arg\min V}$（最小点） | 連続の方程式 |
+| $\frac{1}{m-1}\int \mu^m d\mu$（Rényi） | $\propto e^{-V}$ | Porous medium方程式 |
+| $\frac{1}{2}W_2^2(\mu, \nu)$（輸送） | $\nu$ | McCann補間（§3.6.1） |
+
+> **⚠️ Warning:** JKO scheme の各ステップは「$W_2$ 距離付きの変分問題」であり、それ自体が最適輸送問題だ。計算コストが高く、実用的な実装には Sinkhorn を用いた近似 (de Bortoli et al., 2021) や粒子法が必要になる。Diffusion Model の理論的背景としての JKO は「直感の枠組み」として理解し、実装詳細は第36回まで保留してよい。
+
+#### 3.12.4 Rectified Flow — 反復によるOTへの収束
+
+Liu et al. (2022) [^4] の **Rectified Flow** は次の目的関数で速度場 $v_\theta$ を訓練する:
+
+$$
+\min_{v_\theta} \mathbb{E}_{t \sim U[0,1], \, (\boldsymbol{x}_0, \boldsymbol{x}_1) \sim \pi_0} \left[ \| v_\theta(\boldsymbol{x}_t, t) - (\boldsymbol{x}_1 - \boldsymbol{x}_0) \|^2 \right]
+$$
+
+ここで $\boldsymbol{x}_t = (1-t)\boldsymbol{x}_0 + t\boldsymbol{x}_1$（直線補間）、$\pi_0 = \mu \otimes \nu$（独立結合）。
+
+**なぜ直線ターゲットか？** 2点 $(\boldsymbol{x}_0, \boldsymbol{x}_1)$ を固定したとき、経路 $\boldsymbol{x}_t$ の長さ $\int_0^1 \|\dot{\boldsymbol{x}}_t\| dt \geq \|\boldsymbol{x}_1 - \boldsymbol{x}_0\|$（等号は直線のとき）。したがって直線補間は **期待経路長を最小化** する。ターゲット速度 $\boldsymbol{x}_1 - \boldsymbol{x}_0$ を学習することは「すべての経路を直線にする」ことに等しい。
+
+ただし独立結合 $\pi_0 = \mu \otimes \nu$ では、異なるカップリング間で経路が「交差」し得るため、速度場が複雑になる。
+
+**Reflow — 交差経路の反復的除去**:
+
+1. Rectified Flow で $v_\theta^{(1)}$ を訓練（$\pi_0 = \mu \otimes \nu$）
+2. ODE $\dot{\boldsymbol{x}} = v_\theta^{(1)}(\boldsymbol{x}, t)$ を解いて新結合 $\pi_1 = (X_0, X_1^{\text{ODE}})_\sharp \mu$ を生成
+3. $\pi_1$ で新しい Rectified Flow $v_\theta^{(2)}$ を訓練
+4. 繰り返す: $\pi_0 \to \pi_1 \to \cdots \to \pi_k$
+
+**定理** (Liu et al., 2022): Reflow の各反復でカップリングは改善し、輸送コスト $\mathbb{E}_{(\boldsymbol{x}_0, \boldsymbol{x}_1) \sim \pi_k}[\|\boldsymbol{x}_1 - \boldsymbol{x}_0\|^2]$ は単調非増加。無限回の Reflow の極限では $\pi_k \to \gamma^*$（$W_2$-最適輸送計画）に収束し、速度場が:
+
+$$
+v^*(\boldsymbol{x}, t) = T^*(\boldsymbol{x}) - \boldsymbol{x}
+$$
+
+（定数速度場、すなわち経路が完全に直線）に収束する。
+
+$$
+\underbrace{\mu \otimes \nu}_{\text{交差多数}} \xrightarrow{\text{Reflow ×1}} \pi_1 \xrightarrow{\text{Reflow ×2}} \cdots \xrightarrow{\text{Reflow }\times\infty} \underbrace{\gamma^*}_{\text{OT計画、交差ゼロ}}
+$$
+
+直感: 最初は点が入り乱れて「交差する輸送経路」が多数ある。Reflow が交差を解消するたびに経路がまっすぐになり、最終的に OT map $T^*$ に相当する straight flow に収束する。
+
+#### 3.12.5 OT-CFM との接続と統一的視点
+
+OT-CFM（§3.9.1参照）は Reflow の「無限回版」を一発で実現しようとするアプローチだ。
+
+独立結合 $\mu \otimes \nu$ の代わりに、最初から **$W_2$-最適輸送計画** $\gamma^*$（Sinkhorn で近似）に基づいてカップリング $(\boldsymbol{x}_0, \boldsymbol{x}_1) \sim \gamma^*$ をサンプルし:
+
+$$
+\boldsymbol{x}_t = (1-t)\boldsymbol{x}_0 + t\boldsymbol{x}_1, \quad (\boldsymbol{x}_0, \boldsymbol{x}_1) \sim \gamma^*
+$$
+
+で Flow Matching を訓練する。これにより最初から「交差のない経路」で学習が始まる。
+
+| 手法 | カップリング $\pi$ | 交差の有無 | サンプリングステップ |
+|:-----|:-----------------|:----------|:--------------------|
+| DDPM (Diffusion) | SDE 漸進ノイズ付加 | N/A（確率的） | 1000ステップ |
+| Rectified Flow | $\mu \otimes \nu$（独立） | 多い → Reflow 要 | 多（Reflow なし） |
+| Rectified Flow + Reflow | $\pi_k$（改善済み） | 少ない | 少 |
+| OT-CFM | $\gamma^*$（Sinkhorn） | ほぼゼロ | 少（1〜10ステップ） |
+| Minibatch OT-CFM | $\hat{\gamma}^*$（バッチ近似） | 少ない | 少 |
+
+Tong et al. (2023) [^17] の実験では、OT-CFM は CIFAR-10 で標準 Flow Matching より FID を約 20% 改善し、同等品質を約半分のサンプリングステップで達成した。「最適輸送計画で点をペアリングする」という一手間が、推論コストを大幅に削減する。
+
+> **Note:** Wasserstein 勾配流（JKO）→ Fokker-Planck 方程式 → 確率フロー ODE → Rectified Flow → OT-CFM という一連の接続は「確率測度を動かす」という共通のテーマを持つ。第36回「Flow Matching 統一理論」でこれらを整理し、OT-CFM・Stochastic Interpolants・Consistency Models を単一の枠組みで比較する。
+
+> Progress: 50%
+> **理解度チェック**
+> 1. Rectified Flow $\dot{X}_t = v_\theta(X_t, t)$ がOT-Mapと同等の直線化経路を達成できる理論的根拠を、OT計画 $\gamma^*$ との関係から説明せよ。
+> 2. Sinkhorn反復 $u^{(l+1)} = a \oslash (K v^{(l)})$、$v^{(l+1)} = b \oslash (K^\top u^{(l+1)})$（$K_{ij} = \exp(-C_{ij}/\varepsilon)$）がなぜ輸送計画 $\gamma^* = \text{diag}(u) K \text{diag}(v)$ に収束するか、Sinkhorn-Knopp定理の観点から直感的に説明せよ。
 
 ---
 
@@ -1872,69 +1487,69 @@ end
 [^2]: Brenier, Y. (1991). Polar factorization and monotone rearrangement of vector-valued functions. Communications on Pure and Applied Mathematics, 44(4), 375-417.
 
 [^3]: Arjovsky, M., Chintala, S., & Bottou, L. (2017). Wasserstein Generative Adversarial Networks. In ICML.
-@[card](https://arxiv.org/abs/1701.07875)
+<https://arxiv.org/abs/1701.07875>
 
 [^4]: Liu, X., Gong, C., & Liu, Q. (2022). Flow Straight and Fast: Learning to Generate and Transfer Data with Rectified Flow. In ICLR 2023.
-@[card](https://arxiv.org/abs/2209.03003)
+<https://arxiv.org/abs/2209.03003>
 
 [^5]: Song, Y., Sohl-Dickstein, J., Kingma, D. P., Kumar, A., Ermon, S., & Poole, B. (2021). Score-Based Generative Modeling through Stochastic Differential Equations. In ICLR.
-@[card](https://arxiv.org/abs/2011.13456)
+<https://arxiv.org/abs/2011.13456>
 
 [^6]: Gulrajani, I., Ahmed, F., Arjovsky, M., Dumoulin, V., & Courville, A. C. (2017). Improved Training of Wasserstein GANs. In NeurIPS.
-@[card](https://arxiv.org/abs/1704.00028)
+<https://arxiv.org/abs/1704.00028>
 
 [^7]: Miyato, T., Kataoka, T., Koyama, M., & Yoshida, Y. (2018). Spectral Normalization for Generative Adversarial Networks. In ICLR.
-@[card](https://arxiv.org/abs/1802.05957)
+<https://arxiv.org/abs/1802.05957>
 
 [^8]: Amos, B., Xu, L., & Kolter, J. Z. (2017). Input Convex Neural Networks. In ICML.
-@[card](https://arxiv.org/abs/1609.07152)
+<https://arxiv.org/abs/1609.07152>
 
 [^9]: Cuturi, M. (2013). Sinkhorn Distances: Lightspeed Computation of Optimal Transport. In NeurIPS.
-@[card](https://arxiv.org/abs/1306.0895)
+<https://arxiv.org/abs/1306.0895>
 
 [^10]: Korotin, A., Selikhanovych, D., & Burnaev, E. (2023). Neural Optimal Transport. In ICLR.
-@[card](https://arxiv.org/abs/2201.12220)
+<https://arxiv.org/abs/2201.12220>
 
-[^11]: Uscidda, A., & Cuturi, M. (2024). Wasserstein Wormhole: Scalable Optimal Transport Distance with Transformers. In ICML.
-@[card](https://arxiv.org/abs/2404.09411)
+[^11]: Haviv, D., Kunes, R. Z., Dougherty, T., Burdziak, C., et al. (2024). Wasserstein Wormhole: Scalable Optimal Transport Distance with Transformers. In ICML.
+<https://arxiv.org/abs/2404.09411>
 
 [^12]: Korotin, A., Li, L., Genevay, A., Solomon, J., Filippov, A., & Burnaev, E. (2021). Do Neural Optimal Transport Solvers Work? A Continuous Wasserstein-2 Benchmark. In NeurIPS.
-@[card](https://arxiv.org/abs/2106.01954)
+<https://arxiv.org/abs/2106.01954>
 
 [^13]: Schmitzer, B. (2016). Stabilized Sparse Scaling Algorithms for Entropy Regularized Transport Problems. SIAM Journal on Scientific Computing, 41(3), A1443-A1481.
-@[card](https://arxiv.org/abs/1610.06519)
+<https://arxiv.org/abs/1610.06519>
 
 [^14]: Scetbon, M., Cuturi, M., & Peyré, G. (2021). Low-Rank Sinkhorn Factorization. In ICML.
-@[card](https://arxiv.org/abs/2103.04737)
+<https://arxiv.org/abs/2103.04737>
 
 [^15]: Xie, Y., Wang, X., Wang, R., & Zha, H. (2021). Optimal Transport with f-divergence Regularization and Generalized Sinkhorn Algorithm. In AISTATS.
-@[card](https://arxiv.org/abs/2105.14337)
+<https://arxiv.org/abs/2105.14337>
 
 [^16]: Lipman, Y., Chen, R. T. Q., Ben-Hamu, H., Nickel, M., & Le, M. (2023). Flow Matching for Generative Modeling. In ICLR.
-@[card](https://arxiv.org/abs/2210.02747)
+<https://arxiv.org/abs/2210.02747>
 
 [^17]: Tong, A., Malkin, N., Huguet, G., Zhang, Y., Rector-Brooks, J., Fatras, K., Wolf, G., & Bengio, Y. (2023). Improving and Generalizing Flow-Based Generative Models with Minibatch Optimal Transport. In AISTATS.
-@[card](https://arxiv.org/abs/2302.00482)
+<https://arxiv.org/abs/2302.00482>
 
 [^18]: Pooladian, A. A., Ben-Hamu, H., Domingo-Enrich, C., Amos, B., Lipman, Y., & Chen, R. (2023). Multisample Flow Matching: Straightening Flows with Minibatch Couplings. In ICML.
-@[card](https://arxiv.org/abs/2304.14772)
+<https://arxiv.org/abs/2304.14772>
 
 [^19]: Liu, X., Gong, C., & Liu, Q. (2022). Flow Straight and Fast: Learning to Generate and Transfer Data with Rectified Flow. arXiv preprint.
-@[card](https://arxiv.org/abs/2209.03003)
+<https://arxiv.org/abs/2209.03003>
 
 [^20]: Zhang, X., Zhao, L., Arnold, A., Liu, N., Rong, Y., & Yan, J. (2020). Optimal Transport Graph Neural Networks. arXiv preprint.
-@[card](https://arxiv.org/abs/2006.04804)
+<https://arxiv.org/abs/2006.04804>
 
-[^21]: Huang, R., Li, J., Wang, Y., & Zhang, C. (2024). Improving Molecular Graph Generation with Flow Matching and Optimal Transport. arXiv preprint.
-@[card](https://arxiv.org/abs/2411.05676)
+[^21]: Hou, X., Zhu, T., Ren, M., Bu, D., Gao, X., Zhang, C., & Sun, S. (2024). Improving Molecular Graph Generation with Flow Matching and Optimal Transport. arXiv preprint.
+<https://arxiv.org/abs/2411.05676>
 
 [^22]: Chizat, L., Peyré, G., Schmitzer, B., & Vialard, F. X. (2018). Scaling Algorithms for Unbalanced Optimal Transport Problems. Mathematics of Computation, 87(314), 2563-2609.
-@[card](https://arxiv.org/abs/1607.05816)
+<https://arxiv.org/abs/1607.05816>
 
 ### サーベイ論文・教科書
 
 - Peyré, G., & Cuturi, M. (2019). Computational Optimal Transport. Foundations and Trends in Machine Learning, 11(5-6), 355-607.
-@[card](https://arxiv.org/abs/1803.00567)
+<https://arxiv.org/abs/1803.00567>
 
 - Santambrogio, F. (2015). Optimal Transport for Applied Mathematicians. Birkhäuser.
 
@@ -1943,11 +1558,19 @@ end
 ### 最新サーベイ (2023)
 
 - Calvello, E., Nüsken, N., Reich, S., & Schillings, C. (2023). Recent Advances in Optimal Transport for Machine Learning. arXiv preprint.
-@[card](https://arxiv.org/abs/2306.16156)
+<https://arxiv.org/abs/2306.16156>
 
 ---
 
 ---
+
+## 著者リンク
+
+- Blog: https://fumishiki.dev
+- X: https://x.com/fumishiki
+- LinkedIn: https://www.linkedin.com/in/fumitakamurakami
+- GitHub: https://github.com/fumishiki
+- Hugging Face: https://huggingface.co/fumishiki
 
 ## ライセンス
 

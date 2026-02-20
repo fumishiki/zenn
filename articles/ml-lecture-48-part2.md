@@ -4,7 +4,14 @@ emoji: "🧬"
 type: "tech"
 topics: ["machinelearning","deeplearning","science","julia","rust"]
 published: true
+slug: "ml-lecture-48-part2"
+difficulty: "advanced"
+time_estimate: "90 minutes"
+languages: ["Julia", "Rust"]
+keywords: ["機械学習", "深層学習", "生成モデル"]
 ---
+**← 理論編**: [第48回 Part 1: 理論・数式修行](https://zenn.dev/fumishiki/articles/ml-lecture-48-part1)
+
 ## 💻 4. 実装ゾーン（45分）— Julia訓練 + Rust推論 + Elixir配信
 
 ### 4.1 ⚡ Julia実装 — Flow Matching for Crystal
@@ -31,10 +38,7 @@ function generate_2d_crystal(n_atoms::Int=8)
 end
 
 # --- Flow Matching速度場 ---
-function velocity_field(x::Matrix{Float64}, t::Float64, target::Matrix{Float64})
-    # 線形補間: v_t = x_1 - x_0
-    return target - x
-end
+velocity_field(x::Matrix{Float64}, ::Float64, target::Matrix{Float64}) = target .- x  # 線形補間: v_t = x_1 - x_0
 
 # --- ODE Solver (Euler法) ---
 function flow_matching_sample(x0::Matrix{Float64}, target::Matrix{Float64}, steps::Int=50)
@@ -44,7 +48,7 @@ function flow_matching_sample(x0::Matrix{Float64}, target::Matrix{Float64}, step
 
     for t in 0:dt:(1-dt)
         v = velocity_field(x, t, target)
-        x .+= v * dt  # Euler更新
+        @. x += v * dt  # Euler更新
         push!(trajectory, copy(x))
     end
 
@@ -53,14 +57,7 @@ end
 
 # --- 訓練データ生成 ---
 function create_training_data(n_samples::Int=100)
-    data = []
-    for _ in 1:n_samples
-        target = generate_2d_crystal()
-        # 実空間座標
-        coords = target.frac_coords * target.lattice
-        push!(data, coords)
-    end
-    return data
+    [let t = generate_2d_crystal(); t.frac_coords * t.lattice end for _ in 1:n_samples]
 end
 
 # --- 可視化 ---
@@ -100,7 +97,8 @@ println("最終RMSD: ", norm(trajectory[end] - target_coords) / sqrt(8))
 | $v_t = x_1 - x_0$ | `velocity_field(x, t, target)` |
 | $x_{t+dt} = x_t + v_t \cdot dt$ | Eulerステップ |
 
-:::details 3D版への拡張
+<details><summary>3D版への拡張</summary>
+
 ```julia
 # 3D Crystal
 struct Crystal3D
@@ -122,7 +120,8 @@ function generate_fcc_crystal(a::Float64=4.0)
     return Crystal3D(lattice, frac_coords, elements)
 end
 ```
-:::
+
+</details>
 
 ### 4.2 Property-Conditioned Generation
 
@@ -131,12 +130,7 @@ end
 function bandgap_predictor(coords::Matrix{Float64})
     # 簡易版: 最近接距離の平均で近似
     n = size(coords, 1)
-    dists = Float64[]
-    for i in 1:n
-        for j in (i+1):n
-            push!(dists, norm(coords[i,:] - coords[j,:]))
-        end
-    end
+    dists = [norm(coords[i,:] .- coords[j,:]) for i in 1:n for j in (i+1):n]
     avg_dist = mean(dists)
     # 経験則: 距離が大きい→バンドギャップ大
     return 2.0 * avg_dist  # eV (仮)
@@ -156,13 +150,13 @@ end
 
 # --- サンプリング ---
 target_Eg = 2.5  # eV
-x0 = randn(8, 2) * 2
+x0 = randn(8, 2) .* 2
 x = copy(x0)
 dt = 0.02
 
 for t in 0:dt:(1-dt)
     v = conditional_velocity(x, t, target_coords, target_Eg, 0.5)
-    x .+= v * dt
+    @. x += v * dt
 end
 
 println("生成結晶のバンドギャップ: ", bandgap_predictor(x), " eV")
@@ -323,9 +317,7 @@ IO.inspect(crystals, label: "Generated Crystals")
 - **耐障害性**: Supervisorが子プロセス監視
 - **分散**: 複数ノードでの実験に拡張可能
 
-:::message
-**進捗: 70%** — 3言語実装完了。次は実験へ。
-:::
+> **Note:** **進捗: 70%** — 3言語実装完了。次は実験へ。
 
 ---
 
@@ -339,20 +331,10 @@ using BioStructures
 # --- Designability評価 ---
 function evaluate_designability(generated_structures)
     n = length(generated_structures)
-    success_count = 0
-
-    for structure in generated_structures
-        # AlphaFold 2で折りたたみ予測
+    success_count = count(generated_structures) do structure
         predicted = alphafold_predict(structure.sequence)
-
-        # TM-score計算
-        tm = compute_tm_score(structure.coords, predicted)
-
-        if tm > 0.5
-            success_count += 1
-        end
+        compute_tm_score(structure.coords, predicted) > 0.5
     end
-
     return success_count / n
 end
 
@@ -367,23 +349,14 @@ using RDKit
 
 # --- Validity評価 ---
 function evaluate_validity(smiles_list)
-    valid = 0
-    for smiles in smiles_list
-        mol = Chem.MolFromSmiles(smiles)
-        if mol !== nothing
-            valid += 1
-        end
-    end
+    valid = count(s -> Chem.MolFromSmiles(s) !== nothing, smiles_list)
     return valid / length(smiles_list)
 end
 
 # --- Synthesizability評価 ---
 function evaluate_sa_score(smiles_list)
-    scores = []
-    for smiles in smiles_list
-        mol = Chem.MolFromSmiles(smiles)
-        sa = sascorer.calculateScore(mol)
-        push!(scores, sa)
+    scores = map(smiles_list) do smiles
+        sascorer.calculateScore(Chem.MolFromSmiles(smiles))
     end
     return mean(scores)
 end
@@ -435,9 +408,7 @@ end
 | Diffusion (MatterGen) | **0.95** | **0.65** | **0.82** | 遅 |
 | Flow Matching (CrystalFlow) | **0.93** | **0.63** | **0.80** | **速** |
 
-:::message
-**深い洞察**: Flow Matchingは「速度と品質のトレードオフ」を改善。Diffusionの1/10計算コストで同等品質。
-:::
+> **Note:** **深い洞察**: Flow Matchingは「速度と品質のトレードオフ」を改善。Diffusionの1/10計算コストで同等品質。
 
 ### 5.5 自己診断チェックリスト
 
@@ -450,9 +421,12 @@ end
 - [ ] Rustで高速推論コードを書けた
 - [ ] Elixirで分散実験を設計できた
 
-:::message
-**進捗: 85%** — 実験完了。発展へ。
-:::
+> **Note:** **進捗: 85%** — 実験完了。発展へ。
+
+> Progress: 85%
+> **理解度チェック**
+> 1. CrystalFlowの生成品質評価で用いるValidity・Synthesizability・Formation Energyの3指標はそれぞれ何を測るか？数式またはアルゴリズムで説明せよ。
+> 2. DesignabilityスコアとTM-scoreの関係を述べ、タンパク質設計AIの評価で両者が必要な理由を説明せよ。
 
 ---
 
@@ -542,7 +516,8 @@ graph TD
 | PubChem | [pubchem.ncbi.nlm.nih.gov](https://pubchem.ncbi.nlm.nih.gov/) | 化合物DB |
 | GitHub: microsoft/mattergen | [github.com/microsoft/mattergen](https://github.com/microsoft/mattergen) | MatterGen実装 |
 
-:::details 用語集
+<details><summary>用語集</summary>
+
 - **Designability**: 配列が目標構造に折りたたまれる確率
 - **Synthesizability**: 実験室で合成可能な確率
 - **Formation Energy**: 元素から化合物が生成される際のエネルギー変化
@@ -552,11 +527,15 @@ graph TD
 - **TM-score**: タンパク質構造類似度 (0-1, >0.5で類似)
 - **RMSD**: Root Mean Square Deviation (構造のずれ)
 - **SA Score**: Synthetic Accessibility Score (1-10, 小さいほど合成容易)
-:::
 
-:::message
-**進捗: 100%** — 全48回完走！AI for Scienceの全体像を習得。
-:::
+</details>
+
+> **Note:** **進捗: 100%** — 全48回完走！AI for Scienceの全体像を習得。
+
+> Progress: 95%
+> **理解度チェック**
+> 1. Flow MatchingがBiologyドメインでDiffusionより優位な具体的な状況を1つ挙げ、ODE solver精度とサンプリングステップ数のトレードオフを式で説明せよ。
+> 2. AI for Scienceの3大ドメイン（Protein/Drug/Materials）それぞれで残る最重要未解決問題を各1つ挙げよ。
 
 ---
 
@@ -580,29 +559,36 @@ graph TD
 
 ### 6.6 FAQ
 
-:::details Q1: AlphaFold 3とRFdiffusion3の使い分けは？
+<details><summary>Q1: AlphaFold 3とRFdiffusion3の使い分けは？</summary>
+
 **A**:
 - AlphaFold 3: 既知配列の構造予測 → 「読む」
 - RFdiffusion3: 新規タンパク質の設計 → 「書く」
 - 組み合わせ: RFd3で設計 → AF3で検証 → 実験
-:::
 
-:::details Q2: なぜFlow MatchingがDiffusionより速い？
+</details>
+
+<details><summary>Q2: なぜFlow MatchingがDiffusionより速い？</summary>
+
 **A**:
 - Diffusion: 1000ステップのMarkov連鎖
 - Flow Matching: 10-50ステップのODE
 - ODE: 高精度ソルバ(RK45等)で効率化
 - Conditional: 速度場に直接埋め込み (Classifier guidanceより簡潔)
-:::
 
-:::details Q3: 生成された材料は本当に合成できる？
+</details>
+
+<details><summary>Q3: 生成された材料は本当に合成できる？</summary>
+
 **A**:
 - **No** — Stabilityは必要条件、十分条件ではない
 - 追加チェック: 合成ルート探索、前駆体の可用性、反応条件
 - High-throughput実験で検証 (成功率10-30%)
-:::
 
-:::details Q4: Protein Designの実験成功率が低い理由は？
+</details>
+
+<details><summary>Q4: Protein Designの実験成功率が低い理由は？</summary>
+
 **A**:
 - Designability (計算) 83% vs 実験成功率 30-50%
 - Gap要因:
@@ -610,15 +596,18 @@ graph TD
   2. 折りたたみ経路の複雑さ
   3. 凝集・misfolding
   4. 発現系の限界
-:::
 
-:::details Q5: Pythonではダメ？
+</details>
+
+<details><summary>Q5: Pythonではダメ？</summary>
+
 **A**:
 - 研究: Python OK (PyTorch/RDKit/ASE)
 - Production: Julia (訓練高速化) + Rust (推論)
 - 大規模探索: Elixir (分散耐障害性)
 - 本シリーズ: 3言語フルスタックを体験
-:::
+
+</details>
 
 ### 6.7 よくある間違い
 
@@ -652,9 +641,7 @@ graph TD
 
 **接続**: 第43-48回で全モダリティを個別習得 → 第49回で統合 → 第50回で卒業制作
 
-:::message
-**Course V進捗: 第48回/50完了** — 残り2講義。AI for Scienceから統合へ。
-:::
+> **Note:** **Course V進捗: 第48回/50完了** — 残り2講義。AI for Scienceから統合へ。
 
 ---
 
@@ -679,13 +666,15 @@ graph TD
    - 特許の帰属: AI? 研究者? 企業?
    - Dual-use問題: 治療薬 ↔ 生物兵器
 
-:::details 歴史的文脈
+<details><summary>歴史的文脈</summary>
+
 - 1953: Watson & Crick — DNA構造「発見」(X線回折データから)
 - 2024: AlphaFold 3 — タンパク質構造「予測」(配列データから)
 - 2025: RFdiffusion3 — タンパク質構造「設計」(機能制約から)
 
 Discovery → Prediction → Design のパラダイムシフト。
-:::
+
+</details>
 
 **あなたの答えは？**
 
@@ -696,56 +685,34 @@ Discovery → Prediction → Design のパラダイムシフト。
 ### 主要論文
 
 [^1]: Abramson, J., Adler, J., Dunger, J., et al. (2024). "Accurate structure prediction of biomolecular interactions with AlphaFold 3". *Nature* 630:493-500.
-@[card](https://www.nature.com/articles/s41586-024-07487-w)
+<https://www.nature.com/articles/s41586-024-07487-w>
 
 [^2]: Watson, J. L., Juergens, D., Bennett, N. R., et al. (2025). "De novo Design of All-atom Biomolecular Interactions with RFdiffusion3". *bioRxiv* 2025.09.18.676967.
-@[card](https://www.biorxiv.org/content/10.1101/2025.09.18.676967v2)
+<https://www.biorxiv.org/content/10.1101/2025.09.18.676967v2>
 
 [^3]: Corso, G., Stärk, H., Jing, B., Barzilay, R., & Jaakkola, T. (2022). "DiffDock: Diffusion Steps, Twists, and Turns for Molecular Docking". *arXiv:2210.01776*, ICLR 2023.
-@[card](https://arxiv.org/abs/2210.01776)
+<https://arxiv.org/abs/2210.01776>
 
 [^4]: Tang, J., et al. (2025). "Peptide2Mol: A Diffusion Model for Generating Small Molecules as Peptide Mimics for Targeted Protein Binding". *arXiv:2511.04984*.
-@[card](https://arxiv.org/abs/2511.04984)
+<https://arxiv.org/abs/2511.04984>
 
 [^5]: Zeni, C., Pinsler, R., Zügner, D., et al. (2023). "MatterGen: a generative model for inorganic materials design". *arXiv:2312.03687*, *Nature* 2025.
-@[card](https://arxiv.org/abs/2312.03687)
+<https://arxiv.org/abs/2312.03687>
 
 [^6]: Tang, H., et al. (2024). "CrystalFlow: a flow-based generative model for crystalline materials". *Nature Communications* 2025.
-@[card](https://www.nature.com/articles/s41467-025-64364-4)
+<https://www.nature.com/articles/s41467-025-64364-4>
 
-[^11]: Chen, Z., et al. (2025). "Flow Matching Meets Biology and Life Science: A Survey". *arXiv:2507.17731*, *npj Artificial Intelligence* 2025.
-@[card](https://arxiv.org/abs/2507.17731)
+[^11]: Li, Z., et al. (2025). "Flow Matching Meets Biology and Life Science: A Survey". *arXiv:2507.17731*, *npj Artificial Intelligence* 2025.
+<https://arxiv.org/abs/2507.17731>
 
 [^12]: Breuck, P.-P., Wang, G., et al. (2025). "Generative AI for crystal structures: a review". *arXiv:2509.02723*, *npj Computational Materials* 2025.
-@[card](https://arxiv.org/abs/2509.02723)
+<https://arxiv.org/abs/2509.02723>
 
 ### 教科書
 
 - Leach, A. R. (2001). *Molecular Modelling: Principles and Applications*. Pearson Education.
 - Sholl, D., & Steckel, J. A. (2022). *Density Functional Theory: A Practical Introduction*. 2nd ed. Wiley.
 - Alberts, B., Johnson, A., Lewis, J., et al. (2022). *Molecular Biology of the Cell*. 7th ed. Garland Science.
-
----
-
-## 記法規約
-
-| 記号 | 意味 | 備考 |
-|:-----|:-----|:-----|
-| $\mathbf{X}$ | タンパク質全原子座標 | Backbone + Sidechain |
-| $\mathbf{s}$ | アミノ酸配列 | $(s_1, \ldots, s_L)$ |
-| $R \in \text{SO}(3)$ | 回転行列 | 3×3直交行列 |
-| $\mathbf{t} \in \mathbb{R}^3$ | 並進ベクトル | 3次元 |
-| $\mathbf{L}$ | 格子行列 | 3×3 (結晶) |
-| $\mathbf{f}_i$ | 分率座標 | $[0, 1)^3$ |
-| $Z_i$ | 原子番号 | 1-118 |
-| $E_g$ | バンドギャップ | eV |
-| $p_\theta$ | 学習分布 | パラメータ $\theta$ |
-| $v_\theta(x, t)$ | Flow速度場 | Flow Matching |
-| $\mathbf{s}_\theta(x, t)$ | Score function | Diffusion |
-| $q(x_t \| x_0)$ | Forward process | ノイズ追加 |
-| TM-score | Template Modeling score | 構造類似度 (0-1) |
-| RMSD | Root Mean Square Deviation | 構造のずれ (Å) |
-| SA Score | Synthetic Accessibility Score | 合成容易性 (1-10) |
 
 ---
 
@@ -771,9 +738,7 @@ packages = [
     "StaticArrays",  # 高速固定サイズ配列
 ]
 
-for pkg in packages
-    Pkg.add(pkg)
-end
+Pkg.add.(packages)
 
 # プロジェクト初期化
 Pkg.activate("CrystalFlowProject")
@@ -885,11 +850,11 @@ end
 # --- Flow Matching Loss ---
 function fm_loss(model, x0, x1)
     t = rand(Float32)
-    x_t = (1 - t) * x0 + t * x1
-    v_target = x1 - x0
+    x_t = @. (1 - t) * x0 + t * x1
+    v_target = x1 .- x0
 
     v_pred = model(x_t, t)
-    return mean((v_pred - v_target).^2)
+    return mean((v_pred .- v_target).^2)
 end
 
 # --- Training ---
@@ -1266,35 +1231,33 @@ end
 
 #### SA Score実装
 
-```python
-from rdkit import Chem
-from rdkit.Chem import rdMolDescriptors
+```julia
+using MolecularGraph
 
-def calculate_sa_score(smiles):
-    mol = Chem.MolFromSmiles(smiles)
-    if mol is None:
-        return None
+function calculate_sa_score(smiles::String)::Union{Float64, Nothing}
+    mol = smilestomol(smiles)
+    isnothing(mol) && return nothing
 
-    # Complexity score
-    complexity = rdMolDescriptors.CalcNumRotatableBonds(mol)
-    complexity += rdMolDescriptors.CalcNumAromaticRings(mol) * 2
+    # Complexity score: rotatable bonds + aromatic rings
+    rot_bonds   = countrotatablebonds(mol)
+    arom_rings  = length(sssrings(mol) |> filter(r -> isaromatic(mol, r)))
+    complexity  = rot_bonds + arom_rings * 2
 
-    # Fragment score (simplification)
-    num_atoms = mol.GetNumAtoms()
-    fragment_score = num_atoms / 10.0
+    # Fragment and size penalty
+    n_atoms      = atomcount(mol)
+    fragment_sc  = n_atoms / 10.0
+    size_penalty = abs(n_atoms - 20) / 10.0
 
-    # Size penalty
-    size_penalty = abs(num_atoms - 20) / 10.0
-
-    sa = complexity - fragment_score + size_penalty
-    sa = 1.0 + (9.0 - 1.0) / (1.0 + np.exp(-sa))  # Normalize to 1-10
-
+    sa_raw = complexity - fragment_sc + size_penalty
+    sa = 1.0 + 8.0 / (1.0 + exp(-sa_raw))  # normalize to [1, 9]
     return sa
+end
 
-# 使用例
-smiles_list = ["CCO", "c1ccccc1", "CC(=O)Oc1ccccc1C(=O)O"]  # エタノール, ベンゼン, アスピリン
-for s in smiles_list:
-    print(f"{s}: SA Score = {calculate_sa_score(s):.2f}")
+# 使用例: エタノール、ベンゼン、アスピリン
+for smiles in ["CCO", "c1ccccc1", "CC(=O)Oc1ccccc1C(=O)O"]
+    sc = calculate_sa_score(smiles)
+    @printf "%s: SA Score = %.2f\n" smiles sc
+end
 ```
 
 **出力**:
@@ -1308,66 +1271,64 @@ CC(=O)Oc1ccccc1C(=O)O: SA Score = 4.67 (moderate)
 
 #### Formation Energy (DFT計算)
 
-```python
-from ase import Atoms
-from ase.calculators.vasp import Vasp
+```julia
+using DFTK, LinearAlgebra
 
-def calculate_formation_energy(crystal):
-    # ASE Atoms object
-    atoms = Atoms(
-        symbols=crystal.elements,
-        scaled_positions=crystal.frac_coords,
-        cell=crystal.lattice,
-        pbc=True
-    )
+function calculate_formation_energy(elements::Vector{Symbol},
+                                    frac_coords::Matrix{Float64},
+                                    lattice::Matrix{Float64})::Float64
+    # Build unit cell
+    a1, a2, a3 = eachcol(lattice)
+    cell = UnitCell(Lattice(a1, a2, a3),
+                    [ElementCoulomb(Z) for Z in elements],
+                    [frac_coords[:, i] for i in axes(frac_coords, 2)])
 
-    # VASP calculator
-    calc = Vasp(
-        xc='PBE',
-        encut=520,
-        kpts=(4, 4, 4),
-        ibrion=2,
-        nsw=100
-    )
-    atoms.set_calculator(calc)
+    # PBE model + planewave basis
+    model = model_DFT(cell, [:gga_x_pbe, :gga_c_pbe])
+    basis = PlaneWaveBasis(model; Ecut=27.0, kgrid=[4, 4, 4])  # 520 eV ≈ 27 Hartree
 
-    # Total energy
-    E_total = atoms.get_potential_energy()
+    # SCF convergence
+    scfres   = self_consistent_field(basis; tol=1e-8)
+    E_total  = sum(values(scfres.energies))
 
-    # Reference energies (元素の化学ポテンシャル)
-    mu = {6: -9.22, 8: -4.95}  # C, O (example)
+    # Reference chemical potentials (Hartree): C=-9.22, O=-4.95 (example)
+    μ = Dict(:C => -9.22, :O => -4.95)
+    n_elem   = counter(elements)
+    E_ref    = sum(n * μ[Z] for (Z, n) in n_elem)
 
-    # Formation energy
-    composition = count_elements(crystal.elements)
-    E_form = E_total - sum(n * mu[Z] for Z, n in composition.items())
-    E_form_per_atom = E_form / len(crystal.elements)
-
-    return E_form_per_atom
+    return (E_total - E_ref) / length(elements)  # per-atom formation energy
+end
 ```
 
 #### Convex Hull判定
 
-```python
-from pymatgen.analysis.phase_diagram import PhaseDiagram, PDEntry
+```julia
+using LinearAlgebra
 
-def check_convex_hull_stability(structure, entries):
-    # Create entry for our structure
-    entry = PDEntry(structure.composition, structure.energy)
+# entryは(composition_vector, energy_per_atom)のタプルのリスト
+function check_convex_hull_stability(composition::Vector{Float64},
+                                     energy::Float64,
+                                     entries::Vector{Tuple{Vector{Float64}, Float64}})
+    # 生成エンタルピー行列を構築
+    pts = hcat([e[1] for e in entries]...)  # (n_elements, N)
+    ens = [e[2] for e in entries]
 
-    # Phase diagram
-    pd = PhaseDiagram(entries + [entry])
+    # Qhull経由の凸包分解 (Polyhedra.jl + CDDLib.jl)
+    # 簡易版: 線形計画法で安定性距離を計算
+    # E_above_hull = energy - (凸包上の補間エネルギー)
+    # ここでは2成分系を例に
 
-    # Decomposition
-    decomp, e_above_hull = pd.get_decomp_and_e_above_hull(entry)
+    n = size(pts, 2)
+    # Convex combination: pts * λ = composition, sum(λ) = 1, λ ≥ 0
+    # Minimize: ens ⋅ λ  → E_hull
+    # Use Simplex LP (JuMP + HiGHS)
+    e_hull = minimum(dot(ens, λ) for λ in _convex_combinations(composition, pts))
+    e_above_hull = energy - e_hull
 
-    # Stability criterion: < 25 meV/atom
-    is_stable = e_above_hull < 0.025
-
-    return {
-        "e_above_hull": e_above_hull,
-        "is_stable": is_stable,
-        "decomposition": decomp
-    }
+    return (e_above_hull = e_above_hull,
+            is_stable   = e_above_hull < 0.025,  # < 25 meV/atom
+            stable_msg  = e_above_hull < 0.025 ? "✅ stable" : "⚠️ unstable ($(round(e_above_hull*1000, digits=1)) meV/atom)")
+end
 ```
 
 ---
@@ -1411,7 +1372,7 @@ function rfdiffusion3_with_motif(motif::Matrix{Float64}, target_length::Int)
 
     # Fix motif positions
     motif_indices = 1:size(motif, 1)
-    x_T[motif_indices, :] = motif
+    x_T[motif_indices, :] .= motif
 
     # Reverse diffusion
     for t in reverse(0.01:0.01:1.0)
@@ -1452,11 +1413,11 @@ function (layer::EGNNLayer)(x::Matrix{Float64}, h::Matrix{Float64}, edges)
         e_ij = layer.edge_mlp(vcat(h[i, :], h[j, :], [d_ij]))
 
         # Update coordinates (equivariant)
-        Δx = layer.coord_mlp(e_ij) .* (r_ij / d_ij)
-        x_out[i, :] += Δx
+        Δx = layer.coord_mlp(e_ij) .* (r_ij ./ d_ij)
+        x_out[i, :] .+= Δx
 
         # Update features (invariant)
-        h_out[i, :] += layer.node_mlp(e_ij)
+        h_out[i, :] .+= layer.node_mlp(e_ij)
     end
 
     return x_out, h_out
@@ -1474,12 +1435,7 @@ function symmetrize_crystal(coords::Matrix{Float64}, space_group::Int)
     symops = operations(sg)
 
     # Apply all symmetry operations
-    sym_coords = []
-    for op in symops
-        # op = (R, t) where R is rotation, t is translation
-        transformed = (op.rotation * coords')' .+ op.translation'
-        push!(sym_coords, mod.(transformed, 1.0))  # Wrap to unit cell
-    end
+    sym_coords = [mod.((op.rotation * coords')' .+ op.translation', 1.0) for op in symops]
 
     # Average
     avg_coords = mean(sym_coords)
@@ -1526,7 +1482,7 @@ function partial_diffusion_refinement(
     # Denoise with peptide guidance
     for t in reverse(0.01:0.01:t_start)
         score = score_function(x_t, t, peptide_ref)
-        x_t -= score * 0.01
+        @. x_t -= score * 0.01
     end
 
     return x_t
@@ -1631,625 +1587,14 @@ fn process_vec_inplace(data: &mut [f32]) {
 
 ---
 
-## 📖 補遺E: 用語集詳細
 
-| 用語 | 英語 | 定義 | 関連概念 |
-|:-----|:-----|:-----|:---------|
-| タンパク質折りたたみ | Protein Folding | アミノ酸配列が3D構造に自発的に変換される過程 | Anfinsen's dogma |
-| モチーフ | Motif | タンパク質の機能的・構造的単位 (例: ヘリックス-ターン-ヘリックス) | Domain, Fold |
-| ドッキング | Docking | 小分子とタンパク質の結合ポーズ予測 | Binding affinity |
-| 結合親和性 | Binding Affinity | 分子間の結合強度 (K_d, ΔG) | IC50, K_i |
-| ADMET | Absorption, Distribution, Metabolism, Excretion, Toxicity | 薬物動態の5要素 | Pharmacokinetics |
-| 生成エネルギー | Formation Energy | 元素から化合物が生成される際のエネルギー変化 | ΔH_f |
-| 凸包 | Convex Hull | 熱力学的に安定な相の集合 | Phase diagram |
-| 空間群 | Space Group | 結晶の対称性を表す230種類の群 | Point group, Bravais lattice |
-| 分率座標 | Fractional Coordinates | 格子ベクトル基底での座標 (0-1) | Cartesian coordinates |
-| バンドギャップ | Bandgap | 半導体の価電子帯と伝導帯のエネルギー差 | Semiconductor |
-| DFT | Density Functional Theory | 電子密度から多体系のエネルギーを計算する量子化学手法 | LDA, GGA, Hybrid |
-| VASP | Vienna Ab initio Simulation Package | DFT計算ソフトウェア | Quantum ESPRESSO, CASTEP |
-| Synthesizability | 合成可能性 | 実験室で実際に合成できる確率 | Retrosynthesis |
-| Designability | 設計可能性 | 配列が目標構造に折りたたまれる確率 | Foldability |
+## 著者リンク
 
----
-
-## 🎯 演習: Tiny Crystal Flow Matching完全実装
-
-### 演習の目標
-
-- 2D格子生成をFlow Matchingで実装
-- 訓練ループ・サンプリング・評価を完全実装
-- Julia (訓練) + Rust (推論) の両方を書く
-- 計算時間: CPU 10分以内
-
-### Step 1: Julia訓練コード（完全版）
-
-```julia
-# ファイル: crystal_flow_training.jl
-module TinyCrystalFlow
-
-using Flux, Zygote
-using LinearAlgebra, Statistics, Random
-using Plots
-
-# --- データ生成 ---
-function generate_square_lattice(n::Int=8, a::Float32=1.0f0)
-    """2D正方格子を生成"""
-    coords = zeros(Float32, n, 2)
-    for i in 1:n
-        coords[i, 1] = mod(i-1, Int(sqrt(n))) * a
-        coords[i, 2] = div(i-1, Int(sqrt(n))) * a
-    end
-    return coords
-end
-
-function generate_hexagonal_lattice(n::Int=8, a::Float32=1.0f0)
-    """2D六方格子を生成"""
-    coords = zeros(Float32, n, 2)
-    for i in 1:n
-        row = div(i-1, Int(sqrt(n)))
-        col = mod(i-1, Int(sqrt(n)))
-        coords[i, 1] = col * a + (row % 2) * a/2
-        coords[i, 2] = row * a * sqrt(3)/2
-    end
-    return coords
-end
-
-# --- Velocity Model ---
-struct VelocityMLP
-    layers::Chain
-end
-
-function VelocityMLP(input_dim::Int=3, hidden_dim::Int=64)
-    layers = Chain(
-        Dense(input_dim, hidden_dim, tanh),
-        Dense(hidden_dim, hidden_dim, tanh),
-        Dense(hidden_dim, 2)  # 2D coords output
-    )
-    return VelocityMLP(layers)
-end
-
-function (model::VelocityMLP)(x::Matrix{Float32}, t::Float32)
-    n = size(x, 1)
-    t_vec = fill(t, n, 1)
-    input = hcat(x, t_vec) |> transpose
-    output = model.layers(input) |> transpose
-    return output
-end
-
-# --- Flow Matching Loss ---
-function flow_matching_loss(model, x0, x1, t)
-    # Linear interpolation
-    x_t = (1 - t) * x0 + t * x1
-
-    # Target velocity
-    v_target = x1 - x0
-
-    # Predicted velocity
-    v_pred = model(x_t, t)
-
-    # MSE loss
-    loss = mean((v_pred - v_target).^2)
-    return loss
-end
-
-# --- Training Loop ---
-function train!(model, opt, n_epochs::Int=1000, batch_size::Int=16)
-    """訓練ループ"""
-    losses = Float32[]
-    ps = Flux.params(model.layers)
-
-    for epoch in 1:n_epochs
-        epoch_loss = 0.0f0
-
-        for _ in 1:batch_size
-            # Random lattice type
-            if rand() > 0.5
-                x1 = generate_square_lattice()
-            else
-                x1 = generate_hexagonal_lattice()
-            end
-
-            # Random noise
-            x0 = randn(Float32, 8, 2) * 2.0f0
-
-            # Random time
-            t = rand(Float32)
-
-            # Compute loss
-            loss, back = Zygote.pullback(() -> flow_matching_loss(model, x0, x1, t), ps)
-            grads = back(1.0f0)
-            Flux.update!(opt, ps, grads)
-
-            epoch_loss += loss
-        end
-
-        avg_loss = epoch_loss / batch_size
-        push!(losses, avg_loss)
-
-        if epoch % 100 == 0
-            println("Epoch $epoch/$n_epochs, Loss: $(round(avg_loss, digits=6))")
-        end
-    end
-
-    return losses
-end
-
-# --- Sampling ---
-function sample(model::VelocityMLP, x0::Matrix{Float32}, steps::Int=50)
-    """ODEサンプリング (Euler法)"""
-    dt = 1.0f0 / steps
-    x = copy(x0)
-    trajectory = [copy(x)]
-
-    for step in 1:steps
-        t = (step - 1) * dt
-        v = model(x, t)
-        x .+= v * dt
-        push!(trajectory, copy(x))
-    end
-
-    return x, trajectory
-end
-
-# --- 評価 ---
-function evaluate_rmsd(generated::Matrix{Float32}, target::Matrix{Float32})
-    """RMSD計算"""
-    diff = generated - target
-    rmsd = sqrt(mean(diff.^2))
-    return rmsd
-end
-
-# --- 可視化 ---
-function plot_training_loss(losses)
-    p = plot(1:length(losses), losses,
-             xlabel="Epoch", ylabel="Loss",
-             title="Training Loss", label="FM Loss",
-             linewidth=2)
-    return p
-end
-
-function plot_trajectory(trajectory, target)
-    anim = @animate for (i, x) in enumerate(trajectory)
-        scatter(x[:,1], x[:,2],
-                xlim=(-3, 5), ylim=(-3, 5),
-                title="Flow Step $i/$(length(trajectory))",
-                label="Generated", ms=8, color=:blue)
-        scatter!(target[:,1], target[:,2],
-                 label="Target", ms=8, color=:red, markershape=:x)
-    end
-    return anim
-end
-
-# --- メイン実行 ---
-function main()
-    Random.seed!(42)
-
-    # モデル初期化
-    model = VelocityMLP(3, 64)
-    opt = ADAM(1e-3)
-
-    # 訓練
-    println("=== 訓練開始 ===")
-    losses = train!(model, opt, 1000, 16)
-
-    # Loss可視化
-    p_loss = plot_training_loss(losses)
-    savefig(p_loss, "training_loss.png")
-
-    # サンプリングテスト
-    println("\n=== サンプリング ===")
-    target = generate_square_lattice()
-    x0 = randn(Float32, 8, 2) * 2.0f0
-    x_final, trajectory = sample(model, x0, 50)
-
-    # RMSD評価
-    rmsd = evaluate_rmsd(x_final, target)
-    println("Final RMSD: $(round(rmsd, digits=4))")
-
-    # Trajectory可視化
-    anim = plot_trajectory(trajectory, target)
-    gif(anim, "crystal_flow.gif", fps=10)
-
-    # モデル保存
-    using BSON: @save
-    @save "velocity_model.bson" model
-
-    println("\n=== 完了 ===")
-    println("モデル保存: velocity_model.bson")
-    println("Loss図: training_loss.png")
-    println("軌跡動画: crystal_flow.gif")
-
-    return model, losses
-end
-
-end  # module
-
-# 実行
-using .TinyCrystalFlow
-model, losses = TinyCrystalFlow.main()
-```
-
-**実行**:
-```bash
-julia crystal_flow_training.jl
-```
-
-**期待出力**:
-```
-=== 訓練開始 ===
-Epoch 100/1000, Loss: 0.523412
-Epoch 200/1000, Loss: 0.312456
-Epoch 300/1000, Loss: 0.198234
-Epoch 400/1000, Loss: 0.123567
-Epoch 500/1000, Loss: 0.078912
-Epoch 600/1000, Loss: 0.051234
-Epoch 700/1000, Loss: 0.034567
-Epoch 800/1000, Loss: 0.024123
-Epoch 900/1000, Loss: 0.017891
-Epoch 1000/1000, Loss: 0.013456
-
-=== サンプリング ===
-Final RMSD: 0.0342
-
-=== 完了 ===
-モデル保存: velocity_model.bson
-Loss図: training_loss.png
-軌跡動画: crystal_flow.gif
-```
-
-### Step 2: Rust推論コード（完全版）
-
-```rust
-// ファイル: src/lib.rs
-use ndarray::{Array1, Array2};
-use serde::{Deserialize, Serialize};
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct VelocityModel {
-    w1: Array2<f32>,
-    b1: Array1<f32>,
-    w2: Array2<f32>,
-    b2: Array1<f32>,
-    w3: Array2<f32>,
-    b3: Array1<f32>,
-}
-
-impl VelocityModel {
-    pub fn load(path: &str) -> Result<Self, Box<dyn std::error::Error>> {
-        let data = std::fs::read_to_string(path)?;
-        let model: VelocityModel = serde_json::from_str(&data)?;
-        Ok(model)
-    }
-
-    pub fn forward(&self, x: &Array2<f32>, t: f32) -> Array2<f32> {
-        let n = x.nrows();
-
-        // Input: [x, y, t]
-        let mut input = Array2::<f32>::zeros((n, 3));
-        input.slice_mut(s![.., 0..2]).assign(x);
-        input.slice_mut(s![.., 2]).fill(t);
-
-        // Layer 1: tanh(W1 @ x + b1)
-        let z1 = input.dot(&self.w1.t()) + &self.b1;
-        let h1 = z1.mapv(|x| x.tanh());
-
-        // Layer 2: tanh(W2 @ h1 + b2)
-        let z2 = h1.dot(&self.w2.t()) + &self.b2;
-        let h2 = z2.mapv(|x| x.tanh());
-
-        // Layer 3: W3 @ h2 + b3
-        let output = h2.dot(&self.w3.t()) + &self.b3;
-
-        output
-    }
-}
-
-pub fn flow_sample(
-    model: &VelocityModel,
-    mut x: Array2<f32>,
-    steps: usize
-) -> Array2<f32> {
-    let dt = 1.0 / steps as f32;
-
-    for step in 0..steps {
-        let t = step as f32 * dt;
-        let v = model.forward(&x, t);
-        x = &x + &(&v * dt);
-    }
-
-    x
-}
-
-pub fn calculate_rmsd(generated: &Array2<f32>, target: &Array2<f32>) -> f32 {
-    let diff = generated - target;
-    let squared_sum: f32 = diff.iter().map(|x| x * x).sum();
-    (squared_sum / (generated.nrows() * generated.ncols()) as f32).sqrt()
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use ndarray::arr2;
-
-    #[test]
-    fn test_flow_sample() {
-        // Dummy model (identity-like)
-        let w1 = Array2::<f32>::eye(3);
-        let b1 = Array1::<f32>::zeros(3);
-        let w2 = Array2::<f32>::eye(3);
-        let b2 = Array1::<f32>::zeros(3);
-        let w3 = Array2::<f32>::eye(3).slice(s![0..2, ..]).to_owned();
-        let b3 = Array1::<f32>::zeros(2);
-
-        let model = VelocityModel { w1, b1, w2, b2, w3, b3 };
-
-        let x0 = arr2(&[[0.0, 0.0], [1.0, 1.0]]);
-        let result = flow_sample(&model, x0.clone(), 10);
-
-        assert_eq!(result.nrows(), 2);
-        assert_eq!(result.ncols(), 2);
-    }
-
-    #[test]
-    fn test_rmsd() {
-        let gen = arr2(&[[1.0, 1.0], [2.0, 2.0]]);
-        let target = arr2(&[[1.1, 1.1], [2.1, 2.1]]);
-        let rmsd = calculate_rmsd(&gen, &target);
-
-        assert!((rmsd - 0.1).abs() < 0.01);
-    }
-}
-```
-
-```rust
-// ファイル: src/bin/inference.rs
-use crystal_inference::{VelocityModel, flow_sample, calculate_rmsd};
-use ndarray::{Array2};
-
-fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // Load model
-    let model = VelocityModel::load("velocity_model.json")?;
-
-    // Initial noise
-    let x0 = Array2::<f32>::from_shape_fn((8, 2), |(_, _)| {
-        rand::random::<f32>() * 2.0 - 1.0
-    });
-
-    // Sample
-    let result = flow_sample(&model, x0, 50);
-
-    // Target (square lattice)
-    let mut target = Array2::<f32>::zeros((8, 2));
-    for i in 0..8 {
-        target[[i, 0]] = (i % 3) as f32;
-        target[[i, 1]] = (i / 3) as f32;
-    }
-
-    // RMSD
-    let rmsd = calculate_rmsd(&result, &target);
-    println!("RMSD: {:.4}", rmsd);
-
-    Ok(())
-}
-```
-
-**ビルド・実行**:
-```bash
-cargo build --release
-cargo run --release --bin inference
-```
-
-### Step 3: 評価・比較
-
-```julia
-using BenchmarkTools, BSON
-
-# Julia推論速度
-@load "velocity_model.bson" model
-x0 = randn(Float32, 8, 2) * 2.0f0
-
-@btime sample($model, $x0, 50)
-# Median: 0.234 ms
-
-# 精度評価
-target = generate_square_lattice()
-x_final, _ = sample(model, x0, 50)
-julia_rmsd = evaluate_rmsd(x_final, target)
-println("Julia RMSD: $julia_rmsd")
-```
-
-```bash
-# Rust推論速度
-hyperfine --warmup 3 'cargo run --release --bin inference'
-# Time (mean ± σ): 1.2 ms ± 0.1 ms
-
-# 精度は同一 (同じモデル使用)
-```
-
-| 実装 | 速度 | 用途 |
-|:-----|:-----|:-----|
-| Julia | 0.234 ms | 訓練 + 研究 |
-| Rust | 1.2 ms (起動込み) | Production |
-| Rust (warm) | ~0.05 ms | サービング |
-
----
-
-## 🧪 演習課題
-
-### 課題1: 3D拡張
-
-**目標**: 2D→3D Crystalに拡張
-
-```julia
-function generate_fcc_3d(n::Int=27, a::Float32=1.0f0)
-    """3D FCC格子生成"""
-    coords = zeros(Float32, n, 3)
-    # TODO: FCC配置を実装
-    return coords
-end
-
-# VelocityMLPを3D対応に変更
-model_3d = VelocityMLP(4, 64)  # input_dim = 3 (coords) + 1 (time)
-```
-
-**ヒント**: 3Dでは`x,y,z`座標 + 時間`t`で4次元入力。
-
-### 課題2: Property-Conditioned生成
-
-**目標**: 格子定数`a`を条件に追加
-
-```julia
-function conditional_velocity_mlp(input_dim::Int=4, hidden_dim::Int=64)
-    """条件付きモデル"""
-    Chain(
-        Dense(input_dim, hidden_dim, tanh),  # [x, y, t, a]
-        Dense(hidden_dim, hidden_dim, tanh),
-        Dense(hidden_dim, 2)
-    )
-end
-
-function conditional_loss(model, x0, x1, t, a)
-    x_t = (1 - t) * x0 + t * x1
-    v_target = x1 - x0
-
-    # Input: [coords, time, lattice_constant]
-    input = hcat(x_t, fill(t, size(x_t, 1), 1), fill(a, size(x_t, 1), 1))
-    v_pred = model(input')' |> x -> x[:, 1:2]  # 最初2次元のみ取得
-
-    return mean((v_pred - v_target).^2)
-end
-```
-
-### 課題3: Symmetry-Aware生成
-
-**目標**: 対称性を保存する後処理
-
-```julia
-function symmetrize_2d(coords::Matrix{Float32}, symmetry::Symbol)
-    """2D対称操作"""
-    if symmetry == :p4m  # 4回回転 + 鏡映
-        # TODO: 4回対称操作を実装
-        return coords
-    elseif symmetry == :p6m  # 6回回転 + 鏡映
-        # TODO: 6回対称操作を実装
-        return coords
-    else
-        return coords
-    end
-end
-```
-
-### 課題4: Rust並列化
-
-**目標**: 複数サンプルの並列推論
-
-```rust
-use rayon::prelude::*;
-
-pub fn batch_inference(
-    model: &VelocityModel,
-    batch: Vec<Array2<f32>>,
-    steps: usize
-) -> Vec<Array2<f32>> {
-    batch.par_iter()
-        .map(|x0| flow_sample(model, x0.clone(), steps))
-        .collect()
-}
-```
-
----
-
-## 📚 補遺F: 追加リソース
-
-### F.1 データセット
-
-| Dataset | URL | 内容 | サイズ |
-|:--------|:----|:-----|:------|
-| Protein Data Bank | rcsb.org | タンパク質構造 | 200K+ |
-| Materials Project | materialsproject.org | 無機材料 | 150K+ |
-| QM9 | quantum-machine.org | 小分子 | 134K |
-| ZINC | zinc.docking.org | 購入可能化合物 | 750M+ |
-| AlphaFold DB | alphafold.ebi.ac.uk | 予測構造 | 200M+ |
-
-### F.2 ツール
-
-#### タンパク質
-- **PyRosetta**: タンパク質設計・モデリング
-- **OpenMM**: 分子動力学シミュレーション
-- **Modeller**: 相同性モデリング
-
-#### 分子
-- **RDKit**: 化学情報学ライブラリ (Python)
-- **Open Babel**: 分子フォーマット変換
-- **AutoDock**: 分子ドッキング
-
-#### 材料
-- **ASE**: Atomistic Simulation Environment (Python)
-- **Pymatgen**: Materials analysis (Python)
-- **VESTA**: 結晶構造可視化
-
-### F.3 計算資源
-
-| プラットフォーム | 特徴 | 価格 |
-|:----------------|:-----|:-----|
-| Google Colab Pro | GPU (V100/A100) | $10/月 |
-| AWS EC2 (p3.2xlarge) | V100 | $3.06/時 |
-| Lambda Labs | A100 (40GB) | $1.10/時 |
-| Paperspace | RTX A6000 | $0.76/時 |
-
-### F.4 コミュニティ
-
-- **RosettaCommons**: タンパク質設計コミュニティ
-- **Materials Virtual Lab**: 計算材料科学
-- **OpenChem**: オープンソース創薬
-- **AI for Science**: Microsoft Research
-
----
-
-## 🎓 最終チェックリスト
-
-### 理論理解
-
-- [ ] RFdiffusion3とAlphaFold 3の違いを3行で説明できる
-- [ ] DiffDockのSE(3)-equivarianceを数式で書ける
-- [ ] MatterGenのDiffusion processを導出できる
-- [ ] CrystalFlowのFlow Matching ODEを解ける
-- [ ] Designability, Validity, Stabilityの定義を言える
-
-### 実装スキル
-
-- [ ] Julia で2D Crystal Flow Matchingを訓練できた
-- [ ] Rust で推論コードを書けた
-- [ ] Elixir で分散実験を設計できた
-- [ ] 3つの評価指標を計算できた
-- [ ] ベンチマークを取れた
-
-### 最新研究
-
-- [ ] Flow Matching in Biologyの動向を知っている
-- [ ] RFdiffusion3の技術的ブレイクスルーを理解した
-- [ ] Peptide2Molのハイブリッドアプローチを説明できる
-- [ ] 2025-2026の未解決問題を3つ挙げられる
-
-### 実践
-
-- [ ] 演習課題1 (3D拡張) を完了した
-- [ ] 演習課題2 (Property条件) を完了した
-- [ ] 演習課題3 (対称性) を完了した
-- [ ] 演習課題4 (並列化) を完了した
-
----
-
-**第48回完走、本当にお疲れ様でした！**
-
-AI for Scienceの3つの柱（Protein/Drug/Materials）を理論・実装・評価の全側面から習得しました。RFdiffusion3, AlphaFold 3, MatterGen, CrystalFlowという2024-2025の最前線を押さえ、Flow Matchingの生物学応用という2025-2026フロンティアまで到達しました。
-
-次回（第49回）は **マルチモーダル統合 & 推論時スケーリング**。全モダリティ（画像・音声・動画・3D・モーション・科学）を統合する Unified Multimodal Models（Show-o, BAGEL, GPT-4o）と、Training scaling laws を超える Inference-Time Scaling（Reflect-DiT）で、Course V の最終局面へ突入します。
-
-第43-48回で培った全ドメインの知識が、第49回で一つに繋がります。2025-2026パラダイムシフトの完全理解まであと一歩。準備はいいですか？
-
----
----
+- Blog: https://fumishiki.dev
+- X: https://x.com/fumishiki
+- LinkedIn: https://www.linkedin.com/in/fumitakamurakami
+- GitHub: https://github.com/fumishiki
+- Hugging Face: https://huggingface.co/fumishiki
 
 ## ライセンス
 

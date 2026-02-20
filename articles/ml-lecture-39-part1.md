@@ -4,13 +4,16 @@ emoji: "🖼️"
 type: "tech"
 topics: ["machinelearning", "deeplearning", "ldm", "julia", "stablediffusion"]
 published: true
+slug: "ml-lecture-39-part1"
+difficulty: "advanced"
+time_estimate: "90 minutes"
+languages: ["Julia", "Rust"]
+keywords: ["機械学習", "深層学習", "生成モデル"]
 ---
 
 # 第39回: 🖼️ Latent Diffusion Models
 
-:::message
-**前回の到達点**: 第38回でScore/Flow/Diffusionの数学的等価性を証明し、統一理論が完成した。理論だけでは画像は生成できない — ピクセル空間拡散の計算限界を超える潜在空間拡散と、テキスト条件付き生成へ。
-:::
+> **Note:** **前回の到達点**: 第38回でScore/Flow/Diffusionの数学的等価性を証明し、統一理論が完成した。理論だけでは画像は生成できない — ピクセル空間拡散の計算限界を超える潜在空間拡散と、テキスト条件付き生成へ。
 
 ## 🚀 0. クイックスタート（30秒）— ピクセル vs 潜在空間の衝撃
 
@@ -47,11 +50,15 @@ $$
 
 **この30秒で体感したこと**: 次元削減が計算量を **2000倍** 削減。Stable Diffusionが消費者GPUで動く理由。
 
-:::message
-**ここまでで全体の3%完了！** これから潜在空間の数学的基盤と、テキスト条件付き生成の完全理論へ。
-:::
+> **Note:** **ここまでで全体の3%完了！** これから潜在空間の数学的基盤と、テキスト条件付き生成の完全理論へ。
 
 ---
+
+
+> Progress: 10%
+> **理解度チェック**
+> 1. このゾーンの主要な概念・定義を自分の言葉で説明してください。
+> 2. この手法が他のアプローチより優れている点と、その限界を述べてください。
 
 ## 🎮 1. 体験ゾーン（10分）— なぜ潜在空間か
 
@@ -115,9 +122,7 @@ Stable Diffusion 1.5の実測値:
 2. **Perceptual compression**: VAEが知覚的に重要な特徴を保存 → 品質維持
 3. **Computational efficiency**: 次元削減で計算量削減 → より深いU-Net・長時間訓練が可能
 
-:::message alert
-**よくある誤解**: 「潜在空間で拡散するから品質が下がる」— 実際はVAEの知覚的損失関数で **品質は向上**。
-:::
+> **⚠️ Warning:** **よくある誤解**: 「潜在空間で拡散するから品質が下がる」— 実際はVAEの知覚的損失関数で **品質は向上**。
 
 ### 数式で見るLDM
 
@@ -138,15 +143,6 @@ $$
 
 **鍵**: $x$ を $z$ に置き換えただけ。DDPMの理論がそのまま使える!
 
-```julia
-# ピクセル空間DDPM
-x₀ = randn(512, 512, 3)  # 786K次元
-εₜ = unet_pixel(xₜ, t)    # 786K次元の逆拡散
-
-# 潜在空間LDM
-z₀ = encoder(x₀)         # 64×64×4 = 16K次元
-εₜ = unet_latent(zₜ, t)  # 16K次元の逆拡散 (48x削減!)
-```
 
 ### LDMの訓練パイプライン
 
@@ -182,9 +178,7 @@ $$
 - VAEは **固定** （勾配を流さない）
 - U-Netだけを訓練
 
-:::message
-**ここまでで全体の10%完了！** VAEで圧縮、潜在空間で拡散という2段階設計の理論的根拠を理解した。次は数式修行ゾーンへ。
-:::
+> **Note:** **ここまでで全体の10%完了！** VAEで圧縮、潜在空間で拡散という2段階設計の理論的根拠を理解した。次は数式修行ゾーンへ。
 
 ---
 
@@ -290,11 +284,15 @@ graph TD
 
 この3言語スタックで **訓練→推論→配信** の完全パイプラインを構築する。
 
-:::message
-**ここまでで全体の20%完了！** 直感を固めた。次は数式修行ゾーンで完全理論へ。
-:::
+> **Note:** **ここまでで全体の20%完了！** 直感を固めた。次は数式修行ゾーンで完全理論へ。
 
 ---
+
+
+> Progress: 20%
+> **理解度チェック**
+> 1. このゾーンの主要な概念・定義を自分の言葉で説明してください。
+> 2. この手法が他のアプローチより優れている点と、その限界を述べてください。
 
 ## 📐 3. 数式修行ゾーン（60分）— LDM完全理論
 
@@ -341,52 +339,21 @@ $$
 
 **結論**: $f=8$ が品質と速度の最適バランス。
 
-```julia
-# VAE Encoder/Decoder定義 (Lux.jl)
-function create_vae_encoder(; img_size=512, latent_size=64, latent_channels=4)
-    # Downsampling path: 512 -> 256 -> 128 -> 64
-    encoder = Chain(
-        Conv((3, 3), 3 => 128, pad=1),
-        ResBlock(128),
-        Downsample(128 => 256),  # 512 -> 256
-        ResBlock(256),
-        Downsample(256 => 512),  # 256 -> 128
-        ResBlock(512),
-        Downsample(512 => 512),  # 128 -> 64
-        SelfAttention(512),
-        ResBlock(512),
-        Conv((3, 3), 512 => latent_channels, pad=1)  # Output z
-    )
-    return encoder
-end
+**KL 正則化 VAE の潜在変数スケーリング**:
 
-# エンコード
-x = randn(Float32, 512, 512, 3, 1)  # [H, W, C, B]
-z = encoder(x, ps, st)[1]           # [64, 64, 4, 1] (48x圧縮!)
-```
+LDM の実装では VAE の潜在変数を標準偏差でスケーリングして拡散モデルに入力する。SD 1.x の VAE では学習データ統計から推定したスケール定数 $s = 0.18215$ を用い:
 
-:::details VAE Decoderのミラー構造
-```julia
-function create_vae_decoder(; latent_size=64, img_size=512, latent_channels=4)
-    decoder = Chain(
-        Conv((3, 3), latent_channels => 512, pad=1),
-        ResBlock(512),
-        SelfAttention(512),
-        ResBlock(512),
-        Upsample(512 => 512),  # 64 -> 128
-        ResBlock(512),
-        Upsample(512 => 256),  # 128 -> 256
-        ResBlock(256),
-        Upsample(256 => 128),  # 256 -> 512
-        ResBlock(128),
-        Conv((3, 3), 128 => 3, pad=1, activation=tanh)  # Output x
-    )
-    return decoder
-end
+$$
+z_\text{scaled} = \mathcal{E}(x) / s, \quad z_\text{diffusion} = z_\text{scaled}
+$$
 
-x̃ = decoder(z, ps, st)[1]  # [512, 512, 3, 1] 再構成
-```
-:::
+これにより拡散モデルが扱う入力の分散が約 $1$ に正規化され、ノイズスケジュールが適切に機能する。デコード時は逆演算 $\tilde{x} = \mathcal{D}(z_\text{diffusion} \times s)$ を施す。スケール定数はモデルごとに異なり（SDXL: $s=0.13025$、FLUX: $s=0.3611$）、誤った値を使うと生成品質が著しく低下する。
+
+
+<details><summary>VAE Decoderのミラー構造</summary>
+
+
+</details>
 
 ### 3.2 潜在空間での拡散プロセス
 
@@ -412,31 +379,15 @@ $$
 
 **鍵**: ピクセル空間のDDPMと数式は **完全に同じ**。$x \to z$ の置き換えだけ。
 
-```julia
-# Forward process: z₀にノイズ付加
-function forward_diffusion(z₀, t, αₜ_bar, rng)
-    ε = randn(rng, Float32, size(z₀))
-    z_t = sqrt(αₜ_bar) .* z₀ .+ sqrt(1 - αₜ_bar) .* ε
-    return z_t, ε
-end
+**潜在空間での拡散が有効な理由の定量的考察**:
 
-# 訓練ステップ
-function train_step!(model, z₀, t, αₜ_bar, ps, st, opt_state)
-    z_t, ε_true = forward_diffusion(z₀, t, αₜ_bar, rng)
+VAE の圧縮率 $f$ を用いると、元画像 $x \in \mathbb{R}^{H \times W \times 3}$ に対して潜在変数は $z \in \mathbb{R}^{(H/f) \times (W/f) \times C}$ となる（SD 1.x: $f=8$, $C=4$）。拡散モデルの計算コストは入力次元に対して概ね $\mathcal{O}(d^2)$（Self-Attention 項）の依存性を持つため、潜在空間での拡散の理論的高速化は:
 
-    # ε-prediction
-    ε_pred, st = model((z_t, t), ps, st)
+$$
+\text{Speedup} \approx \left(\frac{H \times W \times 3}{(H/f)^2 \times C}\right)^2 = \left(\frac{3 f^2}{C}\right)^2
+$$
 
-    # MSE loss
-    loss = mean((ε_pred .- ε_true).^2)
-
-    # Backprop
-    gs = gradient(ps -> loss, ps)[1]
-    opt_state, ps = Optimisers.update(opt_state, ps, gs)
-
-    return loss, ps, st, opt_state
-end
-```
+$f=8$, $C=4$ で Speedup $\approx (192/4)^2 = 2304$ 倍（理論値）。実際には CNN 部分のオーバーヘッドや Attention 以外の項があるため実測値は数十〜百倍程度であるが、512×512 生成においてピクセル拡散との差は歴然。
 
 **Noise scheduleの選択**:
 
@@ -445,7 +396,7 @@ end
 - Cosine: $\bar{\alpha}_t = \cos\left(\frac{t/T + s}{1+s} \cdot \frac{\pi}{2}\right)^2 / \cos\left(\frac{s}{1+s} \cdot \frac{\pi}{2}\right)^2$
 - **Zero Terminal SNR**: $\bar{\alpha}_T = 0$ を強制（後述）
 
-Stable Diffusion 1.x/2.xは **Linear schedule** with 1000 steps。
+Stable Diffusion 1.x/2.xは **Linear schedule** with 1000 steps。累積積 $\bar{\alpha}_t = \prod_{s=1}^t (1-\beta_s)$ は $t=1000$ で $\bar{\alpha}_{1000} \approx 4.6 \times 10^{-5}$ となり、完全なノイズには僅かに達しない（Zero Terminal SNR 問題）。
 
 ### 3.3 LDM訓練パイプライン
 
@@ -485,40 +436,8 @@ $$
 \end{aligned}
 $$
 
-```julia
-# 完全な訓練ループ
-function train_ldm!(unet, vae_encoder, dataloader, epochs; lr=1e-4)
-    opt = Adam(lr)
-    opt_state = Optimisers.setup(opt, ps_unet)
 
-    for epoch in 1:epochs
-        for (x, c) in dataloader
-            # VAE encode (no grad)
-            z₀ = vae_encoder(x, ps_vae, st_vae)[1]  # 勾配なし
-
-            # Random timestep
-            t = rand(1:T)
-            αₜ_bar = alpha_bar_schedule[t]
-
-            # Forward diffusion
-            z_t, ε = forward_diffusion(z₀, t, αₜ_bar, rng)
-
-            # Predict noise
-            ε_pred, st_unet = unet((z_t, t, c), ps_unet, st_unet)
-
-            # Loss & update
-            loss = mse_loss(ε_pred, ε)
-            gs = gradient(ps -> loss, ps_unet)[1]
-            opt_state, ps_unet = Optimisers.update(opt_state, ps_unet, gs)
-        end
-    end
-    return ps_unet
-end
-```
-
-:::message alert
-**よくあるミス**: VAEに勾配を流してしまう。Encoderは **完全に固定** しなければならない。
-:::
+> **⚠️ Warning:** **よくあるミス**: VAEに勾配を流してしまう。Encoderは **完全に固定** しなければならない。
 
 ### 3.4 Classifier Guidance完全版
 
@@ -550,26 +469,6 @@ $$
 
 → Classifier-Free Guidanceで解決!
 
-```julia
-# Classifier Guidance (参考実装)
-function classifier_guidance_sample(unet, classifier, z_T, c, w)
-    z_t = z_T
-    for t in T:-1:1
-        # 無条件スコア
-        ε_uncond = unet(z_t, t, nothing)
-
-        # 分類器勾配
-        grad_log_p_c = gradient(z -> log_prob(classifier(z), c), z_t)[1]
-
-        # ガイダンス適用
-        ε_guided = ε_uncond .- sqrt(1 - α_bar[t]) .* w .* grad_log_p_c
-
-        # サンプリングステップ
-        z_t = reverse_step(z_t, ε_guided, t)
-    end
-    return decoder(z_t)
-end
-```
 
 ### 3.5 Classifier-Free Guidance完全導出
 
@@ -630,7 +529,8 @@ $$
 
 $w \to \infty$ で条件付き分布の **最頻値** (mode)にピーク → 品質向上だが多様性低下。
 
-:::details CFGの理論的理解: Mode-Seeking vs Mode-Covering
+<details><summary>CFGの理論的理解: Mode-Seeking vs Mode-Covering</summary>
+
 **$w$の効果**:
 
 | Guidance Scale $w$ | 挙動 | 品質 | 多様性 |
@@ -648,43 +548,9 @@ $w \to \infty$ で条件付き分布の **最頻値** (mode)にピーク → 品
 **数学的視点**:
 - $w < 1$: Mode-covering (KL[q‖p]最小化風)
 - $w > 1$: Mode-seeking (KL[p‖q]最小化風)
-:::
 
-```julia
-# Classifier-Free Guidance実装
-function cfg_sample(unet, z_T, c, w; steps=50)
-    z_t = z_T
-    timesteps = reverse(1:steps)
+</details>
 
-    for t in timesteps
-        # 2回のforward pass
-        ε_uncond = unet((z_t, t, nothing), ps, st)[1]  # 無条件
-        ε_cond = unet((z_t, t, c), ps, st)[1]           # 条件付き
-
-        # CFG結合
-        ε_guided = ε_uncond .+ w .* (ε_cond .- ε_uncond)
-
-        # DDIMステップ (高速サンプリング)
-        z_t = ddim_step(z_t, ε_guided, t, t-1, αₜ_bar)
-    end
-
-    return vae_decoder(z_t)
-end
-
-# 訓練時のCondition Drop
-function train_step_with_cfg!(unet, z₀, c, t, p_uncond=0.1)
-    # Randomly drop condition
-    if rand() < p_uncond
-        c = nothing  # 無条件化
-    end
-
-    z_t, ε = forward_diffusion(z₀, t, αₜ_bar, rng)
-    ε_pred = unet((z_t, t, c), ps, st)[1]
-
-    loss = mse_loss(ε_pred, ε)
-    # ... backprop
-end
-```
 
 ### 3.6 CFGの理論的理解
 
@@ -719,28 +585,27 @@ $$
 
 **解釈**: 「$c_\text{neg}$から離れ、$c_\text{pos}$に近づく」方向にガイド。
 
+**Negative Prompt の確率的解釈**:
+
+CFG の確率分布的解釈（セクション 3.6）を Negative Prompt に拡張すると、実効分布は:
+
+$$
+p_w(z_t | c_\text{pos}, c_\text{neg}) \propto p(z_t | c_\text{neg})^{1-w} \cdot p(z_t | c_\text{pos})^w
+$$
+
+$w > 1$ のとき $1-w < 0$ であるため $p(z_t | c_\text{neg})^{1-w}$ は負のプロンプト分布の**逆数**に比例する。すなわち Negative Prompt 条件下で高確率な領域を積極的に避ける動作を示す。
+
+**双方向誘導の強度分解**:
+
+ガイダンス方向を分解すると:
+
+$$
+\tilde{\epsilon} = \underbrace{\epsilon_\theta(z_t, t, c_\text{neg})}_{\text{anchor}} + w \cdot \underbrace{(\epsilon_\theta(z_t, t, c_\text{pos}) - \epsilon_\theta(z_t, t, c_\text{neg}))}_{\text{positive - negative}}
+$$
+
+正のプロンプトと負のプロンプトのノイズ予測差が誘導ベクトルとなる。$c_\text{neg} = \emptyset$ の場合は無条件モデルがアンカーとなり、標準 CFG に帰着する。Negative Prompt として空文字列の代わりに「blurry, low quality, deformed」を使うと、アンカーが低品質空間に移動し、誘導ベクトルが高品質空間を向くため品質向上が生じる。
+
 **典型的なNegative Prompt**:
-```
-"blurry, low quality, watermark, signature, jpeg artifacts,
- worst quality, low resolution, bad anatomy"
-```
-
-```julia
-# Negative Prompt実装
-function cfg_with_negative(unet, z_T, c_pos, c_neg, w)
-    z_t = z_T
-    for t in T:-1:1
-        ε_neg = unet((z_t, t, c_neg), ps, st)[1]
-        ε_pos = unet((z_t, t, c_pos), ps, st)[1]
-
-        # Negative Prompt適用
-        ε_guided = ε_neg .+ w .* (ε_pos .- ε_neg)
-
-        z_t = reverse_step(z_t, ε_guided, t)
-    end
-    return decoder(z_t)
-end
-```
 
 **効果**:
 - 品質向上: 「blurry」を避ける → 鮮明
@@ -774,28 +639,23 @@ end
 - CLIP: グローバルな意味（「犬」「山」）
 - T5: 詳細な関係性（「犬が山の上に座っている」）
 
-:::details CLIP Text Encoderの仕組み
-```python
-# CLIPテキストエンコーディング (PyTorch擬似コード)
-text = "A beautiful mountain landscape"
-tokens = tokenizer(text)  # [BOS, 320, 1215, 5270, 5677, EOS, PAD, ...]  # 77 tokens
+**CLIP のコントラスティブ事前学習**:
 
-# Transformer Encoder
-embeddings = text_embedding(tokens)  # [77, 768]
-hidden = transformer_layers(embeddings)  # [77, 768]
+CLIP は画像エンコーダ $f_I$ とテキストエンコーダ $f_T$ を持ち、対になった $(I_i, T_i)$ ペアに対してコントラスティブ損失で同時学習する。バッチサイズ $N$ の場合の InfoNCE 損失:
 
-# Pooling
-pooled = hidden[0]  # [BOS]トークンを使用 (BERT風)
-# または
-pooled = hidden.mean(dim=0)  # 平均プーリング
+$$
+\mathcal{L}_\text{CLIP} = -\frac{1}{2N} \sum_{i=1}^N \left[ \log \frac{e^{f_I(I_i)^\top f_T(T_i) / \tau}}{\sum_{j=1}^N e^{f_I(I_i)^\top f_T(T_j) / \tau}} + \log \frac{e^{f_T(T_i)^\top f_I(I_i) / \tau}}{\sum_{j=1}^N e^{f_T(T_j)^\top f_I(I_j) / \tau}} \right]
+$$
 
-# Output: [768] vector
-```
+ここで $\tau$ は学習可能な温度パラメータ。この学習により CLIP 潜在空間では意味的に類似した画像とテキストが近傍に配置される。拡散モデルの条件付けで CLIP テキストエンコーダを用いることで、この画像・テキスト整合空間の幾何学的構造が生成プロセスに活用される。
+
+<details><summary>CLIP Text Encoderの仕組み</summary>
 
 SD 1.xはCLIPの最終層hidden statesを **全て使用**:
 - $c = [\mathbf{h}_0, \mathbf{h}_1, \ldots, \mathbf{h}_{76}]$ : shape [77, 768]
 - これをCross-Attentionに入力
-:::
+
+</details>
 
 ### 3.9 Cross-Attention Text Conditioning
 
@@ -840,53 +700,41 @@ $$
 
 各headが異なる意味的側面をキャプチャ（例: 色、形、配置）。
 
-```julia
-# Cross-Attention Layer (Lux.jl)
-struct CrossAttention
-    num_heads::Int
-    head_dim::Int
-    W_Q::Dense
-    W_K::Dense
-    W_V::Dense
-    W_O::Dense
-end
+**Cross-Attention の情報流れの分析**:
 
-function (ca::CrossAttention)(f, c)
-    # f: [h*w, d], c: [L, d_text]
-    Q = ca.W_Q(f)      # [h*w, num_heads * head_dim]
-    K = ca.W_K(c)      # [L, num_heads * head_dim]
-    V = ca.W_V(c)      # [L, num_heads * head_dim]
+注意重み行列 $A \in \mathbb{R}^{(hw) \times L}$ の各行 $A_{i,:}$ は空間位置 $i$ がテキストトークン $1, \ldots, L$ に割り当てる重みの分布を示す。 $\text{softmax}$ の性質より $\sum_j A_{ij} = 1$ であり、各空間位置は全テキストトークンの加重平均 $\sum_j A_{ij} V_j$ を受け取る。
 
-    # Reshape for multi-head
-    Q = reshape(Q, :, ca.num_heads, ca.head_dim)  # [h*w, heads, dim]
-    K = reshape(K, :, ca.num_heads, ca.head_dim)  # [L, heads, dim]
-    V = reshape(V, :, ca.num_heads, ca.head_dim)
+この仕組みにより、例えば「赤い犬」というプロンプトでは:
+- 「犬」トークン → 犬形状の空間位置に高い重み
+- 「赤い」トークン → 同じ領域に高い重みを持ちつつ色情報を付加
 
-    # Attention
-    scores = batched_mul(Q, permutedims(K, (2, 1, 3))) / sqrt(ca.head_dim)
-    attn = softmax(scores, dims=2)  # [h*w, L, heads]
-    out = batched_mul(attn, V)      # [h*w, heads, dim]
+という構造化された条件付けが生じる。Prompt-to-Prompt（Hertz et al. 2022）はこの注意マップ $A$ を操作することで画像編集を可能にする。
 
-    # Concat + projection
-    out = reshape(out, :, ca.num_heads * ca.head_dim)
-    return ca.W_O(out)
-end
-```
+**SpatialTransformer の残差構造**:
+
+SD の SpatialTransformer Block は以下の残差接続で構成される:
+
+$$
+h \leftarrow h + \text{SelfAttn}(\text{GroupNorm}(h))
+$$
+
+$$
+h \leftarrow h + \text{CrossAttn}(\text{GroupNorm}(h), c)
+$$
+
+$$
+h \leftarrow h + \text{FFN}(\text{GroupNorm}(h))
+$$
+
+特徴マップ $h \in \mathbb{R}^{B \times C \times H \times W}$ は空間次元を平坦化して $(BHW) \times C$ のシーケンスとして扱い、注意計算後に元の形状に戻す。FFN は GEGLU 活性化関数を用いる:
+
+$$
+\text{GEGLU}(x, W_1, W_2, b_1, b_2) = (x W_1 + b_1) \otimes \sigma(x W_2 + b_2)
+$$
+
+ここで $\sigma$ はシグモイド関数、$\otimes$ は要素積。GEGLU は ReLU より滑らかな勾配を持ち、Transformer の FFN における標準的な選択となっている。
 
 **SpatialTransformer Block** (SD U-Net):
-```
-Input z_t
-  ↓
-GroupNorm
-  ↓
-Self-Attention (spatial)
-  ↓
-Cross-Attention (with text c)
-  ↓
-FeedForward
-  ↓
-Output
-```
 
 これを各解像度で繰り返し。
 
@@ -923,19 +771,7 @@ graph LR
 **総パラメータ数**: ~860M
 
 **ResBlock構成**:
-```
-Input
-  ↓
-GroupNorm → SiLU → Conv (3×3)
-  ↓
-Timestep Embedding (broadcast add)
-  ↓
-GroupNorm → SiLU → Conv (3×3)
-  ↓
-Residual Connection
-  ↓
-Output
-```
+
 
 **Timestep Embedding**:
 $$
@@ -944,16 +780,6 @@ $$
 
 ここで $\omega_k = 10000^{-2k/d}$ (Transformer風)。
 
-```julia
-# Timestep Embedding
-function sinusoidal_embedding(t, dim)
-    half_dim = dim ÷ 2
-    emb = log(10000) / (half_dim - 1)
-    emb = exp.(-emb .* (0:(half_dim-1)))
-    emb = t .* emb'
-    return hcat(sin.(emb), cos.(emb))
-end
-```
 
 ### 3.11 LDM固有のU-Net拡張: SpatialTransformer
 
@@ -966,29 +792,7 @@ end
 | **層構成** | ResBlock→Attn | ResBlock→**SpatialTransformer** |
 
 **SpatialTransformer Block**:
-```
-Input: [B, H, W, C]
-  ↓
-Reshape: [B, H*W, C]
-  ↓
-LayerNorm
-  ↓
-Self-Attention: Attention(Q,K,V) where Q=K=V=features
-  ↓
-LayerNorm
-  ↓
-Cross-Attention: Attention(Q_img, K_text, V_text)
-  ↓
-LayerNorm
-  ↓
-FeedForward (MLP)
-  ↓
-Reshape: [B, H, W, C]
-  ↓
-Residual Add
-  ↓
-Output
-```
+
 
 **なぜSpatial Transformer？**
 
@@ -1042,23 +846,7 @@ graph TD
 ```
 
 **Transformer Blockの構成**:
-```
-Input: z_t patches + timestep t + text c
-  ↓
-Adaptive LayerNorm (conditioned on t, c)
-  ↓
-Self-Attention (全patch間)
-  ↓
-Adaptive LayerNorm
-  ↓
-Cross-Attention (patch ↔ text)
-  ↓
-Adaptive LayerNorm
-  ↓
-MLP
-  ↓
-Output
-```
+
 
 **なぜFLUXが速い？**
 
@@ -1074,35 +862,10 @@ Output
 | **FLUX.1-dev** | 12B | 20 steps | 高 | 開発用 |
 | **FLUX.1-schnell** | 12B | **4 steps** | 中 | 高速生成 |
 
-:::details FLUX Transformerの実装概要
-```julia
-# FLUX Transformer Block (概念的)
-struct FLUXTransformerBlock
-    self_attn::MultiHeadAttention
-    cross_attn::MultiHeadAttention
-    mlp::MLP
-    adaLN::AdaptiveLayerNorm
-end
+<details><summary>FLUX Transformerの実装概要</summary>
 
-function (block::FLUXTransformerBlock)(z_patches, t_emb, text_emb)
-    # Adaptive LayerNorm (timestep & text conditioned)
-    z = block.adaLN(z_patches, t_emb, text_emb)
 
-    # Self-Attention (全patch間)
-    z = z + block.self_attn(z, z, z)
-
-    # Cross-Attention (patch ↔ text)
-    z = block.adaLN(z, t_emb, text_emb)
-    z = z + block.cross_attn(z, text_emb, text_emb)
-
-    # MLP
-    z = block.adaLN(z, t_emb, text_emb)
-    z = z + block.mlp(z)
-
-    return z
-end
-```
-:::
+</details>
 
 ### 3.13 学習テクニック
 
@@ -1143,6 +906,34 @@ $$
 
 **効果**: 数値安定性向上・収束性改善。
 
+$v$-prediction と $\epsilon$-prediction の損失は以下の関係で接続される。$v_t = \sqrt{\bar{\alpha}_t} \epsilon - \sqrt{1-\bar{\alpha}_t} z_0$ を用いると、損失の等価変換は:
+
+$$
+\mathcal{L}_\epsilon = \mathbb{E}_t\!\left[ \frac{1-\bar{\alpha}_t}{\bar{\alpha}_t} \mathcal{L}_v \right]
+$$
+
+低 SNR 領域（大 $t$）では $1-\bar{\alpha}_t \gg \bar{\alpha}_t$ となるため $\mathcal{L}_\epsilon$ は高い重みを持つ。$v$-prediction はこの不均衡を緩和し、全タイムステップで均等な勾配スケールを実現する。
+
+**LoRA（Low-Rank Adaptation）ファインチューニング理論**:
+
+事前学習済みの重み行列 $W_0 \in \mathbb{R}^{d_\text{out} \times d_\text{in}}$ を凍結し、低ランク分解による差分 $\Delta W = B A$ を学習する:
+
+$$
+W = W_0 + \Delta W = W_0 + B A, \quad B \in \mathbb{R}^{d_\text{out} \times r},\; A \in \mathbb{R}^{r \times d_\text{in}}
+$$
+
+ランク $r \ll \min(d_\text{out}, d_\text{in})$ とすることで学習パラメータ数を $r(d_\text{out} + d_\text{in})$ に削減する（通常は元の $0.1\%$ 以下）。初期化は $A \sim \mathcal{N}(0, \sigma^2)$、$B = 0$ として $\Delta W_\text{init} = 0$ を保証する。スケーリング係数 $\alpha / r$ を用いた出力:
+
+$$
+h = W_0 x + \frac{\alpha}{r} B A x
+$$
+
+は LoRA スケール $\alpha / r$ を変更するだけで強度を調整でき、複数の LoRA を重み付き加算で合成できる:
+
+$$
+W = W_0 + \sum_i \lambda_i \cdot \frac{\alpha_i}{r_i} B_i A_i
+$$
+
 **Zero Terminal SNR**:
 
 Noise scheduleを強制的に $\bar{\alpha}_T = 0$ に rescale:
@@ -1152,94 +943,50 @@ $$
 
 **効果**: 非常に明るい/暗い画像の生成品質向上 [^zero_snr]。
 
-```julia
-# Zero Terminal SNR rescaling
-function rescale_to_zero_terminal_snr(alphas)
-    alphas_cumprod = cumprod(alphas)
-    sqrt_alphas_cumprod = sqrt.(alphas_cumprod)
 
-    # Rescale
-    sqrt_alphas_cumprod_final = sqrt_alphas_cumprod[end]
-    sqrt_alphas_cumprod .= sqrt_alphas_cumprod ./ sqrt_alphas_cumprod_final
-
-    return sqrt_alphas_cumprod
-end
-```
-
-:::message
-**ここまでで全体の50%完了！ ボス戦前のチェックポイント。**
-
-数式修行ゾーン完了:
-- VAE Encoder/Decoder圧縮の数学
-- 潜在空間拡散プロセス
-- Classifier Guidance完全版
-- Classifier-Free Guidance完全導出
-- CFG理論的理解（Mode-Seeking / 温度）
-- Negative Prompt
-- Text Conditioning（CLIP / T5）
-- Cross-Attention完全版
-- SD 1.x/2.x アーキテクチャ
-- SpatialTransformer
-- FLUX Architecture詳解
-- 学習テクニック（Noise Offset / Min-SNR / v-prediction / Zero Terminal SNR）
-
-次は実装ゾーンへ！
-:::
+> **Note:** **ここまでで全体の50%完了！ ボス戦前のチェックポイント。**
+>
+> 数式修行ゾーン完了:
+> - VAE Encoder/Decoder圧縮の数学
+> - 潜在空間拡散プロセス
+> - Classifier Guidance完全版
+> - Classifier-Free Guidance完全導出
+> - CFG理論的理解（Mode-Seeking / 温度）
+> - Negative Prompt
+> - Text Conditioning（CLIP / T5）
+> - Cross-Attention完全版
+> - SD 1.x/2.x アーキテクチャ
+> - SpatialTransformer
+> - FLUX Architecture詳解
+> - 学習テクニック（Noise Offset / Min-SNR / v-prediction / Zero Terminal SNR）
+>
+> 次は実装ゾーンへ！
 
 ### 3.14 SD vs FLUX: アーキテクチャ詳細比較
 
 **Stable Diffusion 1.x/2.x/SDXL Architecture**:
 
-```
-Input: Text prompt
-  ↓
-CLIP Text Encoder: [77, 768]
-  ↓
-Random Noise z_T: [64, 64, 4]
-  ↓
-U-Net (ResBlock + SpatialTransformer):
-  - Down1: 64→32 (320ch, Cross-Attn)
-  - Down2: 32→16 (640ch, Cross-Attn)
-  - Down3: 16→8 (1280ch, Cross-Attn)
-  - Middle: 8 (1280ch, Cross-Attn)
-  - Up1: 8→16 (1280ch, Cross-Attn)
-  - Up2: 16→32 (640ch, Cross-Attn)
-  - Up3: 32→64 (320ch, Cross-Attn)
-  ↓
-Denoised z_0: [64, 64, 4]
-  ↓
-VAE Decoder (f=8)
-  ↓
-Image: [512, 512, 3]
-```
+SD 1.x/2.x は U-Net をデノイザーとして採用し、エンコーダ・ボトルネック・デコーダの3段構造を持つ。各解像度レベルにおいて ResNet ブロックと Cross-Attention ブロックを交互に配置する。解像度レベル $l \in \{64, 32, 16, 8\}$ での特徴マップ $h_l \in \mathbb{R}^{B \times C_l \times h/2^l \times w/2^l}$ に対し、各 SpatialTransformer ブロックは:
+
+$$
+h_l' = h_l + \text{CrossAttn}(\text{GroupNorm}(h_l),\; c_\text{text}) + \text{FFN}(\text{GroupNorm}(h_l))
+$$
+
+チャネル数は深さに応じて $C_l \in \{320, 640, 1280, 1280\}$ と倍増し、ボトルネック（解像度8×8）で Self-Attention を加えた全注意操作を行う。タイムステップ $t$ はサイン波埋め込みで $\mathbb{R}^{320}$ に変換し、各 ResNet ブロックの GroupNorm にスケールシフト注入する。
 
 **FLUX.1 Architecture**:
 
-```
-Input: Text prompt
-  ↓
-Dual Encoders:
-  - CLIP ViT-L: [77, 768]
-  - T5-XXL: [512, 4096]
-  ↓
-Random Noise z_T: [64, 64, 16]  # 4倍のチャネル!
-  ↓
-Patchify: [64, 64, 16] → [1024, 768]  # 4×4パッチ
-  ↓
-Positional Encoding (RoPE)
-  ↓
-Transformer Blocks (N=24):
-  - Adaptive LayerNorm (t, c conditioned)
-  - Self-Attention (全patch間)
-  - Cross-Attention (patch ↔ CLIP+T5)
-  - Gated FFN
-  ↓
-Unpatchify: [1024, 768] → [64, 64, 16]
-  ↓
-VAE Decoder (f=8, 16ch input)
-  ↓
-Image: [512, 512, 3]
-```
+FLUX.1 は 19 層の Double Stream Block（画像・テキスト別処理）と 38 層の Single Stream Block（結合処理）で構成される。Double Stream Block では MMDiT と同様に画像ストリームとテキストストリームを独立した QKV 投影で注意計算し双方向に情報を共有する。Single Stream Block ではテキストトークンを除去し画像のみを処理:
+
+$$
+h_\text{img}^{(l+1)} = h_\text{img}^{(l)} + \text{SelfAttn}(\text{adaRMSNorm}(h_\text{img}^{(l)})) + \text{FFN}(\text{adaRMSNorm}(h_\text{img}^{(l)}))
+$$
+
+adaRMSNorm は条件ベクトル $c = [c_\text{pooled} \| e_t]$ から生成したスケール $\gamma$ のみでノルム調整（バイアスなし）を行い、LayerNorm より計算効率が高い:
+
+$$
+\text{adaRMSNorm}(h; \gamma) = \gamma \cdot \frac{h}{\|h\|_\text{RMS}}, \quad \|h\|_\text{RMS} = \sqrt{\frac{1}{d}\sum_{i=1}^d h_i^2}
+$$
 
 **詳細比較表**:
 
@@ -1262,98 +1009,56 @@ Image: [512, 512, 3]
 
 **Multi-Head Cross-Attention完全版**:
 
-```julia
-struct MultiHeadCrossAttention{F}
-    num_heads::Int
-    head_dim::Int
-    qkv_dim::Int
-    W_Q::Dense
-    W_K::Dense
-    W_V::Dense
-    W_O::Dense
-    dropout::Dropout
-end
+入力として画像潜在変数 $z \in \mathbb{R}^{(H \cdot W) \times d_\text{model}}$ とテキスト埋め込み $c \in \mathbb{R}^{L \times d_\text{text}}$ を受け取る。まず各ヘッドに対してQuery・Key・Valueを線形投影する:
 
-function MultiHeadCrossAttention(qkv_dim::Int, num_heads::Int; dropout_rate=0.1)
-    head_dim = qkv_dim ÷ num_heads
-    @assert qkv_dim == num_heads * head_dim "qkv_dim must be divisible by num_heads"
+$$
+Q = z W_Q \in \mathbb{R}^{(HW) \times d_k}, \quad
+K = c W_K \in \mathbb{R}^{L \times d_k}, \quad
+V = c W_V \in \mathbb{R}^{L \times d_v}
+$$
 
-    return MultiHeadCrossAttention(
-        num_heads,
-        head_dim,
-        qkv_dim,
-        Dense(qkv_dim => qkv_dim),  # W_Q
-        Dense(qkv_dim => qkv_dim),  # W_K
-        Dense(qkv_dim => qkv_dim),  # W_V
-        Dense(qkv_dim => qkv_dim),  # W_O
-        Dropout(dropout_rate)
-    )
-end
+ここで $W_Q \in \mathbb{R}^{d_\text{model} \times d_k}$、$W_K, W_V \in \mathbb{R}^{d_\text{text} \times d_k}$ はヘッドごとに異なる重み行列。スケール付き内積注意は:
 
-function (mha::MultiHeadCrossAttention)(q, k, v, mask=nothing)
-    # q: [N_q, d], k: [N_k, d], v: [N_k, d]
-    batch_size = size(q, 1)
+$$
+\text{Attention}(Q, K, V) = \text{softmax}\!\left( \frac{Q K^\top}{\sqrt{d_k}} \right) V \in \mathbb{R}^{(HW) \times d_v}
+$$
 
-    # Linear projections
-    Q = mha.W_Q(q)  # [N_q, d]
-    K = mha.W_K(k)  # [N_k, d]
-    V = mha.W_V(v)  # [N_k, d]
+$\sqrt{d_k}$ によるスケーリングは、内積の分散を $d_k$ に依存しないよう正規化する操作であり、勾配消失を防ぐ。注意行列 $A = \text{softmax}(Q K^\top / \sqrt{d_k}) \in \mathbb{R}^{(HW) \times L}$ の各要素 $A_{ij}$ は「画像パッチ $i$ がテキストトークン $j$ にどれだけ注目するか」のソフトな重みを表す。
 
-    # Reshape to multi-head: [N, d] → [N, num_heads, head_dim]
-    Q = reshape(Q, :, mha.num_heads, mha.head_dim)
-    K = reshape(K, :, mha.num_heads, mha.head_dim)
-    V = reshape(V, :, mha.num_heads, mha.head_dim)
+**Multi-Head Attention**: $h$ 個のヘッドを並列に計算し結合する:
 
-    # Transpose for batch matrix multiply: [num_heads, N, head_dim]
-    Q = permutedims(Q, (2, 1, 3))
-    K = permutedims(K, (2, 1, 3))
-    V = permutedims(V, (2, 1, 3))
+$$
+\text{MultiHead}(z, c) = \text{Concat}\!\left( \text{head}_1, \ldots, \text{head}_h \right) W_O
+$$
 
-    # Scaled dot-product attention
-    scores = batched_mul(Q, batched_transpose(K)) / sqrt(Float32(mha.head_dim))
-    # scores: [num_heads, N_q, N_k]
+$$
+\text{head}_i = \text{Attention}(z W_Q^{(i)},\; c W_K^{(i)},\; c W_V^{(i)})
+$$
 
-    # Apply mask if provided
-    if mask !== nothing
-        scores = scores .+ mask
-    end
+ここで $W_O \in \mathbb{R}^{(h \cdot d_v) \times d_\text{model}}$ は出力投影。各ヘッドの次元は $d_k = d_v = d_\text{model} / h$ とするのが一般的（Stable Diffusion 1.x では $d_\text{model}=320$、$h=8$、$d_k=40$）。
 
-    # Softmax
-    attn_weights = softmax(scores, dims=3)  # Over N_k
-    attn_weights = mha.dropout(attn_weights)
+**計算複雑度の分析**:
 
-    # Apply attention to values
-    out = batched_mul(attn_weights, V)  # [num_heads, N_q, head_dim]
+注意行列 $Q K^\top$ の計算コストは $\mathcal{O}(HW \cdot L \cdot d_k)$ であり、画像解像度とテキスト長の両方に線形に依存する。U-Net内の全注意操作を合算した複雑度は:
 
-    # Transpose back: [num_heads, N_q, head_dim] → [N_q, num_heads, head_dim]
-    out = permutedims(out, (2, 1, 3))
+$$
+\mathcal{O}\!\left( (HW)^2 \cdot d_k + HW \cdot L \cdot d_k \right)
+$$
 
-    # Concat heads: [N_q, num_heads, head_dim] → [N_q, d]
-    out = reshape(out, :, mha.qkv_dim)
+第一項は同一特徴マップ内の Self-Attention（FLUX で使用）、第二項は Cross-Attention のコスト。SD 1.x では Self-Attention を省略しているが、FLUX は全層で Self-Attention を行うため表現力が高い。
 
-    # Final linear
-    return mha.W_O(out)
-end
-```
+**RoPE（Rotary Position Embedding）**: FLUXでは絶対位置埋め込みの代わりにRoPEを採用。2次元画像座標 $(r, s)$ に対して、周波数 $\theta_d = 10000^{-2d/D}$ を用いた回転行列を各ヘッドの次元ペアに適用する:
 
-**使用例**:
+$$
+\text{RoPE}(q, r, s)_{2d} = q_{2d} \cos(r\theta_d) - q_{2d+1} \sin(r\theta_d)
+$$
 
-```julia
-# 初期化
-d_model = 768
-num_heads = 12
-mha = MultiHeadCrossAttention(d_model, num_heads)
+$$
+\text{RoPE}(q, r, s)_{2d+1} = q_{2d} \sin(r\theta_d) + q_{2d+1} \cos(r\theta_d)
+$$
 
-# U-Net中間特徴: [h*w, d_model]
-f = randn(Float32, 64*64, d_model)
+この操作により、注意スコア $q^\top k$ が相対位置 $(r_i - r_j, s_i - s_j)$ のみに依存するようになり、任意解像度への外挿が容易になる。
 
-# Text embeddings: [77, d_model]
-c = randn(Float32, 77, d_model)
-
-# Cross-Attention
-out = mha(f, c, c)  # Q from image, K/V from text
-# out: [64*64, d_model]
-```
 
 ### 3.16 VAE訓練の詳細
 
@@ -1380,39 +1085,65 @@ $$
 
 ここで $\Phi_l$ はVGGの第$l$層特徴。
 
-```julia
-# LPIPS損失 (簡略版)
-function lpips_loss(x, x_recon, vgg_model, layers=[3, 8, 15, 22])
-    loss = 0.0
-    for layer in layers
-        feat_x = vgg_model[1:layer](x)
-        feat_recon = vgg_model[1:layer](x_recon)
-        loss += mean((feat_x .- feat_recon).^2)
-    end
-    return loss / length(layers)
-end
+**VQ-VAE コードブック更新則**:
 
-# VAE訓練with LPIPS
-function train_vae_lpips!(encoder, decoder, vgg, dataloader; β=0.1)
-    for (x,) in dataloader
-        # Encode
-        μ, logσ² = encoder(x)
-        σ = exp.(0.5 .* logσ²)
-        ε = randn(size(μ))
-        z = μ .+ σ .* ε
+Vector Quantization VAE では連続潜在変数 $z_e$ を離散コードブック $\{e_k\}_{k=1}^K$ に量子化する。量子化写像は:
 
-        # Decode
-        x_recon = decoder(z)
+$$
+z_q = e_{k^*}, \quad k^* = \arg\min_k \| z_e - e_k \|_2
+$$
 
-        # Losses
-        recon_loss = lpips_loss(x, x_recon, vgg)
-        kl_loss = 0.5 * mean(μ.^2 .+ σ.^2 .- logσ² .- 1)
+コードブックの更新には Exponential Moving Average (EMA) を用いる。バッチ内でコード $k$ に割り当てられたエンコーダ出力の集合を $\{z_e^{(i)} : k^{*(i)} = k\}$ とすると:
 
-        loss = recon_loss + β * kl_loss
-        # ... backprop
-    end
-end
-```
+$$
+n_k \leftarrow \gamma n_k + (1-\gamma) \sum_i \mathbf{1}[k^{*(i)}=k]
+$$
+
+$$
+m_k \leftarrow \gamma m_k + (1-\gamma) \sum_i \mathbf{1}[k^{*(i)}=k] \cdot z_e^{(i)}
+$$
+
+$$
+e_k \leftarrow \frac{m_k}{n_k}
+$$
+
+ここで $\gamma \in (0,1)$ は減衰係数（典型的には $\gamma = 0.99$）。この EMA 更新はコードブック損失の勾配降下と数学的に等価であるが、より安定した学習を実現する。
+
+**Commitment Loss の導出**:
+
+VQ-VAE の全体損失は3項からなる:
+
+$$
+\mathcal{L}_\text{VQ} = \underbrace{\| x - \mathcal{D}(z_q) \|_2^2}_{\text{reconstruction}} + \underbrace{\| \text{sg}[z_e] - e_{k^*} \|_2^2}_{\text{codebook loss}} + \underbrace{\beta_c \| z_e - \text{sg}[e_{k^*}] \|_2^2}_{\text{commitment loss}}
+$$
+
+ここで $\text{sg}[\cdot]$ は Stop-Gradient 演算子（順伝播は恒等写像、逆伝播で勾配を遮断）。Commitment loss の係数は典型的に $\beta_c = 0.25$ とし、エンコーダ出力が選択されたコードブックベクトルに「コミット」するよう促す。
+
+**FSQ（Finite Scalar Quantization）の代替定式化**:
+
+FSQ は VQ の複雑なコードブック管理を排除し、各潜在次元を有限整数にラウンドするだけで量子化を実現する。各次元 $d$ の出力範囲を $L_d$ 段階に制限する場合:
+
+$$
+z_q^{(d)} = \text{round}\!\left( \frac{L_d - 1}{2} \cdot \tanh(z_e^{(d)}) \right) \cdot \frac{2}{L_d - 1}
+$$
+
+コードブック総サイズは $K = \prod_d L_d$ となる。FSQ ではコードブック崩壊が起きず、EMA 更新も不要。例えば各次元を $[-2, -1, 0, 1, 2]$ の5段階に量子化し4次元使用すると $K = 5^4 = 625$ コード。
+
+**PatchGAN 識別器損失**:
+
+知覚的品質向上のため LDM の VAE は GAN 損失も組み合わせる。PatchGAN 識別器 $D_\psi$ は画像をパッチ単位で真偽判定し、完全画像の識別より局所的テクスチャを重視する:
+
+$$
+\mathcal{L}_\text{GAN} = \mathbb{E}_x[\log D_\psi(x)] + \mathbb{E}_x[\log(1 - D_\psi(\mathcal{D}(\mathcal{E}(x))))]
+$$
+
+生成器（デコーダ）は $-\log D_\psi(\mathcal{D}(\mathcal{E}(x)))$ を最小化することで識別器を欺こうとする。最終的な VAE 損失は:
+
+$$
+\mathcal{L}_\text{total} = \mathcal{L}_\text{rec} + \beta \mathcal{L}_\text{KL} + \lambda_\text{LPIPS} \mathcal{L}_\text{LPIPS} + \lambda_\text{GAN} \mathcal{L}_\text{GAN}
+$$
+
+SD 1.x の VAE では $\beta = 10^{-6}$（ほぼ無視）、$\lambda_\text{LPIPS} = 1.0$、$\lambda_\text{GAN} = 0.5$ が典型的な設定。
 
 ### 3.17 Noise Scheduleの設計理論
 
@@ -1436,50 +1167,75 @@ $s = 0.008$ が標準。
 
 $\beta_t$ をパラメータ化して学習。
 
-```julia
-# 3つのスケジュール実装
-function linear_beta_schedule(T::Int; β_start=1e-4, β_end=0.02)
-    return range(β_start, β_end, length=T)
-end
-
-function cosine_alpha_bar_schedule(T::Int; s=0.008)
-    t = 0:T
-    f_t = cos.(((t ./ T) .+ s) ./ (1 + s) .* π ./ 2).^2
-    α_bar = f_t ./ f_t[1]
-    return α_bar[2:end]
-end
-
-function learned_beta_schedule(T::Int; init_β_start=1e-4, init_β_end=0.02)
-    # パラメータ化βを学習
-    logit_β = range(logit(init_β_start), logit(init_β_end), length=T)
-    return logit_β  # 訓練中に最適化
-end
-
-# Zero Terminal SNR rescaling
-function rescale_zero_terminal_snr(α_bar)
-    # α_bar[T] = 0 を強制
-    return α_bar ./ α_bar[end]
-end
-```
 
 **SNRの可視化**:
 
-```julia
-using Plots
+**SNR（Signal-to-Noise Ratio）完全理論**:
 
-T = 1000
-betas_linear = linear_beta_schedule(T)
-α_bar_cosine = cosine_alpha_bar_schedule(T)
+各タイムステップ $t$ における SNR は以下で定義される:
 
-# SNR計算
-snr_linear = cumprod(1 .- betas_linear) ./ (1 .- cumprod(1 .- betas_linear))
-snr_cosine = α_bar_cosine ./ (1 .- α_bar_cosine)
+$$
+\text{SNR}(t) = \frac{\bar{\alpha}_t}{1 - \bar{\alpha}_t}
+$$
 
-# Plot
-plot(1:T, snr_linear, label="Linear", yscale=:log10, xlabel="Timestep", ylabel="SNR")
-plot!(1:T, snr_cosine, label="Cosine")
-title!("SNR Schedule Comparison")
-```
+この定義は $x_t = \sqrt{\bar{\alpha}_t} x_0 + \sqrt{1-\bar{\alpha}_t} \epsilon$ において、信号成分 $\sqrt{\bar{\alpha}_t} x_0$ のパワーとノイズ成分 $\sqrt{1-\bar{\alpha}_t}\epsilon$ のパワーの比に対応する。$t=0$ では $\text{SNR}(0) \to \infty$（純粋な画像）、$t=T$ では $\text{SNR}(T) \to 0$（純粋なノイズ）が理想。
+
+コサインスケジュールの SNR 曲線は $\log \text{SNR}(t)$ が線形に近く、各タイムステップが均等な「難易度増加」を持つ。Linear Schedule では低タイムステップ域で SNR が急変し、高品質な細部の学習に不利。
+
+損失関数を SNR で重み付けすることで、異なるスケジュールを統一的に比較できる:
+
+$$
+\mathcal{L}_\text{weighted} = \mathbb{E}_{t, \epsilon} \left[ \text{SNR}(t) \cdot \| \epsilon - \epsilon_\theta(x_t, t) \|_2^2 \right]
+$$
+
+これは $v$-prediction （速度予測）と等価であり、$v_t = \sqrt{\bar{\alpha}_t} \epsilon - \sqrt{1-\bar{\alpha}_t} x_0$ を予測する定式化と整合する。
+
+**EDM フレームワーク（Karras et al. 2022）**:
+
+EDM は離散タイムステップを廃し、連続ノイズレベル $\sigma \in [\sigma_\text{min}, \sigma_\text{max}]$ でプロセスを記述する。ノイズ付加は:
+
+$$
+x_\sigma = x_0 + \sigma \epsilon, \quad \epsilon \sim \mathcal{N}(0, I)
+$$
+
+デノイザー $D_\theta(x_\sigma; \sigma)$ の出力は、入力・ノイズ・スキップ接続を組み合わせた事前条件付き形式にする:
+
+$$
+D_\theta(x_\sigma; \sigma) = c_\text{skip}(\sigma) x_\sigma + c_\text{out}(\sigma) F_\theta(c_\text{in}(\sigma) x_\sigma;\; c_\text{noise}(\sigma))
+$$
+
+ここで各スケーリング係数は:
+
+$$
+c_\text{skip}(\sigma) = \frac{\sigma_\text{data}^2}{\sigma^2 + \sigma_\text{data}^2}, \quad
+c_\text{out}(\sigma) = \frac{\sigma \cdot \sigma_\text{data}}{\sqrt{\sigma^2 + \sigma_\text{data}^2}}, \quad
+c_\text{in}(\sigma) = \frac{1}{\sqrt{\sigma^2 + \sigma_\text{data}^2}}
+$$
+
+$\sigma_\text{data}$ は学習データの標準偏差（典型的には $0.5$）。この事前条件付けにより、ネットワーク $F_\theta$ の入出力スケールが $\sigma$ に依らず一定となり、学習が安定する。訓練損失は:
+
+$$
+\mathcal{L}_\text{EDM} = \mathbb{E}_{\sigma, x_0, \epsilon} \left[ \lambda(\sigma) \| D_\theta(x_0 + \sigma\epsilon; \sigma) - x_0 \|_2^2 \right]
+$$
+
+$$
+\lambda(\sigma) = \frac{\sigma^2 + \sigma_\text{data}^2}{(\sigma \cdot \sigma_\text{data})^2}
+$$
+
+ノイズレベル $\sigma$ は対数正規分布 $\ln \sigma \sim \mathcal{N}(P_\text{mean}, P_\text{std}^2)$ からサンプリングし、$P_\text{mean}=-1.2$、$P_\text{std}=1.2$ が実証的に最適とされる。
+
+**Zero Terminal SNR の導出**:
+
+DDPM のデフォルト設定では $\bar{\alpha}_T > 0$（$T=1000$ で $\bar{\alpha}_{1000} \approx 4.6 \times 10^{-5}$）となり、終端で完全なノイズに到達しない。これにより高い CFG スケール使用時に「真の黒画像」など極端なサンプルが生成できない問題が生じる。
+
+Zero Terminal SNR（Lin et al. 2023）は $\bar{\alpha}_T = 0$ を保証するようスケジュールを再スケールする。再スケール後の累積積を:
+
+$$
+\bar{\alpha}_t' = \frac{\bar{\alpha}_t - \bar{\alpha}_T}{1 - \bar{\alpha}_T} \cdot \frac{1 - \bar{\alpha}_0}{\bar{\alpha}_0 - \bar{\alpha}_T}
+$$
+
+と定義すると、$\bar{\alpha}_0' \approx 1$（元の画像）かつ $\bar{\alpha}_T' = 0$（完全ノイズ）が厳密に成立する。この修正により $v$-prediction との組み合わせでサンプリング品質が向上し、SD 2.1 以降で採用されている。
+
 
 ### 3.18 Sampling Algorithms完全比較
 
@@ -1504,26 +1260,6 @@ $$
 
 $\sigma_t = 0$ で完全決定論的、$\sigma_t = \sqrt{(1-\bar{\alpha}_{t-\Delta t})/(1-\bar{\alpha}_t)} \sqrt{1-\bar{\alpha}_t/\bar{\alpha}_{t-\Delta t}}$ でDDPMと同等。
 
-```julia
-function ddim_step(z_t, ε_θ, t, t_prev, α_bar; η=0.0)
-    # Predict x₀
-    α_t = α_bar[t]
-    α_prev = t_prev > 0 ? α_bar[t_prev] : 1.0
-
-    pred_x₀ = (z_t .- sqrt(1 - α_t) .* ε_θ) ./ sqrt(α_t)
-
-    # Direction
-    σ_t = η * sqrt((1 - α_prev) / (1 - α_t)) * sqrt(1 - α_t / α_prev)
-    dir_z = sqrt(1 - α_prev - σ_t^2) .* ε_θ
-
-    # Noise
-    noise = σ_t .* randn(Float32, size(z_t))
-
-    # Combine
-    z_prev = sqrt(α_prev) .* pred_x₀ .+ dir_z .+ noise
-    return z_prev
-end
-```
 
 **DPM-Solver++ (概要)**:
 
@@ -1533,6 +1269,111 @@ z_{t-\Delta t} = z_t + \int_t^{t-\Delta t} f(z_s, s) ds
 $$
 
 3次Adams-Bashforth法で近似 → 20ステップで高品質。
+
+**DPM-Solver++ 完全導出**:
+
+DPM-Solver++ は拡散ODE を指数積分器（Exponential Integrator）として解く手法。まず時刻 $t$ でのノイズスケジュールを対数SNR $\lambda_t = \log(\bar{\alpha}_t / \sqrt{1-\bar{\alpha}_t})$ で再パラメータ化する。ODEは:
+
+$$
+\frac{dz_t}{dt} = f(t) z_t + g(t)^2 \nabla_{z_t} \log p_t(z_t)
+$$
+
+スコアを $\epsilon_\theta$ で近似し、変数変換 $u = \lambda_t$ を行うと積分形式:
+
+$$
+z_{\lambda_{t'}} = \frac{\sqrt{1-e^{-2\lambda_{t'}}}}{\sqrt{1-e^{-2\lambda_t}}} z_{\lambda_t} - \sqrt{1-e^{-2\lambda_{t'}}} \int_{\lambda_t}^{\lambda_{t'}} e^{-\lambda} \hat{\epsilon}_\theta(z_\lambda, \lambda) d\lambda
+$$
+
+が得られる。この積分を Taylor 展開で近似することで各次数のソルバーを構成する。
+
+**1次（Euler ステップ）**: 被積分関数 $\hat{\epsilon}_\theta$ を定数近似:
+
+$$
+z_{t_{i-1}} \approx \frac{\alpha_{t_{i-1}}}{\alpha_{t_i}} z_{t_i} - \alpha_{t_{i-1}} (e^{h_i} - 1) \hat{\epsilon}_\theta(z_{t_i}, t_i)
+$$
+
+ここで $h_i = \lambda_{t_{i-1}} - \lambda_{t_i} > 0$、$\alpha_t = \sqrt{\bar{\alpha}_t}$。これは DDIM の決定論的サンプリングと同一。
+
+**2次（DPM-Solver-2）**: 前ステップの $\epsilon$ 予測を用いた1次 Taylor 補正:
+
+$$
+z_{t_{i-1}} \approx \frac{\alpha_{t_{i-1}}}{\alpha_{t_i}} z_{t_i} - \alpha_{t_{i-1}} (e^{h_i} - 1) \hat{\epsilon}_\theta(z_{t_i}, t_i) - \frac{\alpha_{t_{i-1}}}{2} (e^{h_i} - 1 - h_i) \cdot \frac{\hat{\epsilon}_\theta(z_{t_i}, t_i) - \hat{\epsilon}_\theta(z_{t_{i-1}}, t_{i-1})}{h_{i-1}} \cdot h_i
+$$
+
+ここで $h_{i-1} = \lambda_{t_i} - \lambda_{t_{i+1}}$。この補正項は $\mathcal{O}(h^2)$ の精度改善をもたらす。
+
+**Multistep vs Single-Step の比較**:
+
+| 方式 | NFE / ステップ | 精度オーダー | 適用条件 |
+|:-----|:--------------|:------------|:---------|
+| Single-step 1次 | 1 | $\mathcal{O}(h)$ | 常に適用可 |
+| Single-step 2次 | 2 | $\mathcal{O}(h^2)$ | 1中間点評価 |
+| Multistep 2次 | 1 | $\mathcal{O}(h^2)$ | 前ステップ再利用 |
+| Multistep 3次 | 1 | $\mathcal{O}(h^3)$ | 前2ステップ再利用 |
+
+NFE はネットワーク関数評価回数。Multistep 方式は前ステップの $\hat{\epsilon}$ を再利用するため、Single-step 2次と同等の精度を1回の評価で達成する。実装では最初の2ステップを Single-step で初期化し、以降を Multistep に切り替えるのが標準的手順。20ステップの DPM-Solver++ Multistep 3次は、1000ステップ DDPM とほぼ同等の FID スコアを実現する。
+
+### 3.19 SDXL アーキテクチャ理論
+
+**デュアルテキストエンコーダ条件付け**:
+
+SDXL は2つの異なる CLIP モデルのテキスト埋め込みを結合して条件付けに用いる。CLIP ViT-L/14（最終層出力: 768次元）と OpenCLIP ViT-bigG/14（最終層出力: 1280次元）を連結した後の条件ベクトルは:
+
+$$
+c_\text{text} = \left[ c_\text{CLIP-L} \;\|\; c_\text{OpenCLIP-G} \right] \in \mathbb{R}^{L \times 2048}
+$$
+
+さらに OpenCLIP の全最終隠れ状態（プールされた 1280次元ベクトル）を時刻埋め込みと結合し、アダプティブグループ正規化（adaGN）へ入力する:
+
+$$
+c_\text{pooled} = \text{Pool}(c_\text{OpenCLIP-G}) \in \mathbb{R}^{1280}
+$$
+
+$$
+c_\text{aug} = \text{MLP}(c_\text{pooled} \oplus e_t) \in \mathbb{R}^{d_\text{model}}
+$$
+
+ここで $e_t$ はタイムステップ埋め込み、$\oplus$ は連結。この拡張条件ベクトルは全 ResNet ブロックの GroupNorm パラメータ $(\gamma, \beta)$ をスケールシフトする: $h \leftarrow \gamma \cdot \text{GroupNorm}(h) + \beta$。
+
+**サイズ条件付けベクトル**:
+
+SDXL は学習時に入力画像の各種サイズ情報を補助条件として付加する。具体的には3つの 2次元ベクトルをフーリエ特徴に変換し結合する:
+
+$$
+c_\text{size} = \left[ \text{FourierEmb}(h_\text{orig}, w_\text{orig}) \;\|\; \text{FourierEmb}(c_\text{top}, c_\text{left}) \;\|\; \text{FourierEmb}(h_\text{target}, w_\text{target}) \right]
+$$
+
+ここで $(h_\text{orig}, w_\text{orig})$ は元画像の高さ・幅、$(c_\text{top}, c_\text{left})$ はクロップ座標、$(h_\text{target}, w_\text{target})$ は学習解像度。各スカラー値 $v$ のフーリエ埋め込みは:
+
+$$
+\text{FourierEmb}(v) = \left[ \sin(2\pi \cdot 10000^{-2i/d} \cdot v),\; \cos(2\pi \cdot 10000^{-2i/d} \cdot v) \right]_{i=0}^{d/2-1} \in \mathbb{R}^d
+$$
+
+典型的に $d=256$ を用いるため、2スカラーで $512$ 次元となり、3ペアで $c_\text{size} \in \mathbb{R}^{1536}$。これを $c_\text{pooled}$ と連結してサイズ認識条件ベクトルを構成する:
+
+$$
+c_\text{cond} = \left[ c_\text{pooled} \;\|\; c_\text{size} \right] \in \mathbb{R}^{1280 + 1536} = \mathbb{R}^{2816}
+$$
+
+**時間埋め込みへの連結**:
+
+タイムステップ $t$ の正弦波埋め込み $e_t \in \mathbb{R}^{320}$ と条件ベクトル $c_\text{cond}$ を MLP に通して各スケールの adaGN スケーリング係数を生成する:
+
+$$
+(\gamma_l, \beta_l) = \text{MLP}_l\!\left( [e_t \;\|\; c_\text{cond}] \right), \quad l = 1, \ldots, L_\text{block}
+$$
+
+サイズ条件付けは学習時に存在した低品質データ（小さい画像、偏ったクロップ）の影響をモデルが推論時に「回避」できるようにする。推論時は $(h_\text{orig}, w_\text{orig}) = (h_\text{target}, w_\text{target})$、$(c_\text{top}, c_\text{left}) = (0, 0)$ と設定することで最高品質の生成が得られる。
+
+**Refiner モデルの理論**:
+
+SDXL は Base モデル（$t \in [200, 1000]$）と Refiner モデル（$t \in [0, 200]$）の2段階生成を採用する。Base の逆拡散で $t=200$ まで進めた中間潜在変数 $z_{200}$ を Refiner の初期値とし:
+
+$$
+z_0 = \text{Refiner}(z_{200}, c_\text{text}^\text{ref}, t \in [0, 200])
+$$
+
+Refiner は高 SNR（低ノイズ）領域の細部生成に特化しており、Base とは異なる U-Net 構成（より深い Transformer ブロック）を持つ。この分割により各モデルが担う「ノイズレベルの難易度帯域」が分離され、全体的な画像品質が向上する。Refiner への引き継ぎ雑音レベル $t_\text{switch} = 200$ は実験的に決定されており、$\text{SNR}(200) \approx 0.11$ という中程度の SNR 点に対応する。
 
 ### ⚔️ Boss Battle: CFGの完全分解
 
@@ -1590,37 +1431,134 @@ $$
 $w > 1$ のとき、条件付き分布を **over-emphasize** → mode-seeking。
 
 **数値検証**:
-```julia
-# CFGの3視点検証
-w = 7.5
-ε_uncond = randn(Float32, 64, 64, 4)
-ε_cond = randn(Float32, 64, 64, 4)
 
-# 視点1: ε-prediction
-ε_cfg1 = ε_uncond .+ w .* (ε_cond .- ε_uncond)
-ε_cfg2 = (1 - w) .* ε_uncond .+ w .* ε_cond
-
-@assert isapprox(ε_cfg1, ε_cfg2)  # 等価性確認
-
-# 視点2: スコア
-α_bar = 0.5
-s_uncond = -ε_uncond ./ sqrt(1 - α_bar)
-s_cond = -ε_cond ./ sqrt(1 - α_bar)
-s_cfg = (1 - w) .* s_uncond .+ w .* s_cond
-
-# 視点3: 確率
-log_p_uncond = -0.5 * sum(ε_uncond.^2)
-log_p_cond = -0.5 * sum(ε_cond.^2)
-log_p_w = (1 - w) * log_p_uncond + w * log_p_cond
-
-println("CFG 3視点検証完了！")
-```
 
 **ボス撃破！** CFGの数学的構造を完全理解した。
 
----
+
+### 3.20 SD3 & Rectified Flow 統合理論
+
+SD3 は Stability AI が 2024年に発表した第3世代モデルであり、2B・8B パラメータの2バリアントが公開されている。本節ではその理論的基盤を詳述する。
+
+**MMDiT（Multimodal Diffusion Transformer）アーキテクチャ**:
+
+SD3 は U-Net を廃止し、画像トークンとテキストトークンを同一 Transformer に入力する MMDiT を採用する。画像潜在変数 $z \in \mathbb{R}^{(H/p)(W/p) \times d}$（パッチサイズ $p$）とテキスト埋め込みシーケンス $c \in \mathbb{R}^{L \times d}$ を結合したシーケンス:
+
+$$
+X = \begin{bmatrix} z_1 & z_2 & \cdots & z_{HW/p^2} & c_1 & c_2 & \cdots & c_L \end{bmatrix} \in \mathbb{R}^{(HW/p^2 + L) \times d}
+$$
+
+に対して Self-Attention を適用するが、画像側とテキスト側で異なる QKV 射影重みを持つ「デュアルストリーム」構造を採る:
+
+$$
+Q_z = z W_Q^z, \quad K_z = z W_K^z, \quad V_z = z W_V^z
+$$
+
+$$
+Q_c = c W_Q^c, \quad K_c = c W_K^c, \quad V_c = c W_V^c
+$$
+
+$$
+Q = [Q_z \; Q_c], \quad K = [K_z \; K_c], \quad V = [V_z \; V_c]
+$$
+
+全結合注意 $\text{Attention}(Q, K, V)$ を計算した後、画像側とテキスト側の出力を分離して各ストリームに戻す。これにより画像特徴がテキスト特徴から、テキスト特徴が画像特徴から双方向に情報を受け取れる。
+
+**3つのテキストエンコーダの連結**:
+
+SD3 は3種類のテキストエンコーダの出力を組み合わせる:
+
+$$
+c_\text{CLIP-L} \in \mathbb{R}^{L \times 768}, \quad c_\text{CLIP-G} \in \mathbb{R}^{L \times 1280}, \quad c_\text{T5-XXL} \in \mathbb{R}^{L \times 4096}
+$$
+
+シーケンス次元での結合前にゼロパディングで次元を統一する。CLIP-L と CLIP-G は $d_\text{model}=4096$ へ線形投影し T5-XXL と連結:
+
+$$
+c_\text{joint} = \left[ c_\text{CLIP-L}' \;\|\; c_\text{CLIP-G}' \;\|\; c_\text{T5-XXL} \right] \in \mathbb{R}^{3L \times 4096}
+$$
+
+プールされたテキスト埋め込みは CLIP-L と CLIP-G の pooled 出力を連結した $\mathbb{R}^{768+1280} = \mathbb{R}^{2048}$ ベクトルを用い、タイムステップ埋め込みと合流させて adaLN（adaptive LayerNorm）の制御信号とする。
+
+**Rectified Flow 目的関数**:
+
+SD3 の拡散プロセスは VP-SDE ではなく Rectified Flow（Liu et al. 2022 / Lipman et al. 2022 の Flow Matching）を採用する。時刻 $t \in [0, 1]$ で直線補間による確率フロー:
+
+$$
+x_t = (1 - t) x_0 + t \epsilon, \quad \epsilon \sim \mathcal{N}(0, I)
+$$
+
+速度場 $v_\theta(x_t, t, c)$ はこの直線軌跡の速度を予測する:
+
+$$
+v^* = \epsilon - x_0
+$$
+
+Flow Matching 損失は:
+
+$$
+\mathcal{L}_\text{FM} = \mathbb{E}_{t, x_0, \epsilon}\!\left[ \| v_\theta(x_t, t, c) - (\epsilon - x_0) \|_2^2 \right]
+$$
+
+$\epsilon$-prediction との関係は $\epsilon_\theta = x_t + (1-t) v_\theta$ で変換でき、DDPM との互換性も保持できる。タイムステップ分布は一様分布ではなく:
+
+$$
+t \sim \text{Logit-Normal}(\mu, \sigma^2), \quad t = \sigma(u), \; u \sim \mathcal{N}(\mu, \sigma^2)
+$$
+
+$\mu = 0, \sigma = 1$ の場合 $t = 0.5$ 付近（中程度のノイズ）を重点的にサンプリングし、難易度の高い中間タイムステップの学習を強化する。
+
+**2D-RoPE の導出**:
+
+SD3 の MMDiT は画像パッチの2次元位置をエンコードするため 2D-RoPE を用いる。パッチ座標 $(r, s)$（行・列インデックス）に対して、ヘッドの次元を2等分し各半分に独立した1D-RoPE を適用する:
+
+$$
+\text{2D-RoPE}(q, r, s)_{4d}   = q_{4d}   \cos(r \theta_d) - q_{4d+1} \sin(r \theta_d)
+$$
+
+$$
+\text{2D-RoPE}(q, r, s)_{4d+1} = q_{4d}   \sin(r \theta_d) + q_{4d+1} \cos(r \theta_d)
+$$
+
+$$
+\text{2D-RoPE}(q, r, s)_{4d+2} = q_{4d+2} \cos(s \theta_d) - q_{4d+3} \sin(s \theta_d)
+$$
+
+$$
+\text{2D-RoPE}(q, r, s)_{4d+3} = q_{4d+2} \sin(s \theta_d) + q_{4d+3} \cos(s \theta_d)
+$$
+
+ここで $\theta_d = 10000^{-2d/(D/4)}$。この構成により注意スコア $q^\top k$ が行相対距離 $(r_i - r_j)$ と列相対距離 $(s_i - s_j)$ のみに依存し、正方形以外の解像度でも位置情報が適切にエンコードされる。
+
+**直線軌跡 vs VP-SDE の比較**:
+
+VP-SDE の加噪過程 $x_t = \sqrt{\bar{\alpha}_t} x_0 + \sqrt{1-\bar{\alpha}_t} \epsilon$ は時間方向に湾曲した軌跡を描くのに対し、Rectified Flow は直線補間 $x_t = (1-t)x_0 + t\epsilon$ で結ぶ。サンプリング時の ODE 積分において、直線軌跡は曲率が小さいため Euler 法などの低次積分器でも高精度な近似が可能であり、20ステップ以下での高品質生成を可能にする。Straightness（直線性）の指標:
+
+$$
+\text{Straightness} = \mathbb{E}\left[ \left\| \int_0^1 v_\theta(x_t, t) \, dt - (x_1 - x_0) \right\|_2^2 \right]
+$$
+
+を最小化することが Reflow（反復直線化）の目標であり、これを繰り返すことで1ステップ生成に近づく。
+
+
 
 ---
+
+## 参考文献
+
+[^min_snr]: Hang, T., Gu, S., Li, C., et al. (2023). Efficient Diffusion Training via Min-SNR Weighting Strategy. ICCV 2023. arXiv:2303.09556.
+<https://arxiv.org/abs/2303.09556>
+
+[^zero_snr]: Lin, S., et al. (2023). Common Diffusion Noise Schedules and Sample Steps are Flawed. arXiv:2305.08891.
+<https://arxiv.org/abs/2305.08891>
+
+## 著者リンク
+
+- Blog: https://fumishiki.dev
+- X: https://x.com/fumishiki
+- LinkedIn: https://www.linkedin.com/in/fumitakamurakami
+- GitHub: https://github.com/fumishiki
+- Hugging Face: https://huggingface.co/fumishiki
 
 ## ライセンス
 

@@ -4,6 +4,11 @@ emoji: "🌍"
 type: "tech"
 topics: ["machinelearning", "deeplearning", "worldmodels", "julia", "jepa"]
 published: true
+slug: "ml-lecture-41-part2"
+difficulty: "advanced"
+time_estimate: "90 minutes"
+languages: ["Julia", "Rust"]
+keywords: ["機械学習", "深層学習", "生成モデル"]
 ---
 ## 💻 4. 実装ゾーン（45分）— JEPAコンセプト実装
 
@@ -58,7 +63,7 @@ end
 function update_ema!(target_ps, context_ps, τ=0.996)
     for (k, v) in pairs(target_ps)
         if v isa AbstractArray
-            target_ps[k] .= τ .* target_ps[k] .+ (1 - τ) .* context_ps[k]
+            @. target_ps[k] = τ * target_ps[k] + (1 - τ) * context_ps[k]
         end
     end
 end
@@ -77,8 +82,8 @@ function train_jepa!(context_enc, target_enc, pred,
         for (x_batch,) in dataloader
             # ランダムマスク生成
             # Context: 左半分、Target: 右半分（簡易版）
-            x_context = x_batch[:, 1:32, :, :]
-            x_target = x_batch[:, 33:64, :, :]
+            @views x_context = x_batch[:, 1:32, :, :]
+            @views x_target = x_batch[:, 33:64, :, :]
 
             # Context encoding
             z_ctx, st_ctx = context_enc(x_context, ps_ctx, st_ctx)
@@ -146,7 +151,7 @@ train_x = Float32.(train_x) |> x -> reshape(x, 28, 28, 1, :)
 
 # 28x28 -> 64x64にパディング（実装簡略化のため）
 train_x_padded = zeros(Float32, 64, 64, 1, size(train_x, 4))
-train_x_padded[19:46, 19:46, :, :] .= train_x
+@views train_x_padded[19:46, 19:46, :, :] .= train_x
 
 # DataLoader
 train_loader = DataLoader((train_x_padded,), batchsize=64, shuffle=true)
@@ -224,120 +229,39 @@ Lossが減少 → Context encoderが有用な表現を学習している。
 - **Section 4**: 各ベンチマークでの性能表
 - **Appendix**: Hyperparameters詳細
 
-:::details 論文読解テンプレート (Python dict形式)
-```python
-paper = {
-    "title": "Revisiting Feature Prediction for Learning Visual Representations from Video",
-    "authors": "Bardes et al.",
-    "year": 2024,
-    "venue": "arXiv",
-    "arxiv_id": "2404.08471",
-    "key_contribution": "V-JEPA: Spatio-temporal masked prediction in latent space",
-    "architecture": {
-        "encoder": "Vision Transformer (ViT)",
-        "predictor": "Transformer with cross-attention",
-        "target_encoder": "EMA updated from encoder"
-    },
-    "loss": "MSE in latent space (no pixel reconstruction)",
-    "results": {
-        "Kinetics-400": "81.9% Top-1",
-        "Something-Something v2": "72.2%",
-        "ImageNet": "77.9% (from video pre-training)"
-    },
-    "limitations": "Requires large-scale video data",
-    "future_work": "Longer temporal context, action-conditioned prediction"
-}
-```
-:::
+<details><summary>論文読解テンプレート (Julia NamedTuple形式)</summary>
 
-:::message
-**進捗**: 全体の70%完了。JEPAコンセプトをJuliaで実装し、MNIST簡易実験でLoss減少を確認した。Context encoderがmasked predictionを通じて有用な表現を学習している。
-:::
+```julia
+paper = (
+    title        = "Revisiting Feature Prediction for Learning Visual Representations from Video",
+    authors      = "Bardes et al.",
+    year         = 2024,
+    venue        = "arXiv",
+    arxiv_id     = "2404.08471",
+    key_contribution = "V-JEPA: Spatio-temporal masked prediction in latent space",
+    architecture = (
+        encoder        = "Vision Transformer (ViT)",
+        predictor      = "Transformer with cross-attention",
+        target_encoder = "EMA updated from encoder",
+    ),
+    loss    = "MSE in latent space (no pixel reconstruction)",
+    results = (
+        kinetics400          = "81.9% Top-1",
+        something_something2 = "72.2%",
+        imagenet             = "77.9% (from video pre-training)",
+    ),
+    limitations = "Requires large-scale video data",
+    future_work = "Longer temporal context, action-conditioned prediction",
+)
+```
+
+</details>
+
+> **Note:** **進捗**: 全体の70%完了。JEPAコンセプトをJuliaで実装し、MNIST簡易実験でLoss減少を確認した。Context encoderがmasked predictionを通じて有用な表現を学習している。
 
 ---
 
 ## 🔬 5. 実験ゾーン（30分）— World Modelsの性能比較
-
-### 5.1 記号読解テスト（10問）
-
-各記号を声に出して読め:
-
-1. $z_{t+1} = f_\theta(z_t, a_t)$
-2. $\mathcal{L}_{\text{I-JEPA}} = \mathbb{E}_{x, M} \left[ \| f_\theta(s_\theta(x_{\text{ctx}}), M) - \bar{s}_\theta(x_{\text{tgt}}) \|_2^2 \right]$
-3. $\mathcal{L}_{\text{Transfusion}} = \mathcal{L}_{\text{LM}}(\text{text}) + \lambda \mathcal{L}_{\text{Diffusion}}(\text{image})$
-4. $\mathcal{L}_{\text{PINN}} = \mathcal{L}_{\text{data}} + \lambda_{\text{PDE}} \mathcal{L}_{\text{PDE}}$
-5. $p(z_{t+1} | z_t, a_t) = \frac{\exp(-E_\theta(z_t, a_t, z_{t+1}))}{Z(z_t, a_t)}$
-
-:::details 解答
-1. 「次状態$z_{t+1}$は、現状態$z_t$とaction $a_t$から関数$f$パラメータ$\theta$で計算される」
-2. 「I-JEPAのlossは、$x$とmask $M$に関する期待値で、predictor $f_\theta$がcontext $s_\theta(x_{\text{ctx}})$とmask $M$から予測した潜在表現と、target encoder $\bar{s}_\theta$がtarget $x_{\text{tgt}}$から抽出した潜在表現のL2距離の2乗」
-3. 「Transfusionのlossは、テキスト部分の言語モデルlossと、画像部分のdiffusion lossの重み付き和、$\lambda$はハイパーパラメータ」
-4. 「Physics-Informed NNのlossは、データlossとPDE（微分方程式）lossの重み付き和、$\lambda_{\text{PDE}}$は物理制約の重み」
-5. 「次状態$z_{t+1}$の、現状態$z_t$とaction $a_t$が与えられた条件付き確率は、エネルギー関数$E_\theta$の指数の負に比例し、正規化定数$Z$で割られたGibbs分布」
-:::
-
-### 5.2 LaTeX書き取りテスト（5問）
-
-以下の数式をLaTeXで書け:
-
-1. 「次状態$z_{t+1}$は現状態$z_t$と行動$a_t$から予測関数$f$パラメータ$\theta$で計算され、ノイズ$\epsilon_t$が加わる。$\epsilon_t$は平均0共分散$\Sigma$の正規分布に従う」
-
-2. 「JEPAのlossは、期待値で、予測$z_{\text{pred}}$とターゲット$z_{\text{tgt}}$のL2ノルム2乗」
-
-3. 「Transfusionの画像lossは、時刻$t$とノイズ$\epsilon$に関する期待値で、真のノイズ$\epsilon$とモデル予測$\epsilon_\theta(x_t, t, c)$のL2ノルム2乗」
-
-4. 「エネルギー保存誤差は、時間平均で、時刻$t$のエネルギー$E(z_t)$と初期エネルギー$E(z_0)$の差の絶対値」
-
-5. 「Hamiltonian力学系の方程式: $q$の時間微分は$H$の$p$に関する偏微分、$p$の時間微分は$H$の$q$に関する偏微分の負」
-
-:::details 解答
-1. `z_{t+1} = f_\theta(z_t, a_t) + \epsilon_t, \quad \epsilon_t \sim \mathcal{N}(0, \Sigma)`
-2. `\mathcal{L} = \mathbb{E} \left[ \| z_{\text{pred}} - z_{\text{tgt}} \|_2^2 \right]`
-3. `\mathcal{L}_{\text{image}} = \mathbb{E}_{t, \epsilon} \left[ \| \epsilon - \epsilon_\theta(\mathbf{x}_t, t, \mathbf{c}) \|_2^2 \right]`
-4. `\text{Energy Error} = \frac{1}{T} \sum_{t=1}^T | E(z_t) - E(z_0) |`
-5. `\dot{q} = \frac{\partial H}{\partial p}, \quad \dot{p} = -\frac{\partial H}{\partial q}`
-:::
-
-### 5.3 コード翻訳テスト（5問）
-
-数式をJuliaコードに翻訳せよ:
-
-1. $z_{t+1} = f_\theta(z_t, a_t) + \epsilon$, $\epsilon \sim \mathcal{N}(0, \Sigma)$
-
-2. $\mathcal{L} = \mathbb{E} \left[ \| z_{\text{pred}} - z_{\text{tgt}} \|_2^2 \right]$
-
-3. EMA更新: $\bar{\theta} \leftarrow \tau \bar{\theta} + (1-\tau)\theta$
-
-4. $\mathcal{L}_{\text{Transfusion}} = \mathcal{L}_{\text{text}} + \lambda \mathcal{L}_{\text{image}}$
-
-5. Hamiltonian勾配: $\dot{q} = \frac{\partial H}{\partial p}$, $\dot{p} = -\frac{\partial H}{\partial q}$
-
-:::details 解答
-1. ```julia
-   z_next = f_θ(z_t, a_t, ps, st)[1] + sqrt(Σ) * randn(size(z_t))
-   ```
-
-2. ```julia
-   loss = mean((z_pred .- z_tgt).^2)
-   ```
-
-3. ```julia
-   for (k, v) in pairs(target_ps)
-       target_ps[k] .= τ .* target_ps[k] .+ (1 - τ) .* context_ps[k]
-   end
-   ```
-
-4. ```julia
-   loss = loss_text + λ * loss_image
-   ```
-
-5. ```julia
-   dH_dp = gradient(p -> H(q, p, ps, st)[1], p)[1]
-   dH_dq = gradient(q -> H(q, p, ps, st)[1], q)[1]
-   dq_dt = dH_dp
-   dp_dt = -dH_dq
-   ```
-:::
 
 ### 5.4 論文読解: V-JEPA Pass 1実践
 
@@ -348,12 +272,14 @@ paper = {
 3. 性能は？
 4. 限界は？
 
-:::details 解答例
+<details><summary>解答例</summary>
+
 1. **新規性**: Video Joint-Embedding Predictive Architecture — 動画の潜在表現を時空間マスク予測で学習
 2. **動作原理**: Context frames → Encoder → Predictor → Target latent prediction (ピクセル再構成なし)
 3. **性能**: Kinetics-400 81.9%, SSv2 72.2%, ImageNet 77.9%
 4. **限界**: 大規模動画データが必要、action-conditioned predictionは未実装
-:::
+
+</details>
 
 ### 5.5 実装チャレンジ: 保存則World Model
 
@@ -369,8 +295,8 @@ function (m::MomentumConservingWM)(state, actions, ps, st)
     N = size(state, 1)
 
     # Extract positions and velocities
-    pos = state[:, 1:3]
-    vel = state[:, 4:6]
+    @views pos = state[:, 1:3]
+    @views vel = state[:, 4:6]
 
     # GNN computes forces (pairwise)
     forces = m.gnn(pos, vel, ps, st)[1]  # [N, 3]
@@ -400,24 +326,11 @@ function symmetrize_forces(forces, N)
 end
 ```
 
-### 5.6 自己診断チェックリスト
 
-- [ ] World Modelsの3レベル（生成・条件付き生成・環境シミュレーション）を説明できる
-- [ ] JEPAの3変種（I/V/VL）の違いを理解している
-- [ ] Transfusionの統一損失関数を導出できる
-- [ ] Physics-Informed World Modelsの原理を説明できる
-- [ ] Energy-based World Modelsの定式化を導出できる
-- [ ] Action-conditioned predictionを実装できる
-- [ ] EMA target encoderの役割を理解している
-- [ ] 保存則（運動量・エネルギー）をモデルに埋め込む方法を知っている
-- [ ] Hamiltonian Neural Networksの構造を理解している
-- [ ] World Modelsの評価指標（MSE, SSIM, 物理法則遵守スコア）を計算できる
-
-:::message
-**進捗**: 全体の85%完了。記号読解・LaTeX書き取り・コード翻訳・論文読解・実装チャレンジを完了した。World Modelsの理論と実装の対応関係を完全理解している。
-:::
-
----
+> Progress: 95%
+> **理解度チェック**
+> 1. このゾーンの主要な概念・定義を自分の言葉で説明してください。
+> 2. この手法が他のアプローチより優れている点と、その限界を述べてください。
 
 ## 🚀 6. 発展ゾーン（30分）— Embodied AIへの接続 + まとめ
 
@@ -724,19 +637,19 @@ function (m::PhysicsInformedGNN)(positions, velocities, ps, st; Δt=0.01)
     forces = zeros(Float32, N, 3)
 
     # Compute pairwise forces (message passing)
-    for i in 1:N
+    @inbounds for i in 1:N
         for j in (i+1):N
             # Edge features
-            r_ij = positions[j, :] - positions[i, :]
-            v_ij = velocities[j, :] - velocities[i, :]
+            @views r_ij = positions[j, :] .- positions[i, :]
+            @views v_ij = velocities[j, :] .- velocities[i, :]
             edge_feat = vcat(r_ij, v_ij)
 
             # Compute force (symmetric)
             F_ij, _ = m.edge_mlp(edge_feat, ps.edge_mlp, st.edge_mlp)
 
             # Newton's 3rd law: F_ij = -F_ji
-            forces[i, :] += F_ij
-            forces[j, :] -= F_ij
+            forces[i, :] .+= F_ij
+            forces[j, :] .-= F_ij
         end
     end
 
@@ -746,24 +659,17 @@ function (m::PhysicsInformedGNN)(positions, velocities, ps, st; Δt=0.01)
 
     # Update velocities and positions
     accelerations = forces ./ m.mass'  # Broadcasting over masses
-    v_new = velocities + accelerations * Δt
-    r_new = positions + v_new * Δt
+    @. v_new = velocities + accelerations * Δt
+    @. r_new = positions + v_new * Δt
 
     return r_new, v_new, st
 end
 
 # Energy conservation verification
 function verify_conservation(r, v, masses, potential_fn)
-    # Kinetic energy
-    KE = sum(0.5 * masses .* sum(v.^2, dims=2))
-
-    # Potential energy
-    PE = potential_fn(r)
-
-    # Total energy
-    E_total = KE + PE
-
-    return E_total
+    KE = 0.5f0 * sum(masses .* sum(v .^ 2, dims=2))  # Kinetic energy
+    PE = potential_fn(r)                                # Potential energy
+    return KE + PE                                      # Total energy
 end
 ```
 
@@ -819,8 +725,8 @@ function hamiltonian_dynamics(qp, model, ps, st, t)
     ∇H = gradient(qp -> model(qp, ps, st)[1], qp)[1]
 
     D = length(qp) ÷ 2
-    dq = ∇H[D+1:end]   # ∂H/∂p
-    dp = -∇H[1:D]       # -∂H/∂q
+    @views dq = ∇H[D+1:end]   # ∂H/∂p
+    @views dp = -∇H[1:D]       # -∂H/∂q
 
     return vcat(dq, dp)
 end
@@ -969,420 +875,6 @@ end
 | **ロボティクス** | Multi-body dynamics | GNN | Sim-to-real転移成功率+25% |
 | **材料科学** | 結晶構造予測 | PINNs + 対称性 | 新材料発見加速 |
 
-### 6.3 完全実装チュートリアル — V-JEPA
-
-ここまでI-JEPAを実装した。次は**V-JEPA（動画版）**を完全実装する。
-
-#### 6.3.1 V-JEPAアーキテクチャ詳解
-
-**コア要素**:
-
-1. **Spatio-temporal Encoder**: 動画パッチを潜在表現に変換
-2. **Predictor**: マスクされた時空間領域の表現を予測
-3. **Target Encoder**: EMAで更新されるターゲット
-
-**マスキング戦略**:
-
-```
-Frame 0: [████ ████ ████]  ← Context
-Frame 1: [░░░░ ████ ░░░░]  ← Masked
-Frame 2: [████ ░░░░ ████]  ← Masked
-Frame 3: [░░░░ ░░░░ ░░░░]  ← Fully masked
-```
-
-**Julia完全実装**:
-
-```julia
-using Lux, Flux, Random, Statistics
-
-# 3D Vision Transformer for video
-struct VideoEncoder
-    patch_embed::Chain      # 3D convolution for spatio-temporal patches
-    pos_embed::Array{Float32, 3}  # Positional embedding [T, H*W, D]
-    transformer::Chain      # Transformer blocks
-    norm::LayerNorm
-end
-
-function VideoEncoder(; frames=4, patch_size=16, img_size=224, embed_dim=768, depth=12)
-    n_patches_per_frame = (img_size ÷ patch_size)^2
-
-    # 3D patch embedding: (C, H, W, T) → (D, n_patches, T)
-    patch_embed = Chain(
-        Conv((3, patch_size, patch_size), 3 => embed_dim, stride=(1, patch_size, patch_size)),
-        flatten
-    )
-
-    # Learnable positional embedding
-    pos_embed = randn(Float32, frames, n_patches_per_frame, embed_dim) * 0.02
-
-    # Transformer
-    transformer = Chain([
-        TransformerBlock(embed_dim, n_heads=12, mlp_ratio=4.0) for _ in 1:depth
-    ]...)
-
-    norm = LayerNorm(embed_dim)
-
-    return VideoEncoder(patch_embed, pos_embed, transformer, norm)
-end
-
-function (m::VideoEncoder)(video, mask, ps, st)
-    # video: [C, H, W, T, B] — (channels, height, width, time, batch)
-    # mask: [T, n_patches, B] — 1=keep, 0=remove
-
-    # Patch embedding
-    patches, st_emb = m.patch_embed(video, ps.patch_embed, st.patch_embed)
-    # patches: [D, n_patches, T, B]
-
-    # Add positional embedding
-    patches = patches .+ m.pos_embed  # Broadcasting
-
-    # Apply mask (remove masked patches)
-    T, n_patches, D = size(m.pos_embed)
-    B = size(video, 5)
-    patches_flat = reshape(patches, D, T * n_patches, B)
-    mask_flat = reshape(mask, T * n_patches, B)
-
-    # Keep only visible patches
-    visible_patches = [patches_flat[:, mask_flat[:, b] .== 1, b] for b in 1:B]
-
-    # Transformer (process each batch element separately due to variable length)
-    encoded = []
-    for b in 1:B
-        x = visible_patches[b]
-        x, st_trans = m.transformer(x, ps.transformer, st.transformer)
-        x = m.norm(x, ps.norm, st.norm)[1]
-        push!(encoded, x)
-    end
-
-    return encoded, st
-end
-
-# Predictor: predicts masked regions
-struct VideoPredictor
-    mask_token::Array{Float32, 1}  # Learnable mask token [D]
-    transformer::Chain
-    head::Dense
-end
-
-function VideoPredictor(; embed_dim=768, depth=6, n_masks=16)
-    mask_token = randn(Float32, embed_dim) * 0.02
-
-    transformer = Chain([
-        TransformerBlock(embed_dim, n_heads=12, mlp_ratio=4.0) for _ in 1:depth
-    ]...)
-
-    head = Dense(embed_dim, embed_dim)  # Project to target dim
-
-    return VideoPredictor(mask_token, transformer, head)
-end
-
-function (m::VideoPredictor)(context_tokens, mask_positions, ps, st)
-    # context_tokens: [D, N_visible, B]
-    # mask_positions: [N_masked, 3] — (t, patch_idx, batch) for each masked position
-
-    D = size(context_tokens, 1)
-    N_masked = size(mask_positions, 1)
-    B = size(context_tokens, 3)
-
-    # Create mask tokens
-    mask_tokens = repeat(m.mask_token, 1, N_masked, B)  # [D, N_masked, B]
-
-    # Concatenate context + mask tokens
-    all_tokens = cat(context_tokens, mask_tokens, dims=2)  # [D, N_visible+N_masked, B]
-
-    # Transformer
-    x, st_trans = m.transformer(all_tokens, ps.transformer, st.transformer)
-
-    # Extract predictions for masked positions
-    predictions = x[:, (size(context_tokens, 2)+1):end, :]  # [D, N_masked, B]
-
-    # Project
-    predictions, st_head = m.head(predictions, ps.head, st.head)
-
-    return predictions, st
-end
-
-# Full V-JEPA model
-struct VJEPA
-    context_encoder::VideoEncoder
-    target_encoder::VideoEncoder
-    predictor::VideoPredictor
-end
-
-function VJEPA(; frames=4, patch_size=16, img_size=224, embed_dim=768, enc_depth=12, pred_depth=6)
-    context_encoder = VideoEncoder(frames=frames, patch_size=patch_size, img_size=img_size,
-                                     embed_dim=embed_dim, depth=enc_depth)
-    target_encoder = VideoEncoder(frames=frames, patch_size=patch_size, img_size=img_size,
-                                    embed_dim=embed_dim, depth=enc_depth)
-    predictor = VideoPredictor(embed_dim=embed_dim, depth=pred_depth)
-
-    return VJEPA(context_encoder, target_encoder, predictor)
-end
-
-# Training step
-function train_vjepa_step!(model, video_batch, ps, st; τ=0.996)
-    # Generate random spatio-temporal mask
-    T, H, W, C, B = size(video_batch)
-    n_patches = (H ÷ 16) * (W ÷ 16)
-    mask = generate_spatiotemporal_mask(T, n_patches, B, mask_ratio=0.6)
-
-    # Context encoding (with mask)
-    context_tokens, st_ctx = model.context_encoder(video_batch, mask, ps.context_encoder, st.context_encoder)
-
-    # Target encoding (full video, stopgradient)
-    target_tokens, st_tgt = model.target_encoder(video_batch, ones(size(mask)), ps.target_encoder, st.target_encoder)
-    # Stopgradient: do not backprop through target encoder
-
-    # Predictor
-    mask_positions = findall(mask .== 0)
-    predictions, st_pred = model.predictor(context_tokens, mask_positions, ps.predictor, st.predictor)
-
-    # Loss: MSE in latent space
-    targets = [target_tokens[b][:, mask_positions[b]] for b in 1:B]
-    loss = sum([Flux.mse(predictions[:, :, b], targets[b]) for b in 1:B]) / B
-
-    # EMA update for target encoder
-    ps.target_encoder = update_ema(ps.target_encoder, ps.context_encoder, τ)
-
-    return loss, st
-end
-
-function generate_spatiotemporal_mask(T, n_patches, B; mask_ratio=0.6)
-    # Simple random masking (can use more sophisticated block masking)
-    mask = rand(Float32, T, n_patches, B) .> mask_ratio
-    return mask
-end
-
-function update_ema(target_ps, context_ps, τ)
-    # Exponential moving average
-    return τ .* target_ps .+ (1 - τ) .* context_ps
-end
-```
-
-#### 6.3.2 V-JEPAの訓練 — Kinetics-400での実験
-
-**データセット**: Kinetics-400 (400 action classes, 240K training videos)
-
-**訓練設定**:
-
-```julia
-# Hyperparameters
-config = Dict(
-    "frames" => 16,             # Input video length
-    "patch_size" => 16,
-    "img_size" => 224,
-    "embed_dim" => 1024,        # ViT-Large
-    "enc_depth" => 24,
-    "pred_depth" => 12,
-    "batch_size" => 16,         # Per GPU
-    "epochs" => 300,
-    "lr" => 1.5e-4,
-    "weight_decay" => 0.05,
-    "τ_initial" => 0.996,
-    "τ_final" => 1.0,           # EMA momentum schedule
-    "mask_ratio" => 0.6
-)
-
-# Learning rate schedule: cosine decay
-function cosine_schedule(epoch, total_epochs, lr_max, lr_min=0.0)
-    return lr_min + 0.5 * (lr_max - lr_min) * (1 + cos(π * epoch / total_epochs))
-end
-
-# τ schedule: gradually increase to 1.0
-function tau_schedule(epoch, total_epochs, τ_init, τ_final)
-    return τ_final - (τ_final - τ_init) * cos(π * epoch / total_epochs) / 2
-end
-
-# Training loop
-function train_vjepa!(model, train_loader, ps, st, config)
-    opt = AdamW(config["lr"], (0.9, 0.95), config["weight_decay"])
-    opt_st = Optimisers.setup(opt, ps)
-
-    for epoch in 1:config["epochs"]
-        # Update learning rate
-        lr = cosine_schedule(epoch, config["epochs"], config["lr"])
-        opt.eta = lr
-
-        # Update EMA momentum
-        τ = tau_schedule(epoch, config["epochs"], config["τ_initial"], config["τ_final"])
-
-        total_loss = 0.0
-        for video_batch in train_loader
-            # Forward + backward
-            loss, st = train_vjepa_step!(model, video_batch, ps, st, τ=τ)
-
-            # Gradient descent
-            grads = gradient(ps -> loss, ps)[1]
-            opt_st, ps = Optimisers.update(opt_st, ps, grads)
-
-            total_loss += loss
-        end
-
-        avg_loss = total_loss / length(train_loader)
-        println("Epoch $epoch/$( config["epochs"]): Loss = $(round(avg_loss, digits=4)), LR = $(round(lr, sigdigits=3)), τ = $(round(τ, digits=4))")
-
-        # Save checkpoint every 50 epochs
-        if epoch % 50 == 0
-            save_checkpoint(ps, st, "vjepa_epoch$(epoch).jld2")
-        end
-    end
-
-    return ps, st
-end
-```
-
-**期待される性能** (論文値と比較):
-
-| 指標 | V-JEPA (論文) | 今回の実装 (予想) |
-|:----|:--------------|:------------------|
-| **Kinetics-400 Top-1** | 81.9% | 78-80% (fewer resources) |
-| **訓練時間** | 288 GPU hours (A100 x32) | ~600 GPU hours (single A100) |
-| **メモリ使用量** | 40GB/GPU | 38GB/GPU |
-
-#### 6.3.3 Transfusion完全実装 — テキスト+画像統一モデル
-
-**Challenge**: 1つのTransformerでテキスト（AR loss）と画像（Diffusion loss）を同時訓練
-
-**Julia実装**:
-
-```julia
-using Lux, Flux, Transformers
-
-struct TransfusionModel
-    text_tokenizer::BPETokenizer     # For text
-    image_patchify::Chain            # For image patches
-    shared_transformer::Chain        # Unified Transformer
-    text_head::Dense                 # Next token prediction
-    image_head::Dense                # Noise prediction
-end
-
-function TransfusionModel(; vocab_size=50257, img_patch_size=16, d_model=2048, n_layers=24)
-    text_tokenizer = load_tokenizer("gpt2")
-
-    # Image patchify
-    image_patchify = Chain(
-        Conv((img_patch_size, img_patch_size), 3 => d_model, stride=img_patch_size),
-        flatten
-    )
-
-    # Shared Transformer
-    shared_transformer = Chain([
-        TransformerBlock(d_model, n_heads=32, mlp_ratio=4.0) for _ in 1:n_layers
-    ]...)
-
-    # Task-specific heads
-    text_head = Dense(d_model, vocab_size)  # Logits over vocab
-    image_head = Dense(d_model, 3 * img_patch_size^2)  # Predict RGB patch
-
-    return TransfusionModel(text_tokenizer, image_patchify, shared_transformer, text_head, image_head)
-end
-
-# Forward pass for text (autoregressive)
-function forward_text(model, text_tokens, ps, st)
-    # text_tokens: [seq_len, batch]
-    # Embed
-    embeddings = ps.text_embedding[text_tokens, :]  # [seq_len, d_model, batch]
-
-    # Transformer (causal mask)
-    h, st_trans = model.shared_transformer(embeddings, ps.shared_transformer, st.shared_transformer)
-
-    # Predict next token
-    logits, st_head = model.text_head(h, ps.text_head, st.text_head)
-
-    return logits, st
-end
-
-# Forward pass for image (diffusion)
-function forward_image(model, image, t, ps, st)
-    # image: [C, H, W, batch] noisy image at timestep t
-    # Patchify
-    patches, st_patch = model.image_patchify(image, ps.image_patchify, st.image_patchify)
-    # patches: [d_model, n_patches, batch]
-
-    # Add time embedding
-    t_emb = sinusoidal_embedding(t, d_model)
-    patches = patches .+ t_emb
-
-    # Transformer (bidirectional, no causal mask)
-    h, st_trans = model.shared_transformer(patches, ps.shared_transformer, st.shared_transformer)
-
-    # Predict noise
-    noise_pred, st_head = model.image_head(h, ps.image_head, st.image_head)
-
-    return noise_pred, st
-end
-
-# Unified training step
-function train_transfusion_step!(model, text_batch, image_batch, ps, st; λ=1.0)
-    # Text loss (cross-entropy)
-    text_logits, st = forward_text(model, text_batch, ps, st)
-    text_target = text_batch[2:end, :]  # Shifted by 1 (next token)
-    loss_text = Flux.crossentropy(softmax(text_logits[1:end-1, :, :]), text_target)
-
-    # Image loss (diffusion)
-    t = rand(1:1000)  # Random timestep
-    noise = randn(size(image_batch))
-    noisy_image = sqrt(alpha(t)) * image_batch + sqrt(1 - alpha(t)) * noise
-    noise_pred, st = forward_image(model, noisy_image, t, ps, st)
-    loss_image = Flux.mse(noise_pred, noise)
-
-    # Combined loss
-    loss = loss_text + λ * loss_image
-
-    return loss, st
-end
-
-# Helper: sinusoidal time embedding
-function sinusoidal_embedding(t, d_model)
-    half_d = d_model ÷ 2
-    freqs = exp.(-log(10000) * (0:half_d-1) / half_d)
-    args = t * freqs'
-    emb = vcat(sin.(args), cos.(args))
-    return emb
-end
-
-# Helper: alpha schedule (DDPM)
-function alpha(t, T=1000)
-    β = 0.0001 + (0.02 - 0.0001) * t / T
-    return prod([1 - β_i for β_i in β])
-end
-```
-
-**訓練**:
-
-```julia
-# Transfusion training
-config_transfusion = Dict(
-    "batch_size" => 128,
-    "epochs" => 100,
-    "lr" => 1e-4,
-    "λ" => 0.1,  # Balance text vs image loss
-    "d_model" => 2048,
-    "n_layers" => 24
-)
-
-function train_transfusion!(model, text_data, image_data, ps, st, config)
-    opt = Adam(config["lr"])
-    opt_st = Optimisers.setup(opt, ps)
-
-    for epoch in 1:config["epochs"]
-        total_loss = 0.0
-        for (text_batch, image_batch) in zip(text_data, image_data)
-            loss, st = train_transfusion_step!(model, text_batch, image_batch, ps, st, λ=config["λ"])
-
-            grads = gradient(ps -> loss, ps)[1]
-            opt_st, ps = Optimisers.update(opt_st, ps, grads)
-
-            total_loss += loss
-        end
-
-        println("Epoch $epoch: Loss = $(total_loss / min(length(text_data), length(image_data)))")
-    end
-
-    return ps, st
-end
-```
-
 ### 6.4 ベンチマーク総合比較
 
 各World Modelsファミリーのベンチマーク性能を統合比較する。
@@ -1439,19 +931,6 @@ end
 | **MAE** | ImageNet Top-1 84% | ★★★☆☆ | ★★★★☆ |
 | **V-JEPA** | Kinetics Top-1 79% | ★★★★★ | ★★★★☆ |
 | **Transfusion** | Mixed metrics | ★★★★☆ | ★★★☆☆ |
-
-### 6.5 推薦書籍・オンラインリソース
-
-| タイトル | 著者 | URL | レベル |
-|:--------|:-----|:----|:------|
-| **JEPA公式ブログ** | Yann LeCun, Meta AI | [Meta AI Blog](https://ai.meta.com/blog/yann-lecun-ai-model-i-jepa/) | 初級 |
-| **V-JEPA公式ページ** | Meta AI | [V-JEPA](https://ai.meta.com/vjepa/) | 初級 |
-| **Transfusion論文** | Zhou et al. | [arXiv:2408.11039](https://arxiv.org/abs/2408.11039) | 中級 |
-| **Cosmos公式** | NVIDIA | [NVIDIA Cosmos](https://www.nvidia.com/en-us/ai/cosmos/) | 中級 |
-| **Physics-Informed ML** | Karniadakis et al. | [Nature Rev Physics](https://www.nature.com/articles/s42254-021-00314-5) | 上級 |
-| **Hamiltonian NN論文** | Greydanus et al. | [arXiv:1906.01563](https://arxiv.org/abs/1906.01563) | 上級 |
-| **World Models (Ha)** | Ha & Schmidhuber | [arXiv:1803.10122](https://arxiv.org/abs/1803.10122) | 中級 |
-| **DreamerV3** | Hafner et al. | [arXiv:2301.04104](https://arxiv.org/abs/2301.04104) | 上級 |
 
 ### 6.6 実装Tips & デバッグガイド
 
@@ -1559,12 +1038,12 @@ end
 function enforce_newtons_third_law(forces_matrix)
     # forces_matrix: [N, N, 3] — F[i,j,:] = force on i from j
     N = size(forces_matrix, 1)
-    for i in 1:N
+    @inbounds for i in 1:N
         for j in (i+1):N
             # Average and symmetrize
-            F_ij = (forces_matrix[i, j, :] - forces_matrix[j, i, :]) / 2
-            forces_matrix[i, j, :] = F_ij
-            forces_matrix[j, i, :] = -F_ij
+            @views F_ij = (forces_matrix[i, j, :] .- forces_matrix[j, i, :]) ./ 2
+            forces_matrix[i, j, :] .= F_ij
+            forces_matrix[j, i, :] .= .-F_ij
         end
     end
     return forces_matrix
@@ -1651,12 +1130,11 @@ grads = grads ./ loss_scale  # Unscale
 # ✅ 全フレームを一度に処理せず、時間方向に分割
 function chunked_video_encoding(encoder, video, ps, st; chunk_size=4)
     T = size(video, 4)
-    chunks = []
-    for t in 1:chunk_size:T
+    chunks = map(1:chunk_size:T) do t
         t_end = min(t + chunk_size - 1, T)
-        chunk = video[:, :, :, t:t_end, :]
+        @views chunk = video[:, :, :, t:t_end, :]
         encoded, st = encoder(chunk, ps, st)
-        push!(chunks, encoded)
+        encoded
     end
     return cat(chunks..., dims=2), st  # Concatenate along time
 end
@@ -1725,7 +1203,8 @@ end
 
 ### 6.8 用語集
 
-:::details World Modelsの用語（50音順）
+<details><summary>World Modelsの用語（50音順）</summary>
+
 - **Action-conditioned prediction**: 行動$a_t$を条件として次状態を予測
 - **Causal World Model**: 因果関係を明示的に学習する世界モデル
 - **Cosmos**: NVIDIAの物理AI向け世界基盤モデル
@@ -1750,7 +1229,8 @@ end
 - **VL-JEPA**: Vision-Language JEPA
 - **World Model**: 環境の潜在構造を学習し、未来を予測するモデル
 - **保存則 (Conservation laws)**: エネルギー・運動量等が時間変化しない物理法則
-:::
+
+</details>
 
 ### 6.9 実装演習 — 段階別チャレンジ
 
@@ -1839,8 +1319,7 @@ end
 
 # Generate training data
 function generate_pendulum_data(n_samples=1000, T=10.0)
-    data = []
-    for _ in 1:n_samples
+    return map(1:n_samples) do _
         q0 = rand() * 2π - π
         p0 = rand() * 2 - 1
         qp0 = [q0, p0]
@@ -1851,9 +1330,8 @@ function generate_pendulum_data(n_samples=1000, T=10.0)
 
         # Random pairs
         t1, t2 = sort(rand(1:length(sol), 2))
-        push!(data, (sol[t1], sol[t2], sol.t[t2] - sol.t[t1]))
+        (sol[t1], sol[t2], sol.t[t2] - sol.t[t1])
     end
-    return data
 end
 
 function pendulum_dynamics(qp)
@@ -2018,9 +1496,7 @@ graph TD
     style B fill:#ff9,stroke:#333,stroke-width:4px
 ```
 
-:::message
-**進捗**: 全体の95%完了。World Modelsファミリーの全体像を把握し、最新研究（Cosmos/Genie/Physics-Informed）の位置づけを理解した。Embodied AI・ロボティクスへの接続が見えた。
-:::
+> **Note:** **進捗**: 全体の95%完了。World Modelsファミリーの全体像を把握し、最新研究（Cosmos/Genie/Physics-Informed）の位置づけを理解した。Embodied AI・ロボティクスへの接続が見えた。
 
 ---
 
@@ -2043,19 +1519,26 @@ graph TD
 
 ### 6.7 FAQ
 
-:::details Q1: JEPAはなぜピクセル生成をスキップするのか？
+<details><summary>Q1: JEPAはなぜピクセル生成をスキップするのか？</summary>
+
 **A**: ピクセル再構成は低レベル詳細（テクスチャ、色）に過剰適合し、高レベル抽象表現（オブジェクト、動き、因果関係）を学習しにくい。JEPAは潜在空間で予測することで、構造的・意味的表現を優先的に学習する。
-:::
 
-:::details Q2: TransfusionはなぜVQ-VAEを使わないのか？
+</details>
+
+<details><summary>Q2: TransfusionはなぜVQ-VAEを使わないのか？</summary>
+
 **A**: VQ-VAEは画像を離散トークンに量子化するが、量子化誤差とコードブック利用率低下の問題がある。Transfusionは画像を**連続パッチ埋め込み**として扱い、Diffusion lossで訓練することで、情報損失を回避する。
-:::
 
-:::details Q3: Physics-Informed World Modelsの実用性は？
+</details>
+
+<details><summary>Q3: Physics-Informed World Modelsの実用性は？</summary>
+
 **A**: 物理シミュレーション（気候・流体・分子動力学）では高い実用性。ロボティクスでも、物理法則を知っていれば少ないデータで学習可能。ただし、複雑な実世界（歩行者の行動予測など）では物理法則だけでは不十分。
-:::
 
-:::details Q4: World ModelsとDiffusion Modelsの違いは？
+</details>
+
+<details><summary>Q4: World ModelsとDiffusion Modelsの違いは？</summary>
+
 **A**:
 
 | | Diffusion | World Models |
@@ -2066,9 +1549,11 @@ graph TD
 | **応用** | 画像生成 | シミュレーション、強化学習 |
 
 World ModelsはDiffusionの上位概念で、環境の因果構造を理解する。
-:::
 
-:::details Q5: Embodied AIへの接続は？
+</details>
+
+<details><summary>Q5: Embodied AIへの接続は？</summary>
+
 **A**: World Modelsは**行動の結果を予測**できるため、ロボットの制御に直結する。
 
 1. **Perception**: 観測$x_t$→潜在$z_t$
@@ -2076,44 +1561,8 @@ World ModelsはDiffusionの上位概念で、環境の因果構造を理解す�
 3. **Control**: 最良の行動を選択
 
 第47回（Course V）で「Diffusion Policy」としてロボティクス応用を完全実装する。
-:::
 
-### 6.8 学習スケジュール（1週間プラン）
-
-| 日 | タスク | 時間 |
-|:---|:------|:-----|
-| **Day 1** | Zone 0-2: 動機理解 + 体験 | 1h |
-| **Day 2-3** | Zone 3.1-3.3: JEPA理論完全習得 | 3h |
-| **Day 4** | Zone 3.4-3.7: 物理法則学習+訓練理論 | 2h |
-| **Day 5** | Zone 4: Julia JEPA実装 | 2h |
-| **Day 6** | Zone 5: 実験+チェックリスト | 1.5h |
-| **Day 7** | Zone 6-7: 最新研究+復習 | 1h |
-
-### 6.9 進捗トラッカー
-
-```julia
-# 自己評価（0-10）
-scores = Dict(
-    "World Modelsの定義理解" => 0,
-    "JEPA理論の数学的導出" => 0,
-    "Transfusion統一理論" => 0,
-    "物理法則学習の原理" => 0,
-    "JEPAコンセプト実装" => 0,
-    "論文読解スキル" => 0,
-    "Embodied AI接続理解" => 0
-)
-
-# 目標: 各項目 ≥ 7
-total = sum(values(scores))
-progress = total / 70 * 100
-println("総合進捗: $(round(progress, digits=1))%")
-
-if all(v >= 7 for v in values(scores))
-    println("✅ 第41回コンプリート！第42回（統一理論）へ進め")
-else
-    println("⚠️ 7未満の項目を復習せよ")
-end
-```
+</details>
 
 ### 6.10 次回予告: 第42回 全生成モデル統一理論 + Course IV総括
 
@@ -2134,13 +1583,11 @@ end
 
 **到達点**: 「全生成モデルは本質的に同じものの異なる視点だった」
 
-:::message
-**進捗**: 🏆 **全体の100%完了！第41回読了！**
-
-生成モデルの最終到達点「World Models」を完全理解した。ピクセル生成をスキップし、潜在空間で環境の因果構造を学習するJEPA理論、テキスト+画像を統一するTransfusion理論、物理法則を埋め込むPhysics-Informed理論、エネルギー関数視点、訓練・評価手法を完全習得した。
-
-次回、全生成モデルの統一理論へ。
-:::
+> **Note:** **進捗**: 🏆 **全体の100%完了！第41回読了！**
+>
+> 生成モデルの最終到達点「World Models」を完全理解した。ピクセル生成をスキップし、潜在空間で環境の因果構造を学習するJEPA理論、テキスト+画像を統一するTransfusion理論、物理法則を埋め込むPhysics-Informed理論、エネルギー関数視点、訓練・評価手法を完全習得した。
+>
+> 次回、全生成モデルの統一理論へ。
 
 ---
 
@@ -2172,7 +1619,7 @@ JEPAはピクセルを再構成せず、潜在表現を予測する。
 3. **AGIへの道**
    World Modelsが環境の因果構造を完全に学習すれば、それはAGI（汎用人工知能）と呼べるか？
 
-:::details 歴史的文脈 — Yann LeCunの挑戦
+<details><summary>歴史的文脈 — Yann LeCunの挑戦</summary>
 
 **Yann LeCun** (Meta AI Chief Scientist, Turing Award 2018)は、長年「生成モデルは非効率」と批判してきた。
 
@@ -2202,7 +1649,14 @@ JEPAはピクセルを再構成せず、潜在表現を予測する。
 - DeepMind Genie 3: インタラクティブ環境生成
 
 World Modelsは**生成モデルを超えた先**の概念として確立された。
-:::
+
+</details>
+
+---
+
+> **理解度チェック**
+> 1. V-JEPAのマスキング戦略において、ランダムマスクよりブロックマスクが有効な理由を、学習される表現の性質と関連づけて説明してください。
+> 2. Self-supervised learningにおけるCollapse問題を防ぐ手法を2つ挙げ、それぞれの数学的メカニズムを述べてください。
 
 ---
 
@@ -2217,23 +1671,13 @@ World Modelsは**生成モデルを超えた先**の概念として確立され�
 
 ---
 
-## 記法規約
+## 著者リンク
 
-| 記号 | 意味 | 例 |
-|:-----|:-----|:---|
-| $x_t$ | 時刻$t$の観測 | $x_0, x_1, \ldots, x_T$ |
-| $z_t$ | 時刻$t$の潜在状態 | $z_t \in \mathbb{R}^d$ |
-| $a_t$ | 時刻$t$のaction | $a_t \in \mathbb{R}^{d_a}$ |
-| $f_\theta$ | パラメータ$\theta$の遷移関数 | $z_{t+1} = f_\theta(z_t, a_t)$ |
-| $s_\theta$ | Context encoder | $z_{\text{ctx}} = s_\theta(x_{\text{ctx}})$ |
-| $\bar{s}_\theta$ | Target encoder (EMA) | EMA更新 |
-| $M$ | Mask tokens | Positional encoding for masked regions |
-| $\epsilon_\theta$ | Diffusion noise predictor | $\epsilon_\theta(\mathbf{x}_t, t, \mathbf{c})$ |
-| $E_\theta$ | Energy function | $p(z) \propto \exp(-E_\theta(z))$ |
-| $H(q, p)$ | Hamiltonian | 総エネルギー |
-| $\mathcal{L}_{\text{JEPA}}$ | JEPA損失 | MSE in latent space |
-| $\mathcal{L}_{\text{Transfusion}}$ | Transfusion損失 | $\mathcal{L}_{\text{LM}} + \lambda \mathcal{L}_{\text{Diffusion}}$ |
----
+- Blog: https://fumishiki.dev
+- X: https://x.com/fumishiki
+- LinkedIn: https://www.linkedin.com/in/fumitakamurakami
+- GitHub: https://github.com/fumishiki
+- Hugging Face: https://huggingface.co/fumishiki
 
 ## ライセンス
 

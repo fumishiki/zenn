@@ -5,6 +5,10 @@ type: "tech"
 topics: ["machinelearning"]
 published: true
 slug: "ml-lecture-33-part2"
+difficulty: "advanced"
+time_estimate: "90 minutes"
+languages: ["Julia", "Rust"]
+keywords: ["機械学習", "深層学習", "生成モデル"]
 ---
 ## 💻 4. 実装ゾーン（45分）— Julia/RustでFlowを書く
 
@@ -27,13 +31,15 @@ using Random
 
 **Lux選択理由**: Immutable (functional) → 型安定性 → Reactant GPU AOT → Production-ready。
 
+> **⚠️ Warning:** Lux の `ps`（parameters）と `st`（states）を混同しないこと。`ps` は訓練で更新される重み、`st` は BatchNorm 統計などの状態（訓練中と推論時で動作が異なる）。Flux.jl から Lux.jl へ移行する際の最大の落とし穴。
+
 ### 4.2 Coupling Layer実装
 
 ```julia
 # Affine Coupling Layer (Lux style)
 function affine_coupling_forward(z, s_net, t_net, ps_s, ps_t, st_s, st_t, d)
-    z1 = z[1:d, :]          # identity part
-    z2 = z[d+1:end, :]      # transform part
+    @views z1 = z[1:d, :]          # identity part
+    @views z2 = z[d+1:end, :]      # transform part
 
     # Compute scale & translation from z1
     s, st_s_new = s_net(z1, ps_s, st_s)
@@ -47,13 +53,17 @@ function affine_coupling_forward(z, s_net, t_net, ps_s, ps_t, st_s, st_t, d)
     # log|det J| = sum(s)
     log_det_jac = vec(sum(s, dims=1))
 
+    # shape: s ∈ ℝ^{(D-d)×B} → sum over dim=1 → ℝ^B（バッチごとのlog行列式）
+    # ヤコビアンが下三角ブロック構造を持つため、対角成分 exp(s_i) の積が行列式になる
+    # → log|det J| = Σᵢ sᵢ（O(D)、行列式のO(D³)ではない）
+
     return x, log_det_jac, (st_s_new, st_t_new)
 end
 
 # Inverse
 function affine_coupling_inverse(x, s_net, t_net, ps_s, ps_t, st_s, st_t, d)
-    x1 = x[1:d, :]
-    x2 = x[d+1:end, :]
+    @views x1 = x[1:d, :]
+    @views x2 = x[d+1:end, :]
 
     s, st_s_new = s_net(x1, ps_s, st_s)
     t, st_t_new = t_net(x1, ps_t, st_t)
@@ -147,6 +157,9 @@ function nll_loss(layers, ps_list, st_list, x_batch, base_dist)
     # log p(z)
     log_pz = sum(logpdf.(base_dist, z), dims=1)  # sum over D
 
+    # shape: z ∈ ℝ^{D×B}, logpdf.(base_dist, z) ∈ ℝ^{D×B}, sum(dims=1) ∈ ℝ^{1×B}
+    # 各次元の独立正規分布の対数尤度を合計: log p(z) = Σᵢ log𝒩(zᵢ; 0,1) = -D/2·log(2π) - Σᵢ zᵢ²/2
+
     # log p(x) = log p(z) + log|det J|
     log_px = vec(log_pz) .+ log_det_sum
 
@@ -193,7 +206,7 @@ function cnf_dynamics!(du, u, p, t)
     # u = [z; log_det_jac]
     f_net, ps, st = p
     D = length(u) - 1
-    z = u[1:D]
+    @views z = u[1:D]
 
     # Velocity: dz/dt = f(z, t)
     z_mat = reshape(z, :, 1)
@@ -205,8 +218,12 @@ function cnf_dynamics!(du, u, p, t)
     jvp = Zygote.gradient(z -> dot(vec(f_net(reshape(z, :, 1), ps, st)[1]), ε), z)[1]
     tr_jac = dot(ε, jvp)  # ε^T * (∂f/∂z) * ε
 
+    # なぜこれが tr(∂f/∂z) を推定するか:
+    # E[ε^T A ε] = E[Σᵢⱼ εᵢ Aᵢⱼ εⱼ] = Σᵢ Aᵢᵢ E[εᵢ²] = tr(A)  （∵ E[εᵢεⱼ]=δᵢⱼ）
+    # 計算量: 直接計算 O(D²) → Hutchinson O(D)（VJPが1回のAD passで計算可能）
+
     # d(log_det)/dt = -tr(∂f/∂z)
-    du[1:D] .= dz
+    @views du[1:D] .= dz
     du[D+1] = -tr_jac
 end
 
@@ -247,11 +264,11 @@ impl AffineCouplingLayer {
         let t = self.mlp_forward(&self.t_weights, z1);
 
         // Affine transformation
-        let mut x = Vec::with_capacity(z.len());
-        x.extend_from_slice(z1);
-        for i in 0..z2.len() {
-            x.push(z2[i] * s[i].exp() + t[i]);
-        }
+        let x2: Vec<f32> = z2.iter().zip(s.iter()).zip(t.iter())
+            .map(|((z2i, si), ti)| z2i * si.exp() + ti)
+            .collect::<Vec<_>>();
+        let mut x = z1.to_vec();
+        x.extend(x2);
 
         let log_det_jac: f32 = s.iter().sum();
 
@@ -291,16 +308,10 @@ impl RealNVP {
     }
 
     fn forward(&self, z: &[f32]) -> (Vec<f32>, f32) {
-        let mut x = z.to_vec();
-        let mut log_det_sum = 0.0;
-
-        for layer in &self.layers {
+        self.layers.iter().fold((z.to_vec(), 0.0f32), |(x, sum), layer| {
             let (x_new, ldj) = layer.forward(&x);
-            x = x_new;
-            log_det_sum += ldj;
-        }
-
-        (x, log_det_sum)
+            (x_new, sum + ldj)
+        })
     }
 
     fn inverse(&self, x: &[f32]) -> (Vec<f32>, f32) {
@@ -327,9 +338,12 @@ impl RealNVP {
 | $\log \|\det J\| = \sum s_i$ | `sum(s)` | `s.iter().sum()` |
 | $\text{tr}(A) = \mathbb{E}[\epsilon^T A \epsilon]$ | `dot(ε, jvp)` | - (training only) |
 
-:::message
-**進捗: 70% 完了** Julia/Rust実装完了。次は実験ゾーン — 2D/MNIST訓練・評価。
-:::
+**shape 追跡サマリー**:
+- Coupling forward: $z \in \mathbb{R}^{D \times B} \to (x \in \mathbb{R}^{D \times B},\ \text{ldj} \in \mathbb{R}^B)$
+- NLL loss: $x \in \mathbb{R}^{D \times B} \to z \in \mathbb{R}^{D \times B} \to \log p_z \in \mathbb{R}^B \to \text{NLL} \in \mathbb{R}$
+- 全 $B$ サンプルで平均 → スカラー loss
+
+> **Note:** **進捗: 70% 完了** Julia/Rust実装完了。次は実験ゾーン — 2D/MNIST訓練・評価。
 
 ---
 
@@ -406,6 +420,8 @@ Epoch 20: NLL = 1.8765
 Epoch 500: NLL = 1.2341
 ```
 
+**NLL の下界**: 2D ガウス混合（Two Moons）の真のエントロピーは $H \approx 1.0$（nats）。NLL=1.23 はこれに近い → 密度推定がほぼ収束。NLL がエントロピーを大きく下回ることはない（なぜなら $-\mathbb{E}_{p_\text{data}}[\log p_\theta(x)] \geq H(p_\text{data})$ は成り立たないため）。NLL < $H$ になったらオーバーフィットか計算バグを疑うこと。
+
 #### 5.1.3 生成サンプル可視化
 
 ```julia
@@ -457,8 +473,13 @@ test_x_flat = reshape(test_x, 784, :)
 function logit_transform(x; α=0.05f0)
     x_dequant = x .+ α .* rand(Float32, size(x))
     x_clip = clamp.(x_dequant, α, 1 - α)
-    return log.(x_clip ./ (1 .- x_clip))
+    return @. log(x_clip / (1 - x_clip))
 end
+
+# なぜ logit 変換が必要か:
+# MNIST は [0,1] の有界区間 → Gaussian base 分布と不整合
+# logit(x) = log(x/(1-x)) で [0,1] → ℝ に変換 → Gaussian に近似
+# α=0.05 は dequantization のために [0.05, 0.95] にクリップ → log(0)=−∞ を防ぐ
 
 train_x_trans = logit_transform(Float32.(train_x_flat))
 test_x_trans = logit_transform(Float32.(test_x_flat))
@@ -508,66 +529,57 @@ plot([Gray.(x_img_reshape[:, :, 1, i]) for i in 1:16]..., layout=(4, 4), size=(4
 
 #### 5.3.1 理論チェック
 
-:::details **Q1: Change of Variables公式**
+<details><summary>**Q1: Change of Variables公式**</summary>
 
 > $X = f(Z)$, $f$ 可逆。$p_X(x)$ を $p_Z$ と $f$ で表せ。
 
 **解答**: $p_X(x) = p_Z(f^{-1}(x)) \left| \det \frac{\partial f^{-1}}{\partial x} \right| = p_Z(z) \left| \det \frac{\partial f}{\partial z} \right|^{-1}$
-:::
 
-:::details **Q2: Coupling Layerヤコビアン**
+</details>
+
+<details><summary>**Q2: Coupling Layerヤコビアン**</summary>
 
 > $x_{1:d} = z_{1:d}$, $x_{d+1:D} = z_{d+1:D} \odot \exp(s(z_{1:d})) + t(z_{1:d})$。$\log |\det J|$ = ?
 
 **解答**: $\log |\det J| = \sum_{i=1}^{D-d} s_i(z_{1:d})$ (下三角ブロック行列の対角成分の積)
-:::
 
-:::details **Q3: CNF密度変化**
+</details>
+
+<details><summary>**Q3: CNF密度変化**</summary>
 
 > $\frac{dz}{dt} = f(z, t)$。$\frac{\partial \log p(z(t))}{\partial t}$ = ?
 
 **解答**: $\frac{\partial \log p(z(t))}{\partial t} = -\text{tr}\left(\frac{\partial f}{\partial z}\right)$ (Liouvilleの定理)
-:::
 
-:::details **Q4: Hutchinson trace**
+</details>
+
+<details><summary>**Q4: Hutchinson trace**</summary>
 
 > $\text{tr}(A)$ を期待値で。
 
 **解答**: $\text{tr}(A) = \mathbb{E}_{\epsilon \sim \mathcal{N}(0,I)}[\epsilon^T A \epsilon]$
-:::
 
-:::details **Q5: Flow vs VAE vs GAN尤度**
+</details>
+
+<details><summary>**Q5: Flow vs VAE vs GAN尤度**</summary>
 
 **解答**:
 - Flow: 厳密 $\log p(x) = \log p(z) - \log |\det J|$
 - VAE: 近似 ELBO $\leq \log p(x)$
 - GAN: 不明 (暗黙的)
-:::
 
-#### 5.3.2 実装チェックリスト
+</details>
 
-- [ ] Forward: $z \to x$ 実行
-- [ ] Inverse: $x \to z$ 再構成誤差 < 1e-5
-- [ ] $\log |\det J|$ が O(D)
-- [ ] $\log p(x)$ 数値的に正しい
-- [ ] 訓練でNLL減少
-- [ ] 生成サンプルが分布に近い
-- [ ] 密度ヒートマップがデータと一致
+> Progress: 85%
+> **理解度チェック**
+> 1. RealNVP Julia実装において affine coupling の行列式計算が $O(1)$ になる理由をコードの対応変数名と数式で示せ。
+>    - *ヒント*: `log_det_jac = vec(sum(s, dims=1))` の `s` はどの変数か。ヤコビアンの三角ブロック構造を書き出せ。
+> 2. NCSNとの比較で、NFの密度推定が低次元データで優れ高次元で劣る傾向がある理由を述べよ。
+>    - *ヒント*: Coupling Layer の「変数分割」が高次元でどういう情報損失を引き起こすか考えよ。
 
-:::message
-**進捗: 85% 完了** 2D/MNIST実験完了。自己診断テスト終了。次は発展ゾーン — Flow Matching/JKO scheme/最新研究。
-:::
-
----
-
-
-
----
 ## Zone 6: 🎓 振り返り + 統合ゾーン（30min）
 
-:::message
-**Zone 6の目的**: FlowとDiffusionの統一理論である**Flow Matching**を理解し、JKOスキームの数理基盤を学ぶ。2024-2026の最新研究動向を把握し、Normalizing Flowの未来を展望する。
-:::
+> **Note:** **Zone 6の目的**: FlowとDiffusionの統一理論である**Flow Matching**を理解し、JKOスキームの数理基盤を学ぶ。2024-2026の最新研究動向を把握し、Normalizing Flowの未来を展望する。
 
 ### 6.1 Flow Matching: FlowとDiffusionの統一
 
@@ -617,7 +629,7 @@ $$
 \mathcal{L}_{\text{CFM}}(\theta) = \mathbb{E}_{t \sim U[0,1], x_1 \sim p_1, x \sim p_t(\cdot|x_1)} \left[ \| v_t(x; \theta) - u_t(x|x_1) \|^2 \right]
 $$
 
-**重要性質**: この損失を最小化すると $v_t(x) \to \nabla \log p_t(x)$ (スコア関数) に収束する!
+**数値検算**: $D=2$, $x_1 = (1,0)$, $x_0 = (0,0)$, $t=0.5$のとき。$x_t = 0.5 x_1 = (0.5, 0)$、$u_t = x_1 - x_0 = (1,0)$。完璧なモデルが $v_t(x_t) = (1,0)$ を出力すれば loss=0。
 
 #### 6.1.4 Flow Matching vs CNF vs Diffusion
 
@@ -629,6 +641,8 @@ $$
 | **DDPM** | $\epsilon_\theta(x_t, t)$ | MSE回帰 $\|\|\epsilon - \epsilon_\theta\|\|^2$ | 不要 | 速い (少ステップ) |
 
 **結論**: Flow MatchingはCNFの「尤度計算を捨てて回帰に特化」したもの。Diffusionと数学的に等価[^8]。
+
+> **⚠️ Warning:** CFM では $u_t(x|x_1)$ で回帰するが、これは conditional velocity（1サンプルの経路）であり marginal velocity $v_t(x)$ ではない。**両者を最小化する解が一致する**（Lipman et al., 2022 の Theorem 2）ことが CFM の核心。`u_t` と `v_t` を混同してデバッグに迷った場合はこの等価性に立ち返ること。
 
 #### 6.1.5 Flow Matching実装 (Julia/Lux)
 
@@ -692,7 +706,7 @@ function sample_flow_matching(vnet, ps, st, n_samples, n_steps=100)
     for step in 1:n_steps
         t = step * dt
         v, _ = vnet(x, ps, st)
-        x = x .+ dt .* v  # Euler step
+        x .+= dt .* v  # Euler step
     end
 
     return x
@@ -706,6 +720,8 @@ samples = sample_flow_matching(vnet, ps, st, 1000)
 - **尤度計算なし**: traceも不要
 - **サンプリングは高速**: 少ないステップ数でOK (10-50ステップ)
 - **Diffusionと等価**: DDPMの $\epsilon_\theta$ をベクトル場 $v_t$ に変換しただけ
+
+**数値検算（2D）**: $x_1 = (1,0)$, $x_0 = (0,0)$, $t=0.5$ のとき。$x_t = (0.5, 0)$、$u_t = (1,0) - (0,0) = (1,0)$。Euler step: $x_{0.5+dt} = x_t + dt \cdot v_t$。10ステップ ($dt=0.1$) で $(0,0) \to (1,0)$ に到達。各ステップで $v_t \approx (1,0)$ なら誤差ゼロ（直線経路の恩恵）。
 
 ### 6.2 JKOスキーム: Wasserstein勾配流の視点
 
@@ -735,7 +751,7 @@ $$
 W_2^2(p, q) = \inf_{\pi \in \Pi(p,q)} \int \|x - y\|^2 d\pi(x,y)
 $$
 
-**解釈**: $p_{k+1}$ は「エネルギー $\mathcal{F}$ を減らしつつ、$p_k$ から遠ざかりすぎない」という制約最適化の解。
+**数値例（1次元）**: $p_k = \mathcal{N}(1, 1)$, $\mathcal{F}[p] = \text{KL}(p \| \mathcal{N}(0,1))$, $\tau = 0.1$ のとき、$p_{k+1} \approx \mathcal{N}(0.9, 1)$。平均が目標分布に向かって $\tau$ だけ近づく → 勾配降下の確率分布版。
 
 #### 6.2.3 Normalizing FlowとJKOの関係
 
@@ -772,6 +788,9 @@ $$
    - **Flow**: 決定論的な経路 (ODEソルバー)
    - **Diffusion**: 確率的な経路 (SDEソルバー)
 
+**実用的意義まとめ**: JKO理論の視点から見ると、Flow訓練中の「NLL減少 + パラメータ更新」は「エネルギー減少 + 分布移動コスト最小化」の離散化になっている。学習率 $\eta$ が小さすぎると $W_2$ ペナルティが強く効いて収束が遅く、大きすぎると JKO の正則化が崩れて発散する — これが「lr が高すぎると NLL が爆発する」現象の幾何学的説明だ。
+
+
 ### 6.3 最新研究動向 (2024-2026)
 
 #### 6.3.1 Flow Matching の発展
@@ -786,6 +805,8 @@ $$
 - 1-stepサンプリングが可能に
 - Distillation手法として注目
 
+**Rectified Flow の核心**: 訓練データ $x_1$ とノイズ $x_0$ をランダムペアにして Linear Flow を学習すると経路が「曲がる」。これを Reflow（同一モデルで $(x_0, x_1)$ の最適ペアを再サンプリング）で繰り返すと経路が直線に近づく。$k$ 回 Reflow で切断誤差 $O(1/N^{2k})$ → $k=2$ で大幅高速化。SD3 はこの原理を採用。
+
 **Policy Flow (2024)**:
 - 強化学習とFlowの融合
 - 方策 $\pi(a|s)$ をFlowでモデル化
@@ -797,6 +818,8 @@ $$
 - Diffusionの蒸留により1-stepサンプリング実現
 - FlowにもConsistency原理を適用可能
 - 推論速度100倍以上の高速化
+
+**なぜ Consistency が Flow に適用できるか**: Flow の ODE は連続時間版の「決定論的マップ」なので、任意の $t$ から終点 $t=1$ への self-consistency（同じ終点に到達する）を定義できる。Diffusion の Consistency Models（CM）と全く同じ枠組みが成立する。Flow Matching の場合、直線経路により CM の蒸留誤差がさらに小さくなる（経路の曲率 ≈ 0 → truncation error 最小）。
 
 **Latent Diffusion/Flow (2024)**:
 - 画像を潜在空間 $z$ に圧縮してからFlow/Diffusion
@@ -815,6 +838,8 @@ $$
 - 原子座標の同時分布を学習
 - Diffusion/Flowハイブリッド
 
+**AlphaFold3 の Flow 利用の核心**: タンパク質の原子座標は 3D 空間上の点群 $\{r_i \in \mathbb{R}^3\}_{i=1}^N$。これに SE(3) 不変 Flow を適用することで、回転・並進に対して物理的に整合した構造を生成できる。Diffusion ベースの AlphaFold3 は「ガウスノイズから原子座標を復元」するため、NF の「変換可能性（厳密尤度）」と Diffusion の「表現力」を両立している。
+
 **2. 分子生成**:
 - SE(3)-equivariant Flow
 - 回転・並進不変性を持つFlow
@@ -830,12 +855,16 @@ $$
 - 介入分布 $p(y|do(x))$ の学習
 - 反事実推論への応用
 
+> **⚠️ Warning:** 因果推論に Flow を使う場合、「相関」と「因果」を混同しないこと。$\log p(x)$ の最大化は「観測データのパターンを学習」するだけで、介入 $do(x)$ の効果は観測データのみからは識別できない。Causal Flow は構造因果モデル（SCM）の仮定が別途必要。
+
 #### 6.3.4 理論的進展
 
 **Universal Approximation of Flows (2024)**:
 - Coupling Layer の理論的保証強化
 - 有限幅でも universal approximation 可能
 - 必要層数の上界導出
+
+**直感**: Coupling Layer が全ての可逆変換を近似できることの証明は、「十分多い層を重ねれば任意の分布間の変換が学習可能」を意味する。実用的には $K = 10$〜$20$ 層で十分（論文では $K = O(\log D)$ の上界導出）。
 
 **Flow Matching = Diffusion の厳密証明 (2024)**:
 - CFM損失とDDPM損失が本質的に同一
@@ -847,9 +876,9 @@ $$
 - 時間ステップ $\tau$ に対する誤差 $O(\tau^2)$ の証明
 - 適応的ステップサイズの設計指針
 
-:::message alert
-**Zone 6 完了**: Flow Matchingの数理、JKOスキーム、2024-2026最新研究を網羅。次は**振り返り統合**で全体をまとめる。
-:::
+**誤差 $O(\tau^2)$ の直感**: JKO の各ステップは「エネルギーを下げる最適化」。$\tau$ が大きいと Wasserstein 球の外に飛び出して誤差が累積 → $O(\tau^2)$。Runge-Kutta の $O(\Delta t^2)$ と全く同じ構造。適応的 $\tau$ はオーバーシュートを防ぎつつ収束を速める — ODE ソルバーのステップサイズ制御と数学的に同一。
+
+> **⚠️ Warning:** **Zone 6 完了**: Flow Matchingの数理、JKOスキーム、2024-2026最新研究を網羅。次は**振り返り統合**で全体をまとめる。
 
 ---
 
@@ -949,6 +978,8 @@ $$
 
 **結論**: 生成品質ではDiffusionに一度敗北 → Flow Matchingで数学的基盤を保ちつつ実用性を取り戻した。
 
+> **⚠️ Warning:** 「Normalizing Flow は使われなくなった」という言説は 2021-2022 年時点の話。2024-2026 年の Stable Diffusion 3、FLUX.1、F5-TTS は全て Flow Matching ベースであり、現在最も実用化されている生成モデルの数学的基盤が Flow であることに変わりはない。
+
 #### Q2: RealNVP vs Glow vs FFJORD、どれを選ぶべき？
 
 | 観点 | RealNVP | Glow | FFJORD/CNF |
@@ -988,6 +1019,8 @@ $$
 
 **結論**: Coupling Layerの「三角行列化」が、Flowの実用化を可能にした天才的アイデア。
 
+**数値例**: $D = 784$（MNIST）の場合、一般行列式は $O(784^3) \approx 4.8 \times 10^8$ flops。Coupling Layer なら $O(784)$ で 600,000 倍高速。バッチサイズ 256 で訓練すれば、この差は毎ステップの訓練速度に直結する。
+
 #### Q4: CNFとDiffusionのODE、何が違うの？
 
 **A**: 訓練方法と目的が異なるが、**数学的には同じ枠組み** (ODE-based transport)。
@@ -1007,6 +1040,8 @@ $$
 - CNF: ベクトル場 $f$ を直接学習
 - Diffusion (PF-ODE): スコア $\nabla \log p_t$ を学習 → $f$ を導出
 - Flow Matching: 両者を統一 — 条件付きフロー $v_t(x_t | x_0)$ を学習
+
+**なぜ Diffusion が CNF より生成品質で勝るか**: CNF はアーキテクチャに Coupling 制約があるため表現力が低い。Diffusion の PF-ODE は U-Net/Transformer で自由にスコアを学習できるため SOTA。Flow Matching は Diffusion のアーキテクチャを保ちつつ CNF の数学的厳密性を取り込んだ「いいとこ取り」。
 
 **第38回で完全統一** — Benamou-Brenier公式、Wasserstein勾配流で全てが繋がる。
 
@@ -1374,6 +1409,13 @@ Flow Matchingの洞察: 「可逆性」は決定論的ODEの性質 (同じ初期
 
 ---
 
+> Progress: 95%
+> **理解度チェック**
+> 1. CNF と Flow Matching の数学的接続を1つの式で表現し、FMがNFを「包含する」意味を述べよ。
+>    - *ヒント*: CNF の `tr(∂f/∂z)` と FM の `‖v_t - u_t‖²` のどちらが最適化しやすいか、計算量の観点で比較せよ。
+> 2. NF→EBM→Score→DDPMの密度モデリングチェーンで、各手法が前手法の何の困難を「解決」しているか一行ずつ述べよ。
+>    - *ヒント*: NF の「ヤコビアン計算」→ EBM の「分配関数」→ Score の「何？」→ DDPM の「何？」という順に考えよ。
+
 ## 🌀 Paradigm-Breaking Question
 
 > **「可逆性を捨てれば、Flowはもっと表現力が上がるのでは？」**
@@ -1455,471 +1497,72 @@ $$
 
 ---
 
-## 📚 参考文献
+## 参考文献
 
 [^1]: Rezende, D. J., & Mohamed, S. (2015). Variational Inference with Normalizing Flows. *ICML*.
-@[card](https://arxiv.org/abs/1505.05770)
+<https://arxiv.org/abs/1505.05770>
 
 [^2]: Dinh, L., Krueger, D., & Bengio, Y. (2014). NICE: Non-linear Independent Components Estimation. *ICLR Workshop*.
-@[card](https://arxiv.org/abs/1410.8516)
+<https://arxiv.org/abs/1410.8516>
 
 [^3]: Dinh, L., Sohl-Dickstein, J., & Bengio, S. (2016). Density Estimation using Real NVP. *ICLR*.
-@[card](https://arxiv.org/abs/1605.08803)
+<https://arxiv.org/abs/1605.08803>
 
 [^4]: Kingma, D. P., & Dhariwal, P. (2018). Glow: Generative Flow with Invertible 1x1 Convolutions. *NeurIPS*.
-@[card](https://arxiv.org/abs/1807.03039)
+<https://arxiv.org/abs/1807.03039>
 
 [^5]: Chen, R. T. Q., Rubanova, Y., Bettencourt, J., & Duvenaud, D. (2018). Neural Ordinary Differential Equations. *NeurIPS*.
-@[card](https://arxiv.org/abs/1806.07366)
+<https://arxiv.org/abs/1806.07366>
 
 [^6]: Grathwohl, W., Chen, R. T. Q., Bettencourt, J., Sutskever, I., & Duvenaud, D. (2019). FFJORD: Free-form Continuous Dynamics for Scalable Reversible Generative Models. *ICLR*.
-@[card](https://arxiv.org/abs/1810.01367)
+<https://arxiv.org/abs/1810.01367>
 
 [^7]: Rezende, D. J., & Mohamed, S. (2015). Variational Inference with Normalizing Flows (Planar Flow). *ICML*.
-@[card](https://arxiv.org/abs/1505.05770)
+<https://arxiv.org/abs/1505.05770>
 
 [^8]: Kingma, D. P., Salimans, T., Jozefowicz, R., Chen, X., Sutskever, I., & Welling, M. (2016). Improved Variational Inference with Inverse Autoregressive Flow. *NeurIPS*.
-@[card](https://arxiv.org/abs/1606.04934)
+<https://arxiv.org/abs/1606.04934>
 
 [^9]: Liu, X., Gong, C., & Liu, Q. (2022). Flow Straight and Fast: Learning to Generate and Transfer Data with Rectified Flow. *ICLR 2023*.
-@[card](https://arxiv.org/abs/2209.03003)
+<https://arxiv.org/abs/2209.03003>
 
 [^10]: Lipman, Y., Chen, R. T. Q., Ben-Hamu, H., Nickel, M., & Le, M. (2023). Flow Matching for Generative Modeling. *ICLR*.
-@[card](https://arxiv.org/abs/2210.02747)
+<https://arxiv.org/abs/2210.02747>
 
 [^11]: Chen, R. T. Q., Rubanova, Y., Bettencourt, J., & Duvenaud, D. (2018). Neural Ordinary Differential Equations (Adjoint Method). *NeurIPS*.
-@[card](https://arxiv.org/abs/1806.07366)
+<https://arxiv.org/abs/1806.07366>
 
 [^12]: Ho, J., Jain, A., & Abbeel, P. (2020). Denoising Diffusion Probabilistic Models. *NeurIPS*.
-@[card](https://arxiv.org/abs/2006.11239)
+<https://arxiv.org/abs/2006.11239>
 
 [^13]: Song, Y., Sohl-Dickstein, J., Kingma, D. P., Kumar, A., Ermon, S., & Poole, B. (2021). Score-Based Generative Modeling through Stochastic Differential Equations. *ICLR*.
-@[card](https://arxiv.org/abs/2011.13456)
+<https://arxiv.org/abs/2011.13456>
 
-[^14]: TarFlow: Targeted Flow Matching (2024).
-@[card](https://arxiv.org/abs/2412.06329)
+[^14]: Zhai, S., et al. (2024). "Normalizing Flows are Capable Generative Models". *arXiv:2412.06329*.
+<https://arxiv.org/abs/2412.06329>
 
-[^15]: Flexible Tails in Normalizing Flows (2025).
-@[card](https://arxiv.org/abs/2406.16971)
+[^15]: Hickling, T., & Prangle, D. (2024). Flexible Tails for Normalizing Flows.
+<https://arxiv.org/abs/2406.16971>
 
 ---
 
 **次回予告**: 第34回 — **Energy-Based Models & 統計物理**。$p(x) = \frac{1}{Z} e^{-E(x)}$ のGibbs分布、Hopfield NetworkとTransformerの等価性、Contrastive Divergence、Langevin Dynamics。正規化定数 $Z$ との戦いが始まる。そして第35回で $Z$ が消える瞬間を目撃する — **Score Matching**。
 
+**第33回の位置付けまとめ**: Normalizing Flow は「厳密な尤度計算」という唯一無二の特性を持つ生成モデルだ。VAE は近似（ELBO）、GAN は暗黙的（尤度なし）であるのに対し、Flow だけが $\log p(x)$ を解析的に計算できる。この特性は密度推定・異常検知・ベイズ推論で今後も不可欠であり続ける。Flow Matching として進化した現在、その数学的基盤はさらに多くの手法を「包含」しつつある。
+
 Course IV の旅はまだ始まったばかり。第33回で得た「Change of Variables」の数学が、第37-38回で**Diffusion Models**と融合し、生成モデル理論の**統一**へと向かう。次の講義で会おう。
 
+> **⚠️ Warning:** 第33回で実装した RealNVP は「学習用」実装であり、本番利用には不十分な点がある。具体的には: (1) 数値安定性のための `clamp` が未実装、(2) Half-precision (fp16) 未対応、(3) バッチ正規化の running statistics が推論時に固定されていない、などの問題がある。Production での Flow 実装は Lux.jl の公式サンプルか Normalizing Flows.jl を参照のこと。
+
 ---
 
-## 📖 Appendix: 詳細導出と補足
-
-### A.1 Change of Variables公式の厳密な証明
-
-**定理** (多次元Change of Variables):
-
-$\mathbf{Z} \in \mathbb{R}^D$ が密度 $p_{\mathbf{Z}}(\mathbf{z})$ を持ち、$\mathbf{f}: \mathbb{R}^D \to \mathbb{R}^D$ を $C^1$ 級の可逆写像とする。このとき、$\mathbf{X} = \mathbf{f}(\mathbf{Z})$ の密度は
-
-$$
-p_{\mathbf{X}}(\mathbf{x}) = p_{\mathbf{Z}}(\mathbf{f}^{-1}(\mathbf{x})) \left| \det \frac{\partial \mathbf{f}^{-1}}{\partial \mathbf{x}} \right|
-$$
-
-**証明**:
-
-Step 1: 分布関数から出発。
-
-$$
-\begin{aligned}
-F_{\mathbf{X}}(\mathbf{x}) &= P(\mathbf{X} \leq \mathbf{x}) \\
-&= P(\mathbf{f}(\mathbf{Z}) \leq \mathbf{x}) \\
-&= P(\mathbf{Z} \in \mathbf{f}^{-1}((-\infty, \mathbf{x}]))
-\end{aligned}
-$$
-
-Step 2: 確率を積分で表現。
-
-$$
-F_{\mathbf{X}}(\mathbf{x}) = \int_{\mathbf{f}^{-1}((-\infty, \mathbf{x}])} p_{\mathbf{Z}}(\mathbf{z}) d\mathbf{z}
-$$
-
-Step 3: 変数変換 $\mathbf{z} = \mathbf{f}^{-1}(\mathbf{u})$、$d\mathbf{z} = \left| \det \frac{\partial \mathbf{f}^{-1}}{\partial \mathbf{u}} \right| d\mathbf{u}$。
-
-$$
-F_{\mathbf{X}}(\mathbf{x}) = \int_{-\infty}^{\mathbf{x}} p_{\mathbf{Z}}(\mathbf{f}^{-1}(\mathbf{u})) \left| \det \frac{\partial \mathbf{f}^{-1}}{\partial \mathbf{u}} \right| d\mathbf{u}
-$$
-
-Step 4: 密度は分布関数の導関数。
-
-$$
-p_{\mathbf{X}}(\mathbf{x}) = \frac{\partial F_{\mathbf{X}}}{\partial \mathbf{x}} = p_{\mathbf{Z}}(\mathbf{f}^{-1}(\mathbf{x})) \left| \det \frac{\partial \mathbf{f}^{-1}}{\partial \mathbf{x}} \right|
-$$
-
-Step 5: 逆関数定理より、$\frac{\partial \mathbf{f}^{-1}}{\partial \mathbf{x}} = \left( \frac{\partial \mathbf{f}}{\partial \mathbf{z}} \right)^{-1}$。
-
-行列式の性質 $\det(A^{-1}) = (\det A)^{-1}$ を使うと
-
-$$
-\boxed{p_{\mathbf{X}}(\mathbf{x}) = p_{\mathbf{Z}}(\mathbf{z}) \left| \det \frac{\partial \mathbf{f}}{\partial \mathbf{z}} \right|^{-1}}
-$$
-
-ここで $\mathbf{z} = \mathbf{f}^{-1}(\mathbf{x})$。 $\square$
-
-### A.2 Coupling Layerのヤコビアン行列の導出
-
-**設定**: $\mathbf{z} = [\mathbf{z}_1, \mathbf{z}_2]$、$\mathbf{z}_1 \in \mathbb{R}^d$、$\mathbf{z}_2 \in \mathbb{R}^{D-d}$。
-
-**変換**:
-
-$$
-\begin{aligned}
-\mathbf{x}_1 &= \mathbf{z}_1 \\
-\mathbf{x}_2 &= \mathbf{z}_2 \odot \exp(\mathbf{s}(\mathbf{z}_1)) + \mathbf{t}(\mathbf{z}_1)
-\end{aligned}
-$$
-
-**ヤコビアン行列の計算**:
-
-$$
-J = \frac{\partial \mathbf{x}}{\partial \mathbf{z}} = \begin{bmatrix}
-\frac{\partial \mathbf{x}_1}{\partial \mathbf{z}_1} & \frac{\partial \mathbf{x}_1}{\partial \mathbf{z}_2} \\
-\frac{\partial \mathbf{x}_2}{\partial \mathbf{z}_1} & \frac{\partial \mathbf{x}_2}{\partial \mathbf{z}_2}
-\end{bmatrix}
-$$
-
-**各ブロックの計算**:
-
-1. $\frac{\partial \mathbf{x}_1}{\partial \mathbf{z}_1} = I_d$ ($\mathbf{x}_1 = \mathbf{z}_1$)
-
-2. $\frac{\partial \mathbf{x}_1}{\partial \mathbf{z}_2} = 0$ ($\mathbf{x}_1$ は $\mathbf{z}_2$ に依存しない)
-
-3. $\frac{\partial \mathbf{x}_2}{\partial \mathbf{z}_2}$:
-
-$$
-\begin{aligned}
-\mathbf{x}_2 &= \mathbf{z}_2 \odot \exp(\mathbf{s}(\mathbf{z}_1)) + \mathbf{t}(\mathbf{z}_1) \\
-\frac{\partial x_{2,i}}{\partial z_{2,j}} &= \delta_{ij} \exp(s_i(\mathbf{z}_1)) \\
-\frac{\partial \mathbf{x}_2}{\partial \mathbf{z}_2} &= \text{diag}(\exp(\mathbf{s}(\mathbf{z}_1)))
-\end{aligned}
-$$
-
-4. $\frac{\partial \mathbf{x}_2}{\partial \mathbf{z}_1}$:
-
-$$
-\frac{\partial x_{2,i}}{\partial z_{1,j}} = z_{2,i} \exp(s_i) \frac{\partial s_i}{\partial z_{1,j}} + \frac{\partial t_i}{\partial z_{1,j}}
-$$
-
-**ヤコビアン行列の構造**:
-
-$$
-J = \begin{bmatrix}
-I_d & 0 \\
-\frac{\partial \mathbf{x}_2}{\partial \mathbf{z}_1} & \text{diag}(\exp(\mathbf{s}(\mathbf{z}_1)))
-\end{bmatrix}
-$$
-
-**下三角ブロック行列** → 行列式は対角ブロックの積:
-
-$$
-\det J = \det(I_d) \cdot \det(\text{diag}(\exp(\mathbf{s}))) = 1 \cdot \prod_{i=1}^{D-d} \exp(s_i) = \exp\left(\sum_{i=1}^{D-d} s_i\right)
-$$
-
-$$
-\boxed{\log |\det J| = \sum_{i=1}^{D-d} s_i(\mathbf{z}_1)}
-$$
-
-**計算量**: $D-d$ 個の和 → **O(D)**。 $\square$
-
-### A.3 Instantaneous Change of Variables の導出
-
-**目標**: 連続時間ODEにおける密度の時間発展を導出。
-
-**設定**: $\mathbf{z}(t)$ がODE $\frac{d\mathbf{z}}{dt} = \mathbf{f}(\mathbf{z}(t), t)$ に従う。
-
-**微小時間 $\Delta t$ での変化**:
-
-$$
-\mathbf{z}(t + \Delta t) = \mathbf{z}(t) + \mathbf{f}(\mathbf{z}(t), t) \Delta t + O(\Delta t^2)
-$$
-
-**Change of Variables公式を適用**:
-
-$$
-\log p(\mathbf{z}(t + \Delta t)) = \log p(\mathbf{z}(t)) - \log \left| \det \frac{\partial \mathbf{z}(t + \Delta t)}{\partial \mathbf{z}(t)} \right|
-$$
-
-**ヤコビアンの計算**:
-
-$$
-\frac{\partial \mathbf{z}(t + \Delta t)}{\partial \mathbf{z}(t)} = I + \frac{\partial \mathbf{f}}{\partial \mathbf{z}} \Delta t + O(\Delta t^2)
-$$
-
-**行列式の対数**:
-
-$$
-\log |\det (I + A \Delta t)| = \log (1 + \text{tr}(A) \Delta t + O(\Delta t^2))
-$$
-
-**1次近似** ($\log(1 + x) \approx x$ for small $x$):
-
-$$
-\log |\det (I + A \Delta t)| \approx \text{tr}(A) \Delta t = \text{tr}\left(\frac{\partial \mathbf{f}}{\partial \mathbf{z}}\right) \Delta t
-$$
-
-**代入**:
-
-$$
-\log p(\mathbf{z}(t + \Delta t)) = \log p(\mathbf{z}(t)) - \text{tr}\left(\frac{\partial \mathbf{f}}{\partial \mathbf{z}}\right) \Delta t
-$$
-
-**両辺を $\Delta t$ で割り、$\Delta t \to 0$ の極限**:
-
-$$
-\boxed{\frac{\partial \log p(\mathbf{z}(t))}{\partial t} = -\text{tr}\left(\frac{\partial \mathbf{f}}{\partial \mathbf{z}}\right)}
-$$
-
-**積分形式**:
-
-$$
-\log p(\mathbf{z}(1)) - \log p(\mathbf{z}(0)) = -\int_0^1 \text{tr}\left(\frac{\partial \mathbf{f}}{\partial \mathbf{z}(t)}\right) dt
-$$
-
-$$
-\boxed{\log p(\mathbf{x}) = \log p(\mathbf{z}_0) - \int_0^1 \text{tr}\left(\frac{\partial \mathbf{f}}{\partial \mathbf{z}(t)}\right) dt}
-$$
-
-ここで $\mathbf{x} = \mathbf{z}(1)$、$\mathbf{z}_0 = \mathbf{z}(0)$。 $\square$
-
-### A.4 Hutchinsonのtrace推定の証明
-
-**定理**: $A \in \mathbb{R}^{D \times D}$ を対称行列、$\mathbf{v} \sim p(\mathbf{v})$ を $\mathbb{E}[\mathbf{v}] = 0$、$\text{Cov}(\mathbf{v}) = I$ を満たす確率変数とする。このとき
-
-$$
-\text{tr}(A) = \mathbb{E}_{\mathbf{v}} [\mathbf{v}^\top A \mathbf{v}]
-$$
-
-**証明**:
-
-$$
-\begin{aligned}
-\mathbb{E}[\mathbf{v}^\top A \mathbf{v}] &= \mathbb{E}\left[\sum_{i=1}^D \sum_{j=1}^D v_i A_{ij} v_j\right] \\
-&= \sum_{i=1}^D \sum_{j=1}^D A_{ij} \mathbb{E}[v_i v_j] \\
-&= \sum_{i=1}^D \sum_{j=1}^D A_{ij} \delta_{ij} \quad (\because \mathbb{E}[v_i v_j] = \text{Cov}(v_i, v_j) = \delta_{ij}) \\
-&= \sum_{i=1}^D A_{ii} \\
-&= \text{tr}(A)
-\end{aligned}
-$$
-
-$\square$
-
-**非対称行列への拡張**:
-
-$A$ が非対称でも、$\mathbf{v}^\top A \mathbf{v}$ は
-
-$$
-\mathbf{v}^\top A \mathbf{v} = \mathbf{v}^\top \frac{A + A^\top}{2} \mathbf{v} + \mathbf{v}^\top \frac{A - A^\top}{2} \mathbf{v}
-$$
-
-第2項 (反対称部分) は $\mathbb{E}[\mathbf{v}^\top (A - A^\top) \mathbf{v}] = 0$ (証明略)。
-
-よって、$A$ が非対称でも $\mathbb{E}[\mathbf{v}^\top A \mathbf{v}] = \text{tr}(A)$ が成立。
-
-### A.5 完全なRealNVP実装 (Lux.jl)
-
-**本文で省略した詳細** — Lux.jlの `AbstractExplicitLayer` との互換性を完全に保った実装。
-
-```julia
-using Lux, Random, Zygote, Optimisers, Distributions, Statistics
-using LinearAlgebra
-
-# Affine Coupling Layer (完全版)
-struct AffineCouplingLayer <: Lux.AbstractExplicitLayer
-    split_dim::Int
-    scale_net::Chain
-    trans_net::Chain
-end
-
-function AffineCouplingLayer(split_dim::Int, hidden_dim::Int, output_dim::Int)
-    scale_net = Chain(
-        Dense(split_dim => hidden_dim, tanh),
-        Dense(hidden_dim => hidden_dim, tanh),
-        Dense(hidden_dim => output_dim)
-    )
-    trans_net = Chain(
-        Dense(split_dim => hidden_dim, tanh),
-        Dense(hidden_dim => hidden_dim, tanh),
-        Dense(hidden_dim => output_dim)
-    )
-    return AffineCouplingLayer(split_dim, scale_net, trans_net)
-end
-
-# Forward pass
-function (layer::AffineCouplingLayer)(z, ps, st)
-    d = layer.split_dim
-    z1, z2 = z[1:d, :], z[d+1:end, :]
-
-    # Compute scale & translation
-    s, st_s = layer.scale_net(z1, ps.scale_net, st.scale_net)
-    t, st_t = layer.trans_net(z1, ps.trans_net, st.trans_net)
-
-    # Transform z2
-    x1 = z1
-    x2 = z2 .* exp.(s) .+ t
-
-    # Log-determinant
-    log_det = vec(sum(s; dims=1))
-    x = vcat(x1, x2)
-
-    return (x, log_det), (scale_net=st_s, trans_net=st_t)
-end
-
-# Inverse (for density evaluation)
-function inverse(layer::AffineCouplingLayer, x, ps, st)
-    d = layer.split_dim
-    x1, x2 = x[1:d, :], x[d+1:end, :]
-
-    s, _ = layer.scale_net(x1, ps.scale_net, st.scale_net)
-    t, _ = layer.trans_net(x1, ps.trans_net, st.trans_net)
-
-    z1 = x1
-    z2 = (x2 .- t) .* exp.(-s)
-
-    return vcat(z1, z2)
-end
-
-# RealNVP Model
-struct RealNVP <: Lux.AbstractExplicitContainerLayer{(:layers,)}
-    layers::NamedTuple
-    base_dist::Distribution
-end
-
-function RealNVP(D::Int, n_layers::Int, hidden_dim::Int)
-    layers_list = []
-    for i in 1:n_layers
-        # Alternate split dimension
-        split_dim = isodd(i) ? D ÷ 2 : D - D ÷ 2
-        push!(layers_list, AffineCouplingLayer(split_dim, hidden_dim, D - split_dim))
-    end
-    layers = NamedTuple{Tuple(Symbol("layer_$i") for i in 1:n_layers)}(Tuple(layers_list))
-    base_dist = MvNormal(zeros(Float32, D), I(D))
-    return RealNVP(layers, base_dist)
-end
-
-# Forward: z → x with log p(x)
-function (model::RealNVP)(z, ps, st)
-    x = z
-    total_log_det = zeros(Float32, size(z, 2))
-    new_st = []
-
-    for (i, (key, layer)) in enumerate(pairs(model.layers))
-        (x, log_det), st_i = layer(x, ps[key], st[key])
-        total_log_det .+= log_det
-        push!(new_st, key => st_i)
-    end
-
-    # log p(x) = log p(z) - log|det J|
-    log_pz = sum(logpdf(model.base_dist, z); dims=1) |> vec
-    log_px = log_pz .- total_log_det
-
-    return (x=x, log_px=log_px), NamedTuple(new_st)
-end
-
-# Inverse: x → z
-function inverse(model::RealNVP, x, ps, st)
-    z = x
-    for (key, layer) in reverse(collect(pairs(model.layers)))
-        z = inverse(layer, z, ps[key], st[key])
-    end
-    return z
-end
-
-# Sample from model
-function sample(model::RealNVP, ps, st, n_samples::Int)
-    D = length(model.base_dist)
-    z = rand(model.base_dist, n_samples)
-    (result, _), _ = model(z, ps, st)
-    return result.x
-end
-
-# Training loop
-function train_realnvp(model, X_train; n_epochs=100, batch_size=64, lr=1e-3)
-    rng = Random.default_rng()
-    ps, st = Lux.setup(rng, model)
-    opt_state = Optimisers.setup(Adam(lr), ps)
-
-    n_batches = size(X_train, 2) ÷ batch_size
-
-    for epoch in 1:n_epochs
-        total_loss = 0.0
-
-        for batch_idx in 1:n_batches
-            idx_start = (batch_idx - 1) * batch_size + 1
-            idx_end = batch_idx * batch_size
-            x_batch = X_train[:, idx_start:idx_end]
-
-            # Loss function
-            loss_fn(ps_) = begin
-                z = inverse(model, x_batch, ps_, st)
-                (result, _), _ = model(z, ps_, st)
-                -mean(result.log_px)  # Negative log likelihood
-            end
-
-            # Compute loss & gradients
-            loss, grads = Zygote.withgradient(loss_fn, ps)
-
-            # Update parameters
-            opt_state, ps = Optimisers.update(opt_state, ps, grads[1])
-
-            total_loss += loss
-        end
-
-        if epoch % 10 == 0
-            avg_loss = total_loss / n_batches
-            println("Epoch $epoch: NLL = $(round(avg_loss, digits=4))")
-        end
-    end
-
-    return ps, st
-end
-```
-
-**使用例**:
-
-```julia
-# Generate 2D Moons dataset
-function make_moons(n_samples; noise=0.05)
-    n = n_samples ÷ 2
-
-    # Upper moon
-    θ_upper = range(0, π; length=n)
-    x_upper = cos.(θ_upper)
-    y_upper = sin.(θ_upper)
-
-    # Lower moon
-    θ_lower = range(0, π; length=n)
-    x_lower = 1 .- cos.(θ_lower)
-    y_lower = 0.5 .- sin.(θ_lower)
-
-    # Combine + noise
-    X = hcat(vcat(x_upper, x_lower), vcat(y_upper, y_lower))'
-    X .+= noise .* randn(size(X))
-
-    return Float32.(X)
-end
-
-# Train
-X_train = make_moons(2000; noise=0.05)
-model = RealNVP(2, 6, 64)
-ps, st = train_realnvp(model, X_train; n_epochs=100)
-
-# Sample
-x_samples = sample(model, ps, st, 500)
-
-# Visualize
-using Plots
-scatter(X_train[1, :], X_train[2, :]; alpha=0.3, label="Data", title="RealNVP on 2D Moons")
-scatter!(x_samples[1, :], x_samples[2, :]; alpha=0.3, label="Generated")
-```
-
----
----
+## 著者リンク
+
+- Blog: https://fumishiki.dev
+- X: https://x.com/fumishiki
+- LinkedIn: https://www.linkedin.com/in/fumitakamurakami
+- GitHub: https://github.com/fumishiki
+- Hugging Face: https://huggingface.co/fumishiki
 
 ## ライセンス
 

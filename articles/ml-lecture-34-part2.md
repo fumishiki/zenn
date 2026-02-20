@@ -5,6 +5,10 @@ type: "tech"
 topics: ["machinelearning"]
 published: true
 slug: "ml-lecture-34-part2"
+difficulty: "advanced"
+time_estimate: "90 minutes"
+languages: ["Julia", "Rust"]
+keywords: ["機械学習", "深層学習", "生成モデル"]
 ---
 ## 💻 4. 実装ゾーン（45分）— Julia実装でRBM + Modern Hopfield + MCMC
 
@@ -59,16 +63,7 @@ function energy(rbm::RBM, v, h)
     # 数式: E(v, h) = -v^T W h - b^T v - c^T h
     # v: 可視層の状態 (n_visible,) or (n_visible, batch)
     # h: 隠れ層の状態 (n_hidden,) or (n_hidden, batch)
-
-    # 第1項: -v^T W h
-    term1 = v' * rbm.W * h
-    # 第2項: -b^T v
-    term2 = rbm.b' * v
-    # 第3項: -c^T h
-    term3 = rbm.c' * h
-
-    # 全てを合計して符号反転
-    return -(term1 + term2 + term3)
+    -(v' * rbm.W * h + rbm.b' * v + rbm.c' * h)
 end
 ```
 
@@ -89,20 +84,10 @@ $$
 function sample_h_given_v(rbm::RBM, v)
     # 数式: p(h_j = 1 | v) = σ(c_j + Σ_i W_ij v_i)
     #                      = σ(c_j + (W^T v)_j)
-
-    # ロジット計算: c + W' * v
     # W' は W の転置 (n_hidden × n_visible)
-    # v は (n_visible, batch)
-    # 結果は (n_hidden, batch)
-    logits = rbm.c .+ rbm.W' * v
-
-    # シグモイド関数適用 → 確率
-    h_prob = sigmoid.(logits)
-
-    # Bernoulli分布からサンプリング
-    # 各 h_j を確率 h_prob[j] で 1、確率 1-h_prob[j] で 0
+    # v は (n_visible, batch) → h_prob は (n_hidden, batch)
+    h_prob   = sigmoid.(rbm.c .+ rbm.W' * v)
     h_sample = rand.(Bernoulli.(h_prob))
-
     return h_sample, h_prob
 end
 
@@ -110,16 +95,8 @@ end
 function sample_v_given_h(rbm::RBM, h)
     # 数式: p(v_i = 1 | h) = σ(b_i + Σ_j W_ij h_j)
     #                      = σ(b_i + (W h)_i)
-
-    # ロジット計算: b + W * h
-    logits = rbm.b .+ rbm.W * h
-
-    # シグモイド関数適用
-    v_prob = sigmoid.(logits)
-
-    # Bernoulli分布からサンプリング
+    v_prob   = sigmoid.(rbm.b .+ rbm.W * h)
     v_sample = rand.(Bernoulli.(v_prob))
-
     return v_sample, v_prob
 end
 ```
@@ -205,7 +182,7 @@ function cd_k(rbm::RBM, v_data; k=1, lr=0.01f0)
 
     # ========== 勾配更新 ==========
     # 数式: ΔW_ij = η (⟨v_i h_j⟩_data - ⟨v_i h_j⟩_model)
-    ΔW = lr .* (pos_grad .- neg_grad)
+    ΔW = @. lr * (pos_grad - neg_grad)
 
     # バイアスの勾配
     # 数式: Δb_i = η (⟨v_i⟩_data - ⟨v_i⟩_model)
@@ -215,7 +192,7 @@ function cd_k(rbm::RBM, v_data; k=1, lr=0.01f0)
     Δc = lr .* mean(h_pos_prob .- h_neg_prob, dims=2)[:]
 
     # 新しいRBMを返す（関数型スタイル）
-    return RBM(rbm.W .+ ΔW, rbm.b .+ Δb, rbm.c .+ Δc)
+    return RBM(@. rbm.W + ΔW, @. rbm.b + Δb, @. rbm.c + Δc)
 end
 ```
 
@@ -259,7 +236,7 @@ function train_rbm(rbm, data; epochs=10, k=1, lr=0.01f0, batch_size=32)
         for i in 1:batch_size:n_samples
             # ミニバッチ抽出
             batch_idx = indices[i:min(i+batch_size-1, n_samples)]
-            batch = data[:, batch_idx]
+            batch = @views data[:, batch_idx]
 
             # CD-k更新
             rbm = cd_k(rbm, batch; k=k, lr=lr)
@@ -326,27 +303,10 @@ end
 # エネルギー関数 E(x) = -lse(β X'x) + 0.5||x||^2
 function energy(hopfield::ModernHopfield, x)
     # 数式: E(x) = -log Σ_i exp(β ⟨x, ξ^i⟩) + (1/2)||x||^2
-
-    # ステップ1: 内積計算 X' * x
-    # X: (d × M)
-    # x: (d,) または (d, batch)
-    # X' * x: (M,) または (M, batch)
-    # これは ⟨x, ξ^i⟩ を全ての i について計算
-    inner_products = hopfield.X' * x
-
-    # ステップ2: スケーリング β ⟨x, ξ^i⟩
-    logits = hopfield.β .* inner_products
-
-    # ステップ3: log-sum-exp(logits)
-    # lse(z) = log Σ_i exp(z_i)
-    # 数値安定版の実装（max-trick使用）
-    lse_term = logsumexp(logits)
-
-    # ステップ4: 正則化項 (1/2)||x||^2
-    reg_term = 0.5f0 * sum(abs2, x)
-
-    # 全体のエネルギー
-    return -lse_term + reg_term
+    # X: (d × M), x: (d,) or (d, batch)
+    # X' * x: 内積 ⟨x, ξ^i⟩ を全 i について一括計算
+    lse_term = hopfield.X' * x |> z -> hopfield.β .* z |> logsumexp
+    -lse_term + 0.5f0 * sum(abs2, x)
 end
 ```
 
@@ -375,21 +335,10 @@ $E(x)$ を最小化する $x$ は、記憶パターン $\{\xi^i\}$ の中で最�
 ```julia
 # Update Rule: x^{t+1} = X softmax(β X'x^t)
 function update(hopfield::ModernHopfield, x)
-    # 数式: x^{t+1} = Σ_i softmax_i(β X'x^t) ξ^i
-    #              = X softmax(β X'x^t)
-
-    # ステップ1: 内積計算
-    inner_products = hopfield.X' * x  # (M,) or (M, batch)
-
-    # ステップ2: スケーリング + softmax
-    logits = hopfield.β .* inner_products
-    weights = softmax(logits)  # (M,) or (M, batch)
-
-    # ステップ3: 重み付き和
-    # X: (d × M)
-    # weights: (M,) or (M, batch)
-    # X * weights: (d,) or (d, batch)
-    return hopfield.X * weights
+    # 数式: x^{t+1} = X softmax(β X'x^t)
+    # X: (d × M), x: (d,) or (d, batch)
+    weights = hopfield.X' * x |> z -> hopfield.β .* z |> softmax
+    hopfield.X * weights
 end
 ```
 
@@ -428,7 +377,7 @@ function retrieve(hopfield::ModernHopfield, x_init; max_iters=10, tol=1e-6)
         x_new = update(hopfield, x)
 
         # 収束判定: ||x_new - x|| < tol
-        if norm(x_new - x) < tol
+        if norm(x_new .- x) < tol
             println("Converged at iteration $t")
             break
         end
@@ -571,7 +520,7 @@ function metropolis_hastings(target_log_prob, x_init; n_samples=1000, proposal_s
 
         # ========== ステップ3: サンプル保存 ==========
         # バーンイン後のサンプルを保存
-        samples[:, i] = x
+        @views samples[:, i] .= x
     end
 
     # 受理率: 理想は 0.2-0.5（高次元では低下）
@@ -642,28 +591,28 @@ function hmc(U, ∇U, x_init; n_samples=1000, L=10, ε=0.01f0)
         #   dp/dt = -∂H/∂x = -∇U(x)
         # Symplectic積分器（エネルギー保存が良い）
 
-        x_new, p_new = x, p
+        x_new, p_new = copy(x), copy(p)
 
         # Half-step for momentum (初期)
         # p_{1/2} = p_0 - (ε/2) ∇U(x_0)
-        p_new = p_new .- (ε/2) .* ∇U(x_new)
+        p_new .-= (ε/2) .* ∇U(x_new)
 
         # Full-steps: L回繰り返し
         for step in 1:L
             # Full-step for position
             # x_{t+1} = x_t + ε p_{t+1/2}
-            x_new = x_new .+ ε .* p_new
+            x_new .+= ε .* p_new
 
             # Full-step for momentum (最後以外)
             # p_{t+3/2} = p_{t+1/2} - ε ∇U(x_{t+1})
             if step < L  # 最後のステップは下で処理
-                p_new = p_new .- ε .* ∇U(x_new)
+                p_new .-= ε .* ∇U(x_new)
             end
         end
 
         # Half-step for momentum (最終)
         # p_L = p_{L-1/2} - (ε/2) ∇U(x_L)
-        p_new = p_new .- (ε/2) .* ∇U(x_new)
+        p_new .-= (ε/2) .* ∇U(x_new)
 
         # ========== ステップ3: Metropolis受理・棄却 ==========
         # 新しいハミルトニアン
@@ -680,7 +629,7 @@ function hmc(U, ∇U, x_init; n_samples=1000, L=10, ε=0.01f0)
         end
 
         # ========== ステップ4: サンプル保存 ==========
-        samples[:, i] = x
+        @views samples[:, i] .= x
     end
 
     # 受理率: HMCは高い（0.65-0.95が典型）
@@ -765,9 +714,8 @@ plot(p1, p2, layout=(1, 2), size=(1000, 400))
 
 ---
 
-:::message progress 70%
-RBM + Modern Hopfield + MCMCをJuliaで完全実装。数式↔コード1:1対応を体験。次は実験で挙動を観察。
-:::
+> Progress: 70%
+> RBM + Modern Hopfield + MCMCをJuliaで完全実装。数式↔コード1:1対応を体験。次は実験で挙動を観察。
 
 ---
 
@@ -891,16 +839,15 @@ for M in M_list
         x_target = patterns[:, i]
 
         # ノイズ付加: SNR ≈ 10（10%ノイズ）
-        noise = 0.1f0 .* randn(Float32, d)
-        x_noisy = x_target .+ noise
-        x_noisy = x_noisy ./ norm(x_noisy)  # 正規化維持
+        x_noisy  = x_target .+ 0.1f0 .* randn(Float32, d)
+        x_noisy ./= norm(x_noisy)           # 正規化維持（in-place）
 
         # 検索
         x_init = x_noisy
         x_retrieved = x_init
         for t in 1:10
             x_new = update(hopfield, x_retrieved)
-            if norm(x_new - x_retrieved) < 1e-6
+            if norm(x_new .- x_retrieved) < 1e-6
                 push!(iters, t)
                 break
             end
@@ -911,7 +858,7 @@ for M in M_list
         end
 
         # 誤差測定: ||x_retrieved - x_target||
-        error = norm(x_retrieved - x_target)
+        error = norm(x_retrieved .- x_target)
         push!(errors, error)
     end
 
@@ -990,7 +937,7 @@ function autocorrelation(samples, lag)
     cov_0 = sum(abs2, centered) / n
 
     # 自己共分散(lag): E[(X_t - μ)(X_{t+lag} - μ)]
-    cov_lag = sum(centered[:, 1:n-lag] .* centered[:, 1+lag:n]) / (n - lag)
+    cov_lag = @views sum(centered[:, 1:n-lag] .* centered[:, 1+lag:n]) / (n - lag)
 
     # 正規化された自己相関: ρ(lag) = Cov(lag) / Var
     return cov_lag / cov_0
@@ -1022,8 +969,8 @@ samples_hmc = hmc(
 
 # ========== 自己相関計算 ==========
 lags = 1:100
-acf_mh = [autocorrelation(samples_mh, lag) for lag in lags]
-acf_hmc = [autocorrelation(samples_hmc, lag) for lag in lags]
+acf_mh  = lags .|> lag -> autocorrelation(samples_mh,  lag)
+acf_hmc = lags .|> lag -> autocorrelation(samples_hmc, lag)
 
 # ========== Effective Sample Size (ESS) ==========
 # ESS = n_samples / (1 + 2 Σ_{lag=1}^∞ ACF(lag))
@@ -1090,11 +1037,16 @@ plot(p1, p2, layout=(1, 2), size=(1200, 400))
 
 ---
 
-:::message progress 85%
-RBMの記憶容量、Modern Hopfieldの指数的容量、MCMC混合時間を実験で確認。理論と実装の整合性を検証した。次は発展的内容へ。
-:::
+> Progress: 85%
+> RBMの記憶容量、Modern Hopfieldの指数的容量、MCMC混合時間を実験で確認。理論と実装の整合性を検証した。次は発展的内容へ。
 
 ---
+
+
+> Progress: 85%
+> **理解度チェック**
+> 1. CD-k実装でPositive/Negativeの勾配 $\nabla_\theta[\log p(\mathbf{v}^+) - \log p(\mathbf{v}^-)]$ を計算する際、$k$ が小さいと推定が偏る理由を述べよ。
+> 2. Modern HopfieldのAttentionとの等価性を数値実験で検証する際、どの出力（更新則の数値一致）を確認すべきか述べよ。
 
 ## 🚀 6. 発展ゾーン（20分）— 最新研究とEBMの未来
 
@@ -1174,8 +1126,8 @@ function sample(sampler::KonaSampler, E, ∇E, x_init)
     # Phase 1: Langevin Dynamics で粗探索
     # dx = -∇E(x) dt + √(2dt) dW
     for _ in 1:sampler.langevin_steps
-        x = x .- sampler.ε_langevin .* ∇E(x) .+
-            sqrt(2 * sampler.ε_langevin) .* randn(Float32, size(x))
+        x .-= sampler.ε_langevin .* ∇E(x)
+        x .+= sqrt(2 * sampler.ε_langevin) .* randn(Float32, size(x))
     end
 
     # Phase 2: HMC で精密化
@@ -1280,11 +1232,16 @@ graph TD
 
 ---
 
-:::message progress 100%
-発展的内容を習得。NRGPT / Energy Matching / Kona 1.0 / 研究系譜を理解。EBMが"遺物"から"統一理論の核心"へ復活した経緯を把握した。
-:::
+> Progress: 100%
+> 発展的内容を習得。NRGPT / Energy Matching / Kona 1.0 / 研究系譜を理解。EBMが"遺物"から"統一理論の核心"へ復活した経緯を把握した。
 
 ---
+
+
+> Progress: 95%
+> **理解度チェック**
+> 1. EBMとScore Matchingの接続式 $s_\theta(\mathbf{x}) = -\nabla_\mathbf{x} E_\theta(\mathbf{x})$ を使い、なぜScore MatchingがZ(θ)を回避できるか説明せよ。
+> 2. Energy Matching が Flow Matching + EBMを統一する数学的根拠（損失関数の形）を述べよ。
 
 ## 🎓 6. 振り返り + 統合ゾーン（30分）— EBMの本質と次への接続
 
@@ -1312,7 +1269,7 @@ graph TD
 
 ### 7.3 よくある質問（FAQ）
 
-:::details Q1: なぜEBMは訓練が難しいのか？
+<details><summary>Q1: なぜEBMは訓練が難しいのか？</summary>
 
 **A**: 負の対数尤度の勾配:
 
@@ -1321,9 +1278,10 @@ $$
 $$
 
 第2項 $\mathbb{E}_{x \sim p_\theta}$ の計算に $p_\theta$ からのサンプリングが必要 → MCMC → 遅い。各勾配ステップでMCMCを収束させる必要がある。
-:::
 
-:::details Q2: Modern HopfieldとClassical Hopfieldの違いは？
+</details>
+
+<details><summary>Q2: Modern HopfieldとClassical Hopfieldの違いは？</summary>
 
 **A**:
 
@@ -1335,9 +1293,10 @@ $$
 | Attention | 無関係 | **完全等価** |
 
 Modern HopfieldはClassicalの指数的拡張 + Attentionとの等価性。
-:::
 
-:::details Q3: CD-kはなぜk=1でも機能するのか？
+</details>
+
+<details><summary>Q3: CD-kはなぜk=1でも機能するのか？</summary>
 
 **A**: 理論的にはバイアスあり（目的関数が $\log p(x)$ でない）。だが実用上:
 - データ近傍の負例でも勾配方向は概ね正しい
@@ -1345,18 +1304,20 @@ Modern HopfieldはClassicalの指数的拡張 + Attentionとの等価性。
 - 経験的に $k=1$ で良好な結果
 
 PCD（Persistent CD）は $k$ を大きくせずバイアスを減らす工夫。
-:::
 
-:::details Q4: HMCはなぜ効率的なのか？
+</details>
+
+<details><summary>Q4: HMCはなぜ効率的なのか？</summary>
 
 **A**: Metropolis-Hastingsとの違い:
 - **MH**: ランダムウォーク → 探索が遅い
 - **HMC**: 運動量を利用して「勢いをつけて」移動 → 遠方まで効率的に探索
 
 Hamilton力学のエネルギー保存則により、受理確率が高い（理論上1）。
-:::
 
-:::details Q5: Energy Matchingは何を統一したのか？
+</details>
+
+<details><summary>Q5: Energy Matchingは何を統一したのか？</summary>
 
 **A**:
 - **Flow Matching**: OT直線輸送（決定論的）
@@ -1367,7 +1328,8 @@ Energy Matchingは時間依存エネルギー $E(x, t)$ で両者を連続的に
 - $t = 1$: EBM
 
 これにより、Flow Matchingの訓練速度とEBMの表現力を両立。
-:::
+
+</details>
 
 ### 7.4 学習スケジュール（1週間）
 
@@ -1461,37 +1423,45 @@ Energy Matchingは時間依存エネルギー $E(x, t)$ で両者を連続的に
 
 **よくあるエラーと解決策**:
 
-:::details エラー1: RBM訓練でエネルギーが発散
+<details><summary>エラー1: RBM訓練でエネルギーが発散</summary>
+
 **原因**: 学習率が高すぎる / 勾配爆発
 **解決**:
 - 学習率を `0.01 → 0.001` に下げる
 - Gradient clipping: `clip_grad_norm!(params, 1.0)`
 - 重みの初期化を `randn(...) .* 0.01` で小さく
-:::
 
-:::details エラー2: Modern Hopfieldが収束しない
+</details>
+
+<details><summary>エラー2: Modern Hopfieldが収束しない</summary>
+
 **原因**: βが大きすぎる / パターンが線形従属
 **解決**:
 - β を `1.0` から開始（理論値 `β = d` は数値的に不安定な場合あり）
 - パターンを正規化: `patterns ./ norm.(eachcol(patterns))'`
 - 収束判定を緩める: `tol = 1e-4` → `1e-6`
-:::
 
-:::details エラー3: HMCの受理率が極端に低い（< 0.1）
+</details>
+
+<details><summary>エラー3: HMCの受理率が極端に低い（< 0.1）</summary>
+
 **原因**: ε（step size）が大きすぎる
 **解決**:
 - ε を 1/10 に減らす: `0.1 → 0.01`
 - L を増やして compensate: `L=10 → L=50`
 - 自動調整: NUTSを使う（Turing.jlで利用可能）
-:::
 
-:::details エラー4: Grokking が観測されない
+</details>
+
+<details><summary>エラー4: Grokking が観測されない</summary>
+
 **原因**: 訓練データが多すぎる / weight decay が弱い
 **解決**:
 - 訓練データを **30%以下** に制限（Grokkingは過少データで起きる）
 - Weight decay を強化: `0.001 → 0.01`
 - より長く訓練: `epochs=1000 → epochs=5000`
-:::
+
+</details>
 
 ### 7.7 コミュニティ・質問先
 
@@ -1556,7 +1526,7 @@ $$
 - VAE/GANは"進化"だったのか、それとも"EBMの訓練困難性からの逃避"だったのか？
 - 2026年のFlow Matching / Diffusionの背後にある統一理論は、実は1982年のHopfieldが既に示していたのでは？
 
-:::details 考察のヒント
+<details><summary>考察のヒント</summary>
 
 **歴史的サイクル**:
 - 1982: Hopfield → "画期的"
@@ -1571,7 +1541,8 @@ $$
 - Flow Matching: EBM + OTの統一（Energy Matching）
 
 **結論**: 生成モデルの全てはEBMの変形。"遺物"ではなく"基盤"だった。
-:::
+
+</details>
 
 ---
 
@@ -1580,22 +1551,22 @@ $$
 ### 主要論文
 
 [^1]: Hopfield, J. J. (1982). "Neural networks and physical systems with emergent collective computational abilities." *Proceedings of the National Academy of Sciences*, 79(8), 2554-2558.
-@[card](https://www.pnas.org/doi/abs/10.1073/pnas.79.8.2554)
+<https://www.pnas.org/doi/abs/10.1073/pnas.79.8.2554>
 
 [^2]: Hinton, G. E. (2002). "Training products of experts by minimizing contrastive divergence." *Neural Computation*, 14(8), 1771-1800.
-@[card](https://www.cs.toronto.edu/~hinton/absps/tr00-004.pdf)
+<https://www.cs.toronto.edu/~hinton/absps/tr00-004.pdf>
 
 [^3]: Ramsauer, H., et al. (2020). "Hopfield Networks is All You Need." *ICLR 2021*.
-@[card](https://arxiv.org/abs/2008.02217)
+<https://arxiv.org/abs/2008.02217>
 
 [^4]: Santos, S., et al. (2025). "Modern Hopfield Networks with Continuous-Time Memories." *arXiv:2502.10122*.
-@[card](https://arxiv.org/abs/2502.10122)
+<https://arxiv.org/abs/2502.10122>
 
 [^5]: Dehmamy, N., et al. (2025). "NRGPT: An Energy-based Alternative for GPT." *arXiv:2512.16762*.
-@[card](https://arxiv.org/abs/2512.16762)
+<https://arxiv.org/abs/2512.16762>
 
-[^6]: Energy Matching Authors (2025). "Energy Matching: Unifying Flow Matching and Energy-Based Models for Generative Modeling." *arXiv:2504.10612*.
-@[card](https://arxiv.org/abs/2504.10612)
+[^6]: Balcerak, M., et al. (2025). "Energy Matching: Unifying Flow Matching and Energy-Based Models for Generative Modeling." *arXiv:2504.10612*.
+<https://arxiv.org/abs/2504.10612>
 
 [^7]: Tieleman, T. (2008). "Training restricted Boltzmann machines using approximations to the likelihood gradient." *ICML 2008*.
 
@@ -1604,7 +1575,7 @@ $$
 [^9]: Smolensky, P. (1986). "Information processing in dynamical systems: Foundations of harmony theory." In *Parallel Distributed Processing*, Vol. 1.
 
 [^10]: Nobel Prize (2024). "The Nobel Prize in Physics 2024." John J. Hopfield and Geoffrey E. Hinton.
-@[card](https://www.nobelprize.org/prizes/physics/2024/summary/)
+<https://www.nobelprize.org/prizes/physics/2024/summary/>
 
 [^11]: LeCun, Y., Chopra, S., Hadsell, R., Ranzato, M., & Huang, F. (2006). "A tutorial on energy-based learning." In *Predicting Structured Data*, MIT Press.
 
@@ -1617,27 +1588,13 @@ $$
 
 ---
 
-## 記法規約
+## 著者リンク
 
-| 記法 | 意味 |
-|:-----|:-----|
-| $E_\theta(x)$ | エネルギー関数（パラメータ $\theta$） |
-| $p_\theta(x)$ | 確率分布（Gibbs分布） |
-| $Z(\theta)$ | 正規化定数（Partition Function） |
-| $v$ | RBM可視層 |
-| $h$ | RBM隠れ層 |
-| $W$ | RBM重み行列 |
-| $\xi^i$ | Hopfield記憶パターン |
-| $\beta$ | 逆温度パラメータ |
-| $\tau$ | 温度パラメータ |
-| $T(x' \| x)$ | Markov連鎖遷移カーネル |
-| $\alpha(x' \| x)$ | Metropolis-Hastings受理確率 |
-| $H(q, p)$ | Hamiltonian（Hamilton関数） |
-| $U(q)$ | ポテンシャルエネルギー |
-| $K(p)$ | 運動エネルギー |
-| $\epsilon$ | ステップサイズ |
-| $L$ | Leapfrog steps数 |
----
+- Blog: https://fumishiki.dev
+- X: https://x.com/fumishiki
+- LinkedIn: https://www.linkedin.com/in/fumitakamurakami
+- GitHub: https://github.com/fumishiki
+- Hugging Face: https://huggingface.co/fumishiki
 
 ## ライセンス
 

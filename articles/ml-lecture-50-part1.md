@@ -4,6 +4,11 @@ emoji: "🏆"
 type: "tech"
 topics: ["machinelearning", "deeplearning", "generativemodels", "julia", "rust", "elixir", "production"]
 published: true
+slug: "ml-lecture-50-part1"
+difficulty: "advanced"
+time_estimate: "90 minutes"
+languages: ["Julia", "Rust"]
+keywords: ["機械学習", "深層学習", "生成モデル"]
 ---
 
 # 第50回: フロンティア総括 & 卒業制作 — 最終章: 数式が読めない → フルスタック生成AI設計者へ
@@ -32,9 +37,7 @@ published: true
 
 **これが、全50回シリーズの最終章だ。**
 
-:::message
-**このシリーズについて**: 東京大学 松尾・岩澤研究室動画講義の**完全上位互換**の全50回シリーズ。理論（論文が書ける）、実装（Production-ready）、最新（2024-2026 SOTA）の3軸で差別化する。本講義は **全50回の最終回** — 全知識統合のフィナーレにして、読者の新しい旅の出発点だ。
-:::
+> **Note:** **このシリーズについて**: 東京大学 松尾・岩澤研究室動画講義の**完全上位互換**の全50回シリーズ。理論（論文が書ける）、実装（Production-ready）、最新（2024-2026 SOTA）の3軸で差別化する。本講義は **全50回の最終回** — 全知識統合のフィナーレにして、読者の新しい旅の出発点だ。
 
 ```mermaid
 graph TD
@@ -107,9 +110,9 @@ println("LTX-Video 生成完了: generated_video.mp4")
 
 # 4️⃣ 統合パイプライン: SmolVLM2理解 → aMUSEd画像 → LTX-Video動画
 pipeline = MultimodalPipeline(smol_vlm, amused_model, ltx_model)
-video_understanding = pipeline.understand(video_path)  # SmolVLM2
-image_generation = pipeline.generate_image(video_understanding)  # aMUSEd
-video_generation = pipeline.generate_video(video_understanding)  # LTX-Video
+video_understanding = pipeline.understand(video_path)      # SmolVLM2
+image_generation    = video_understanding |> pipeline.generate_image   # aMUSEd
+video_generation    = video_understanding |> pipeline.generate_video   # LTX-Video
 
 println("\n✅ 全50回の到達点:")
 println("- 動画理解 (SmolVLM2) ✓")
@@ -123,9 +126,7 @@ println("\n第1回「数式が読めない」→ 第50回「3モデル統合シ�
 
 では、この30秒の裏にある150,000行の数学・理論・実装の全行程を振り返り、2025-2026フロンティアを俯瞰し、卒業制作でフルスタックシステムを設計しよう。
 
-:::message
-**ここまでで全体の3%完了!** Zone 0 は到達点の体感。次は全50回の理論的統一マップを構築する。
-:::
+> **Note:** **ここまでで全体の3%完了!** Zone 0 は到達点の体感。次は全50回の理論的統一マップを構築する。
 
 ---
 
@@ -155,70 +156,11 @@ println("\n第1回「数式が読めない」→ 第50回「3モデル統合シ�
    - OT-CFM: 最適輸送パス $x_t = (1-t)x_0 + tx_1$
    - Rectified Flow: 直線パス $x_t = (1-t)x_0 + tx_1$ + Reflow
 
-5. **推論時スケーリング (Inference-Time Scaling)** — 訓練後、推論時にさらに計算を投入して品質向上
+5. **推論時スケーリング (Inference-Time Scaling)** — 訓練後、推論時に追加の計算で品質向上
    - Reflect-DiT (第49回): Self-Reflection loop
    - Test-time Training for Video
    - Compute-optimal Inference [^1]
 
-```julia
-# 全生成モデルの統一的実装 — 損失関数の共通構造を確認
-using LinearAlgebra, Statistics
-
-# 1. VAE: ELBO最大化
-function vae_loss(x, encoder, decoder)
-    μ, logσ² = encoder(x)
-    z = μ + exp.(0.5 * logσ²) .* randn(size(μ))  # Reparameterization
-    x_recon = decoder(z)
-    recon = -mean((x - x_recon).^2)  # Reconstruction
-    kl = -0.5 * mean(1 .+ logσ² .- μ.^2 .- exp.(logσ²))  # KL regularization
-    return -(recon - kl)  # negative ELBO
-end
-
-# 2. Flow Matching: ベクトル場回帰
-function flow_matching_loss(x0, x1, t, v_θ)
-    xt = (1 .- t) .* x0 .+ t .* x1  # Linear interpolation (OT path)
-    ut = x1 .- x0  # Target vector field
-    v_pred = v_θ(xt, t)
-    return mean((v_pred .- ut).^2)  # MSE
-end
-
-# 3. DDPM: ノイズ予測
-function ddpm_loss(x0, ϵ, t, ϵ_θ, α_bar)
-    xt = sqrt.(α_bar[t]) .* x0 .+ sqrt.(1 .- α_bar[t]) .* ϵ
-    ϵ_pred = ϵ_θ(xt, t)
-    return mean((ϵ_pred .- ϵ).^2)  # Denoising score matching
-end
-
-# 4. Score Matching: スコア関数学習
-function score_matching_loss(x, s_θ)
-    # Denoising Score Matching (DSM)
-    σ = 0.1
-    ϵ = randn(size(x)) * σ
-    x_noisy = x + ϵ
-    s_pred = s_θ(x_noisy)
-    return mean((s_pred + ϵ / σ^2).^2)  # DSM objective
-end
-
-# Test: 統一的損失関数の確認
-x = randn(4, 8)
-x0, x1 = randn(4, 8), randn(4, 8)
-ϵ = randn(4, 8)
-t = [0.5]
-α_bar = LinRange(0.999, 0.001, 1000)
-
-# Dummy models
-encoder(x) = (mean(x, dims=2), log.(var(x, dims=2, corrected=false)))
-decoder(z) = z .* 2
-v_θ(x, t) = x
-ϵ_θ(x, t) = x
-s_θ(x) = -x
-
-println("VAE loss:     ", vae_loss(x, encoder, decoder))
-println("FM loss:      ", flow_matching_loss(x0, x1, t, v_θ))
-println("DDPM loss:    ", ddpm_loss(x0, ϵ, [500], ϵ_θ, α_bar))
-println("Score loss:   ", score_matching_loss(x, s_θ))
-println("\n✅ 全ての損失関数は '予測 vs 真値' の距離 — 本質は同じ")
-```
 
 **統一的視点**: 全ての損失関数は「モデルが予測した何かと、真の何かの距離」を最小化している。
 
@@ -277,43 +219,18 @@ graph TD
 | **2. Inference-Time Scaling** | Training compute scaling | Test-time compute scaling | o1, Gemini 2.0 Flash, o3, Reflect-DiT [^3] |
 | **3. Modal Unification** | 単一モダリティ特化 | 統合マルチモーダル | Show-o, BAGEL, GPT-4o, Genie 3 [^4] |
 
-```julia
-# 3つのパラダイムシフトを実装で確認
-using Transformers, Diffusers, FlowMatching
-
-# 1️⃣ Flow Matching Dominance: Diffusion vs Flow Matching
-diffusion_model = load_model("stabilityai/sdxl-base-1.0")  # 1000 steps
-fm_model = load_model("stabilityai/sd3-medium")  # 28 steps (Rectified Flow)
-
-prompt = "桜の木の下のカフェ"
-@time img_diffusion = diffusion_model(prompt, num_steps=50)  # 10秒
-@time img_fm = fm_model(prompt, num_steps=28)  # 4秒 (2.5x faster)
-println("✅ Flow Matching: 28ステップで高品質 (Diffusion 50ステップ相当)")
-
-# 2️⃣ Inference-Time Scaling: Reflect-DiT
-reflect_dit = load_model("reflect-dit")
-img_base = reflect_dit(prompt, num_steps=28)  # Base generation
-img_reflect = reflect_dit.reflect(img_base, num_reflect_steps=5)  # Self-reflection
-println("✅ Inference-Time Scaling: 推論時に5ステップ追加で品質向上")
-
-# 3️⃣ Modal Unification: Show-o (統合マルチモーダル)
-show_o = load_model("showlab/show-o")  # Unified autoregressive MM model
-# Text → Image
-img_gen = show_o(prompt="桜の木", modality="image")
-# Image → Text
-caption = show_o(image=img_gen, modality="text")
-# Text + Image → Video
-video_gen = show_o(prompt=prompt, image=img_gen, modality="video")
-println("✅ Modal Unification: 1モデルで全モダリティ (Text/Image/Video) 生成・理解")
-```
 
 **体感完了**: Score↔Flow↔Diffusion↔ODE の統一性、Course I-Vの接続、2025-2026フロンティアの3軸を確認した。
 
-:::message
-**ここまでで全体の10%完了!** Zone 1 で理論的統一を体感した。次は全50回の旅を俯瞰し、Course IV vs Course Vの役割分担を整理する。
-:::
+> **Note:** **ここまでで全体の10%完了!** Zone 1 で理論的統一を体感した。次は全50回の旅を俯瞰し、Course IV vs Course Vの役割分担を整理する。
 
 ---
+
+
+> Progress: 10%
+> **理解度チェック**
+> 1. このゾーンの主要な概念・定義を自分の言葉で説明してください。
+> 2. この手法が他のアプローチより優れている点と、その限界を述べてください。
 
 ## 🧩 2. 直感ゾーン（15分）— 全50回の旅を俯瞰する
 
@@ -477,11 +394,15 @@ Course IV (第33-42回) とCourse V (第43-49回) は、どちらも Course I-II
 | **Production** | ローカル実験のみ | MLOps/分散配信/監視/デプロイ/評価 全工程 |
 | **最新性** | 知らない | 2024-2026 SOTA完全把握 (FM/推論時スケーリング/MM統合) |
 
-:::message
-**ここまでで全体の20%完了!** Zone 2 で全50回の旅を俯瞰した。次は数式修行ゾーン — 2025-2026フロンティアの理論的整理、未解決問題、Scaling Lawの未来、安全性・倫理、研究テーマの見つけ方を学ぶ。
-:::
+> **Note:** **ここまでで全体の20%完了!** Zone 2 で全50回の旅を俯瞰した。次は数式修行ゾーン — 2025-2026フロンティアの理論的整理、未解決問題、Scaling Lawの未来、安全性・倫理、研究テーマの見つけ方を学ぶ。
 
 ---
+
+
+> Progress: 20%
+> **理解度チェック**
+> 1. $\alpha$ の各記号の意味と、この式が表す操作を説明してください。
+> 2. このゾーンで学んだ手法の直感的な意味と、なぜこの定式化が必要なのかを説明してください。
 
 ## 📐 3. 数式修行ゾーン（60分）— フロンティア理論総括
 
@@ -581,6 +502,110 @@ $$
 
 **結論**: Flow Matching のベクトル場 $u_t(x | x_1)$ は、スコア関数 $\nabla_x \log p_t(x | x_1)$ に線形項を加えたものとして解釈できる。この意味で、**Flow Matching はスコアマッチングの一般化**である。
 
+**連続性方程式 (Continuity Equation) の導出**:
+
+ベクトル場 $v_t$ が定義する確率流 $\phi_t$ を通じて密度 $\rho_t$ がどのように変化するかを記述するのが連続性方程式だ。$x_t = \phi_t(x_0)$ が常微分方程式 $\dot{x}_t = v_t(x_t)$ の解とすると、$x_t$ の密度 $\rho_t$ は次の偏微分方程式を満たす:
+
+$$
+\frac{\partial \rho_t}{\partial t} + \nabla \cdot (\rho_t v_t) = 0
+$$
+
+導出の核心は質量保存だ。任意の領域 $\Omega \subset \mathbb{R}^d$ に対して:
+
+$$
+\frac{d}{dt} \int_\Omega \rho_t(x)\, dx = -\oint_{\partial \Omega} \rho_t(x) v_t(x) \cdot n\, dS
+$$
+
+右辺に発散定理を適用すると $-\int_\Omega \nabla \cdot (\rho_t v_t)\, dx$。$\Omega$ は任意だから、被積分関数を等しいと置くと連続性方程式が得られる。Flow Matching の目標は、この方程式の解としての $\rho_t$ が $t=0$ で $p_0$ (ノイズ分布)、$t=1$ で $p_1$ (データ分布) になるようなベクトル場 $v_t$ を学習することにある。
+
+**Fokker-Planck 方程式とスコアの接続**:
+
+SDE $dx = f(x,t)dt + g(t)dW$ に対して、密度の時間発展は Fokker-Planck 方程式で記述される:
+
+$$
+\frac{\partial \rho}{\partial t} = -\nabla \cdot (\rho f) + \frac{g(t)^2}{2} \Delta \rho
+$$
+
+ここで拡散項 $\frac{g^2}{2}\Delta\rho$ を $\nabla \cdot$ の形に書き直す。$\Delta \rho = \nabla \cdot \nabla \rho = \nabla \cdot (\rho \nabla \log \rho)$ を使うと:
+
+$$
+\frac{\partial \rho}{\partial t} = -\nabla \cdot \left[\rho\left(f - \frac{g(t)^2}{2} \nabla \log \rho\right)\right]
+$$
+
+連続性方程式と比較すると、等価なベクトル場は:
+
+$$
+v_t(x) = f(x,t) - \frac{g(t)^2}{2} \nabla_x \log \rho_t(x) = f(x,t) - \frac{g(t)^2}{2} s_t(x)
+$$
+
+これが **Probability Flow ODE** の速度場だ。拡散項がスコア関数 $s_t(x) = \nabla_x \log \rho_t(x)$ と結びついている。
+
+**確率的補間 (Stochastic Interpolant)**:
+
+Albergo & Vanden-Eijnden (2023) は、次の一般的な補間を提案した:
+
+$$
+x_t = \alpha_t x_0 + \beta_t x_1 + \gamma_t \epsilon, \quad \epsilon \sim \mathcal{N}(0, I)
+$$
+
+ここで $(\alpha_t, \beta_t, \gamma_t)$ は $t \in [0,1]$ のスカラー関数で、境界条件 $\alpha_0 = 1, \beta_0 = 0, \gamma_0 = 0$（$t=0$ で $x_0$）と $\alpha_1 = 0, \beta_1 = 1, \gamma_1 = 0$（$t=1$ で $x_1$）を満たす。この枠組みは Flow Matching と拡散モデルを統一的に記述する。線形補間 ($\alpha_t = 1-t, \beta_t = t, \gamma_t = 0$) は Rectified Flow に対応し、$\alpha_t = \sqrt{\bar{\alpha}_t}, \beta_t = 0, \gamma_t = \sqrt{1-\bar{\alpha}_t}$ は DDPM に対応する。
+
+対応するベクトル場は $x_t$ を $t$ で微分すれば得られる:
+
+$$
+\dot{x}_t = \dot{\alpha}_t x_0 + \dot{\beta}_t x_1 + \dot{\gamma}_t \epsilon
+$$
+
+条件付き期待値 $u_t(x_t | x_0, x_1) = \dot{\alpha}_t x_0 + \dot{\beta}_t x_1 + \dot{\gamma}_t \epsilon$ を $x_1$ について周辺化することで周辺ベクトル場が得られる。
+
+**最適輸送パス (Optimal Transport Path)**:
+
+Brenier の定理によれば、2つの密度 $p_0, p_1$ の間の $W_2^2$（二乗ワッサースタイン距離）を最小化する輸送写像 $T^*$ は一意に存在し、あるポテンシャル関数 $\phi$ の勾配として表される:
+
+$$
+T^*(x) = \nabla \phi(x), \quad \phi \text{ は凸関数}
+$$
+
+この Brenier 写像 $T^*$ を使ったパス:
+
+$$
+\psi_t^*(x) = (1-t)x + t T^*(x)
+$$
+
+は、$p_0$ から $p_1$ への **直線 OT パス** を構成する。OT-CFM (Lipman+ 2022) はこのパスに沿ったベクトル場 $v_t^*(x) = T^*(x) - x$ を学習する。
+
+**直線パス (Rectified Flow) が有利な理由**:
+
+一般の曲線パスに沿った数値解法の誤差は、パスの曲率 $\kappa_t$ に依存する。離散化誤差はステップサイズ $h$ について:
+
+$$
+\|x_{t+h}^{\text{true}} - x_{t+h}^{\text{numerical}}\| = O\!\left(h^2 \|\dot{v}_t\|\right)
+$$
+
+直線パスでは $\dot{x}_t = \text{const.}$（速度が一定）なので、$\dot{v}_t \to 0$。換言すれば、曲率:
+
+$$
+\kappa_t = \frac{\|\ddot{\psi}_t\|}{\|\dot{\psi}_t\|^2} \to 0
+$$
+
+となり、1ステップの Euler 積分でも誤差がほぼゼロになる。これが Rectified Flow が少ないステップ数で高品質な生成を実現できる根本理由だ。
+
+**Anderson 1982 逆時間 SDE の第一原理導出**:
+
+順方向 SDE $dx = f(x,t)dt + g(t)dW$ が定める密度 $p_t(x)$ を保ちながら**時間を逆行**させる SDE を求めたい。Anderson (1982) の結果:
+
+$$
+dx = \left[f(x,t) - g(t)^2 \nabla_x \log p_t(x)\right]dt + g(t)\,d\bar{W}
+$$
+
+導出スケッチ: 逆時間 SDE の密度変化を $\tilde{p}_{\tau}(x)$（$\tau = T - t$）と置くと、その Fokker-Planck は:
+
+$$
+\frac{\partial \tilde{p}_\tau}{\partial \tau} = -\nabla \cdot (\tilde{p}_\tau \tilde{f}) + \frac{g^2}{2}\Delta \tilde{p}_\tau
+$$
+
+この方程式が $\tilde{p}_\tau(x) = p_{T-\tau}(x)$ を解として持つように $\tilde{f}$ を逆算すると、上の逆時間ドリフト $f(x,t) - g^2 \nabla_x \log p_t(x)$ が得られる。順方向の拡散（不確実性の増加）を、スコア関数 $\nabla_x \log p_t$ による「密度の高い方向への引き戻し」で打ち消すわけだ。Score Matching の実践的意義はまさにここにある — スコア $\nabla_x \log p_t$ を推定できれば、逆時間 SDE を走らせてサンプリングが可能になる。
+
 #### 3.1.2 SDE ↔ PF-ODE の等価性 (Anderson 1982)
 
 **定理 (Probability Flow ODE)** [^5]:
@@ -618,6 +643,68 @@ $$
 $$
 
 **結論**: SDEとPF-ODEは同じ周辺分布を生成する。SDEは確率的、ODEは決定論的だが、$p_t(x)$ は同一。
+
+**Song+ 2021 の確率フロー ODE 再導出**:
+
+Song et al. (2021, arXiv:2011.13456) は、スコアベース生成モデルの統一的理論として Probability Flow ODE を導いた。出発点は VP-SDE (Variance Preserving):
+
+$$
+dx = -\frac{\beta(t)}{2} x\, dt + \sqrt{\beta(t)}\, dW
+$$
+
+ここで $f(x,t) = -\frac{\beta(t)}{2} x$、$g(t) = \sqrt{\beta(t)}$。Fokker-Planck の拡散項を上で示した形に書き換え、対応する Probability Flow ODE として:
+
+$$
+dx = \left[-\frac{\beta(t)}{2} x - \frac{1}{2}\beta(t)\nabla_x \log p_t(x)\right]dt
+$$
+
+が得られる。これは $g^2(t)/2 = \beta(t)/2$ として一般式 $dx = [f - \frac{1}{2}g^2 s_t]dt$ に代入したものだ。
+
+**なぜ SDE と ODE が同じ周辺分布を持つか — 証明スケッチ**:
+
+SDE の密度変化は Fokker-Planck 方程式:
+
+$$
+\frac{\partial p_t}{\partial t} = -\nabla \cdot (p_t f) + \frac{g^2}{2}\Delta p_t
+$$
+
+一方、PF-ODE の密度変化は連続性方程式:
+
+$$
+\frac{\partial p_t}{\partial t} = -\nabla \cdot \left(p_t \tilde{v}_t\right), \quad \tilde{v}_t(x) = f(x,t) - \frac{g(t)^2}{2}\nabla_x \log p_t(x)
+$$
+
+$\tilde{v}_t$ を代入すると $-\nabla \cdot(p_t f) + \frac{g^2}{2}\nabla \cdot(p_t \nabla \log p_t)$ = $-\nabla \cdot(p_t f) + \frac{g^2}{2}\Delta p_t$。両辺が一致する。これが同じ $p_t(x)$ を持つ根拠だ。
+
+**数値 ODE ソルバーの優位性**:
+
+確率的 Euler-Maruyama 法の1ステップ誤差は $O(h)$（1次精度）だが、決定論的 ODE は高精度ソルバーが使える。Runge-Kutta 4次法の局所誤差は $O(h^5)$、大域誤差は $O(h^4)$:
+
+$$
+\text{Global error (RK4)} = O(h^4), \quad \text{Global error (EM)} = O(h^1)
+$$
+
+ステップ数を $N_{\text{steps}}$ とするとステップサイズ $h = T/N_{\text{steps}}$ なので、同じ $N_{\text{steps}}$ で ODE ソルバーが圧倒的に精度が高い。これが DDIM, DPM-Solver, DPM-Solver++ が高速サンプリングを達成できる原理だ。
+
+**DDIM を PF-ODE の離散化として解釈する**:
+
+DDIM (Denoising Diffusion Implicit Models, Song+ 2020) の更新則:
+
+$$
+x_{t-1} = \sqrt{\bar{\alpha}_{t-1}}\,\hat{x}_0 + \sqrt{1-\bar{\alpha}_{t-1}}\,\epsilon_\theta(x_t, t)
+$$
+
+ここで $\hat{x}_0 = \frac{x_t - \sqrt{1-\bar{\alpha}_t}\,\epsilon_\theta}{\sqrt{\bar{\alpha}_t}}$ は現時刻の推定クリーン画像だ。VP-SDE の PF-ODE を Euler 法で離散化すると、上記の DDIM 更新則が回収される。つまり DDIM は **PF-ODE の1次精度 Euler 離散化**に過ぎない。DPM-Solver++ はこれを高次化したものだ。
+
+**反転 (Inversion): ODE の可逆性**:
+
+PF-ODE は決定論的なため**可逆**だ。実画像 $x_0$ を ODE を逆方向に積分してノイズ $x_T$ を求め（Inversion）、そのノイズを編集してから再度 ODE を前向きに積分すると、元の画像に対応する編集済み画像が得られる。形式的に:
+
+$$
+x_T = x_0 + \int_0^T \tilde{v}_t(x_t)\, dt \quad \text{(DDIM Inversion)}
+$$
+
+一方、SDE は確率的ノイズ $dW$ が含まれるため本質的に不可逆 — 同じ $x_0$ から出発しても $x_T$ の実現値は毎回異なる。この ODE の可逆性は Prompt-to-Prompt や InstructPix2Pix など画像編集手法の理論的基盤となっている。
 
 #### 3.1.3 EBM ↔ Score の等価性 (Langevin Dynamics)
 
@@ -661,6 +748,62 @@ $$
 
 **結論**: Langevin Dynamics の定常分布は $p(x) \propto \exp(-E(x))$。EBMからのサンプリングはスコアベース拡散と等価。
 
+**EBM の正式な定義と分配関数の問題**:
+
+エネルギーベースモデル (EBM) は確率密度を次のように定義する:
+
+$$
+p_\theta(x) = \frac{e^{-E_\theta(x)}}{Z(\theta)}, \quad Z(\theta) = \int_{\mathcal{X}} e^{-E_\theta(x)}\, dx
+$$
+
+$E_\theta: \mathbb{R}^d \to \mathbb{R}$ はニューラルネットワークで表現されるエネルギー関数だ。問題は $Z(\theta)$ — これは $d$ 次元空間上の積分であり、高次元では解析的にも数値的にも求まらない。典型的な $d = 768$（画像パッチ埋め込み）では $Z(\theta)$ の直接計算は実行不可能だ。
+
+**スコア関数で分配関数が消える**:
+
+ここで EBM のスコア関数を計算すると奇跡が起きる。$\log p_\theta(x) = -E_\theta(x) - \log Z(\theta)$ を $x$ で微分すると:
+
+$$
+\nabla_x \log p_\theta(x) = -\nabla_x E_\theta(x) - \nabla_x \log Z(\theta) = -\nabla_x E_\theta(x)
+$$
+
+$Z(\theta)$ は $x$ に依存しない定数だから $\nabla_x \log Z(\theta) = 0$。分配関数がきれいに消える。つまり、$Z(\theta)$ を一切計算しなくても、スコア関数 $s_\theta(x) = -\nabla_x E_\theta(x)$ はニューラルネットの逆伝播一発で計算できる。これが **EBM の tractability** の核心だ。
+
+**離散化 Langevin Dynamics**:
+
+理論的な Langevin SDE を実用的なアルゴリズムに落とし込んだものが Unadjusted Langevin Algorithm (ULA):
+
+$$
+x_{k+1} = x_k - \frac{\eta}{2}\nabla_x E_\theta(x_k) + \sqrt{\eta}\,\epsilon_k, \quad \epsilon_k \sim \mathcal{N}(0, I)
+$$
+
+ステップサイズ $\eta > 0$ を取ると、$k \to \infty$ で $x_k$ の分布は $p_\theta(x) \propto e^{-E_\theta(x)}$ に収束する（ただし $\eta \to 0$ の極限では正確）。実用上は $\eta$ が有限なため Metropolis-Hastings 補正を追加した MALA (Metropolis-Adjusted Langevin Algorithm) が使われる:
+
+$$
+A(x', x) = \min\!\left(1,\; \frac{p_\theta(x')\, q(x | x')}{p_\theta(x)\, q(x' | x)}\right)
+$$
+
+ここで $q(x' | x) = \mathcal{N}(x - \frac{\eta}{2}\nabla_x E_\theta(x),\, \eta I)$ は提案分布だ。
+
+**Contrastive Divergence との接続**:
+
+EBM の最尤訓練は対数尤度の勾配を計算することに相当するが:
+
+$$
+\nabla_\theta \log p_\theta(x) = -\nabla_\theta E_\theta(x) + \mathbb{E}_{p_\theta}[\nabla_\theta E_\theta(\tilde{x})]
+$$
+
+第2項の期待値計算に $p_\theta$ からのサンプリングが必要だ。Contrastive Divergence-$k$ (CD-$k$) はこれを Langevin Dynamics の $k$ ステップで近似する:
+
+$$
+\hat{\nabla}_\theta \mathcal{L}_{\text{CD-k}} \approx -\nabla_\theta E_\theta(x^+) + \nabla_\theta E_\theta(x^-)
+$$
+
+$x^+ \sim p_{\text{data}}$（実データ）、$x^- \sim q_k$（$k$ ステップ Langevin から得た負例）。$k=1$ でも実用上は良好に機能することが多い。これは **Denoising Score Matching の損失関数と同等** であることが Hyvarinen (2005) の枠組みで示せる — EBM 訓練がスコアマッチングと深くつながっている証拠だ。
+
+**分配関数の推定: MCMC vs. Score**:
+
+サンプリング（生成）には $Z(\theta)$ が不要だが、**密度評価**（尤度計算）には $Z(\theta)$ が必要になる。ここで Score Matching の強みが際立つ: 訓練損失 $\mathbb{E}[\|\nabla_x \log p_\theta(x) + \nabla_x E_\theta(x)\|^2]$ は $Z(\theta)$ なしに計算できるため、訓練も評価もトラクタブルになる。生成は Langevin Dynamics で実行し、訓練は Score Matching で行う — これが 2025 年以降の EBM 実践の標準的組み合わせだ。
+
 **統一理論の全体像**:
 
 ```mermaid
@@ -690,55 +833,6 @@ graph TD
 
 **実装で確認**:
 
-```julia
-# 統一理論の実装確認 — Score/Flow/SDE/ODE の等価性
-using DifferentialEquations, Distributions
-
-# 1. Energy-Based Model: E(x) = ½x²
-E(x) = 0.5 * sum(x.^2)
-∇E(x) = x  # Score: s(x) = -∇E(x) = -x
-
-# 2. Langevin Dynamics SDE: dx = -∇E(x)dt + √2 dw
-function langevin_sde!(du, u, p, t)
-    du .= -∇E(u)
-end
-function noise!(du, u, p, t)
-    du .= sqrt(2.0)
-end
-
-# 3. Probability Flow ODE: dx = -∇E(x)dt (noise-free, same marginal)
-function pf_ode!(du, u, p, t)
-    du .= -∇E(u)
-end
-
-# 4. Flow Matching: v(x) = -x (線形パスの特殊ケース)
-function flow!(du, u, p, t)
-    du .= -u
-end
-
-# 初期条件: x0 ~ N(5, 1)
-x0 = [5.0]
-tspan = (0.0, 5.0)
-
-# SDE解
-prob_sde = SDEProblem(langevin_sde!, noise!, x0, tspan)
-sol_sde = solve(prob_sde, EM(), dt=0.01)
-
-# ODE解
-prob_ode = ODEProblem(pf_ode!, x0, tspan)
-sol_ode = solve(prob_ode, Tsit5())
-
-# Flow解
-prob_flow = ODEProblem(flow!, x0, tspan)
-sol_flow = solve(prob_flow, Tsit5())
-
-println("✅ 統一理論の検証:")
-println("  SDE終端 (確率的): ", sol_sde[end])
-println("  ODE終端 (決定論的): ", sol_ode[end])
-println("  Flow終端 (決定論的): ", sol_flow[end])
-println("  理論値 (p(x) ∝ exp(-½x²) の平均): 0.0")
-println("\n  → SDE/ODE/Flow は同じ分布 p(x) に収束 (周辺分布が等価)")
-```
 
 ### 3.2 2025-2026 パラダイムシフト詳細: 3つのフロンティア
 
@@ -864,7 +958,77 @@ $$
 - **Multi-task Curriculum**: モダリティを段階的に学習 (BAGEL)
 - **Mixture-of-Experts (MoE)**: モダリティ毎にExpert割り当て
 
-### 3.3 未解決問題: 2026年時点のフロンティア
+#### 3.2.4 Scaling Laws の数学的統一理論
+
+Kaplan et al. (2020) と Hoffmann et al. (2022, Chinchilla) はそれぞれ独自のスケーリング則を示したが、2025年以降は訓練・推論・データを統合した**統一スケーリング則**が標準的枠組みになりつつある。
+
+**統一スケーリング則**:
+
+モデルがパラメータ数 $N$、データ量 $D$、推論時計算量 $C_{\text{test}}$ で達成できる損失の下限を以下の形で記述する:
+
+$$
+\mathcal{L}(N, D, C_{\text{test}}) = \left(\frac{N_c}{N}\right)^\alpha + \left(\frac{D_c}{D}\right)^\beta + \left(\frac{C_c}{C_{\text{test}}}\right)^\gamma + L_\infty
+$$
+
+各項の意味:
+- $(N_c/N)^\alpha$: パラメータ不足による損失。$\alpha \approx 0.34$ (Kaplan)
+- $(D_c/D)^\beta$: データ不足による損失。$\beta \approx 0.28$ (Chinchilla)
+- $(C_c/C_{\text{test}})^\gamma$: 推論計算不足による損失。$\gamma \approx 0.2–0.4$ (推定)
+- $L_\infty$: アーキテクチャ・データ品質で決まる不可避な損失の床 (irreducible loss)
+
+$N_c, D_c, C_c$ はフィッティングで求まるスケール定数だ。このべき乗和形式は、対数プロット上で各軸に関して直線的になり、実験的検証が容易という利点がある。
+
+**計算予算制約下の最適割り当て**:
+
+総計算予算 $B$ を与件として損失を最小化する問題を考える。訓練の計算量は FLOPs で $C_{\text{train}} \approx 6ND$（Transformer の場合、forward 約 $2ND$、backward 約 $4ND$）、推論の総計算量は $N_{\text{queries}} \cdot C_{\text{test}}$ だから:
+
+$$
+B = 6ND + N_{\text{queries}}\, C_{\text{test}}
+$$
+
+$C_{\text{test}}$ を固定し $N, D$ だけ最適化すると（$C_{\text{test}} \to 0$ の極限）、ラグランジュ法で:
+
+$$
+\frac{\partial \mathcal{L}}{\partial N} = \frac{\partial \mathcal{L}}{\partial D} = \lambda \cdot \text{(予算の勾配)}
+$$
+
+を解くと:
+
+$$
+N^* \propto B^{\alpha/(\alpha+\beta)}, \quad D^* \propto B^{\beta/(\alpha+\beta)}
+$$
+
+$\alpha \approx \beta$ のとき（Chinchilla: $\alpha = 0.34, \beta = 0.28$ は近い）$N^* \propto B^{0.5}$, $D^* \propto B^{0.5}$ が得られる。これが Chinchilla の「パラメータとトークン数は1:1がベスト」という直感的結論の数学的根拠だ。
+
+**Inference-Optimal: $N_{\text{queries}}$ による相転移**:
+
+$N_{\text{queries}}$ が大きい本番環境では、訓練後の推論コストが支配的になる。最適化問題:
+
+$$
+\min_{N, D, C_{\text{test}}}\; \mathcal{L}(N, D, C_{\text{test}}) \quad \text{s.t.}\quad 6ND + N_{\text{queries}}\, C_{\text{test}} = B
+$$
+
+の一階条件から:
+
+$$
+\frac{\alpha}{N} \cdot \frac{N_c^\alpha}{N^\alpha} = \lambda \cdot 6D, \quad \frac{\beta}{D} \cdot \frac{D_c^\beta}{D^\beta} = \lambda \cdot 6N, \quad \frac{\gamma}{C_{\text{test}}} \cdot \frac{C_c^\gamma}{C_{\text{test}}^\gamma} = \lambda \cdot N_{\text{queries}}
+$$
+
+第3式から $C_{\text{test}}^* \propto (N_{\text{queries}})^{1/(\gamma+1)}$ — $N_{\text{queries}}$ が増えるほど推論計算を増やすのが最適だ。
+
+**相転移 (Phase Transition)**:
+
+推論最適と訓練最適の境界となる**臨界クエリ数** $N_{\text{queries}}^*$ は:
+
+$$
+N_{\text{queries}}^* = \frac{6ND \cdot \gamma}{C_{\text{test}} \cdot (\alpha + \beta)} \cdot \frac{B}{C_{\text{test}}}
+$$
+
+$N_{\text{queries}} < N_{\text{queries}}^*$ では訓練時スケーリング（大きな $N, D$）が支配的。$N_{\text{queries}} > N_{\text{queries}}^*$ では推論時スケーリング（大きな $C_{\text{test}}$、小さな $N$）が支配的になる。o1/o3 型モデルがターゲットするのはまさにこの後者の領域だ。
+
+**実用的示唆**:
+
+Chinchilla 最適モデル (70B, 1.4T tokens) は訓練最適だが、百万ユーザーが数百回クエリを送る環境では $N_{\text{queries}} \sim 10^{11}$ となり、推論最適モデル（小さな $N$ + Chain-of-Thought での大きな $C_{\text{test}}$）の方が総コスト面で有利になり得る。これが Mistral 7B + 推論時スケーリングが GPT-4 に迫ったロジックの数学的説明だ。
 
 全50回で学んだ内容は、2026年時点の**既知の理論**だ。しかし、生成モデル研究には**多くの未解決問題**が残っている。ここで主要な未解決問題を整理し、読者が研究テーマを見つける手がかりを提供する。
 
@@ -982,6 +1146,82 @@ $$
 $$
 
 分散が減少し、最終的に $p_\infty(x) \to \delta(x - \mu)$ (デルタ分布) に収束。
+
+**分散縮小の定量的分析**:
+
+各世代のモデルが有限サンプル $n$ から訓練されると仮定する。世代 $k$ の分布 $p^{(k)}$ の平均 $\mu_k$ と分散 $\sigma_k^2$ の漸化式を導こう。$n$ 個のサンプルから推定された分布でモデルを訓練し、そのモデルから次世代サンプルを引くと:
+
+$$
+\sigma_{k+1}^2 = \sigma_k^2 \cdot \left(1 - \frac{1}{n}\right)
+$$
+
+なぜなら、サンプル平均の分散は $\sigma^2 / n$ だから、$k$ 世代後の分布の分散は:
+
+$$
+\sigma_k^2 = \sigma_0^2 \left(1 - \frac{1}{n}\right)^k
+$$
+
+$n$ が有限である限り $\left(1 - \frac{1}{n}\right)^k \to 0$ ($k \to \infty$)、すなわちモデル崩壊は不可避だ。逆に $n \to \infty$（無限サンプル）でのみ $\sigma_k^2 = \sigma_0^2$ が保たれる。実際の生成モデルは有限個の出力サンプルから次世代訓練データを作るため、世代を重ねるごとに必ず分散が縮む。
+
+**情報理論的崩壊定理**:
+
+分布の情報量 (微分エントロピー) で崩壊を評価すると、Gaussian 近似のもとで:
+
+$$
+H(p^{(k)}) = \frac{d}{2}\left(1 + \log(2\pi\sigma_k^2)\right) = H(p^{(0)}) + \frac{d}{2}\log\left[\left(1-\frac{1}{n}\right)^k\right]
+$$
+
+したがって:
+
+$$
+H(p^{(0)}) - H(p^{(k)}) = \frac{d}{2} \cdot k \cdot \log\frac{n}{n-1} \approx \frac{dk}{2n} \quad (n \gg 1)
+$$
+
+エントロピー損失が世代 $k$ に比例して線形増加する。$k$ 世代後も許容できるエントロピー損失を $\epsilon$ とすれば、安全な世代数の上限は:
+
+$$
+k_{\max} \approx \frac{2n\epsilon}{d}
+$$
+
+次元 $d$ が大きい（高解像度画像など）ほど、許容世代数が減る。これは高次元空間での合成データ繰り返しが特に危険であることを示す。
+
+**安全な合成データ混合条件**:
+
+実データ割合 $\lambda \in [0,1]$ で実データと合成データを混合して訓練するとき、世代 $k$ の分布の分散の漸化式は:
+
+$$
+\sigma_{k+1}^2 = \lambda \sigma_0^2 + (1-\lambda)\sigma_k^2 \cdot \left(1 - \frac{1}{n}\right)
+$$
+
+第1項は実データが定期的に「分散をリセット」する効果だ。この漸化式の不動点を解くと:
+
+$$
+\sigma_\infty^2 = \frac{\lambda \sigma_0^2}{1 - (1-\lambda)\left(1 - \frac{1}{n}\right)}
+$$
+
+崩壊を防ぐ（$\sigma_\infty^2 > 0$ を維持する）には $\lambda > 0$ であれば十分だ。しかし元の分散を $\delta$ 割合以上保つ条件 $\sigma_\infty^2 \geq \delta \sigma_0^2$ を課すと:
+
+$$
+\lambda \geq \lambda^* = \frac{\delta\left[1 - \left(1-\frac{1}{n}\right)\right]}{1 - (1-\delta)\left(1-\frac{1}{n}\right)} \approx \frac{\delta}{n + \delta(n-1)}
+$$
+
+$\delta = 0.9$（元の分散の90%保持）、$n = 10^4$ のとき $\lambda^* \approx 9 \times 10^{-5}$ — 実データが全体の 0.01% でも混在していれば崩壊を防げる計算になる。ただしこれは Gaussian 近似かつ iid 条件下の結果であり、実際の深層モデルではより厳しい $\lambda^*$ が必要な場合が多い。
+
+**多様性保存条件**:
+
+エントロピーで表現すると、$k$ 世代の混合モデルが元の多様性をほぼ保つ条件:
+
+$$
+H(p^{(k)}) \geq H(p^{(0)}) - \epsilon
+$$
+
+を実データ混合率 $\lambda$ で保証するには、先の漸化式から:
+
+$$
+\lambda \geq 1 - \exp\!\left(-\frac{2\epsilon}{dk}\right) \approx \frac{2\epsilon}{dk} \quad (\epsilon \text{ 小})
+$$
+
+つまり世代数 $k$ が増えるほど、多様性を維持するために必要な実データ混合率 $\lambda$ を増やさなければならない。これが「合成データで訓練したモデルの出力をまた訓練データに使う」自己強化サイクルが危険な理由の形式的説明だ。Shumailov et al. (2024, arXiv:2305.17493) の実験結果はこの予測と整合する。
 
 **証拠** [^6]:
 
@@ -1172,13 +1412,9 @@ $$
 - **未来**: Watermarking技術が標準搭載 (JPEG 2000のような標準仕様化)
 - **研究テーマ**: Adversarial-robust Watermarking / Zero-knowledge Watermarking (製作者を隠しつつAI生成を証明)
 
-:::message alert
-**ここが数式修行ゾーンの核心だった**: 2025-2026フロンティア理論 (Flow Matching Dominance / Inference-Time Scaling / Modal Unification)、未解決問題 (Modal Aphasia / 物理法則学習 / 長時間動画一貫性 / 評価指標統一 / Scaling Laws飽和)、合成データのModel Collapse、安全性・倫理 (EU AI Act / C2PA / Watermarking)、研究テーマの見つけ方。これらを理解すれば、読者は「次のブレイクスルー」を予測し、自ら研究テーマを設定できる。
-:::
+> **⚠️ Warning:** **ここが数式修行ゾーンの核心だった**: 2025-2026フロンティア理論 (Flow Matching Dominance / Inference-Time Scaling / Modal Unification)、未解決問題 (Modal Aphasia / 物理法則学習 / 長時間動画一貫性 / 評価指標統一 / Scaling Laws飽和)、合成データのModel Collapse、安全性・倫理 (EU AI Act / C2PA / Watermarking)、研究テーマの見つけ方。これらを理解すれば、読者は「次のブレイクスルー」を予測し、自ら研究テーマを設定できる。
 
-:::message
-**ここまでで全体の50%完了!** Zone 3 でフロンティア理論を完全整理した。次は実装ゾーン — 卒業制作の設計・実装に進む。3言語フルスタック生成AIシステムを0から構築しよう。
-:::
+> **Note:** **ここまでで全体の50%完了!** Zone 3 でフロンティア理論を完全整理した。次は実装ゾーン — 卒業制作の設計・実装に進む。3言語フルスタック生成AIシステムを0から構築しよう。
 
 ---
 
@@ -1217,226 +1453,12 @@ graph TD
 
 ### 4.2 Julia推論エンジン: 3モデル統合
 
-```julia
-# julia/inference_engine.jl — 3モデル統合推論エンジン
-
-using Transformers, Diffusers, VideoModels, Lux, Reactant
-
-# 1️⃣ SmolVLM2 (256M): 動画理解
-struct VideoUnderstandingEngine
-    model::Any
-    tokenizer::Any
-end
-
-function VideoUnderstandingEngine()
-    model = load_model("HuggingFaceTB/SmolVLM2-256M")
-    tokenizer = load_tokenizer("HuggingFaceTB/SmolVLM2-256M")
-    VideoUnderstandingEngine(model, tokenizer)
-end
-
-function (engine::VideoUnderstandingEngine)(video_path::String, prompt::String)
-    frames = extract_frames(video_path)  # VideoIO.jl
-    inputs = engine.tokenizer(prompt, frames)
-    outputs = engine.model(inputs)
-    return decode_outputs(outputs, engine.tokenizer)
-end
-
-# 2️⃣ aMUSEd (256M): 高速画像生成 (12ステップ)
-struct ImageGenerationEngine
-    model::Any
-end
-
-function ImageGenerationEngine()
-    model = load_model("amused/amused-256")  # Masked Image Model
-    ImageGenerationEngine(model)
-end
-
-function (engine::ImageGenerationEngine)(prompt::String; num_steps::Int=12)
-    latent = engine.model.encode_prompt(prompt)
-    for step in 1:num_steps
-        latent = engine.model.denoise_step(latent, step)
-    end
-    return engine.model.decode_latent(latent)
-end
-
-# 3️⃣ LTX-Video: テキスト→動画生成 (DiT+VAE)
-struct VideoGenerationEngine
-    model::Any
-end
-
-function VideoGenerationEngine()
-    model = load_model("Lightricks/LTX-Video")
-    VideoGenerationEngine(model)
-end
-
-function (engine::VideoGenerationEngine)(prompt::String; num_frames::Int=48, num_steps::Int=28)
-    latent = engine.model.encode_prompt(prompt)
-    for step in 1:num_steps
-        latent = engine.model.denoise_step(latent, step)
-    end
-    video = engine.model.decode_latent(latent, num_frames)
-    return video
-end
-
-# 統合エンジン
-struct MultimodalEngine
-    video_understand::VideoUnderstandingEngine
-    image_gen::ImageGenerationEngine
-    video_gen::VideoGenerationEngine
-end
-
-function MultimodalEngine()
-    MultimodalEngine(
-        VideoUnderstandingEngine(),
-        ImageGenerationEngine(),
-        VideoGenerationEngine()
-    )
-end
-
-# エンドポイント: 動画理解 → 画像生成 → 動画生成
-function process_multimodal_request(engine::MultimodalEngine, video_path::String, task::Symbol)
-    if task == :understand
-        return engine.video_understand(video_path, "この動画で何が起こっているか説明してください")
-    elseif task == :image
-        understanding = engine.video_understand(video_path, "この動画のスタイルを説明してください")
-        return engine.image_gen(understanding)
-    elseif task == :video
-        understanding = engine.video_understand(video_path, "この動画を詳しく説明してください")
-        enhanced_prompt = "$understanding。さらに高品質でシネマティック。"
-        return engine.video_gen(enhanced_prompt)
-    end
-end
-```
 
 ### 4.3 Rust推論カーネル: C-ABI FFI
 
-```rust
-// src/inference_kernels.rs — Rust高速推論カーネル
-
-#![deny(clippy::unwrap_used)]
-#![warn(clippy::pedantic, missing_docs)]
-
-/// Softmax kernel (SIMD optimized)
-#[no_mangle]
-pub unsafe extern "C" fn softmax_kernel(
-    input: *const f32,
-    output: *mut f32,
-    n: usize,
-) {
-    // Find max (for numerical stability)
-    let mut max_val = f32::NEG_INFINITY;
-    for i in 0..n {
-        let val = *input.add(i);
-        if val > max_val {
-            max_val = val;
-        }
-    }
-
-    // Compute exp(x - max) and sum
-    let mut sum = 0.0f32;
-    for i in 0..n {
-        let exp_val = (*input.add(i) - max_val).exp();
-        *output.add(i) = exp_val;
-        sum += exp_val;
-    }
-
-    // Normalize
-    for i in 0..n {
-        *output.add(i) /= sum;
-    }
-}
-
-/// Scaled Dot-Product Attention (QKᵀV)
-#[no_mangle]
-pub unsafe extern "C" fn attention_kernel(
-    Q: *const f32,       // (N, d_k)
-    K: *const f32,       // (M, d_k)
-    V: *const f32,       // (M, d_v)
-    output: *mut f32,    // (N, d_v)
-    N: usize, M: usize, d_k: usize, d_v: usize,
-) {
-    let scale = 1.0 / (d_k as f32).sqrt();
-
-    for i in 0..N {
-        // scores[j] = Q[i] · K[j]ᵀ / sqrt(d_k)
-        let mut scores = vec![0.0f32; M];
-        for j in 0..M {
-            let mut dot = 0.0f32;
-            for k in 0..d_k {
-                dot += *Q.add(i * d_k + k) * *K.add(j * d_k + k);
-            }
-            scores[j] = dot * scale;
-        }
-
-        // attn = softmax(scores)
-        let mut attn = vec![0.0f32; M];
-        softmax_kernel(scores.as_ptr(), attn.as_mut_ptr(), M);
-
-        // output[i] = Σ attn[j] * V[j]
-        for d in 0..d_v {
-            let mut sum = 0.0f32;
-            for j in 0..M {
-                sum += attn[j] * *V.add(j * d_v + d);
-            }
-            *output.add(i * d_v + d) = sum;
-        }
-    }
-}
-```
 
 ### 4.4 Elixir分散サーバー: Phoenix WebSocket
 
-```elixir
-# lib/multimodal_web/channels/inference_channel.ex — Phoenix WebSocket
-
-defmodule MultimodalWeb.InferenceChannel do
-  use Phoenix.Channel
-  require Logger
-
-  # Julia FFI経由で推論エンジン呼び出し
-  defmodule JuliaFFI do
-    use Rustler, otp_app: :multimodal_web, crate: "julia_ffi"
-
-    def video_understand(_video_path, _prompt), do: :erlang.nif_error(:not_loaded)
-    def image_generate(_prompt, _num_steps), do: :erlang.nif_error(:not_loaded)
-    def video_generate(_prompt, _num_frames, _num_steps), do: :erlang.nif_error(:not_loaded)
-  end
-
-  def join("inference:lobby", _payload, socket) do
-    {:ok, socket}
-  end
-
-  def handle_in("video_understand", %{"video_path" => video_path, "prompt" => prompt}, socket) do
-    task = Task.async(fn ->
-      JuliaFFI.video_understand(video_path, prompt)
-    end)
-
-    result = Task.await(task, 60_000)  # 60秒タイムアウト
-
-    {:reply, {:ok, %{understanding: result}}, socket}
-  end
-
-  def handle_in("image_generate", %{"prompt" => prompt}, socket) do
-    task = Task.async(fn ->
-      JuliaFFI.image_generate(prompt, 12)  # 12ステップ
-    end)
-
-    result = Task.await(task, 30_000)
-
-    {:reply, {:ok, %{image: Base.encode64(result)}}, socket}
-  end
-
-  def handle_in("video_generate", %{"prompt" => prompt, "num_frames" => num_frames}, socket) do
-    task = Task.async(fn ->
-      JuliaFFI.video_generate(prompt, num_frames, 28)  # 28ステップ
-    end)
-
-    result = Task.await(task, 120_000)  # 2分タイムアウト
-
-    {:reply, {:ok, %{video: Base.encode64(result)}}, socket}
-  end
-end
-```
 
 ---
 
@@ -1446,48 +1468,6 @@ end
 
 ### 5.1 デモシナリオ: 動画入力 → 理解 → 画像生成 → 動画生成
 
-```julia
-# demo/graduation_demo.jl — 卒業制作デモ
-
-using MultimodalEngine
-
-# エンジン初期化
-engine = MultimodalEngine()
-
-# 入力動画
-input_video = "data/demo_cafe.mp4"  # カフェシーンの動画
-
-# 1️⃣ 動画理解 (SmolVLM2)
-println("Step 1: 動画理解中...")
-understanding = process_multimodal_request(engine, input_video, :understand)
-println("理解結果: ", understanding)
-# 出力例: "カフェで2人の女性が会話している。窓の外には桜の木が見える。春の昼間のシーン。"
-
-# 2️⃣ 画像生成 (aMUSEd) — 理解を元にスタイル画像生成
-println("\nStep 2: 画像生成中 (12ステップ)...")
-image_prompt = "$understanding。アニメ調、高品質。"
-generated_image = engine.image_gen(image_prompt, num_steps=12)
-save_image(generated_image, "output/generated_cafe_image.png")
-println("✅ 画像保存完了: output/generated_cafe_image.png")
-
-# 3️⃣ 動画生成 (LTX-Video) — 理解を元に新規動画生成
-println("\nStep 3: 動画生成中 (28ステップ)...")
-video_prompt = "$understanding。さらにカメラが桜の木にズームイン。シネマティック。"
-generated_video = engine.video_gen(video_prompt, num_frames=96, num_steps=28)  # 4秒, 24fps
-save_video(generated_video, "output/generated_cafe_video.mp4", framerate=24)
-println("✅ 動画保存完了: output/generated_cafe_video.mp4")
-
-# 4️⃣ 統計出力
-println("\n" * "="^50)
-println("🎓 全50回 卒業制作デモ完了!")
-println("="^50)
-println("入力動画: $input_video")
-println("理解結果: $understanding")
-println("生成画像: output/generated_cafe_image.png")
-println("生成動画: output/generated_cafe_video.mp4 (4秒, 24fps)")
-println("\n第1回「数式が読めない」→ 第50回「3モデル統合システム設計者」")
-println("全50回、150,000行の旅、完走おめでとうございます！")
-```
 
 ### 5.2 性能ベンチマーク: 3言語統合の効果
 
@@ -1506,39 +1486,6 @@ println("全50回、150,000行の旅、完走おめでとうございます！")
 
 2025年最新研究「Flow Matching Inference-Time Scaling」[^7] を実装し、推論時のCompute投入で品質向上を確認する。
 
-```julia
-# experiments/flow_matching_inference_scaling.jl
-
-using Diffusers, Statistics
-
-# LTX-Video (Flow Matching-based)
-ltx_model = load_model("Lightricks/LTX-Video")
-
-prompt = "桜の木の下のカフェで人々が会話している、春の昼間"
-
-# Base generation (28 steps)
-video_base = ltx_model(prompt, num_frames=48, num_steps=28)
-save_video(video_base, "output/base_28steps.mp4")
-
-# Inference-Time Scaling: 追加Compute投入
-# Randomized ODE formulation (arXiv:2510.17786)
-video_scaled_50 = ltx_model(prompt, num_frames=48, num_steps=50, randomized_ode=true)
-video_scaled_100 = ltx_model(prompt, num_frames=48, num_steps=100, randomized_ode=true)
-
-save_video(video_scaled_50, "output/scaled_50steps.mp4")
-save_video(video_scaled_100, "output/scaled_100steps.mp4")
-
-# 品質評価 (FVD: Fréchet Video Distance)
-fvd_base = compute_fvd(video_base, reference_videos)
-fvd_50 = compute_fvd(video_scaled_50, reference_videos)
-fvd_100 = compute_fvd(video_scaled_100, reference_videos)
-
-println("FVD (lower is better):")
-println("  Base (28 steps): $fvd_base")
-println("  Scaled (50 steps): $fvd_50")
-println("  Scaled (100 steps): $fvd_100")
-println("\nInference-Time Scaling: 推論時Computeで品質向上確認 ✓")
-```
 
 **結果 (推定)**:
 
@@ -1668,6 +1615,12 @@ println("\nInference-Time Scaling: 推論時Computeで品質向上確認 ✓")
 
 ---
 
+
+> Progress: 50%
+> **理解度チェック**
+> 1. $\epsilon_\theta(x_t, t)$ の各記号の意味と、この式が表す操作を説明してください。
+> 2. このゾーンで学んだ手法の直感的な意味と、なぜこの定式化が必要なのかを説明してください。
+
 ## 🎓 7. 振り返りゾーン (30分) — 全50回読了感
 
 **ゴール**: 全50回の旅を振り返り、24時間以内に始める3つのアクション + 90日ロードマップを設計する。
@@ -1776,6 +1729,14 @@ println("\nInference-Time Scaling: 推論時Computeで品質向上確認 ✓")
 
 
 ---
+
+## 著者リンク
+
+- Blog: https://fumishiki.dev
+- X: https://x.com/fumishiki
+- LinkedIn: https://www.linkedin.com/in/fumitakamurakami
+- GitHub: https://github.com/fumishiki
+- Hugging Face: https://huggingface.co/fumishiki
 
 ## ライセンス
 

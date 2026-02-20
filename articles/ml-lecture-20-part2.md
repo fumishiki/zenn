@@ -4,7 +4,14 @@ emoji: "🔥"
 type: "tech"
 topics: ["machinelearning", "deeplearning", "julia", "rust", "elixir"]
 published: true
+slug: "ml-lecture-20-part2"
+difficulty: "advanced"
+time_estimate: "90 minutes"
+languages: ["Julia", "Rust", "Elixir"]
+keywords: ["機械学習", "深層学習", "生成モデル"]
 ---
+
+> 📌 **前編（理論）**: [第20回 前編](./ml-lecture-20-part1)
 
 ## 💻 4. 実装ゾーン（45分）— 3言語パイプライン完全構築
 
@@ -118,16 +125,16 @@ function model_loss(model::VAEModel, ps, st, batch)
 
     # Reparameterization
     ε = randn(Float32, size(μ)...)
-    σ = exp.(logσ² ./ 2)
-    z = μ .+ σ .* ε
+    σ = @. exp(logσ² / 2)
+    z = @. μ + σ * ε
 
     # Decoder: p_θ(x|z)
     x̂, st_dec = model.decoder(z, ps.decoder, st.decoder)
 
     # ELBO
     batch_size = size(x, 2)
-    recon = -sum((x .- x̂).^2) / batch_size  # Gaussian likelihood
-    kl = -0.5f0 * sum(1 .+ logσ² .- μ.^2 .- exp.(logσ²)) / batch_size
+    recon = -sum(@. (x - x̂)^2) / batch_size  # Gaussian likelihood
+    kl = -0.5f0 * sum(@. 1 + logσ² - μ^2 - exp(logσ²)) / batch_size
 
     elbo = recon - kl
     loss = -elbo  # 最大化 = 負の最小化
@@ -137,11 +144,8 @@ function model_loss(model::VAEModel, ps, st, batch)
 end
 
 # === VAE生成 ===
-function generate(model::VAEModel, ps, st, n_samples::Int)
-    z = randn(Float32, model.latent_dim, n_samples)
-    x_gen, _ = model.decoder(z, ps.decoder, st.decoder)
-    return x_gen
-end
+generate(model::VAEModel, ps, st, n_samples::Int) =
+    model.decoder(randn(Float32, model.latent_dim, n_samples), ps.decoder, st.decoder)[1]
 
 # === 使用例 ===
 function train_vae_mnist()
@@ -197,12 +201,12 @@ function model_loss(model::WGANModel, ps, st, batch; train_critic=true)
         wasserstein = mean(score_fake) - mean(score_real)
 
         # Gradient Penalty
-        α = rand(Float32, 1, batch_size)
-        x_interp = α .* x_real .+ (1 .- α) .* x_fake
+        α_gp = rand(Float32, 1, batch_size)
+        x_interp = @. α_gp * x_real + (1 - α_gp) * x_fake
 
         grad_interp = Zygote.gradient(x -> sum(model.critic(x, ps.critic, st_c2)[1]), x_interp)[1]
-        grad_norm = sqrt.(sum(grad_interp.^2, dims=1))
-        gp = mean((grad_norm .- 1).^2)
+        grad_norm = sqrt.(sum(abs2.(grad_interp), dims=1))
+        gp = mean(@. (grad_norm - 1)^2)
 
         loss = wasserstein + model.λ_gp * gp
         st_new = (generator=st_g, critic=st_c2)
@@ -413,12 +417,9 @@ impl VAEDecoder {
     }
 
     fn forward(&self, z: &Tensor) -> Result<Tensor> {
-        let x = self.fc1.forward(z)?;
-        let x = x.tanh()?;
-        let x = self.fc2.forward(&x)?;
-        let x = x.tanh()?;
-        let x = self.fc3.forward(&x)?;
-        x.sigmoid()  // [0, 1] pixel range
+        let x = self.fc1.forward(z)?.tanh()?;
+        let x = self.fc2.forward(&x)?.tanh()?;
+        self.fc3.forward(&x)?.sigmoid()  // [0, 1] pixel range
     }
 }
 
@@ -482,32 +483,35 @@ pub extern "C" fn vae_generate(
     out: *mut *mut f32,
     out_len: *mut usize,
 ) -> i32 {
-    // モデルロード
-    let path = unsafe { std::ffi::CStr::from_ptr(model_path).to_str().unwrap() };
-    let device = Device::Cpu;  // CPUモード（FFIは単純化）
-    let decoder = match load_vae_decoder(path, &device) {
-        Ok(d) => d,
-        Err(_) => return -1,
+    let run = || -> candle_core::Result<Vec<f32>> {
+        // モデルロード
+        let path = unsafe { std::ffi::CStr::from_ptr(model_path).to_str().unwrap() };
+        let device = Device::Cpu;  // CPUモード（FFIは単純化）
+        let decoder = load_vae_decoder(path, &device)?;
+
+        // 推論
+        let samples = generate_samples(&decoder, n_samples, &device)?;
+
+        // 結果をVecに変換
+        Ok(samples.to_vec1().unwrap())
     };
 
-    // 推論
-    let samples = match generate_samples(&decoder, n_samples, &device) {
-        Ok(s) => s,
-        Err(_) => return -1,
-    };
+    match run() {
+        Ok(vec) => {
+            // 結果をCポインタに変換
+            let len = vec.len();
+            let ptr = vec.as_ptr() as *mut f32;
+            std::mem::forget(vec);  // Rust側でdropしない
 
-    // 結果をCポインタに変換
-    let vec: Vec<f32> = samples.to_vec1().unwrap();
-    let len = vec.len();
-    let ptr = vec.as_ptr() as *mut f32;
-    std::mem::forget(vec);  // Rust側でdropしない
+            unsafe {
+                *out = ptr;
+                *out_len = len;
+            }
 
-    unsafe {
-        *out = ptr;
-        *out_len = len;
+            0  // Success
+        }
+        Err(_) => -1,
     }
-
-    0  // Success
 }
 
 #[no_mangle]
@@ -802,9 +806,7 @@ mutable struct EarlyStopping
     should_stop::Bool
 end
 
-function EarlyStopping(patience::Int)
-    return EarlyStopping(patience, Inf32, 0, false)
-end
+EarlyStopping(patience::Int) = EarlyStopping(patience, Inf32, 0, false)
 
 function check_early_stopping!(es::EarlyStopping, current_loss::Float32)
     if current_loss < es.best_loss
@@ -931,11 +933,11 @@ end
 ```julia
 # Global norm clipping
 function clip_gradients!(grads, max_norm::Float32)
-    total_norm = sqrt(sum(sum(g .^ 2) for g in grads))
+    total_norm = sqrt(sum(sum(abs2.(g)) for g in grads))
 
     if total_norm > max_norm
-        clip_coef = max_norm / (total_norm + 1e-6)
-        return grads .* clip_coef
+        clip_coef = max_norm / (total_norm + 1f-6)
+        return @. grads * clip_coef
     else
         return grads
     end
@@ -950,11 +952,14 @@ opt_state, ps = Optimisers.update(opt_state, ps, grads)
 
 ---
 
-:::message
-**進捗**: 全体の70%完了。実装ゾーンクリア。実験ゾーンへ。
-:::
+> **Note:** **進捗**: 全体の70%完了。実装ゾーンクリア。実験ゾーンへ。
 
 ---
+
+> **Progress: 85%**
+> **理解度チェック**
+> 1. Safetensors形式でモデルをエクスポートするとき、PyTorchのpickle形式と比べてセキュリティ上の利点は何か？
+> 2. ElixirのGenStageでバックプレッシャーが自動制御される仕組みを説明せよ。
 
 ## 🔬 5. 実験ゾーン（30分）— 訓練・推論・配信の統合デモ
 
@@ -1017,9 +1022,7 @@ iex> :ok = RabbitMQ.publish("vae_requests", %{n_samples: 100, model_path: "vae_m
 
 ---
 
-:::message
-**進捗**: 全体の85%完了。実験ゾーンクリア。発展ゾーンへ。
-:::
+> **Note:** **進捗**: 全体の85%完了。実験ゾーンクリア。発展ゾーンへ。
 
 ---
 
@@ -1074,7 +1077,7 @@ graph TD
 
 **Flow Matching Transformer（2025）**：
 - Diffusion（SDE）をFlow Matching（ODE）に置換 → 高速化
-- Rectified Flow：直線軌道で最適輸送 → さらに高速
+- Rectified Flow：直線軌道で最適輸送 → より高速
 
 ---
 
@@ -1088,7 +1091,7 @@ graph TD
 using Reactant
 
 # JuliaコードをXLAコンパイル
-f_compiled = @compile (x) -> sum(sin.(x .^ 2))
+f_compiled = @compile x -> sum(@. sin(x^2))
 
 x = randn(Float32, 10000)
 @btime f_compiled(x)  # GPU/TPUで自動実行、JAX並みの速度
@@ -1209,7 +1212,8 @@ Nx.Serving.run(serving, "Once upon a time")
 
 ### 7.3 よくある質問（FAQ）
 
-:::details Q1: なぜPythonを捨てたのか？
+<details><summary>Q1: なぜPythonを捨てたのか？</summary>
+
 **A**: 捨てたのではなく、**適材適所**。
 
 - **Python**：プロトタイプ・探索に最適。エコシステム最強。
@@ -1218,9 +1222,11 @@ Nx.Serving.run(serving, "Once upon a time")
 - **Elixir**：分散システム。耐障害性、バックプレッシャー。
 
 研究段階ではPython。本番環境では3言語パイプライン。
-:::
 
-:::details Q2: Juliaの学習コストは高くないか？
+</details>
+
+<details><summary>Q2: Juliaの学習コストは高くないか？</summary>
+
 **A**: **構文はPythonライク、速度はC並**。学習コスト<リターン。
 
 - 基本構文：1-2日（Pythonユーザーなら即座）
@@ -1228,9 +1234,11 @@ Nx.Serving.run(serving, "Once upon a time")
 - パッケージ開発：2週間
 
 本シリーズでは第10回から段階的に導入済み。今回で完全習得。
-:::
 
-:::details Q3: Rustは難しすぎでは？
+</details>
+
+<details><summary>Q3: Rustは難しすぎでは？</summary>
+
 **A**: **推論エンジンだけなら中級レベル**。
 
 - 所有権・借用：理解必須（第9回で学習済み）
@@ -1238,9 +1246,11 @@ Nx.Serving.run(serving, "Once upon a time")
 - Candle APIはPyTorchライク
 
 本番推論の性能とメモリ安全性を考えれば、学習価値あり。
-:::
 
-:::details Q4: ElixirなしでもOK？
+</details>
+
+<details><summary>Q4: ElixirなしでもOK？</summary>
+
 **A**: 小規模ならOK。大規模・長時間運用なら必須。
 
 - **OTP監視ツリー**：プロセスクラッシュ→自動復旧
@@ -1248,9 +1258,11 @@ Nx.Serving.run(serving, "Once upon a time")
 - **ホットコードスワップ**：無停止アップデート
 
 Python（FastAPI/Celery）では実現困難。
-:::
 
-:::details Q5: 3言語パイプラインは複雑すぎでは？
+</details>
+
+<details><summary>Q5: 3言語パイプラインは複雑すぎでは？</summary>
+
 **A**: 初期投資 vs 長期リターン。
 
 - **初期**：環境構築・FFI設計に1-2週間
@@ -1258,7 +1270,8 @@ Python（FastAPI/Celery）では実現困難。
 - **拡張**：新モデル追加はJulia訓練→Rustエクスポートだけ
 
 1言語で全部やる方が、結局は複雑になる（Python GIL地獄、型安全性欠如）。
-:::
+
+</details>
 
 ---
 
@@ -1329,9 +1342,7 @@ Python（FastAPI/Celery）では実現困難。
 
 ---
 
-:::message
-**進捗**: 全体の100%完了。Course III 第20回完全修了。
-:::
+> **Note:** **進捗**: 全体の100%完了。Course III 第20回完全修了。
 
 ---
 
@@ -1363,12 +1374,17 @@ Python（FastAPI/Celery）では実現困難。
 
 ---
 
+> **Progress: 95%**
+> **理解度チェック**
+> 1. R3GAN（正則化相対論的GAN）が従来のWGAN-GPより改善している点を説明せよ。
+> 2. Reactant.jl がXLAを経由してJuliaコードをGPU/TPUコンパイルする仕組みを概説せよ。
+
 ## 参考文献
 
 ### 主要論文
 
 [^2]: Gulrajani, I., Ahmed, F., Arjovsky, M., Dumoulin, V., & Courville, A. (2017). Improved Training of Wasserstein GANs. *NeurIPS 2017*.
-@[card](https://arxiv.org/abs/1704.00028)
+<https://arxiv.org/abs/1704.00028>
 
 ### 教科書
 
@@ -1384,155 +1400,6 @@ Python（FastAPI/Celery）では実現困難。
 - **Reactant.jl**: [GitHub](https://github.com/EnzymeAD/Reactant.jl)
 
 ---
-
-## 記法規約
-
-| 記号 | 意味 | 例 |
-|:-----|:-----|:---|
-| $\mathbf{x}$ | データ（観測変数） | 画像・テキスト |
-| $\mathbf{z}$ | 潜在変数 | VAEの潜在空間 |
-| $\theta$ | 生成モデルパラメータ | Decoderの重み |
-| $\phi$ | 推論モデルパラメータ | Encoderの重み |
-| $p_\theta(\mathbf{x})$ | 生成分布（真の分布を近似） | VAE Decoder |
-| $q_\phi(\mathbf{z}\|\mathbf{x})$ | 近似事後分布 | VAE Encoder |
-| $p(\mathbf{z})$ | 事前分布 | $\mathcal{N}(\mathbf{0}, \mathbf{I})$ |
-| $\mathcal{L}_{\text{ELBO}}$ | Evidence Lower Bound | VAE損失関数 |
-| $D_{\text{KL}}[q \| p]$ | KLダイバージェンス | 分布間の距離 |
-| $W_1(p, q)$ | Wasserstein-1距離 | WGAN損失 |
-| $\nabla_\theta$ | パラメータ勾配 | 逆伝播 |
-| $\mathbb{E}_{q}[\cdot]$ | 期待値（分布 $q$ に関する） | Monte Carlo近似 |
-| $Q, K, V$ | Query/Key/Value行列 | Attention |
-| $d_k$ | Key次元 | Attentionスケーリング |
-| $h$ | ヘッド数 | Multi-Head Attention |
-| ⚡ | Julia | 訓練コード |
-| 🦀 | Rust | 推論コード |
-| 🔮 | Elixir | 配信コード |
-
----
-
-**本講義の執筆完了**。行数確認へ。
-
-### 5.5 Advanced Deployment Patterns (2024-2025)
-
-#### 5.5.1 Multi-Model Serving with Elixir Broadway
-
-最新の生産環境では、複数モデルの並列サービングが標準となっている:
-
-```elixir
-defmodule MultiModelPipeline do
-  use Broadway
-
-  def start_link(_opts) do
-    Broadway.start_link(__MODULE__,
-      name: __MODULE__,
-      producer: [
-        module: {BroadwayKafka.Producer,
-          hosts: [localhost: 9092],
-          group_id: "ml_inference_group",
-          topics: ["model_requests"]},
-        concurrency: 2
-      ],
-      processors: [
-        # 3モデル並列処理
-        vae: [concurrency: 4, min_demand: 5, max_demand: 10],
-        gan: [concurrency: 2, min_demand: 3, max_demand: 8],
-        transformer: [concurrency: 3, min_demand: 4, max_demand: 12]
-      ],
-      batchers: [
-        default: [batch_size: 20, batch_timeout: 100, concurrency: 4]
-      ]
-    )
-  end
-
-  @impl true
-  def handle_message(processor, message, _context) do
-    %{data: %{"model_type" => model_type, "input" => input}} = message
-
-    result = case model_type do
-      "vae" -> VAERust.generate(input)
-      "gan" -> GANRust.generate(input)
-      "transformer" -> TransformerRust.predict(input)
-    end
-
-    message
-    |> Message.update_data(fn _ -> result end)
-    |> Message.put_batcher(processor)
-  end
-end
-```
-
-**動的負荷分散**:
-
-$$
-\text{Throughput} = \sum_{i=1}^{N} \text{Concurrency}_i \times \frac{1}{\text{Latency}_i}
-$$
-
-各モデルの concurrency を動的調整し、全体スループット最大化。
-
-#### 5.5.2 Rust Inference with Dynamic Batching
-
-```rust
-use candle_core::{Device, Tensor};
-use std::sync::Arc;
-use tokio::sync::RwLock;
-
-pub struct BatchedInferenceEngine {
-    model: Arc<VAEDecoder>,
-    batch_queue: Arc<RwLock<Vec<InferenceRequest>>>,
-    batch_size: usize,
-    timeout_ms: u64,
-}
-
-impl BatchedInferenceEngine {
-    pub async fn infer(&self, request: InferenceRequest) -> InferenceResult {
-        // リクエストをキューに追加
-        {
-            let mut queue = self.batch_queue.write().await;
-            queue.push(request);
-        }
-
-        // バッチサイズ or タイムアウトでトリガー
-        if self.should_process_batch().await {
-            self.process_batch().await
-        }
-    }
-
-    async fn process_batch(&self) -> Vec<InferenceResult> {
-        let mut queue = self.batch_queue.write().await;
-        let batch = queue.drain(..).collect::<Vec<_>>();
-
-        // Rustで並列推論
-        let inputs: Vec<Tensor> = batch.iter()
-            .map(|req| Tensor::from_slice(&req.data, (1, 784), &Device::Cpu).unwrap())
-            .collect();
-
-        let batched_input = Tensor::cat(&inputs, 0).unwrap();  // (B, 784)
-        let output = self.model.forward(&batched_input).unwrap();
-
-        // 結果を分割
-        output.chunk(batch.len(), 0).unwrap()
-            .into_iter()
-            .map(|t| InferenceResult { data: t.to_vec1().unwrap() })
-            .collect()
-    }
-}
-```
-
-**Dynamic Batching の効果**:
-
-| Batch Size | Latency | Throughput |
-|:-----------|:--------|:-----------|
-| 1 | 5ms | 200 req/s |
-| 10 | 12ms | 833 req/s |
-| 50 | 35ms | 1429 req/s |
-| 100 | 65ms | 1538 req/s |
-
-#### 5.5.3 Julia + Reactant による訓練高速化
-
-Reactant.jl (2025) により、Julia訓練がJAX並みの速度に到達:
-
-```julia
-using Reactant, Lux, Optimisers
 
 # モデル定義（通常のLux）
 model = Chain(
@@ -1671,6 +1538,14 @@ end
 トレースを Jaeger/Zipkin に export → ボトルネック可視化。
 
 ---
+
+## 著者リンク
+
+- Blog: https://fumishiki.dev
+- X: https://x.com/fumishiki
+- LinkedIn: https://www.linkedin.com/in/fumitakamurakami
+- GitHub: https://github.com/fumishiki
+- Hugging Face: https://huggingface.co/fumishiki
 
 ## ライセンス
 

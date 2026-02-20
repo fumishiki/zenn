@@ -1068,7 +1068,7 @@ $$
 
 VAE の本質は「積分が無理」を「下界最大化」に落としたことだ。原典は Kingma & Welling（VAE）[^4]。
 
-さらに先で必ず出会うのが再パラメータ化トリックだ。
+先で必ず出会うのが再パラメータ化トリックだ。
 
 $$
 \mathbf{z} = \boldsymbol{\mu}_\phi(\mathbf{x}) + \boldsymbol{\sigma}_\phi(\mathbf{x})\odot \boldsymbol{\epsilon},
@@ -1410,6 +1410,10 @@ $$
 
 > Progress: 85%
 
+> **理解度チェック**
+> 1. $\sum_{k} p_k = 1$ という制約は確率の公理のどれに対応するか。また $p_k \geq 0$ は何を意味するか説明せよ。
+> 2. Softmax 関数 $\text{softmax}(\mathbf{z})_i = \frac{e^{z_i}}{\sum_j e^{z_j}}$ において、$z_i \to \infty$ のとき出力分布はどうなるか。
+
 ---
 
 ## 🎓 Z7. 振り返りゾーン（15分）— まとめと次回予告
@@ -1569,6 +1573,10 @@ mindmap
 > **Checkpoint:** 第1回の道具立ては揃った。次回は線形代数の世界に踏み込む。
 
 > Progress: 100%
+
+> **理解度チェック**
+> 1. 表記 $\mathbf{W} \in \mathbb{R}^{d \times d}$ の各要素の意味を説明せよ。添字 $[i,j]$ はどの方向か。
+> 2. $\nabla_{\mathbf{x}} f(\mathbf{x})$ の shape が $\mathbf{x}$ と同じになる理由を一言で述べよ。
 
 ### 7.7 パラダイム転換の問い
 

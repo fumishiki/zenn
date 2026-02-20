@@ -5,21 +5,23 @@ type: "tech"
 topics: ["machinelearning"]
 published: true
 slug: "ml-lecture-34-part1"
+difficulty: "advanced"
+time_estimate: "90 minutes"
+languages: ["Julia", "Rust"]
+keywords: ["機械学習", "深層学習", "生成モデル"]
 ---
 
 # 第34回: Energy-Based Models & 統計物理 ⚡
 
 **「可逆性制約を捨て、任意の分布をexp(-E(x))で定義する。Modern Hopfield ↔ Attention等価性。2024年ノーベル物理学賞の深層。そして統計物理との接続が全ての統一を示す」**
 
-:::message
-**前回までの到達点**: 第33回でNFの可逆変換とヤコビアンによる厳密尤度を学んだ。だが可逆性制約は表現力を制限する。制約なしに確率密度 $p(x) \propto \exp(-E(x))$ と定義するEnergy-Based Modelsへ。
-
-**本回で獲得する武器**: EBM基本定義 / Gibbs分布 / Modern Hopfield ↔ Attention等価性の完全証明 / RBM + CD-k / MCMC詳細 / HMC / 統計物理との接続 / 相転移 / Energy Matching
-
-**次回への接続**: 正規化定数 $Z(\theta) = \int \exp(-E(x))dx$ は計算不能。スコア関数 $\nabla_x \log p(x)$ ならZが消える → 第35回 Score Matching & Langevin Dynamics
-
-**進捗**: Course IV 拡散モデル編 2/10回完了 :::message progress 15%
-:::
+> **Note:** **前回までの到達点**: 第33回でNFの可逆変換とヤコビアンによる厳密尤度を学んだ。だが可逆性制約は表現力を制限する。制約なしに確率密度 $p(x) \propto \exp(-E(x))$ と定義するEnergy-Based Modelsへ。
+>
+> **本回で獲得する武器**: EBM基本定義 / Gibbs分布 / Modern Hopfield ↔ Attention等価性の完全証明 / RBM + CD-k / MCMC詳細 / HMC / 統計物理との接続 / 相転移 / Energy Matching
+>
+> **次回への接続**: 正規化定数 $Z(\theta) = \int \exp(-E(x))dx$ は計算不能。スコア関数 $\nabla_x \log p(x)$ ならZが消える → 第35回 Score Matching & Langevin Dynamics
+>
+> **進捗**: Course IV 拡散モデル編 2/10回完了
 
 ---
 
@@ -36,9 +38,8 @@ E(x) = sum(abs2, x) / 2
 # ギブス分布 p(x) ∝ exp(-E(x))
 x = randn(Float32, 2, 100)  # 2D, 100サンプル
 energy = E(x)
-unnormalized_prob = exp.(-energy)  # 未正規化確率
-Z = sum(unnormalized_prob)  # 正規化定数（本来は積分）
-prob = unnormalized_prob ./ Z  # 正規化
+prob = exp.(-energy)              # 未正規化確率
+prob ./= sum(prob)                # 正規化（in-place）
 
 println("Energy range: $(extrema(energy))")
 println("Mean probability: $(mean(prob))")
@@ -61,9 +62,8 @@ $$
 - だが正規化定数 $Z(\theta)$ の計算が困難 — 全空間の積分
 - これがEBM訓練の根本的な問題
 
-:::message progress 3%
-30秒でEBMの本質を体験。数式とコードが1:1対応する。エネルギー関数 → 確率分布の定義方法を理解した。次は実際のEBMアーキテクチャを触る。
-:::
+> Progress: 3%
+> 30秒でEBMの本質を体験。数式とコードが1:1対応する。エネルギー関数 → 確率分布の定義方法を理解した。次は実際のEBMアーキテクチャを触る。
 
 ---
 
@@ -77,54 +77,12 @@ $$
 | $E(x) = -\log p_{\text{data}}(x)$ | 負の対数尤度 | データ分布そのもの |
 | $E(x) = f_\theta(x)$ | ニューラルネット | 学習された複雑な分布 |
 
-**Julia実装で3つのエネルギーを可視化**:
-
-```julia
-using Plots
-
-# エネルギー関数3種
-E_gaussian(x) = sum(abs2, x) / 2
-E_mixture(x) = -log(exp(-norm(x .- [2, 2])^2) + exp(-norm(x .+ [2, 2])^2))
-E_ring(x) = abs(norm(x) - 3)^2
-
-# 2Dグリッド上でエネルギーを計算
-x_range = -5:0.1:5
-y_range = -5:0.1:5
-grid = [[x, y] for x in x_range, y in y_range]
-
-E1 = E_gaussian.(grid)
-E2 = E_mixture.(grid)
-E3 = E_ring.(grid)
-
-# エネルギーランドスケープ
-p1 = heatmap(x_range, y_range, E1', title="Gaussian Energy", clims=(0, 10))
-p2 = heatmap(x_range, y_range, E2', title="Mixture Energy", clims=(0, 10))
-p3 = heatmap(x_range, y_range, E3', title="Ring Energy", clims=(0, 10))
-plot(p1, p2, p3, layout=(1, 3), size=(1200, 350))
-```
-
 **観察**:
 - エネルギーが**低い領域 = 高確率領域**（谷）
 - 複雑なエネルギー関数 → 複雑な確率分布を表現可能
 - ガウスは単峰性、Mixtureは多峰性、Ringは円環状
 
 ### 1.2 Gibbs分布の温度パラメータ
-
-```julia
-# 温度パラメータ τ の影響
-τ_values = [0.1, 1.0, 10.0]
-x = randn(Float32, 2, 1000)
-energy = E_gaussian.(eachcol(x))
-
-for τ in τ_values
-    prob = exp.(-energy ./ τ)
-    prob ./= sum(prob)
-    println("τ=$τ: prob std=$(std(prob))")
-end
-# τ=0.1: prob std=0.03 (鋭い分布)
-# τ=1.0: prob std=0.015 (中間)
-# τ=10.0: prob std=0.003 (平坦な分布)
-```
 
 **温度パラメータの物理的意味**:
 
@@ -136,9 +94,7 @@ $$
 - $\tau = 1$: **通常の温度** → ボルツマン分布
 - $\tau \to \infty$: **高温** → 一様分布に近づく（エネルギー差を無視）
 
-:::message
-**Softmax温度との接続**: Attention機構の `softmax(QK^T / sqrt(d))` も同じ原理。`sqrt(d)` = 温度パラメータ。低温（sqrt(d)小）→鋭い注意、高温（sqrt(d)大）→平坦な注意。
-:::
+> **Note:** **Softmax温度との接続**: Attention機構の `softmax(QK^T / sqrt(d))` も同じ原理。`sqrt(d)` = 温度パラメータ。低温（sqrt(d)小）→鋭い注意、高温（sqrt(d)大）→平坦な注意。
 
 ### 1.3 EBMと他の生成モデルの接続
 
@@ -176,11 +132,10 @@ graph TD
 - ❌ $Z(\theta)$ の計算が困難 → 訓練が難しい
 - ❌ サンプリングにMCMC/Langevin必要 → 遅い
 
-:::message progress 10%
-EBMのエネルギーランドスケープを可視化し、温度パラメータの効果を体験。他の生成モデルとの位置づけを理解した。次は「なぜEBMが今再び注目されるのか」を掘り下げる。
-:::
-
----
+> Progress: 10%
+> **理解度チェック**
+> 1. Gibbs分布 $p(\mathbf{x}) = \exp(-E(\mathbf{x}))/Z(\theta)$ において、$Z(\theta)=\int\exp(-E(\mathbf{x}))d\mathbf{x}$ が計算困難な理由と、それがEBM訓練をどう難しくするかを述べよ。
+> 2. EBM・NF・VAEの3手法で密度定義の方法（直接/間接/変分）を比較し、各手法のトレードオフを一行ずつ述べよ。
 
 ## 🧩 2. 直感ゾーン（15分）— EBMの復活と統一的視点
 
@@ -221,9 +176,7 @@ EBMのエネルギーランドスケープを可視化し、温度パラメー�
 - **Contrastive Divergence**: RBM訓練の実用的アルゴリズム
 - **Deep Learning革命**: Backpropagationによる多層ネットワーク訓練
 
-:::message
-**ノーベル物理学賞の意義**: 2024年の受賞は、Hopfield/Boltzmann/EBMの理論的基盤が「物理学」として評価されたことを示す。機械学習は物理学の一分野であり、統計力学の応用である。
-:::
+> **Note:** **ノーベル物理学賞の意義**: 2024年の受賞は、Hopfield/Boltzmann/EBMの理論的基盤が「物理学」として評価されたことを示す。機械学習は物理学の一分野であり、統計力学の応用である。
 
 ### 2.3 Modern Hopfield ↔ Attention等価性の発見
 
@@ -260,9 +213,7 @@ $$
 - $V = [\xi^1, \ldots, \xi^N]^\top$（バリュー = 記憶パターン）
 - $\beta = 1/\sqrt{d}$（温度パラメータ）
 
-:::message alert
-**常識の崩壊**: 「AttentionはHopfield Networkだった」。2017年に登場したTransformer Attentionは、実は1982年のHopfield Networkの現代版。40年の時を経て、統一的理解が得られた。
-:::
+> **⚠️ Warning:** **常識の崩壊**: 「AttentionはHopfield Networkだった」。2017年に登場したTransformer Attentionは、実は1982年のHopfield Networkの現代版。40年の時を経て、統一的理解が得られた。
 
 ### 2.4 本シリーズにおける位置づけ
 
@@ -303,31 +254,28 @@ graph LR
 | Energy Matching | なし | **2025年最新理論** |
 | NRGPT | なし | **GPT=EBM再解釈** |
 
-:::message progress 20%
-EBMの復活背景、2024年ノーベル物理学賞、Modern Hopfield↔Attention等価性の衝撃を理解した。次はエネルギー関数の数学的定義から完全導出へ。
-:::
-
----
+> Progress: 20%
+> **理解度チェック**
+> 1. CD-k（Contrastive Divergence）が「対比発散」と呼ばれる理由を、最尤法の対数尤度勾配 $\nabla_\theta \log p(x) = \langle -\nabla_\theta E\rangle_\text{data} - \langle -\nabla_\theta E\rangle_\text{model}$ と対応させて説明せよ。
+> 2. EBMでZ(θ)が消去できないにもかかわらず、スコア関数 $\nabla_x \log p(x) = -\nabla_x E(x)$ が計算できる理由を数式で示せ。
 
 ## 📐 3. 数式修行ゾーン（60分）— EBMの完全理論
 
-:::message alert
-**覚悟**: このゾーンは3,500行講義の核心。800行のボリュームで以下を完全導出する:
-1. EBM基本定義 + Gibbs分布
-2. Modern Hopfield完全版
-3. Modern Hopfield ↔ Attention等価性の完全証明
-4. Classical Hopfield歴史
-5. RBM完全版（CD-k / PCD）
-6. MCMC理論（詳細釣り合い / Ergodicity）
-7. HMC（Hamiltonian MC / Leapfrog）
-8. Langevin Dynamics概要
-9. 統計物理との接続（自由エネルギー / 変分自由エネルギー）
-10. 相転移 / Ising / Grokking
-11. Energy Matching
-12. Energy-based World Models
-
-ペンと紙を用意。数式を"読む"のではなく"導出"する。
-:::
+> **⚠️ Warning:** **覚悟**: このゾーンは3,500行講義の核心。800行のボリュームで以下を完全導出する:
+> 1. EBM基本定義 + Gibbs分布
+> 2. Modern Hopfield完全版
+> 3. Modern Hopfield ↔ Attention等価性の完全証明
+> 4. Classical Hopfield歴史
+> 5. RBM完全版（CD-k / PCD）
+> 6. MCMC理論（詳細釣り合い / Ergodicity）
+> 7. HMC（Hamiltonian MC / Leapfrog）
+> 8. Langevin Dynamics概要
+> 9. 統計物理との接続（自由エネルギー / 変分自由エネルギー）
+> 10. 相転移 / Ising / Grokking
+> 11. Energy Matching
+> 12. Energy-based World Models
+>
+> ペンと紙を用意。数式を"読む"のではなく"導出"する。
 
 ### 3.1 EBMの基本定義
 
@@ -409,9 +357,7 @@ $$
 2. $p_\theta$ からのサンプリングにMCMCが必要 → 遅い
 3. 各勾配ステップでMCMCを収束させる必要 → 非常に遅い
 
-:::message
-**EBM訓練の本質**: 「データ領域のエネルギーを下げる」と「データ以外の領域のエネルギーを上げる」のバランス。負例サンプリングが困難。Contrastive Divergence (CD-k) はこの近似手法。
-:::
+> **Note:** **EBM訓練の本質**: 「データ領域のエネルギーを下げる」と「データ以外の領域のエネルギーを上げる」のバランス。負例サンプリングが困難。Contrastive Divergence (CD-k) はこの近似手法。
 
 ### 3.2 Modern Hopfield Network完全版
 
@@ -532,12 +478,10 @@ $$
 
 **結論**: Modern Hopfieldの状態更新 = Self-Attention$\quad \blacksquare$
 
-:::message
-**等価性の意味**:
-1. **Transformerは連想記憶マシン**: Attentionは記憶パターン（Key-Value）から最近接を検索
-2. **記憶容量**: Modern Hopfieldの指数的容量 → Transformerの長距離依存性能の理論的根拠
-3. **物理学的解釈**: AttentionはエネルギーベースのUpdate Rule
-:::
+> **Note:** **等価性の意味**:
+> 1. **Transformerは連想記憶マシン**: Attentionは記憶パターン（Key-Value）から最近接を検索
+> 2. **記憶容量**: Modern Hopfieldの指数的容量 → Transformerの長距離依存性能の理論的根拠
+> 3. **物理学的解釈**: AttentionはエネルギーベースのUpdate Rule
 
 #### 3.2.4 Modern Hopfield連続時間版（2025）
 
@@ -898,30 +842,11 @@ $$
 - 各ミニバッチで、前回の $v^{(k)}$ から継続
 - → 負例がモデル分布により近い
 
-**アルゴリズム**:
-
-```
-初期化: v_chain ← ランダム
-for each ミニバッチ do:
-    正例: v_pos ← データ
-    h_pos ← p(h | v_pos)
-
-    負例: v_chain から k-step Gibbs
-    v_neg ← v_chain
-    h_neg ← p(h | v_neg)
-
-    勾配更新:
-    ΔW ← ⟨v_pos h_pos^T⟩ - ⟨v_neg h_neg^T⟩
-end
-```
-
 **利点**: CD-kよりバイアスが少ない、長いチェーンを維持
 
 ### 3.5 MCMC理論（第5回基礎の深化）
 
-:::message
-**第5回での基礎**: Markov連鎖・Metropolis-Hastingsの基礎を導入済み。本回はEBMサンプリング文脈での理論深化。
-:::
+> **Note:** **第5回での基礎**: Markov連鎖・Metropolis-Hastingsの基礎を導入済み。本回はEBMサンプリング文脈での理論深化。
 
 #### 3.5.1 Markov連鎖復習
 
@@ -971,21 +896,6 @@ $$
 \alpha(x' | x) = \min\left(1, \frac{\pi(x') q(x | x')}{\pi(x) q(x' | x)}\right)
 $$
 
-**アルゴリズム**:
-
-```
-初期化: x ← x_0
-for t = 1, 2, ... do:
-    x' ← q(· | x)  # 提案
-    u ← Uniform(0, 1)
-    if u < α(x' | x):
-        x ← x'  # 受理
-    else:
-        x ← x  # 棄却（現在の状態を維持）
-    サンプル: x_t = x
-end
-```
-
 **詳細釣り合いの証明**:
 
 遷移カーネル:
@@ -1021,18 +931,6 @@ $\blacksquare$
 #### 3.5.5 Gibbs Sampling
 
 **設定**: 多変量分布 $\pi(x_1, \ldots, x_d)$ から、条件付き分布 $\pi(x_i | x_{-i})$ が利用可能
-
-**アルゴリズム**:
-
-```
-初期化: x ← (x_1, ..., x_d)
-for t = 1, 2, ... do:
-    for i = 1, ..., d do:
-        x_i ← π(x_i | x_{-i})  # 条件付き分布からサンプル
-    end
-    サンプル: x_t = x
-end
-```
 
 **詳細釣り合い**:
 
@@ -1129,32 +1027,6 @@ $$
 
 #### 3.6.5 HMCアルゴリズム
 
-```
-初期化: q ← q_0
-for t = 1, 2, ... do:
-    p ← N(0, M)  # 運動量を再サンプル
-
-    # Leapfrog積分（L steps、ステップサイズ ε）
-    p' ← p - (ε/2) ∇U(q)
-    for l = 1, ..., L do:
-        q' ← q' + ε M^{-1} p'
-        if l < L:
-            p' ← p' - ε ∇U(q')
-    end
-    p' ← p' - (ε/2) ∇U(q')
-
-    # Metropolis受理・棄却
-    ΔH ← H(q', p') - H(q, p)
-    u ← Uniform(0, 1)
-    if u < exp(-ΔH):
-        q ← q'  # 受理
-    else:
-        q ← q  # 棄却
-
-    サンプル: q_t = q
-end
-```
-
 **ハイパーパラメータ**:
 - $\epsilon$: ステップサイズ（小さいほど正確、大きいほど探索範囲広い）
 - $L$: Leapfrog steps数（大きいほど遠くまで移動）
@@ -1171,9 +1043,7 @@ end
 
 ### 3.7 Langevin Dynamics概要
 
-:::message
-**完全版は第35回**: Score Matching & Langevin Dynamics で詳細導出。本回はEBMサンプリングとしての位置づけのみ。
-:::
+> **Note:** **完全版は第35回**: Score Matching & Langevin Dynamics で詳細導出。本回はEBMサンプリングとしての位置づけのみ。
 
 **Langevin Dynamics**:
 
@@ -1301,38 +1171,6 @@ $$
 - $T$ 高い（学習率高い）: 遷移しやすい
 - $T$ 低い（weight decay強い）: 遷移しにくい → Grokkingが観測される
 
-**数値実験で確認できる指標**:
-
-```julia
-# Grokking実験用の指標
-function compute_entropy(params)
-    # パラメータのヒストグラムエントロピー
-    hist = fit(Histogram, vec(params), nbins=50)
-    p = hist.weights ./ sum(hist.weights)
-    p = p[p .> 0]  # 非ゼロのみ
-    return -sum(p .* log.(p))
-end
-
-function grokking_metrics(model, train_data, test_data)
-    # 訓練誤差
-    train_loss = mean([loss(model, x, y) for (x, y) in train_data])
-
-    # テスト誤差
-    test_loss = mean([loss(model, x, y) for (x, y) in test_data])
-
-    # パラメータエントロピー
-    params = vcat([vec(p) for p in model.params]...)
-    entropy = compute_entropy(params)
-
-    # 自由エネルギー（近似）
-    T_eff = model.lr / model.weight_decay  # 有効温度
-    F = train_loss - T_eff * entropy
-
-    return (train_loss=train_loss, test_loss=test_loss,
-            entropy=entropy, free_energy=F)
-end
-```
-
 **典型的なGrokking曲線**:
 
 ```mermaid
@@ -1356,57 +1194,6 @@ NNのGrokking:
 - 高学習率: パラメータがランダム（記憶相）
 - 低学習率 + weight decay: パラメータが整列（汎化相）
 - 臨界epoch数で相転移
-
-**実装例**（簡易版）:
-
-```julia
-# Modular arithmeticタスクでGrokking再現
-using Flux
-
-# データ: 97 % 97 の足し算（Grokkingで有名）
-p = 97
-data_x = [(i, j) for i in 0:p-1 for j in 0:p-1]
-data_y = [(i + j) % p for (i, j) in data_x]
-
-# 訓練・テスト分割（訓練30%のみ → Grokking起きやすい）
-n_train = Int(0.3 * length(data_x))
-train_idx = shuffle(1:length(data_x))[1:n_train]
-test_idx = setdiff(1:length(data_x), train_idx)
-
-# モデル: 小さいMLP
-model = Chain(
-    Embedding(p => 128), Embedding(p => 128),  # 2つの入力
-    Dense(256 => 256, relu),
-    Dense(256 => p)
-)
-
-# Weight decay 強め → Grokking促進
-opt = OptimiserChain(WeightDecay(0.01), Adam(0.001))
-
-# 訓練ループ（エントロピー追跡）
-history = []
-for epoch in 1:5000
-    # 訓練
-    for idx in train_idx
-        x, y = data_x[idx], data_y[idx]
-        gs = gradient(m -> crossentropy(m(x), y), model)
-        update!(opt, model, gs)
-    end
-
-    # 評価（100 epochごと）
-    if epoch % 100 == 0
-        metrics = grokking_metrics(model, train_idx, test_idx)
-        push!(history, (epoch=epoch, metrics...))
-        println("Epoch $epoch: Train=$(metrics.train_loss), Test=$(metrics.test_loss), Entropy=$(metrics.entropy)")
-    end
-end
-
-# 結果プロット
-epochs = [h.epoch for h in history]
-plot(epochs, [h.train_loss for h in history], label="Train", yscale=:log10)
-plot!(epochs, [h.test_loss for h in history], label="Test")
-plot!(epochs, [h.entropy for h in history], label="Entropy (scaled)", ylabel="Loss / Entropy")
-```
 
 **期待される結果**:
 - Epoch 0-500: Train loss ↓, Test loss 横ばい, Entropy 高
@@ -1747,19 +1534,6 @@ $$
 = -(x - \mu_t) - \tau(t) \nabla_x E_{\text{entropic}}(x)
 $$
 
-**アルゴリズム**:
-
-```
-初期化: x ← N(0, I)  # ノイズ
-for t in [0, ε, 2ε, ..., 1]:
-    # ベクトル場計算
-    v ← -(x - μ_t) - τ(t) ∇E_entropic(x)
-    # Euler法
-    x ← x + ε · v
-end
-return x
-```
-
 **特徴**:
 - $t = 0 \to 0.5$: 高速OT輸送（大域移動）
 - $t = 0.5 \to 1$: エントロピック項が効く（局所調整・多峰性）
@@ -1797,21 +1571,6 @@ $$
 **結論**: Energy Matching = Flow Matchingの速度 + EBMの表現力
 
 #### 3.10.8 実装のポイント
-
-
-**$E_{\text{entropic}}(x)$ のネットワーク設計**:
-
-U-Netベースのスカラー関数:
-
-```python
-class EnergyNet(nn.Module):
-    def forward(self, x):
-        # U-Net処理
-        features = self.unet(x)
-        # スカラー出力（global average pooling）
-        energy = features.mean(dim=[2, 3])  # (B, C) → (B,)
-        return energy.mean()  # Batch平均
-```
 
 **温度スケジュール**:
 
@@ -1922,34 +1681,32 @@ $$
 
 ---
 
-:::message progress 50%
-**ボス戦クリア！** 800行のEBM理論を完全導出した。Modern Hopfield ↔ Attention等価性の証明、RBM + CD-k、MCMC/HMC、統計物理との接続を理解。次は実装へ。
-:::
-
----
-
+> Progress: 50%
+> **理解度チェック**
+> 1. Modern Hopfield NetworkとTransformerのSelf-Attentionが数学的に等価になる核心ステップを示し、エネルギー関数 $F = -\text{lse}(\beta, X^\top\xi)$ の役割を説明せよ。
+> 2. 統計物理の自由エネルギー $F = U - TS$ とEBMの変分自由エネルギーを対応させ、EBMの訓練がエネルギー最小化と等価な理由を述べよ。
 
 ## 参考文献
 
 ### 主要論文
 
 [^1]: Hopfield, J. J. (1982). "Neural networks and physical systems with emergent collective computational abilities." *Proceedings of the National Academy of Sciences*, 79(8), 2554-2558.
-@[card](https://www.pnas.org/doi/abs/10.1073/pnas.79.8.2554)
+<https://www.pnas.org/doi/abs/10.1073/pnas.79.8.2554>
 
 [^2]: Hinton, G. E. (2002). "Training products of experts by minimizing contrastive divergence." *Neural Computation*, 14(8), 1771-1800.
-@[card](https://www.cs.toronto.edu/~hinton/absps/tr00-004.pdf)
+<https://www.cs.toronto.edu/~hinton/absps/tr00-004.pdf>
 
 [^3]: Ramsauer, H., et al. (2020). "Hopfield Networks is All You Need." *ICLR 2021*.
-@[card](https://arxiv.org/abs/2008.02217)
+<https://arxiv.org/abs/2008.02217>
 
 [^4]: Santos, S., et al. (2025). "Modern Hopfield Networks with Continuous-Time Memories." *arXiv:2502.10122*.
-@[card](https://arxiv.org/abs/2502.10122)
+<https://arxiv.org/abs/2502.10122>
 
 [^5]: Dehmamy, N., et al. (2025). "NRGPT: An Energy-based Alternative for GPT." *arXiv:2512.16762*.
-@[card](https://arxiv.org/abs/2512.16762)
+<https://arxiv.org/abs/2512.16762>
 
-[^6]: Energy Matching Authors (2025). "Energy Matching: Unifying Flow Matching and Energy-Based Models for Generative Modeling." *arXiv:2504.10612*.
-@[card](https://arxiv.org/abs/2504.10612)
+[^6]: Energy Matching (Balcerak, M., et al., 2025). "Energy Matching: Unifying Flow Matching and Energy-Based Models for Generative Modeling." *arXiv:2504.10612*.
+<https://arxiv.org/abs/2504.10612>
 
 [^7]: Tieleman, T. (2008). "Training restricted Boltzmann machines using approximations to the likelihood gradient." *ICML 2008*.
 
@@ -1958,7 +1715,7 @@ $$
 [^9]: Smolensky, P. (1986). "Information processing in dynamical systems: Foundations of harmony theory." In *Parallel Distributed Processing*, Vol. 1.
 
 [^10]: Nobel Prize (2024). "The Nobel Prize in Physics 2024." John J. Hopfield and Geoffrey E. Hinton.
-@[card](https://www.nobelprize.org/prizes/physics/2024/summary/)
+<https://www.nobelprize.org/prizes/physics/2024/summary/>
 
 [^11]: LeCun, Y., Chopra, S., Hadsell, R., Ranzato, M., & Huang, F. (2006). "A tutorial on energy-based learning." In *Predicting Structured Data*, MIT Press.
 
@@ -1971,27 +1728,13 @@ $$
 
 ---
 
-## 記法規約
+## 著者リンク
 
-| 記法 | 意味 |
-|:-----|:-----|
-| $E_\theta(x)$ | エネルギー関数（パラメータ $\theta$） |
-| $p_\theta(x)$ | 確率分布（Gibbs分布） |
-| $Z(\theta)$ | 正規化定数（Partition Function） |
-| $v$ | RBM可視層 |
-| $h$ | RBM隠れ層 |
-| $W$ | RBM重み行列 |
-| $\xi^i$ | Hopfield記憶パターン |
-| $\beta$ | 逆温度パラメータ |
-| $\tau$ | 温度パラメータ |
-| $T(x' \| x)$ | Markov連鎖遷移カーネル |
-| $\alpha(x' \| x)$ | Metropolis-Hastings受理確率 |
-| $H(q, p)$ | Hamiltonian（Hamilton関数） |
-| $U(q)$ | ポテンシャルエネルギー |
-| $K(p)$ | 運動エネルギー |
-| $\epsilon$ | ステップサイズ |
-| $L$ | Leapfrog steps数 |
----
+- Blog: https://fumishiki.dev
+- X: https://x.com/fumishiki
+- LinkedIn: https://www.linkedin.com/in/fumitakamurakami
+- GitHub: https://github.com/fumishiki
+- Hugging Face: https://huggingface.co/fumishiki
 
 ## ライセンス
 

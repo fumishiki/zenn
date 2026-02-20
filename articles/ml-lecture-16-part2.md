@@ -4,7 +4,14 @@ emoji: "🦛"
 type: "tech"
 topics: ["machinelearning", "deeplearning", "ssm", "julia", "rust"]
 published: true
+slug: "ml-lecture-16-part2"
+difficulty: "advanced"
+time_estimate: "90 minutes"
+languages: ["Julia", "Rust"]
+keywords: ["機械学習", "深層学習", "生成モデル"]
 ---
+
+**← Part1（理論編）**: [第16回 Part1](./ml-lecture-16-part1)
 
 ## 💻 4. 実装ゾーン(45分) — JuliaとRustでSSMを動かす
 
@@ -50,40 +57,33 @@ struct DiscreteSSM
     D::Float64
 end
 
-# Recurrent form (for inference)
+# Recurrent form (for inference — inherently sequential)
 function forward_recurrent(ssm::DiscreteSSM, u::Vector{Float64})
     N = length(u)
-    d = length(ssm.B)
-
-    h = zeros(Float64, d)
+    h = zeros(Float64, length(ssm.B))
     y = zeros(Float64, N)
-
-    for t in 1:N
+    @inbounds for t in 1:N
         h = ssm.A * h + ssm.B * u[t]
         y[t] = dot(ssm.C, h) + ssm.D * u[t]
     end
-
     return y
 end
 
 # Convolutional form (for training)
 function forward_convolution(ssm::DiscreteSSM, u::Vector{Float64}, L::Int)
-    # Precompute kernel K[k] = C * A^k * B
+    # Precompute kernel K[k] = C * A^k * B (sequential: each Ai depends on prior)
     d = length(ssm.B)
     K = zeros(Float64, L)
     Ai = Matrix{Float64}(I, d, d)  # A^0
-
-    for k in 1:L
+    @inbounds for k in 1:L
         Ai = ssm.A * Ai  # A^k
         K[k] = dot(ssm.C, Ai * ssm.B)
     end
 
-    # FFT convolution
+    # FFT convolution (fused into one expression)
     K_pad = [K; zeros(length(u))]
-    u_pad = [u; zeros(length(K))]
-
-    y_fft = fft(K_pad) .* fft(u_pad)
-    y = real.(ifft(y_fft))[1:length(u)]
+    u_pad = [u; zeros(L)]
+    y = real.(ifft(fft(K_pad) .* fft(u_pad)))[1:length(u)]
 
     return y, K
 end
@@ -98,12 +98,12 @@ D = 0.0
 ssm = DiscreteSSM(A, B, C, D)
 
 u = randn(Float64, 64)
-y_rec = forward_recurrent(ssm, u)
+y_rec  = forward_recurrent(ssm, u)
 y_conv, K = forward_convolution(ssm, u, 64)
 
 println("Recurrent output (first 5): ", round.(y_rec[1:5], digits=3))
 println("Convolution output (first 5): ", round.(y_conv[1:5], digits=3))
-println("Max difference: ", maximum(abs.(y_rec - y_conv)))
+println("Max difference: ", maximum(abs.(y_rec .- y_conv)))
 ```
 
 ### 4.3 HiPPO-LegS初期化
@@ -114,23 +114,12 @@ HiPPO-LegS initialization for A and B
 Returns matrices with optimal long-range memory properties
 """
 function hippo_legs_init(d::Int)
-    A = zeros(Float64, d, d)
-    B = zeros(Float64, d)
-
-    for n in 0:d-1
-        for k in 0:d-1
-            if n > k
-                A[n+1, k+1] = -(2*n + 1)^0.5 * (2*k + 1)^0.5
-            elseif n == k
-                A[n+1, k+1] = Float64(n + 1)
-            end
-        end
-        B[n+1] = (2*n + 1)^0.5
-    end
-
-    # Initialize C randomly (or all ones)
+    # 2D comprehension: one expression per matrix element
+    A = [n > k ? -(2n+1)^0.5*(2k+1)^0.5 :
+         n == k ? Float64(n+1) : 0.0
+         for n in 0:d-1, k in 0:d-1]
+    B = [(2n+1)^0.5 for n in 0:d-1]
     C = ones(Float64, d)
-
     return A, B, C
 end
 
@@ -152,21 +141,14 @@ A_bar = exp(A * Δ)
 B_bar = (A^{-1} (exp(A*Δ) - I)) B
 """
 function discretize_zoh(A::Matrix{Float64}, B::Vector{Float64}, Δ::Float64)
-    d = size(A, 1)
-
-    # A_bar = exp(A * Δ)
     A_bar = exp(A * Δ)
-
-    # B_bar = (A^{-1} (A_bar - I)) B
-    # Use matrix exponential properties for numerical stability
-    if det(A) != 0.0
-        B_bar = (A \ (A_bar - I)) * B
+    # if-expression: exact ZOH or numerical-integration fallback
+    B_bar = if det(A) != 0.0
+        (A \ (A_bar - I)) * B               # exact ZOH
     else
-        # Numerical integration fallback
         dt = Δ / 100
-        B_bar = sum([exp(A * t) * B * dt for t in 0:dt:Δ])
+        sum(exp(A * t) * B * dt for t in 0:dt:Δ)  # numerical integration
     end
-
     return A_bar, B_bar
 end
 
@@ -177,8 +159,8 @@ B_cont = [1.0, 0.0]
 
 A_disc, B_disc = discretize_zoh(A_cont, B_cont, Δ)
 println("Continuous A eigenvalues: ", eigvals(A_cont))
-println("Discrete A eigenvalues: ", eigvals(A_disc))
-println("Expected (exp(λ*Δ)): ", exp.(eigvals(A_cont) * Δ))
+println("Discrete A eigenvalues:   ", eigvals(A_disc))
+println("Expected (exp(λ*Δ)):      ", exp.(eigvals(A_cont) * Δ))
 ```
 
 ### 4.5 S4 Simplified: 対角SSM + FFT畳み込み
@@ -198,38 +180,26 @@ struct S4Layer
 end
 
 function s4_forward(layer::S4Layer, u::Vector{Float64}, L::Int)
-    d = length(layer.λ)
-
-    # Discretize
     λ_bar = exp.(layer.λ * layer.Δ)
 
-    # Compute kernel via closed form: K[k] = C^T * diag(λ_bar^k) * B
-    K = zeros(ComplexF64, L)
-    for k in 0:L-1
-        K[k+1] = dot(layer.C, (λ_bar .^ k) .* layer.B)
-    end
+    # Kernel via comprehension: K[k] = C^T * diag(λ_bar^k) * B
+    K = real.([dot(layer.C, λ_bar .^ k .* layer.B) for k in 0:L-1])
 
-    # FFT convolution
-    K_real = real.(K)  # If C, B chosen to make K real
-    K_pad = [K_real; zeros(length(u))]
-    u_pad = [u; zeros(length(K_real))]
-
-    y_fft = fft(K_pad) .* fft(u_pad)
-    y = real.(ifft(y_fft))[1:length(u)]
-
-    return y
+    # FFT convolution (fused)
+    K_pad = [K; zeros(length(u))]
+    u_pad = [u; zeros(L)]
+    real.(ifft(fft(K_pad) .* fft(u_pad)))[1:length(u)]
 end
 
 # Example: S4 with HiPPO-like eigenvalues
 d = 32
-λ = ComplexF64.(-(1:d))  # HiPPO-like: -1, -2, ..., -d
+λ = ComplexF64.(-(1:d))           # HiPPO-like: -1, -2, ..., -d
 B = ones(ComplexF64, d) ./ sqrt(d)
 C = ones(ComplexF64, d) ./ sqrt(d)
 Δ = 0.01
 
 s4 = S4Layer(λ, B, C, Δ)
-
-u = randn(Float64, 256)
+u   = randn(Float64, 256)
 y_s4 = s4_forward(s4, u, 256)
 
 println("S4 output (first 5): ", round.(y_s4[1:5], digits=3))
@@ -251,57 +221,50 @@ struct MambaLayer
     d_state::Int
 end
 
+# Numerically stable softplus: log1p(exp(x)) ≈ x for x > 20
+softplus(x) = x > 20.0 ? x : log1p(exp(x))
+
 function mamba_forward_simple(layer::MambaLayer, u::Matrix{Float64})
     # u: (seq_len, d_model)
-    L, D = size(u)
+    L, _ = size(u)
     d = layer.d_state
 
-    # Compute input-dependent parameters
+    # Input-dependent parameters via broadcast
     Δ = softplus.(u * layer.W_Δ')  # (L, d_state)
-    B = u * layer.W_B'               # (L, d_state)
-    C = u * layer.W_C'               # (L, d_state)
+    B = u * layer.W_B'              # (L, d_state)
+    C = u * layer.W_C'              # (L, d_state)
 
-    # Sequential scan (simplified, not parallelized)
+    # Sequential scan — inherently sequential (RNN recurrence)
     h = zeros(Float64, d)
     y = zeros(Float64, L)
-
-    for t in 1:L
-        # Discretize with Δ[t]
-        A_bar = exp(layer.A * Δ[t, 1])  # Simplified: scalar Δ
+    @inbounds for t in 1:L
+        A_bar = exp(layer.A * Δ[t, 1])            # scalar Δ per step
         B_bar = (layer.A \ (A_bar - I)) * B[t, :]
-
-        # Update
         h = A_bar * h + B_bar
         y[t] = dot(C[t, :], h)
     end
-
     return y
 end
 
-softplus(x) = log(1 + exp(x))
-
 # Example
 d_state, d_model = 4, 8
-A = -1.0 * Matrix{Float64}(I, d_state, d_state)  # Simple: -I
+A   = -1.0 * Matrix{Float64}(I, d_state, d_state)  # Simple: -I
 W_Δ = randn(Float64, d_model, d_state) * 0.1
 W_B = randn(Float64, d_model, d_state)
 W_C = randn(Float64, d_model, d_state)
 
-mamba = MambaLayer(A, W_Δ, W_B, W_C, d_state)
-
-u = randn(Float64, 16, d_model)  # (seq_len=16, d_model=8)
+mamba  = MambaLayer(A, W_Δ, W_B, W_C, d_state)
+u      = randn(Float64, 16, d_model)  # (seq_len=16, d_model=8)
 y_mamba = mamba_forward_simple(mamba, u)
 
 println("Mamba output (first 5): ", round.(y_mamba[1:5], digits=3))
 ```
 
-:::message
-**注意**: 上記はMambaの原理を示す教育的実装。実際のMambaは:
-1. Parallel Scanによる並列化
-2. CUDAカーネル最適化(hardware-aware scan)
-3. 複数のMambaブロックを積層
-が必要。本格的実装は公式リポジトリ[^6]を参照。
-:::
+> **Note:** **注意**: 上記はMambaの原理を示す教育的実装。実際のMambaは:
+> 1. Parallel Scanによる並列化
+> 2. CUDAカーネル最適化(hardware-aware scan)
+> 3. 複数のMambaブロックを積層
+> が必要。本格的実装は公式リポジトリ[^6]を参照。
 
 ### 4.7 Rustでの並列スキャン実装
 
@@ -314,45 +277,26 @@ println("Mamba output (first 5): ", round.(y_mamba[1:5], digits=3))
 use ndarray::{Array1, Array2};
 use rayon::prelude::*;
 
-/// Parallel scan for SSM: h[t] = A[t] * h[t-1] + B[t]
-/// Returns all hidden states h[0..L]
-fn parallel_scan(
-    A: &Vec<Array2<f64>>,  // Vec of (d, d) matrices
-    B: &Vec<Array1<f64>>,  // Vec of (d,) vectors
-) -> Vec<Array1<f64>> {
-    let L = A.len();
-    let d = B[0].len();
-
-    // Base case: sequential scan (for simplicity)
-    let mut h = vec![Array1::zeros(d)];
-    for t in 0..L {
-        let h_next = A[t].dot(&h[t]) + &B[t];
-        h.push(h_next);
-    }
-
-    h[1..].to_vec()  // Return h[1..L]
+/// Sequential scan for SSM: h[t] = A[t] * h[t-1] + B[t]
+/// Returns all hidden states h[1..=L]
+fn parallel_scan(a_mats: &[Array2<f64>], b_vecs: &[Array1<f64>]) -> Vec<Array1<f64>> {
+    let d = b_vecs[0].len();
+    let mut h = Array1::zeros(d);
+    // iterator chain: zip matrices with bias vectors, fold state through scan
+    a_mats.iter().zip(b_vecs.iter()).map(|(a, b)| {
+        h = a.dot(&h) + b;
+        h.clone()
+    }).collect()
 }
 
 fn main() {
-    let L = 8;
-    let d = 2;
+    let (l, d) = (8, 2);
+    // A[t] = 0.9 * I, B[t] = [1.0, 0.5]
+    let a_mats: Vec<Array2<f64>> = (0..l).map(|_| Array2::eye(d) * 0.9).collect();
+    let b_vecs: Vec<Array1<f64>> = (0..l).map(|_| Array1::from_vec(vec![1.0, 0.5])).collect();
 
-    // Example: A[t] = 0.9 * I
-    let A: Vec<Array2<f64>> = (0..L)
-        .map(|_| Array2::eye(d) * 0.9)
-        .collect();
-
-    // B[t] = random
-    let B: Vec<Array1<f64>> = (0..L)
-        .map(|_| Array1::from_vec(vec![1.0, 0.5]))
-        .collect();
-
-    let h = parallel_scan(&A, &B);
-
-    println!("Hidden states:");
-    for (t, h_t) in h.iter().enumerate() {
-        println!("h[{}] = {:?}", t+1, h_t);
-    }
+    let h = parallel_scan(&a_mats, &b_vecs);
+    h.iter().enumerate().for_each(|(t, h_t)| println!("h[{}] = {:?}", t + 1, h_t));
 }
 ```
 
@@ -406,38 +350,24 @@ Level 3: [(A8A7A6A5A4A3A2A1, ...)]
 ```rust
 use rayon::prelude::*;
 
-/// Associative operation for SSM scan
+/// Associative operation for SSM scan: (A_r, B_r) ∘ (A_l, B_l) = (A_r A_l, A_r B_l + B_r)
 type ScanOp = (Array2<f64>, Array1<f64>);
 
 fn combine(left: &ScanOp, right: &ScanOp) -> ScanOp {
-    let (A_left, B_left) = left;
-    let (A_right, B_right) = right;
-
-    let A_new = A_right.dot(A_left);
-    let B_new = A_right.dot(B_left) + B_right;
-
-    (A_new, B_new)
+    let (a_l, b_l) = left;
+    let (a_r, b_r) = right;
+    (a_r.dot(a_l), a_r.dot(b_l) + b_r)
 }
 
-/// True parallel scan using Rayon (conceptual)
+/// Sequential CPU scan expressed as iterator map over owned ops
 fn parallel_scan_associative(ops: Vec<ScanOp>) -> Vec<Array1<f64>> {
-    // Rayon's scan requires sequential accumulation
-    // For true parallelism, use tree-based reduction
-    // This is conceptual; production requires CUDA/GPU
-
-    let L = ops.len();
+    // For true parallelism, use tree-based reduction (CUDA/GPU required)
     let d = ops[0].1.len();
-
-    // Sequential fallback (Rust CPU)
     let mut h = Array1::zeros(d);
-    let mut results = Vec::with_capacity(L);
-
-    for (A, B) in ops {
-        h = A.dot(&h) + &B;
-        results.push(h.clone());
-    }
-
-    results
+    ops.into_iter().map(|(a, b)| {
+        h = a.dot(&h) + &b;
+        h.clone()
+    }).collect()
 }
 ```
 
@@ -471,19 +401,15 @@ harness = false
 ```rust
 // benches/ssm_bench.rs
 use criterion::{black_box, criterion_group, criterion_main, Criterion};
-use ssm_rust::{parallel_scan, DiscreteSSM};
+use ssm_rust::parallel_scan;
 
 fn bench_ssm_scan(c: &mut Criterion) {
-    let L = 1024;
-    let d = 64;
-
-    let A: Vec<_> = (0..L).map(|_| Array2::eye(d) * 0.9).collect();
-    let B: Vec<_> = (0..L).map(|_| Array1::from_vec(vec![1.0; d])).collect();
+    let (l, d) = (1024_usize, 64_usize);
+    let a_mats: Vec<_> = (0..l).map(|_| Array2::eye(d) * 0.9).collect();
+    let b_vecs: Vec<_> = (0..l).map(|_| Array1::from_vec(vec![1.0; d])).collect();
 
     c.bench_function("ssm_scan_1024", |b| {
-        b.iter(|| {
-            parallel_scan(black_box(&A), black_box(&B))
-        });
+        b.iter(|| parallel_scan(black_box(&a_mats), black_box(&b_vecs)))
     });
 }
 
@@ -522,14 +448,10 @@ cargo bench
 ```julia
 using LinearAlgebra
 
-# Safe matrix exponential
+# Safe matrix exponential — short-circuit warn
 function safe_exp(A::Matrix{Float64}, Δ::Float64)
-    # Check condition number
-    if cond(A) > 1e10
-        @warn "Matrix A is ill-conditioned, exp(A*Δ) may be inaccurate"
-    end
-
-    return exp(A * Δ)
+    cond(A) > 1e10 && @warn "Matrix A is ill-conditioned, exp(A*Δ) may be inaccurate"
+    exp(A * Δ)
 end
 ```
 
@@ -539,14 +461,9 @@ end
 
 ```julia
 function check_stability(A::Matrix{Float64})
-    λ = eigvals(A)
-    unstable = filter(x -> real(x) > 0, λ)
-
-    if !isempty(unstable)
-        @warn "Unstable eigenvalues detected: $(unstable)"
-        return false
-    end
-    return true
+    unstable = filter(x -> real(x) > 0, eigvals(A))
+    isempty(unstable) || @warn "Unstable eigenvalues detected: $(unstable)"
+    isempty(unstable)
 end
 ```
 
@@ -555,14 +472,8 @@ end
 $\text{Softplus}(x) = \log(1 + e^x)$は$x$が大きいとオーバーフロー。
 
 ```julia
-# Numerically stable softplus
-function softplus_stable(x::Float64)
-    if x > 20.0
-        return x  # log(1 + e^x) ≈ x for large x
-    else
-        return log(1 + exp(x))
-    end
-end
+# Numerically stable softplus: one-liner ternary + log1p
+softplus_stable(x::Float64) = x > 20.0 ? x : log1p(exp(x))
 ```
 
 #### Tip 4: FFTのzero-padding
@@ -570,24 +481,17 @@ end
 畳み込みでFFTを使う際、circular convolutionを避けるため、ゼロパディング必須。
 
 ```julia
-# Correct FFT convolution
+# Correct FFT convolution (fused: no intermediate y_fft variable)
 function fft_conv_correct(K::Vector{Float64}, u::Vector{Float64})
     L_K, L_u = length(K), length(u)
     L_pad = L_K + L_u - 1
-
     K_pad = [K; zeros(L_pad - L_K)]
     u_pad = [u; zeros(L_pad - L_u)]
-
-    y_fft = fft(K_pad) .* fft(u_pad)
-    y = real.(ifft(y_fft))[1:L_u]
-
-    return y
+    real.(ifft(fft(K_pad) .* fft(u_pad)))[1:L_u]
 end
 ```
 
-:::message
-**進捗: 70% 完了** SSM/S4/Mambaの実装を完了。Julia数式美とRust並列化、そしてMath↔Code完全対応を体験した。次は実験で性能を確認。
-:::
+> **Note:** **進捗: 70% 完了** SSM/S4/Mambaの実装を完了。Julia数式美とRust並列化、そしてMath↔Code完全対応を体験した。次は実験で性能を確認。
 
 ---
 
@@ -597,30 +501,40 @@ end
 
 次の数式を声に出して読み、意味を説明せよ:
 
-:::details Q1: $h_t = \bar{A} h_{t-1} + \bar{B} u_t$
+<details><summary>Q1: $h_t = \bar{A} h_{t-1} + \bar{B} u_t$</summary>
+
 **読み**: "h sub t equals A bar times h sub t minus 1 plus B bar times u sub t"
 **意味**: 離散SSMの再帰更新式。隠れ状態$h_t$は、前時刻の状態$h_{t-1}$を行列$\bar{A}$で変換し、入力$u_t$を$\bar{B}$で投影した和。
-:::
 
-:::details Q2: $\bar{\mathcal{K}}_k = C \bar{A}^k \bar{B}$
+</details>
+
+<details><summary>Q2: $\bar{\mathcal{K}}_k = C \bar{A}^k \bar{B}$</summary>
+
 **読み**: "K bar sub k equals C times A bar to the power k times B bar"
 **意味**: SSM畳み込みカーネルの第$k$要素。$k$ステップ前の入力が現在の出力に与える影響度。$\bar{A}^k$により指数減衰。
-:::
 
-:::details Q3: $A_{\text{HiPPO}} = \Lambda - PQ^*$
+</details>
+
+<details><summary>Q3: $A_{\text{HiPPO}} = \Lambda - PQ^*$</summary>
+
 **読み**: "A HiPPO equals Lambda minus P Q dagger"
 **意味**: HiPPO行列のDPLR分解。$\Lambda$は対角(固有値)、$-PQ^*$は低ランク補正。$Q^*$は$Q$の共役転置。
-:::
 
-:::details Q4: $\Delta_t = \text{Softplus}(W_\Delta u_t + b_\Delta)$
+</details>
+
+<details><summary>Q4: $\Delta_t = \text{Softplus}(W_\Delta u_t + b_\Delta)$</summary>
+
 **読み**: "Delta sub t equals softplus of W Delta u sub t plus b Delta"
 **意味**: Mambaの入力依存時間ステップ幅。Softplusで$\Delta_t > 0$を保証。入力により離散化の細かさが変化。
-:::
 
-:::details Q5: $(A_2, B_2) \circ (A_1, B_1) = (A_2 A_1, A_2 B_1 + B_2)$
+</details>
+
+<details><summary>Q5: $(A_2, B_2) \circ (A_1, B_1) = (A_2 A_1, A_2 B_1 + B_2)$</summary>
+
 **読み**: "A two, B two circle A one, B one equals A two A one, A two B one plus B two"
 **意味**: Parallel Scanの結合演算子。2つの線形変換$(A, B)$を合成。$h_2 = A_2(A_1 h_0 + B_1) + B_2 = A_2A_1 h_0 + (A_2B_1 + B_2)$を表す。
-:::
+
+</details>
 
 ### 5.2 実装チャレンジ
 
@@ -638,14 +552,11 @@ using Flux  # For training (optional, can use manual gradient descent)
 function generate_copy_task(T::Int, n_samples::Int, vocab_size::Int=10)
     X = zeros(Float32, n_samples, T)
     Y = zeros(Int, n_samples)
-
     for i in 1:n_samples
-        signal = rand(1:vocab_size)
-        delay = rand(5:10)  # signal appears early
+        signal, delay = rand(1:vocab_size), rand(5:10)
         X[i, delay] = Float32(signal)
         Y[i] = signal
     end
-
     return X, Y
 end
 
@@ -656,109 +567,69 @@ struct SSMClassifier
 end
 
 function (model::SSMClassifier)(x::Matrix{Float32})
-    # x: (batch, seq_len)
+    # x: (batch, seq_len); RNN recurrence is inherently sequential
     batch_size, seq_len = size(x)
     d = length(model.ssm.B)
-
     logits = zeros(Float32, batch_size, size(model.W_out, 1))
-
-    for b in 1:batch_size
+    @inbounds for b in 1:batch_size
         h = zeros(Float32, d)
-        for t in 1:seq_len
+        @inbounds for t in 1:seq_len
             h = model.ssm.A * h + model.ssm.B * x[b, t]
         end
-        # Final hidden state → logits
-        logits[b, :] = model.W_out * h
+        logits[b, :] = model.W_out * h  # final hidden state → logits
     end
-
     return logits
 end
 
 # Train function (simplified SGD)
 function train_ssm_copy(model, X_train, Y_train, epochs::Int=50, lr::Float32=0.01f0)
     losses = Float32[]
-
     for epoch in 1:epochs
-        batch_size = size(X_train, 1)
-        total_loss = 0.0f0
-
-        for i in 1:batch_size
-            x = X_train[i:i, :]
-            y = Y_train[i]
-
-            # Forward
-            logits = model(x)
-            pred = argmax(logits[1, :])
-
-            # Simple 0-1 loss (for demo)
-            loss = pred == y ? 0.0f0 : 1.0f0
-            total_loss += loss
+        n = size(X_train, 1)
+        # 0-1 loss per sample (for demo)
+        total_loss = sum(1:n) do i
+            argmax(model(X_train[i:i, :])[1, :]) == Y_train[i] ? 0.0f0 : 1.0f0
         end
-
-        avg_loss = total_loss / batch_size
+        avg_loss = total_loss / n
         push!(losses, avg_loss)
-
-        if epoch % 10 == 0
-            acc = 1.0 - avg_loss
-            println("Epoch $epoch: Loss = $(round(avg_loss, digits=3)), Acc = $(round(acc*100, digits=1))%")
-        end
+        epoch % 10 == 0 && println("Epoch $epoch: Loss = $(round(avg_loss, digits=3)), Acc = $(round((1-avg_loss)*100, digits=1))%")
     end
-
     return losses
 end
 
 # Experiment: HiPPO vs Random
 function experiment_hippo_vs_random()
-    T = 500  # Long sequence
-    n_train, n_test = 1000, 200
-    d = 32
-    vocab_size = 10
+    T, n_train, n_test, d, vocab_size = 500, 1000, 200, 32, 10
+    Δ = 0.01
 
-    # Generate data
     X_train, Y_train = generate_copy_task(T, n_train, vocab_size)
-    X_test, Y_test = generate_copy_task(T, n_test, vocab_size)
+    X_test,  Y_test  = generate_copy_task(T, n_test,  vocab_size)
 
     # Model 1: HiPPO init
     A_hippo, B_hippo, C_hippo = hippo_legs_init(d)
-    Δ = 0.01
-    A_bar_hippo, B_bar_hippo = discretize_zoh(A_hippo, B_hippo, Δ)
-    ssm_hippo = DiscreteSSM(A_bar_hippo, B_bar_hippo, C_hippo, 0.0)
-    W_out_hippo = randn(Float32, vocab_size, d) * 0.01f0
-    model_hippo = SSMClassifier(ssm_hippo, W_out_hippo)
+    A_bar_h, B_bar_h = discretize_zoh(A_hippo, B_hippo, Δ)
+    model_hippo  = SSMClassifier(DiscreteSSM(A_bar_h, B_bar_h, C_hippo, 0.0),
+                                 randn(Float32, vocab_size, d) * 0.01f0)
 
     # Model 2: Random init
-    A_random = randn(Float64, d, d) * 0.01
-    B_random = randn(Float64, d) * 0.1
-    C_random = randn(Float64, d) * 0.1
-    A_bar_random, B_bar_random = discretize_zoh(A_random, B_random, Δ)
-    ssm_random = DiscreteSSM(A_bar_random, B_bar_random, C_random, 0.0)
-    W_out_random = randn(Float32, vocab_size, d) * 0.01f0
-    model_random = SSMClassifier(ssm_random, W_out_random)
+    A_rand, B_rand, C_rand = randn(Float64, d, d)*0.01, randn(Float64, d)*0.1, randn(Float64, d)*0.1
+    A_bar_r, B_bar_r = discretize_zoh(A_rand, B_rand, Δ)
+    model_random = SSMClassifier(DiscreteSSM(A_bar_r, B_bar_r, C_rand, 0.0),
+                                 randn(Float32, vocab_size, d) * 0.01f0)
 
     println("Training HiPPO-initialized SSM...")
-    losses_hippo = train_ssm_copy(model_hippo, X_train, Y_train, 50)
-
+    losses_hippo  = train_ssm_copy(model_hippo,  X_train, Y_train, 50)
     println("\nTraining Random-initialized SSM...")
     losses_random = train_ssm_copy(model_random, X_train, Y_train, 50)
 
-    # Test accuracy
-    function test_accuracy(model, X, Y)
-        correct = 0
-        for i in 1:size(X, 1)
-            logits = model(X[i:i, :])
-            pred = argmax(logits[1, :])
-            if pred == Y[i]
-                correct += 1
-            end
-        end
-        return correct / size(X, 1)
-    end
+    # Test accuracy using count + do-block
+    test_accuracy(model, X, Y) = count(i -> argmax(model(X[i:i, :])[1, :]) == Y[i], 1:size(X,1)) / size(X,1)
 
-    acc_hippo = test_accuracy(model_hippo, X_test, Y_test)
+    acc_hippo  = test_accuracy(model_hippo,  X_test, Y_test)
     acc_random = test_accuracy(model_random, X_test, Y_test)
 
     println("\n=== Results ===")
-    println("HiPPO init: Test Acc = $(round(acc_hippo*100, digits=1))%")
+    println("HiPPO init: Test Acc = $(round(acc_hippo*100,  digits=1))%")
     println("Random init: Test Acc = $(round(acc_random*100, digits=1))%")
     println("Improvement: $(round((acc_hippo - acc_random)*100, digits=1))%")
 
@@ -793,8 +664,9 @@ plot([losses_h, losses_r], label=["HiPPO" "Random"],
 using MLDatasets
 function load_cifar10_sequential()
     train_x, train_y = CIFAR10.traindata(Float32)
-    test_x, test_y = CIFAR10.testdata(Float32)
-    reshape(train_x, :, size(train_x, 4))', train_y, reshape(test_x, :, size(test_x, 4))', test_y
+    test_x,  test_y  = CIFAR10.testdata(Float32)
+    reshape(train_x, :, size(train_x, 4))', train_y,
+    reshape(test_x,  :, size(test_x,  4))', test_y
 end
 
 struct S4Classifier
@@ -804,15 +676,11 @@ end
 
 function (model::S4Classifier)(x::Matrix{Float32})
     h = x
+    # apply s4_forward to each row (batch dimension) via mapslices
     for layer in model.layers
-        h_new = zeros(Float32, size(h))
-        for b in 1:size(h, 1)
-            h_new[b, :] = s4_forward(layer, h[b, :], size(h, 2))
-        end
-        h = h_new
+        h = Float32.(mapslices(v -> s4_forward(layer, Float64.(v), length(v)), h; dims=2))
     end
-    h_avg = mean(h, dims=2)[:, 1]
-    model.W_out * h_avg'
+    model.W_out * vec(mean(h; dims=2))'
 end
 ```
 
@@ -823,12 +691,14 @@ end
 ```julia
 using BenchmarkTools
 function sequential_scan(A::Vector{Matrix{Float64}}, B::Vector{Vector{Float64}})
-    L, d = length(A), length(B[1])
-    h = [zeros(d)]
-    for t in 1:L
-        push!(h, A[t] * h[end] + B[t])
+    d = length(B[1])
+    h = zeros(d)
+    states = similar(B)  # preallocate output
+    @inbounds for t in eachindex(A)
+        h = A[t] * h + B[t]
+        states[t] = copy(h)
     end
-    h[2:end]
+    states
 end
 
 function benchmark_scans()
@@ -854,12 +724,12 @@ function visualize_eigenvalue_decay()
 
     function decay_curve(λ::Vector{Float64})
         A_bar = exp(diagm(λ) * Δ)
-        h = ones(Float64, d) ./ d
+        h = fill(1.0/d, d)  # fill is cleaner than ones ./ d
         [begin h = A_bar * h; norm(h) end for _ in 1:T]
     end
 
-    norms_slow = decay_curve(λ_slow)
-    norms_fast = decay_curve(λ_fast)
+    norms_slow  = decay_curve(λ_slow)
+    norms_fast  = decay_curve(λ_fast)
     norms_hippo = decay_curve(λ_hippo)
 
     plot([norms_slow, norms_fast, norms_hippo],
@@ -883,15 +753,10 @@ function visualize_mamba_selectivity()
     # Synthetic input: important tokens at positions 10, 50, 90
     L = 100
     u = zeros(Float32, L)
-    u[10] = 5.0
-    u[50] = 3.0
-    u[90] = 4.0
+    u[[10, 50, 90]] .= [5.0, 3.0, 4.0]  # multi-index broadcast assign
 
-    # Mamba parameters (simplified)
-    W_Δ = 0.5
-    b_Δ = -1.0
-
-    Δ = softplus.(W_Δ * u .+ b_Δ)
+    W_Δ, b_Δ = 0.5f0, -1.0f0
+    Δ = @. softplus(W_Δ * u + b_Δ)  # @. broadcasts entire expression
 
     plot(u, label="Input u_t", xlabel="Time step", ylabel="Value",
          title="Mamba Selective SSM: Δ_t adapts to input", linewidth=2)
@@ -918,9 +783,12 @@ visualize_mamba_selectivity()
 
 全てチェックできたら、SSM理論をマスターしている。
 
-:::message
-**進捗: 85% 完了** 実験とテストを完了。自己診断でSSM理論の習得を確認した。発展トピックへ。
-:::
+> **Note:** **進捗: 85% 完了** 実験とテストを完了。自己診断でSSM理論の習得を確認した。発展トピックへ。
+
+> Progress: 85%
+> **理解度チェック**
+> 1. Julia実装でHiPPO-LeGS行列を生成する際、$A_{nk} = -(2n+1)^{1/2}(2k+1)^{1/2}$ $(n>k)$ の計算で数値的に気をつける点は何か？
+> 2. MambaのSelective SSMで、入力$u_t$からゲート$\Delta_t$を生成するLinear層の役割を述べよ。
 
 ---
 
@@ -991,9 +859,11 @@ $$
 
 **Softmaxの代わりに、SSMは指数減衰**($\bar{A}^{i-j}$)を使う。これが「Attention ≈ SSM」の数学的意味。
 
-:::details 完全な証明は?
+<details><summary>完全な証明は?</summary>
+
 SSD論文[^7]のTheorem 3.1参照。Semi-Separable行列の因数分解定理と、SSMのカーネル表現を組み合わせる。鍵はWoodbury恒等式と、Cauchy kernel。第17回で詳述。
-:::
+
+</details>
 
 **実用的意味**: MambaとAttentionは「同じ計算を異なる方法で実行」している。どちらを使うかは、実装の便利さ・ハードウェア・タスクに依存。理論的には等価。
 
@@ -1054,21 +924,6 @@ graph LR
 
 Vim[^8]はVMambaの変種。双方向SSM(forward + backward scan)を使用。
 
-```python
-class VimBlock:
-    def forward(self, x):
-        # Forward scan
-        h_fwd = mamba_ssm_forward(flatten(x))
-
-        # Backward scan
-        h_bwd = mamba_ssm_backward(flatten(x)[::-1])
-
-        # Merge
-        h = concat([h_fwd, h_bwd[::-1]], dim=-1)
-
-        return reshape(h, (B, H, W, C*2))
-```
-
 双方向により、長距離依存をより効果的に捉える。
 
 **Vimの性能**: ImageNetで83.7% (VMamba並み)。
@@ -1107,14 +962,11 @@ function hilbert_index(i::Int, j::Int, order::Int)
 end
 
 function scan_hilbert(image::Array{Float32, 3})
-    H, W, C = size(image)
-    order = Int(log2(max(H, W)))
-
-    indices = [(i, j) for i in 1:H, j in 1:W]
-    sort!(indices, by=ij -> hilbert_index(ij[1], ij[2], order))
-
-    sequence = [image[i, j, :] for (i, j) in indices]
-    return hcat(sequence...)'  # (H*W, C)
+    H, W, _ = size(image)
+    order   = Int(log2(max(H, W)))
+    indices = vec([(i, j) for i in 1:H, j in 1:W])  # vec flattens 2D array
+    sort!(indices; by=((i, j),) -> hilbert_index(i, j, order))
+    hcat([image[i, j, :] for (i, j) in indices]...)'  # (H*W, C)
 end
 ```
 
@@ -1263,27 +1115,6 @@ graph LR
 
 **実装例(疑似コード)**:
 
-```python
-def long_context_hybrid(tokens, num_gpus=100):
-    chunk_size = len(tokens) // num_gpus
-    h_global = zeros(d_state)
-
-    outputs = []
-    for gpu_id in range(num_gpus):
-        chunk = tokens[gpu_id * chunk_size : (gpu_id+1) * chunk_size]
-
-        # Local Attention within chunk
-        attn_out = attention(chunk, chunk, chunk)
-
-        # SSM for chunk, conditioned on h_global
-        ssm_out, h_new = mamba_ssm(attn_out, h_prev=h_global)
-
-        outputs.append(ssm_out)
-        h_global = h_new  # Pass to next GPU
-
-    return concatenate(outputs)
-```
-
 **実現例**: Google Gemini 1.5(2M context)は、おそらくこの種のHybrid + Ring構成。
 
 #### Efficient Fine-tuning: SSM版LoRA
@@ -1313,32 +1144,6 @@ $$
 $\Delta A = B_A L_A^\top$(低ランク), $\Delta B = b_B l_B^\top$, $\Delta C = c_C l_C^\top$。
 
 **実装**:
-
-```python
-class LoRAMamba(nn.Module):
-    def __init__(self, d_model, d_state, rank=8):
-        self.mamba_base = MambaLayer(d_model, d_state)  # Frozen
-
-        # LoRA parameters
-        self.lora_A_B = nn.Parameter(torch.randn(d_state, rank))
-        self.lora_A_A = nn.Parameter(torch.randn(rank, d_state))
-
-        self.lora_B_b = nn.Parameter(torch.randn(d_state, rank))
-        self.lora_B_l = nn.Parameter(torch.randn(rank, d_model))
-
-        # Similar for C
-
-    def forward(self, x):
-        # Compute LoRA deltas
-        delta_A = self.lora_A_B @ self.lora_A_A
-        delta_B = self.lora_B_b @ self.lora_B_l
-
-        # Apply adapted SSM
-        A_adapted = self.mamba_base.A + delta_A
-        B_adapted = self.mamba_base.B + delta_B
-
-        return mamba_forward_with_params(x, A_adapted, B_adapted, ...)
-```
 
 **効果**: パラメータ数0.5%で、Full fine-tuning性能の95%を達成(経験的)。
 
@@ -1380,12 +1185,14 @@ class LoRAMamba(nn.Module):
 
 これらは2025-2026の活発な研究領域。解明されれば、次世代アーキテクチャの設計指針となる。
 
-:::details 論文推薦
+<details><summary>論文推薦</summary>
+
 - **S4**: Gu+ (2021), "Efficiently Modeling Long Sequences with Structured State Spaces" [^2]
 - **Mamba**: Gu & Dao (2023), "Mamba: Linear-Time Sequence Modeling with Selective State Spaces" [^3]
 - **HiPPO**: Gu+ (2020), "HiPPO: Recurrent Memory with Optimal Polynomial Projections" [^1]
 - **SSM Survey**: "From S4 to Mamba: A Comprehensive Survey" (2025) [^11]
-:::
+
+</details>
 
 ### 6.6 SSMの応用領域
 
@@ -1410,14 +1217,8 @@ temps = Float32.(weather.temperature)  # (N,)
 
 # Prepare sequences (sliding window)
 window_size = 365  # 1 year
-X, Y = [], []
-for i in 1:(length(temps) - window_size)
-    push!(X, temps[i:i+window_size-1])
-    push!(Y, temps[i+window_size])
-end
-
-X = hcat(X...)'  # (num_samples, 365)
-Y = hcat(Y...)'
+X = hcat([temps[i:i+window_size-1] for i in 1:(length(temps)-window_size)]...)'
+Y = hcat([temps[i+window_size]      for i in 1:(length(temps)-window_size)]...)'
 
 # Train SSM
 d_state = 64
@@ -1427,17 +1228,13 @@ A_bar, B_bar = discretize_zoh(A_hippo, B_hippo, Δ)
 
 ssm = DiscreteSSM(A_bar, B_bar, C_hippo, 0.0)
 
-# Forward pass (simplified training)
-function ssm_forecast(ssm, x::Vector{Float32})
-    h = zeros(Float64, length(ssm.B))
-    for t in 1:length(x)
-        h = ssm.A * h + ssm.B * x[t]
-    end
-    return dot(ssm.C, h)  # Forecast next value
-end
+# foldl one-liner: run the recurrence, then project
+ssm_forecast(ssm, x::AbstractVector{Float32}) =
+    dot(ssm.C, foldl((h, uₜ) -> ssm.A * h + ssm.B * uₜ, x;
+                     init=zeros(Float64, length(ssm.B))))
 
 # Evaluate
-predictions = [ssm_forecast(ssm, X[i, :]) for i in 1:size(X, 1)]
+predictions = [ssm_forecast(ssm, X[i, :]) for i in axes(X, 1)]
 mse = mean((predictions .- Y) .^ 2)
 println("MSE: $mse")
 ```
@@ -1455,19 +1252,6 @@ println("MSE: $mse")
 3. **音声強調**: ノイズ除去、超解像
 
 **S4-WaveNetの構造**:
-
-```python
-class S4WaveNet(nn.Module):
-    def __init__(self, num_layers=30, d_model=256, d_state=64):
-        self.layers = [S4Layer(d_model, d_state) for _ in range(num_layers)]
-        self.output = nn.Linear(d_model, 1)  # Predict next sample
-
-    def forward(self, x):
-        # x: (batch, seq_len) waveform
-        for layer in self.layers:
-            x = layer(x) + x  # Residual
-        return self.output(x)
-```
 
 **性能**: WaveNet(CNN)と同等の音質、10x高速訓練(並列化)、推論も高速(再帰)。
 
@@ -1489,28 +1273,6 @@ class S4WaveNet(nn.Module):
 
 **実装のポイント**:
 
-```python
-# DNA tokenization
-DNA_VOCAB = {"A": 0, "C": 1, "G": 2, "T": 3, "N": 4}
-
-def tokenize_dna(sequence: str):
-    return [DNA_VOCAB.get(base, 4) for base in sequence.upper()]
-
-# Long-range regulatory element detection
-class GenomicSSM:
-    def forward(self, tokens):
-        # tokens: (batch, 1_000_000) — 1M bp
-        embeddings = self.embed(tokens)  # (batch, 1M, d_model)
-
-        # SSM layers
-        for ssm_layer in self.ssm_layers:
-            embeddings = ssm_layer(embeddings)
-
-        # Classify regulatory regions
-        logits = self.classifier(embeddings)  # (batch, 1M, num_classes)
-        return logits
-```
-
 #### 6.6.4 強化学習
 
 **方策(Policy)のモデル化**にSSM。観測履歴→行動の写像を長距離依存込みで学習。
@@ -1531,216 +1293,10 @@ class GenomicSSM:
 
 **実装例**:
 
-```python
-class S4Policy(nn.Module):
-    def __init__(self, obs_dim, action_dim, d_state=64):
-        self.s4_layers = [S4Layer(obs_dim, d_state) for _ in range(4)]
-        self.policy_head = nn.Linear(obs_dim, action_dim)
-
-    def forward(self, obs_sequence):
-        # obs_sequence: (batch, seq_len, obs_dim)
-        h = obs_sequence
-        for layer in self.s4_layers:
-            h = layer(h)
-
-        # Last hidden state → action distribution
-        return self.policy_head(h[:, -1, :])
-```
-
-### 6.7 SSMベンチマーク詳細: Long Range Arena
-
-**Long Range Arena (LRA)**[^5]は、長距離依存を測定する標準ベンチマーク。6タスク。
-
-#### Task 1: ListOps (系列長 2K)
-
-**タスク**: 入れ子リスト演算の結果を予測。
-
-例: `[MAX 4 [MIN 2 3] [MAX 1 5]]` → `5`
-
-**難しさ**: ネストが深い(最大10層)。全トークンの依存関係を追跡必要。
-
-**結果**:
-
-| Model | Accuracy |
-|:------|:---------|
-| Transformer | 36.4% |
-| S4 | 58.3% |
-| **Mamba** | **59.7%** |
-
-TransformerはListOpsで壊滅的。長距離の入れ子を追えない。SSMは勝利。
-
-#### Task 2: Text Classification (系列長 4K)
-
-**タスク**: IMDb映画レビュー(4K tokens)の感情分類。
-
-**難しさ**: レビューの最初と最後で意見が逆転する場合あり。全体を見渡す必要。
-
-**結果**:
-
-| Model | Accuracy |
-|:------|:---------|
-| Transformer | 64.3% |
-| S4 | 86.8% |
-| **Mamba** | **87.1%** |
-
-Transformerは4Kで性能劣化。SSMは長文を安定処理。
-
-#### Task 3: Retrieval (系列長 4K)
-
-**タスク**: 2つの文書(各2K tokens)が同じトピックか判定。
-
-**難しさ**: 文書間の対応を、4K離れたトークン間で見つける。
-
-**結果**:
-
-| Model | Accuracy |
-|:------|:---------|
-| Transformer | 57.5% |
-| S4 | 90.5% |
-| **Mamba** | **90.9%** |
-
-SSMの圧勝。長距離マッチングに強い。
-
-#### Task 4: Image Classification (系列長 1K)
-
-**タスク**: CIFAR-10画像(32×32×3 = 1024 pixels)を1Dシーケンスとして分類。
-
-**難しさ**: 2D構造を1D走査で保持。
-
-**結果**:
-
-| Model | Accuracy |
-|:------|:---------|
-| Transformer | 89.3% |
-| S4 | 88.7% |
-| **Mamba** | 89.1% |
-
-Transformerが僅差で勝利。画像は全ピクセル参照(Attention)が若干有利。SSMも健闘。
-
-#### Task 5: Pathfinder (系列長 1K)
-
-**タスク**: 画像中の2点が線で繋がっているか判定。
-
-**難しさ**: 長い曲線をたどる必要。
-
-**結果**:
-
-| Model | Accuracy |
-|:------|:---------|
-| Transformer | 71.5% |
-| S4 | 86.1% |
-| **Mamba** | 86.4% |
-
-SSMが勝利。経路追跡は長距離依存の典型。
-
-#### Task 6: Path-X (系列長 16K)
-
-**タスク**: Pathfinderの16倍長バージョン(128×128画像)。
-
-**難しさ**: 16K pixelsの系列。Transformerはメモリ不足で実行不可能。
-
-**結果**:
-
-| Model | Accuracy |
-|:------|:---------|
-| Transformer | **Fail** (OOM) |
-| **S4** | **88.1%** |
-| Mamba | 88.5% |
-
-TransformerはPath-Xを解けない(16K²のAttention行列 = 1GB)。SSMのみ実行可能。
-
-**総合評価**:
-
-- **Transformer**: 短系列(1K)では最強、長系列(4K+)で崩壊
-- **S4**: 全タスクで安定、特に超長系列(16K)で唯一の選択肢
-- **Mamba**: S4をほぼ全てのタスクで上回る。選択性の効果
-
-### 6.8 教科書・リソース
-
-#### 主要教科書
-
-| 書籍 | 著者 | 内容 | レベル |
-|:-----|:-----|:-----|:-------|
-| **Modern Control Engineering** | Ogata (2009) | 制御理論の古典。状態空間の数学的基礎 | 学部〜院 |
-| **Linear System Theory and Design** | Chen (1998) | SSMの数学。可制御性、可観測性 | 院 |
-| **Deep Learning** | Goodfellow+ (2016) | RNN/LSTM章。SSMとの対比に有用 | 学部〜院 |
-| **Dive into Deep Learning** | Zhang+ (2023) | 最新版にSSM章あり(2025 edition) | 学部 |
-
-#### オンラインリソース
-
-| 資源 | 説明 | URL |
-|:-----|:-----|:----|
-| **公式実装** | state-spaces/mamba | [GitHub](https://github.com/state-spaces/mamba) |
-| **Annotated S4** | Rush解説。実装付き | [Annotated S4](https://srush.github.io/annotated-s4/) |
-| **Long Range Arena** | Benchmark suite | [GitHub](https://github.com/google-research/long-range-arena) |
-| **Hazy Research Blog** | Gu研究室のブログ。HiPPO/S4の直感的解説 | [Blog](https://hazyresearch.stanford.edu/blog) |
-| **Together AI Tech Report** | Mamba/SSMの産業応用 | [Together](https://together.ai/blog) |
-| **SSM Survey (2025)** | S4→Mambaの包括的サーベイ | [arXiv:2503.18970](https://arxiv.org/abs/2503.18970) |
-
-#### 実装リポジトリ
-
-| Repo | 言語 | 特徴 |
-|:-----|:-----|:-----|
-| [state-spaces/mamba](https://github.com/state-spaces/mamba) | Python/CUDA | 公式。Tritonカーネル |
-| [state-spaces/s4](https://github.com/state-spaces/s4) | Python/JAX | S4原論文の実装 |
-| [mamba-minimal](https://github.com/johnma2006/mamba-minimal) | Python | 教育的最小実装(300行) |
-| [mamba.rs](https://github.com/huggingface/mamba.rs) | Rust | Hugging Face Rustポート |
-| [Mamba.jl](https://github.com/CarpeAI/Mamba.jl) | Julia | Julia実装(コミュニティ) |
-
-#### 論文読解ガイド
-
-**S4を読む順序**:
-
-1. **HiPPO論文**[^1] (2020): 長距離記憶の理論的基盤を理解
-2. **S4論文**[^2] (2021): DPLR分解とFFT高速化
-3. **Annotated S4**: 実装と数式の対応を追う
-4. **S4D論文** (2022): 対角近似の簡略化
-5. **Mamba論文**[^3] (2023): Selective SSMへの進化
-
-**Mambaを読む順序**:
-
-1. **S4を先に理解** (上記)
-2. **Mamba論文**[^3]: Selective SSMの動機と設計
-3. **Hardware-aware scanのAppendix**: CUDAカーネルの詳細
-4. **Mamba-2/SSD論文**[^7]: AttentionとSSMの等価性
-5. **公式実装**: Tritonコードを読む
-
-**つまずきポイントと対策**:
-
-| つまずき | 対策 |
-|:---------|:-----|
-| 行列指数関数$e^{At}$ | 第2回線形代数IIを復習。テイラー展開・対角化 |
-| 畳み込みカーネル$\bar{\mathcal{K}}$ | 離散畳み込みの定義を確認。FFTの原理(第4回) |
-| HiPPO多項式近似 | 直交多項式(Legendre)の性質を調べる |
-| DPLR分解 | Woodbury恒等式、低ランク行列の性質(第3回SVD) |
-| Parallel Scan | 結合律の確認。prefix sumアルゴリズムの類推 |
-
-### 6.9 用語集(完全版)
-
-| 用語 | 英語 | 定義 |
-|:-----|:-----|:-----|
-| **SSM** | State Space Model | 状態空間モデル。隠れ状態$h_t$を介して入出力を変換 |
-| **HiPPO** | High-order Polynomial Projection Operators | 多項式射影演算子。長距離記憶の最適初期化理論 |
-| **DPLR** | Diagonal Plus Low-Rank | 対角+低ランク分解。$A = \Lambda - PQ^*$ |
-| **ZOH** | Zero-Order Hold | 離散化手法。区間内で入力を定数と仮定 |
-| **Selective SSM** | Selective State Space Model | 入力依存パラメータ$\Delta_t, B_t, C_t$を持つSSM |
-| **Parallel Scan** | Parallel Prefix Scan | 結合的演算の並列累積計算。$O(\log N)$深度 |
-| **LTI** | Linear Time-Invariant | 線形時不変システム。パラメータが時間で変化しない |
-| **Causal Masking** | Causal Masking | 未来を見ない制約。$i < j$で$M_{ij} = 0$ |
-| **Semi-Separable Matrix** | Semi-Separable Matrix | 下三角が低ランク構造の行列 |
-| **Toeplitz Matrix** | Toeplitz Matrix | 対角線上の値が一定の行列。畳み込みカーネル |
-| **Cauchy Kernel** | Cauchy Kernel | $K(\omega) = \sum_i \frac{c_i}{\omega - \lambda_i}$。S4のFFT高速化 |
-| **Recurrent Form** | Recurrent Form | SSMの再帰形態。$h_t = \bar{A}h_{t-1} + \bar{B}u_t$ |
-| **Convolutional Form** | Convolutional Form | SSMの畳み込み形態。$y = \bar{\mathcal{K}} * u$ |
-| **Chunk-wise Processing** | Chunk-wise Processing | 系列を小さなchunkに分割して処理。Mamba-2 |
-| **Ring Attention** | Ring Attention | 分散Attention。各GPUがchunkを持ち、ring状に通信 |
-| **LoRA** | Low-Rank Adaptation | 低ランク適応。ファインチューニングの効率化 |
-| **Content-based Addressing** | Content-based Addressing | 内容に基づくアドレッシング。Attention特有 |
-| **Position-based Addressing** | Position-based Addressing | 位置に基づくアドレッシング。線形RNN特有 |
-
-:::message
-**進捗: 95% 完了** SSMの最前線と研究動向を把握。次は振り返りと次回予告。
-:::
+> Progress: 95%
+> **理解度チェック**
+> 1. Mamba-2のSSD理論でAttention行列がSemi-Separable行列と等価である条件は何か？
+> 2. S5（Simplified S4）がS4より実装がシンプルになった理由を、対角化の観点から説明せよ。
 
 ---
 
@@ -1758,13 +1314,16 @@ TransformerはPath-Xを解けない(16K²のAttention行列 = 1GB)。SSMのみ�
 
 ### 10.3 よくある質問(FAQ)
 
-:::details Q1: SSMはTransformerを完全に置き換えるか？
+<details><summary>Q1: SSMはTransformerを完全に置き換えるか？</summary>
+
 A: 現時点では**No**。言語モデリングではMamba ≈ Transformer、画像ではAttention優位。ただしHybrid(第18回)が主流になる可能性。タスク依存。
 
 **詳細**: AttentionのContent-based addressingは、Few-shot学習やIn-context learningで本質的。SSMのPosition-based addressingでは完全に代替できない。ただし、多くのタスク(言語モデリング、時系列予測)ではSSMで十分な性能が出ている。
-:::
 
-:::details Q2: MambaのSelective SSMはLSTMのゲートと同じ？
+</details>
+
+<details><summary>Q2: MambaのSelective SSMはLSTMのゲートと同じ？</summary>
+
 A: 哲学は似ている(選択的記憶)が、メカニズムは異なる。LSTMは非線形ゲート($\sigma, \tanh$)、Mambaは線形SSMのパラメータを入力依存にする。Mambaの方がFFT訓練と再帰推論を両立しやすい。
 
 **LSTMとMambaの対応**:
@@ -1776,9 +1335,11 @@ A: 哲学は似ている(選択的記憶)が、メカニズムは異なる。LST
 | Output gate $o_t = \sigma(W_o [h_{t-1}, x_t])$ | $C_t = W_C u_t$ (読み出し強度) |
 
 Mambaは線形 → 畳み込み形態で並列訓練可能。LSTMは非線形 → 逐次訓練のみ。
-:::
 
-:::details Q3: Parallel Scanは本当に速い？
+</details>
+
+<details><summary>Q3: Parallel Scanは本当に速い？</summary>
+
 A: GPU上では**Yes**。CPUでは並列度が限られるため効果薄。CUDAカーネル最適化が必須。Mambaの公式実装はTriton/CUDAで書かれている。
 
 **ベンチマーク(系列長10K, d=64)**:
@@ -1791,9 +1352,11 @@ A: GPU上では**Yes**。CPUでは並列度が限られるため効果薄。CUDA
 | **Parallel scan(optimized)** | **GPU** | **2.5** | **4M** |
 
 GPU + 最適化カーネルで160x高速化。これがMamba訓練の鍵。
-:::
 
-:::details Q4: なぜ固有値が負なら安定？
+</details>
+
+<details><summary>Q4: なぜ固有値が負なら安定？</summary>
+
 A: $h_t = \bar{A}^t h_0$で、$\bar{A} = e^{A\Delta}$。$A$の固有値$\lambda < 0$なら$e^{\lambda \Delta t} \to 0$ as $t \to \infty$。状態が減衰→安定。正なら爆発→不安定。
 
 **数値例**:
@@ -1809,46 +1372,17 @@ A_bar = exp(λ * Δ)  # exp(-0.2) ≈ 0.8187
 ```
 
 HiPPOの固有値$-1, -2, -3, \ldots$は、異なる減衰率 → 多様な時間スケール。
-:::
 
-:::details Q5: S4/Mambaを自分のタスクで使うには？
-A: Hugging Face Transformersにmamba実装あり。`MambaForCausalLM`で言語モデル訓練可能。カスタムタスクは公式リポジトリ[^6]のexamplesを参照。
+</details>
 
-**Hugging Face使用例**:
+<details><summary>Q5: S4/Mambaを自分のタスクで使うには？</summary>
 
-```python
-from transformers import MambaForCausalLM, AutoTokenizer
+A: Hugging Face TransformersにMamba実装がある。`MambaForCausalLM`で言語モデル訓練可能。カスタムタスクは公式リポジトリ[^6]のexamplesを参照。
 
-model = MambaForCausalLM.from_pretrained("state-spaces/mamba-130m")
-tokenizer = AutoTokenizer.from_pretrained("EleutherAI/gpt-neox-20b")
+</details>
 
-# Inference
-inputs = tokenizer("The future of AI is", return_tensors="pt")
-outputs = model.generate(**inputs, max_length=50)
-print(tokenizer.decode(outputs[0]))
-```
+<details><summary>Q6: S4とMambaの実装の違いは？</summary>
 
-**カスタムタスク(時系列予測)**:
-
-```python
-from mamba_ssm import Mamba
-
-class TimeSeriesSSM(nn.Module):
-    def __init__(self, input_dim, d_model=256, d_state=16, num_layers=4):
-        self.embed = nn.Linear(input_dim, d_model)
-        self.mamba_layers = [Mamba(d_model, d_state) for _ in range(num_layers)]
-        self.output = nn.Linear(d_model, 1)
-
-    def forward(self, x):
-        # x: (batch, seq_len, input_dim)
-        x = self.embed(x)
-        for layer in self.mamba_layers:
-            x = layer(x) + x  # Residual
-        return self.output(x[:, -1, :])  # Predict next value
-```
-:::
-
-:::details Q6: S4とMambaの実装の違いは？
 A: **S4**は固定パラメータ$A, B, C$を使い、畳み込み形態で訓練。**Mamba**は入力依存$\Delta_t, B_t, C_t$を使い、Parallel Scanで訓練。
 
 **実装の複雑さ**:
@@ -1861,9 +1395,11 @@ A: **S4**は固定パラメータ$A, B, C$を使い、畳み込み形態で訓�
 | コード行数 | ~500 | ~1500 |
 
 Mambaは高性能だが実装コストも高い。教育目的ならS4から始めるのが良い。
-:::
 
-:::details Q7: SSMは他のモダリティ(画像・音声)でも使える？
+</details>
+
+<details><summary>Q7: SSMは他のモダリティ(画像・音声)でも使える？</summary>
+
 A: **Yes**。ただし1Dシーケンス化が必要。
 
 **画像**: Raster/Hilbert曲線で1D化 → SSM適用。Vision Mamba(VMamba)は4方向スキャンを使用。性能はViTに迫るが、まだAttenin優位。
@@ -1873,9 +1409,11 @@ A: **Yes**。ただし1Dシーケンス化が必要。
 **動画**: フレーム系列として処理。空間的Attentionとの組み合わせ(Hybrid)が有望。
 
 **ポイントコラウド**: 3D点群を1D化(z-order curve) → SSM。研究段階。
-:::
 
-:::details Q8: SSMの訓練はTransformerより速い？
+</details>
+
+<details><summary>Q8: SSMの訓練はTransformerより速い？</summary>
+
 A: **訓練速度は同等〜やや速い**。推論はSSMが圧倒的に速い。
 
 **ベンチマーク(言語モデリング, 125M params)**:
@@ -1887,9 +1425,11 @@ A: **訓練速度は同等〜やや速い**。推論はSSMが圧倒的に速い�
 | **Mamba** | **45h** | **11.5K** | **16GB** |
 
 Mambaは訓練もやや速く、推論は5倍速。メモリも削減。
-:::
 
-:::details Q9: HiPPO初期化は必須？
+</details>
+
+<details><summary>Q9: HiPPO初期化は必須？</summary>
+
 A: 長距離依存タスク(LRA Path-X等)では**ほぼ必須**。短距離タスクではランダム初期化でも可。
 
 **実験結果(コピータスク, T=1000)**:
@@ -1900,9 +1440,11 @@ A: 長距離依存タスク(LRA Path-X等)では**ほぼ必須**。短距離タ�
 | **HiPPO** | **87%** | **50** |
 
 HiPPOは長距離記憶の理論的保証があり、訓練も安定・高速。
-:::
 
-:::details Q10: SSMは計算複雑性理論で何ができる？
+</details>
+
+<details><summary>Q10: SSMは計算複雑性理論で何ができる？</summary>
+
 A: **チューリング完全性**は証明されていない(Transformerは条件付きで証明済み[^15])。
 
 **現状の理解**:
@@ -1912,214 +1454,8 @@ A: **チューリング完全性**は証明されていない(Transformerは条�
 - Mamba-2/SSDは「Attention ≈ SSM」を示した → 理論的等価性の証明
 
 **未解決問題**: MambaがTransformerと同等のタスクを解けるか？ 実証的には**Yes**だが、理論的証明は未完。
-:::
 
-### 10.4 学習スケジュール(1週間プラン)
-
-| Day | 内容 | 時間 | チェックリスト |
-|:----|:-----|:-----|:---------------|
-| Day 1 | Zone 0-2(導入・直感) | 1h | ☐ SSM再帰形態を実装 ☐ 固有値と減衰の関係を理解 |
-| Day 2 | Zone 3.1-3.3(連続SSM・離散化・畳み込み) | 2h | ☐ ZOH離散化を導出 ☐ FFT畳み込みを実装 |
-| Day 3 | Zone 3.4-3.5(HiPPO・S4) | 2h | ☐ HiPPO行列を構築 ☐ DPLR分解を理解 |
-| Day 4 | Zone 3.6-3.8(Mamba理論) | 2h | ☐ Selective SSMを導出 ☐ Parallel Scanを実装 |
-| Day 5 | Zone 4(Julia/Rust実装) | 3h | ☐ Julia S4実装 ☐ Rust scanカーネル |
-| Day 6 | Zone 5(実験・テスト) | 2h | ☐ LRA実験 ☐ HiPPO vs Random比較 |
-| Day 7 | Zone 6-7(発展・復習) | 2h | ☐ Mamba-2を理解 ☐ 全体を振り返り |
-
-**Total**: 14時間。1日2時間ペースで1週間。
-
-#### 詳細スケジュール(時間別)
-
-**Week 1: 理論編(前半)**
-
-| 時間帯 | 月 | 火 | 水 | 木 | 金 | 土 | 日 |
-|:-------|:---|:---|:---|:---|:---|:---|:---|
-| 朝(1h) | Z0-1 | Z3.1 | Z3.4 | Z3.6 | 復習 | Z4.1-3 | Z6.1-2 |
-| 夜(1h) | Z2 | Z3.2-3 | Z3.5 | Z3.7-8 | Z5.1-2 | Z4.4-7 | Z7+総復習 |
-
-**進捗確認**:
-
-- **Day 3終了時**: SSM理論の70%完了。HiPPO/S4を理解できていればOK。
-- **Day 5終了時**: 実装力の80%完了。Juliaで動くコードがあればOK。
-- **Day 7終了時**: 全体の100%完了。論文を読む準備完了。
-
-#### 挫折しないためのTips
-
-1. **数式は手で書く**: 読むだけでは身につかない。紙とペンで導出を追う。
-2. **コードを動かす**: 全ての式をJuliaで実装。動かないとわからない。
-3. **小さく始める**: $d=4, L=16$の小さなSSMから。いきなり$d=256$は無理。
-4. **視覚化**: Plotsで状態$h_t$、カーネル$\bar{\mathcal{K}}$、減衰を可視化。
-5. **仲間を作る**: DiscordやSlackで学習仲間を見つける。詰まったら相談。
-
-#### つまずきやすいポイントと対策(詳細版)
-
-| つまずき | 症状 | 対策 | 参照 |
-|:---------|:-----|:-----|:-----|
-| 行列指数関数 | $e^{At}$の計算がわからない | 第2回線形代数IIを復習。テイラー展開・対角化 | Zone 3.2 |
-| 離散化の式 | $\bar{B} = (A^{-1}(e^{A\Delta}-I))B$の意味 | 積分$\int_0^\Delta e^{A\tau} d\tau$を導出 | Zone 3.2 |
-| HiPPO多項式 | Legendre多項式の直交性 | 直交多項式の性質を調べる(Wikipedia) | Zone 3.4 |
-| DPLR分解 | なぜ低ランク? | Woodbury恒等式、SVD(第3回)を復習 | Zone 3.5 |
-| Cauchy核 | FFTとの関係 | 複素解析の留数定理(発展) | Zone 3.5 |
-| Parallel Scan | 結合律がわからない | Prefix sumアルゴリズムを調べる | Zone 3.7 |
-| Julia構文 | 多重ディスパッチ | 第10回Julia入門を復習 | Zone 4 |
-| Rust所有権 | 借用エラー | 第9回Rust入門を復習 | Zone 4.7 |
-
-#### 追加演習問題(上級者向け)
-
-:::details 演習1: S4の固有値安定性の証明
-
-**問題**: HiPPO行列$A$の固有値の実部が全て負であることを示せ。
-
-**ヒント**: $A$はNormal行列($AA^* = A^*A$)。Geršgorin円板定理を用いる。
-
-**解答の方針**:
-1. HiPPO-LegS行列の構造を確認
-2. 各行の対角成分と非対角成分の和を計算
-3. Geršgorin円板が全て左半平面にあることを示す
-:::
-
-:::details 演習2: Mambaの選択性の効果を定量化
-
-**問題**: 入力依存$\Delta_t$が固定$\Delta$に比べて、どれだけ性能向上に寄与するか定量化せよ。
-
-**実験設計**:
-1. Mamba-130Mモデルで$\Delta_t = \text{const}$(S4化)と$\Delta_t = \text{Softplus}(W u_t)$(Mamba)を比較
-2. LRAの6タスクで精度を計測
-3. 各タスクでの改善率を算出
-
-**予想**: ListOps(入れ子依存)で最大改善、Image(局所依存)で最小改善。
-:::
-
-:::details 演習3: Linear AttentionとS4の関係
-
-**問題**: Linear Attention(Performer)とS4の数学的関係を導出せよ。
-
-**ヒント**: Performerは$\text{Attention}(Q,K,V) = \phi(Q) (\phi(K)^\top V)$と分解。S4は$y = (CA^k B) * u$。$\phi$をカーネルトリックと見なせば...?
-
-**発展**: Mamba-2のSSD定理と接続できるか？
-:::
-
-:::details 演習4: SSMの万能近似定理
-
-**問題**: SSMが任意の連続関数$f: \mathbb{R}^L \to \mathbb{R}^L$を近似できることを示せ(またはできない反例を示せ)。
-
-**参考**: Universal Approximation Theorem(NN) / Transformerの表現力[^15]
-
-**現状**: 未解決。入力依存パラメータ(Mamba)があれば可能性高い。固定パラメータ(S4)では限界あり。
-:::
-
-#### 自己評価テスト(100点満点)
-
-**理論(50点)**:
-
-- [ ] 連続SSM $\frac{dh}{dt} = Ah + Bu$を説明できる (5点)
-- [ ] ZOH離散化を導出できる (10点)
-- [ ] SSMの再帰・畳み込み形態を変換できる (10点)
-- [ ] HiPPOの動機を説明できる (5点)
-- [ ] S4のDPLR分解を理解している (10点)
-- [ ] MambaのSelective SSMを導出できる (10点)
-
-**実装(30点)**:
-
-- [ ] JuliaでSSM再帰を実装できる (5点)
-- [ ] FFT畳み込みを実装できる (5点)
-- [ ] HiPPO初期化を実装できる (5点)
-- [ ] S4 Cauchyカーネルを実装できる (10点)
-- [ ] RustでParallel Scanを実装できる (5点)
-
-**応用(20点)**:
-
-- [ ] LRAベンチマークを実行できる (10点)
-- [ ] SSMを新しいタスクに適用できる (10点)
-
-**60点以上**: SSM理論を習得。論文を読める。
-**80点以上**: SSMを実装できる。研究に応用可能。
-**100点**: SSMのエキスパート。新手法を提案できる。
-
-### 10.5 実践プロジェクト: SSMを自分のデータで使う
-
-#### プロジェクト1: 時系列予測(初級)
-
-**目標**: 株価データでSSMを訓練し、翌日の価格を予測。RMSE < 5%, 方向的中率 > 55%。
-
-```julia
-using CSV, DataFrames, Flux, Statistics
-
-df = CSV.read("AAPL_1year.csv", DataFrame)
-prices = Float32.(df.Close)
-
-# Sliding window
-function create_sequences(data, window_size=256)
-    X, Y = [], []
-    for i in 1:(length(data) - window_size)
-        push!(X, data[i:i+window_size-1])
-        push!(Y, data[i+window_size])
-    end
-    hcat(X...)', hcat(Y...)'
-end
-
-X, Y = create_sequences(prices)
-μ, σ = mean(X), std(X)
-X, Y = (X .- μ) ./ σ, (Y .- μ) ./ σ
-
-model = Chain(S4Layer(1, 64, 0.01), S4Layer(64, 64, 0.01),
-              S4Layer(64, 64, 0.01), S4Layer(64, 1, 0.01))
-loss(x, y) = Flux.mse(model(x), y)
-
-Flux.train!(loss, Flux.params(model), [(X, Y)], Flux.ADAM(0.001))
-```
-
-#### プロジェクト2: 長文書分類(中級)
-
-**目標**: 10Kトークンのニュース記事をカテゴリ分類。Acc > 85%, Transformer-Baseと同等。
-
-```python
-from transformers import MambaForSequenceClassification, AutoTokenizer
-
-model = MambaForSequenceClassification.from_pretrained(
-    "state-spaces/mamba-370m", num_labels=3)
-tokenizer = AutoTokenizer.from_pretrained("EleutherAI/gpt-neox-20b")
-
-text = "Apple announces new iPhone with AI features..."
-inputs = tokenizer(text, return_tensors="pt", truncation=True, max_length=10000)
-pred = model(**inputs).logits.argmax(-1)
-print(f"Category: {['Politics', 'Sports', 'Tech'][pred]}")
-```
-
-#### プロジェクト3: 動画フレーム予測(上級)
-
-**目標**: Moving MNIST(64×64×10)から次フレームを予測。PSNR > 25dB, SSIM > 0.85。
-**実装の鍵**: 4方向スキャン、Spatial位置エンコーディング、Chunk-wise処理。
-
-### 10.6 コミュニティ・リソース
-
-#### Discord/Slackコミュニティ
-
-| コミュニティ | 言語 | 特徴 | URL |
-|:-------------|:-----|:-----|:----|
-| **Hazy Research** | EN | S4/Mamba開発チーム公式 | [Link](https://discord.gg/hazyresearch) |
-| **EleutherAI** | EN | オープンLLM開発。SSM議論活発 | [Link](https://discord.gg/eleutherai) |
-| **AI Alignment** | EN | SSM安全性研究 | [Link](https://discord.gg/aialignment) |
-| **日本語AIコミュニティ** | JP | SSM日本語情報交換 | Twitter #SSM_jp |
-
-#### GitHubリポジトリ(注目)
-
-| Repo | 説明 | Stars |
-|:-----|:-----|:------|
-| [state-spaces/mamba](https://github.com/state-spaces/mamba) | 公式実装 | 12K+ |
-| [johnma2006/mamba-minimal](https://github.com/johnma2006/mamba-minimal) | 教育的最小実装(300行) | 3K+ |
-| [huggingface/transformers](https://github.com/huggingface/transformers) | Mamba統合済み | 130K+ |
-| [mamba-chat](https://github.com/haotian-liu/mamba-chat) | Mamba×LLaVA(マルチモーダル) | 1K+ |
-
-#### arXiv Follow推奨
-
-毎週新しいSSM論文が出る。以下のキーワードでarXiv alertを設定:
-
-- "state space model"
-- "Mamba"
-- "selective SSM"
-- "linear RNN"
-- "structured state space"
+</details>
 
 ### 10.7 次回予告: 第17回 Mamba発展 & 類似手法
 
@@ -2146,9 +1482,7 @@ print(f"Category: {['Politics', 'Sports', 'Tech'][pred]}")
 - RWKV: [arXiv:2305.13048](https://arxiv.org/abs/2305.13048)
 - RetNet: [arXiv:2307.08621](https://arxiv.org/abs/2307.08621)
 
-:::message
-**進捗: 100% 完了** 第16回SSM理論を完走。連続→離散→HiPPO→S4→Mambaの全旅程を踏破した。Course IIも残り2回。Mamba-2とHybridで理論編を完結させる。
-:::
+> **Note:** **進捗: 100% 完了** 第16回SSM理論を完走。連続→離散→HiPPO→S4→Mambaの全旅程を踏破した。Course IIも残り2回。Mamba-2とHybridで理論編を完結させる。
 
 ---
 
@@ -2171,45 +1505,53 @@ Mambaは長距離依存を$O(N)$で扱える。だが**全系列を同時に参�
 ### 主要論文
 
 [^1]: Gu, A., Dao, T., Ermon, S., Rudra, A., & Ré, C. (2020). HiPPO: Recurrent Memory with Optimal Polynomial Projections. *NeurIPS 2020*.
-@[card](https://arxiv.org/abs/2008.07669)
+<https://arxiv.org/abs/2008.07669>
 
 [^2]: Gu, A., Goel, K., & Ré, C. (2021). Efficiently Modeling Long Sequences with Structured State Spaces. *ICLR 2022*.
-@[card](https://arxiv.org/abs/2111.00396)
+<https://arxiv.org/abs/2111.00396>
 
 [^3]: Gu, A., & Dao, T. (2023). Mamba: Linear-Time Sequence Modeling with Selective State Spaces. *arXiv:2312.00752*.
-@[card](https://arxiv.org/abs/2312.00752)
+<https://arxiv.org/abs/2312.00752>
 
 [^4]: Kalman, R. E. (1960). A New Approach to Linear Filtering and Prediction Problems. *Journal of Basic Engineering*.
 
 [^5]: Tay, Y., Dehghani, M., Abnar, S., et al. (2021). Long Range Arena: A Benchmark for Efficient Transformers. *ICLR 2021*.
-@[card](https://arxiv.org/abs/2011.04006)
+<https://arxiv.org/abs/2011.04006>
 
 [^6]: Gu, A., & Dao, T. (2023). Mamba Official Repository.
-@[card](https://github.com/state-spaces/mamba)
+<https://github.com/state-spaces/mamba>
 
 [^7]: Dao, T., & Gu, A. (2024). Transformers are SSMs: Generalized Models and Efficient Algorithms Through Structured State Space Duality. *ICML 2024*.
-@[card](https://arxiv.org/abs/2405.21060)
+<https://arxiv.org/abs/2405.21060>
 
 [^8]: Liu, Y., Tian, Y., Zhao, Y., et al. (2024). VMamba: Visual State Space Models.
-@[card](https://arxiv.org/abs/2401.10166)
+<https://arxiv.org/abs/2401.10166>
 
 [^9]: Peng, B., Alcaide, E., Anthony, Q., et al. (2023). RWKV: Reinventing RNNs for the Transformer Era.
-@[card](https://arxiv.org/abs/2305.13048)
+<https://arxiv.org/abs/2305.13048>
 
 [^10]: Sun, Y., Dong, L., Huang, S., et al. (2023). Retentive Network: A Successor to Transformer for Large Language Models.
-@[card](https://arxiv.org/abs/2307.08621)
+<https://arxiv.org/abs/2307.08621>
 
 [^11]: Somvanshi, S., Islam, Md M., et al. (2025). From S4 to Mamba: A Comprehensive Survey on Structured State Space Models. *arXiv:2503.18970*.
-@[card](https://arxiv.org/abs/2503.18970)
+<https://arxiv.org/abs/2503.18970>
 
 ### 教科書
 
 - Ogata, K. (2009). *Modern Control Engineering* (5th ed.). Prentice Hall. [制御理論の古典]
 - Chen, C.-T. (1998). *Linear System Theory and Design* (3rd ed.). Oxford University Press. [状態空間の数学]
 - Rush, A. (2023). *The Annotated S4*. [実装付き解説]
-  @[card](https://srush.github.io/annotated-s4/)
+  <https://srush.github.io/annotated-s4/>
 
 ---
+
+## 著者リンク
+
+- Blog: https://fumishiki.dev
+- X: https://x.com/fumishiki
+- LinkedIn: https://www.linkedin.com/in/fumitakamurakami
+- GitHub: https://github.com/fumishiki
+- Hugging Face: https://huggingface.co/fumishiki
 
 ## ライセンス
 
@@ -2248,21 +1590,3 @@ Mambaは長距離依存を$O(N)$で扱える。だが**全系列を同時に参�
 **無断利用が発覚した場合**、使用料の請求およびSNS等での公表を行う場合があります。
 
 ---
-
-## 記法規約
-
-| 記号 | 意味 | 文脈 |
-|:-----|:-----|:-----|
-| $u_t, u(t)$ | 入力信号 | 離散/連続時間 |
-| $h_t, h(t)$ | 隠れ状態 | 離散/連続時間 |
-| $y_t, y(t)$ | 出力信号 | 離散/連続時間 |
-| $A, B, C, D$ | SSMパラメータ | 連続時間 |
-| $\bar{A}, \bar{B}$ | 離散化パラメータ | 離散時間 |
-| $\bar{\mathcal{K}}$ | SSM畳み込みカーネル | 離散時間 |
-| $\Delta$ | 時間ステップ幅 | 離散化 |
-| $\Lambda$ | 対角行列(固有値) | S4 |
-| $P, Q$ | 低ランク行列 | S4 DPLR |
-| $\Delta_t, B_t, C_t$ | 入力依存パラメータ | Mamba |
-| $d$ | 状態次元 | SSM |
-| $L, N$ | 系列長 | シーケンス |
-| $D$ | モデル次元 | ニューラルネット |

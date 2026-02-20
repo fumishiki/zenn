@@ -4,6 +4,11 @@ emoji: "🎨"
 type: "tech"
 topics: ["machinelearning", "deeplearning", "diffusiontransformers", "julia", "dit"]
 published: true
+slug: "ml-lecture-43-part2"
+difficulty: "advanced"
+time_estimate: "90 minutes"
+languages: ["Julia", "Rust"]
+keywords: ["機械学習", "深層学習", "生成モデル"]
 ---
 ## 💻 4. 実装ゾーン（45分）— 3言語でDiTを実装する
 
@@ -64,12 +69,16 @@ function train_step(model, ps, st, x, schedule, t, opt_state)
 
     # Forward diffusion: x_t = √ᾱ_t·x + √(1-ᾱ_t)·ε
     α_bar_t = schedule.α_bar[t]
-    x_t = sqrt(α_bar_t) .* x .+ sqrt(1 - α_bar_t) .* ε
+    x_t = @. sqrt(α_bar_t) * x + sqrt(1 - α_bar_t) * ε
+
+    # shape: x ∈ ℝ^{H×W×C×B}, ε ∈ ℝ^{H×W×C×B}, α_bar_t ∈ ℝ（スカラー）
+    # 数値確認: α_bar_t=1(t=0)→x_t=x（ノイズなし）, α_bar_t=0(t=T)→x_t≈ε（完全ノイズ）
+    # α_bar[500]≈0.02 → signal-to-noise ratio ≈ sqrt(0.02/0.98) ≈ 0.14（ほぼノイズ）
 
     # Predict noise
     loss, grads = withgradient(ps) do p
         ε_pred, _ = model(x_t, p, st)
-        mean((ε_pred .- ε).^2)  # MSE loss
+        mean(abs2, ε_pred .- ε)  # MSE loss
     end
 
     # Update parameters
@@ -116,6 +125,8 @@ println("✅ Mini-DiT trained on MNIST!")
 - **MLUtils.jl** — Data loading & batching
 - **Reactant.jl** (未使用だが重要) — GPU AOT compilation
 
+> **⚠️ Warning:** Lux の `withgradient` でモデルの `st`（state）を返す際、学習フラグ・BN統計などが含まれる。`st` を更新せずに再利用すると BatchNorm の running statistics が訓練中に固定されてしまう。必ず `ps, st = Optimisers.update(...)` の後に更新した `st` を次のイテレーションに渡すこと。
+
 ### 4.2 🦀 Rust: DiT 推論サーバー
 
 **推論の全体像**:
@@ -158,19 +169,14 @@ struct DiT {
 
 impl DiT {
     fn new(vb: VarBuilder, num_layers: usize, hidden_dim: usize) -> Result<Self> {
-        let mut blocks = Vec::new();
-        for i in 0..num_layers {
-            blocks.push(DiTBlock::new(vb.pp(&format!("block_{}", i)), hidden_dim)?);
-        }
+        let blocks = (0..num_layers)
+            .map(|i| DiTBlock::new(vb.pp(&format!("block_{i}")), hidden_dim))
+            .collect::<Result<Vec<_>>>()?;
         Ok(Self { blocks })
     }
 
     fn forward(&self, x: &Tensor) -> Result<Tensor> {
-        let mut x = x.clone();
-        for block in &self.blocks {
-            x = block.forward(&x)?;
-        }
-        Ok(x)
+        self.blocks.iter().try_fold(x.clone(), |x, block| block.forward(&x))
     }
 }
 
@@ -183,10 +189,14 @@ fn ddpm_sample(model: &DiT, schedule: &NoiseSchedule, shape: &[usize]) -> Result
         // Predict noise
         let epsilon_pred = model.forward(&x_t)?;
 
-        // DDPM update: x_{t-1} = (x_t - β_t/√(1-ᾱ_t)·ε_θ) / √α_t + σ_t·z
+        # DDPM update: x_{t-1} = (x_t - β_t/√(1-ᾱ_t)·ε_θ) / √α_t + σ_t·z
         let alpha_t = schedule.alpha[t];
         let alpha_bar_t = schedule.alpha_bar[t];
         let beta_t = schedule.beta[t];
+
+        // 数式の各係数の意味:
+        // 1/sqrt(α_t): ノイズスケール補正
+        // β_t/sqrt(1-ᾱ_t): ε_θ の寄与を α_t スケールに変換
 
         let coeff1 = (1.0 / alpha_t.sqrt())?;
         let coeff2 = (beta_t / (1.0 - alpha_bar_t).sqrt())?;
@@ -229,11 +239,13 @@ async fn main() -> Result<()> {
         let schedule = NoiseSchedule::new(1000);
 
         // Generate
-        let mut images = Vec::new();
-        for _ in 0..req.num_samples {
-            let img = ddpm_sample(&model, &schedule, &[1, 28, 28]).unwrap();
-            images.push(img.to_vec1::<f32>().unwrap());
-        }
+        let images = (0..req.num_samples)
+            .map(|_| {
+                ddpm_sample(&model, &schedule, &[1, 28, 28])
+                    .and_then(|img| img.to_vec1::<f32>())
+                    .unwrap()
+            })
+            .collect::<Vec<_>>();
 
         Json(GenerateResponse { images })
     }
@@ -255,14 +267,13 @@ struct NoiseSchedule {
 
 impl NoiseSchedule {
     fn new(T: usize) -> Self {
-        let beta: Vec<f32> = (0..T).map(|i| {
-            1e-4 + (0.02 - 1e-4) * (i as f32 / T as f32)
-        }).collect();
+        let beta: Vec<f32> = (0..T)
+            .map(|i| 1e-4 + (0.02 - 1e-4) * (i as f32 / T as f32))
+            .collect();
         let alpha: Vec<f32> = beta.iter().map(|b| 1.0 - b).collect();
-        let mut alpha_bar = vec![alpha[0]];
-        for i in 1..T {
-            alpha_bar.push(alpha_bar[i-1] * alpha[i]);
-        }
+        let alpha_bar: Vec<f32> = alpha.iter()
+            .scan(1.0f32, |acc, &a| { *acc *= a; Some(*acc) })
+            .collect();
         Self { T, beta, alpha, alpha_bar }
     }
 }
@@ -273,6 +284,8 @@ impl NoiseSchedule {
 - **Axum** — 高速 HTTP server (Tokio)
 - **Zero-copy** — メモリ効率
 - **型安全性** — コンパイル時エラー検出
+
+> **⚠️ Warning:** `candle_core::Tensor` の演算は `Result<Tensor>` を返すため、全演算に `?` が必要。長いサンプリングループでは `?` エラーが途中で中断されやすい。`unwrap_or_else` で fallback を用意するか、`anyhow::Result` で上位にエラー伝播させること。
 
 ### 4.3 🔮 Elixir: 分散サービング
 
@@ -330,14 +343,12 @@ defmodule DiT.Worker do
   end
 
   defp process_next(state) do
-    case :queue.out(state.queue) do
-      {{:value, {from, prompt}}, queue} ->
-        # Call Rust inference
-        {:ok, image} = DiTNif.generate(state.model, prompt)
-        GenServer.reply(from, {:ok, image})
-        {:noreply, %{state | queue: queue}}
-      {:empty, _} ->
-        {:noreply, state}
+    with {{:value, {from, prompt}}, queue} <- :queue.out(state.queue),
+         {:ok, image} <- DiTNif.generate(state.model, prompt) do
+      GenServer.reply(from, {:ok, image})
+      {:noreply, %{state | queue: queue}}
+    else
+      {:empty, _} -> {:noreply, state}
     end
   end
 end
@@ -362,10 +373,9 @@ defmodule DiT.LoadBalancer do
   @impl true
   def handle_call({:generate, prompt}, _from, state) do
     # Round-robin load balancing
-    worker = Enum.at(state.workers, state.idx)
+    worker = state.workers |> Enum.at(state.idx)
     idx = rem(state.idx + 1, length(state.workers))
 
-    # Delegate to worker
     result = GenServer.call(worker, {:generate, prompt}, :infinity)
     {:reply, result, %{state | idx: idx}}
   end
@@ -386,6 +396,8 @@ end
 - **Rustler** — Rust FFI (低レイテンシ推論)
 - **分散** — BEAM VM の耐障害性
 
+**DiT に Elixir を使う実際のメリット**: GPU サーバーが1台クラッシュしても Supervisor が即座に再起動し、他ノードへ自動フォールオーバー。Python/Rust だけでこれを実装すると数百行の死活監視コードが必要だが、OTP では `strategy: :one_for_one` の1行で済む。大規模推論サービスで見逃されがちな信頼性パターン。
+
 ### 4.4 高速Sampling — DPM-Solver++ & EDM
 
 **DPM-Solver++** [Lu+ 2022] [^9] (第36回の拡張):
@@ -398,6 +410,8 @@ $$
 $$
 - $h_i = \lambda_{t_{i-1}} - \lambda_{t_i}$ — log-SNR step
 - $\epsilon_\theta^{(1)}, \epsilon_\theta^{(2)}$ — 2段階のノイズ予測
+
+> **⚠️ Warning:** DPM-Solver++ は log-SNR空間 $\lambda_t = \log(\alpha_t / \sigma_t)$ で等間隔サンプリングが前提。DDPM のデフォルトの線形スケジュールでは log-SNR が非線形 → 20ステップ程度で良い結果が出ないことがある。`timesteps` の選択が重要。
 
 **実装**:
 ```julia
@@ -422,12 +436,12 @@ function dpm_solver_pp(model, x_T, schedule, num_steps=20)
         λ_tm1 = log(α_tm1 / σ_tm1)
         h = λ_tm1 - λ_t
 
-        x_tm1_1st = (α_tm1 / α_t) .* x_t .- σ_tm1 .* (exp(-h) - 1) .* ε_1
+        x_tm1_1st = @. (α_tm1 / α_t) * x_t - σ_tm1 * (exp(-h) - 1) * ε_1
 
         # 2nd-order correction
         ε_2 = model(x_tm1_1st, t_im1)
         r = (t_im1 - t_i) / (t_i - (i > 1 ? timesteps[i-1] : T))
-        x_t = (α_tm1 / α_t) .* x_t .- σ_tm1 .* (exp(-h) - 1) .* (ε_1 .+ 0.5 / r .* (ε_1 .- ε_2))
+        @. x_t = (α_tm1 / α_t) * x_t - σ_tm1 * (exp(-h) - 1) * (ε_1 + 0.5 / r * (ε_1 - ε_2))
     end
 
     return x_t
@@ -445,6 +459,8 @@ $$
 - $D_\theta$ — Denoiser (EDM の表記)
 - $\sigma(t) = t$ — 時間 = ノイズレベル
 
+**Heun補正の意義**: 1次 Euler ステップは切断誤差 $O(\Delta t^2)$、Heun（予測子-修正子）は $O(\Delta t^3)$ → 同じ NFE 数で高精度。`d_i + d_im1` の平均勾配が補正の本質。
+
 **実装**:
 ```julia
 # EDM Sampling (Heun's method)
@@ -453,7 +469,7 @@ function edm_sample(model, schedule, num_steps=18)
     ρ = 7.0
 
     # Noise schedule
-    σ_steps = (σ_max^(1/ρ) .+ range(0, 1, length=num_steps) .* (σ_min^(1/ρ) - σ_max^(1/ρ))).^ρ
+    σ_steps = @. (σ_max^(1/ρ) + range(0, 1, length=num_steps) * (σ_min^(1/ρ) - σ_max^(1/ρ)))^ρ
 
     # Initialize
     x_t = randn(size...) .* σ_max
@@ -466,14 +482,14 @@ function edm_sample(model, schedule, num_steps=18)
         D_i = model(x_t, σ_i)
 
         # Euler step
-        d_i = (x_t - D_i) / σ_i
-        x_euler = x_t + (σ_im1 - σ_i) * d_i
+        d_i = @. (x_t - D_i) / σ_i
+        x_euler = @. x_t + (σ_im1 - σ_i) * d_i
 
         # Heun's 2nd-order correction
         if σ_im1 > 0
             D_im1 = model(x_euler, σ_im1)
-            d_im1 = (x_euler - D_im1) / σ_im1
-            x_t = x_t + (σ_im1 - σ_i) * (d_i + d_im1) / 2
+            d_im1 = @. (x_euler - D_im1) / σ_im1
+            @. x_t = x_t + (σ_im1 - σ_i) * (d_i + d_im1) / 2
         else
             x_t = x_euler
         end
@@ -488,9 +504,9 @@ end
 - **EDM**: SDE の最適化 (Heun's method + σ(t) 設計)
 - **速度**: 両方とも 20 ステップで DDPM 1000 ステップ相当
 
-:::message
-**ここまでで全体の70%完了！** 実装ゾーン完走。⚡Julia 訓練 + 🦀Rust 推論 + 🔮Elixir 分散サービング + 高速Sampling を全て実装した。次は実験ゾーン — aMUSEd-256 デモと Tiny DiT 演習。
-:::
+**比較の要点**: DPM-Solver++ は既存の DDPM 訓練済みモデルにそのまま適用できる（scheduler の差し替えのみ）。EDM は専用訓練が必要だが、同じ NFE で高品質。プロダクション利用では DPM-Solver++（移行コスト低）、新規訓練なら EDM が推奨。
+
+> **Note:** **ここまでで全体の70%完了！** 実装ゾーン完走。⚡Julia 訓練 + 🦀Rust 推論 + 🔮Elixir 分散サービング + 高速Sampling を全て実装した。次は実験ゾーン — aMUSEd-256 デモと Tiny DiT 演習。
 
 ---
 
@@ -523,28 +539,7 @@ end
 3. 予測したトークンでマスクを置換
 4. 12 ステップ後、全トークンが予測済み → 画像生成完了
 
-**HuggingFace Diffusers での実行**:
-```python
-from diffusers import AmusedPipeline
-import torch
-
-# Load aMUSEd-256 model
-pipe = AmusedPipeline.from_pretrained("amused/amused-256", torch_dtype=torch.float16)
-pipe = pipe.to("cuda")
-
-# Generate image (12 steps)
-prompt = "a photo of a cat wearing sunglasses"
-image = pipe(
-    prompt=prompt,
-    num_inference_steps=12,  # 12 steps (vs DDPM 1000 steps)
-    generator=torch.manual_seed(42)
-).images[0]
-
-image.save("amused_cat.png")
-print(f"✅ Generated image in 12 steps!")
-```
-
-**Julia 版 (HuggingFace.jl 経由)**:
+**Julia 版 (PythonCall.jl 経由)**:
 ```julia
 using PythonCall
 
@@ -600,9 +595,7 @@ using Flux, MLDatasets, Statistics, ProgressMeter
 # 1. Data Loading
 function load_mnist()
     train_x, train_y = MNIST.traindata(Float32)
-    # Normalize to [-1, 1]
-    train_x = (train_x .- 0.5) ./ 0.5
-    # Add channel dimension
+    train_x = @. (train_x - 0.5) / 0.5   # Normalize to [-1, 1]
     train_x = reshape(train_x, 28, 28, 1, :)
     return train_x, train_y
 end
@@ -617,20 +610,16 @@ end
 
 Flux.@functor DiTBlock
 
-function DiTBlock(dim::Int, heads::Int)
-    DiTBlock(
-        MultiHeadAttention(dim, heads=heads),
-        Chain(Dense(dim, 4*dim, gelu), Dense(4*dim, dim)),
-        LayerNorm(dim),
-        LayerNorm(dim)
-    )
-end
+DiTBlock(dim::Int, heads::Int) = DiTBlock(
+    MultiHeadAttention(dim, heads=heads),
+    Chain(Dense(dim, 4*dim, gelu), Dense(4*dim, dim)),
+    LayerNorm(dim),
+    LayerNorm(dim)
+)
 
 function (block::DiTBlock)(x)
-    # Pre-norm + Attention + Residual
-    x = x + block.attn(block.ln1(x))
-    # Pre-norm + MLP + Residual
-    x = x + block.mlp(block.ln2(x))
+    x = x .+ (x |> block.ln1 |> block.attn)
+    x = x .+ (x |> block.ln2 |> block.mlp)
     return x
 end
 
@@ -652,113 +641,69 @@ function DiTTiny(; patch_size=4, dim=128, depth=4, heads=4)
         Dense(patch_dim, dim),
         [DiTBlock(dim, heads) for _ in 1:depth],
         Dense(dim, patch_dim),
-        randn(Float32, dim, num_patches) .* 0.02  # learnable positional encoding
+        randn(Float32, dim, num_patches) .* 0.02f0
     )
 end
 
 function (model::DiTTiny)(x, t)
-    # Patchify
-    patches = patchify(x, 4)  # [num_patches, batch, patch_dim]
-    z = model.patchify(patches)  # [num_patches, batch, dim]
-
-    # Add positional encoding
-    z = z .+ model.pos_emb
-
-    # DiT blocks
-    for block in model.blocks
-        z = block(z)
-    end
-
-    # Unpatchify
-    patches_out = model.unpatchify(z)
-    x_out = unpatchify(patches_out, 4, size(x))
-
-    return x_out
+    z = patchify(x, 4) |> model.patchify
+    z .+= model.pos_emb
+    z = foldl(|>, model.blocks; init=z)
+    return unpatchify(model.unpatchify(z), 4, size(x))
 end
 
 # 3. Patchify / Unpatchify
 function patchify(x, P)
-    B, H, W, C = size(x, 4), size(x, 1), size(x, 2), size(x, 3)
+    H, W, C, B = size(x)
     N_h, N_w = H ÷ P, W ÷ P
-    patches = zeros(Float32, P*P*C, N_h * N_w, B)
-
-    for b in 1:B
-        idx = 1
-        for i in 0:N_h-1
-            for j in 0:N_w-1
-                patch = x[i*P+1:(i+1)*P, j*P+1:(j+1)*P, :, b]
-                patches[:, idx, b] = vec(patch)
-                idx += 1
-            end
-        end
-    end
-    return patches  # [patch_dim, num_patches, batch]
+    x_r = reshape(x, P, N_h, P, N_w, C, B)
+    x_p = permutedims(x_r, (1, 3, 5, 4, 2, 6))   # → [P, P, C, N_w, N_h, B]
+    return reshape(x_p, P*P*C, N_h*N_w, B)
 end
 
 function unpatchify(patches, P, img_shape)
     H, W, C, B = img_shape
     N_h, N_w = H ÷ P, W ÷ P
-    x = zeros(Float32, H, W, C, B)
-
-    for b in 1:B
-        idx = 1
-        for i in 0:N_h-1
-            for j in 0:N_w-1
-                patch = reshape(patches[:, idx, b], P, P, C)
-                x[i*P+1:(i+1)*P, j*P+1:(j+1)*P, :, b] = patch
-                idx += 1
-            end
-        end
-    end
-    return x
+    x_p = reshape(patches, P, P, C, N_w, N_h, B)
+    x_r = permutedims(x_p, (1, 5, 2, 4, 3, 6))   # → [P, N_h, P, N_w, C, B]
+    return reshape(x_r, H, W, C, B)
 end
 
 # 4. Training
 function train_dit_mnist(; epochs=1, batch_size=128, lr=1e-4)
-    # Load data
     train_x, _ = load_mnist()
-    train_x = train_x[:, :, :, 1:10000]  # Use 10k samples for speed
+    train_x = train_x[:, :, :, 1:10000]
 
-    # Initialize model
     model = DiTTiny()
     opt = Adam(lr)
 
-    # Noise schedule (DDPM)
     T = 1000
     β = range(1e-4, 0.02, length=T)
     α = 1 .- β
     ᾱ = cumprod(α)
 
-    # Training loop
     @showprogress for epoch in 1:epochs
         total_loss = 0.0
         num_batches = 0
 
         for i in 1:batch_size:size(train_x, 4)-batch_size
-            batch = train_x[:, :, :, i:i+batch_size-1]
-
-            # Sample timestep
+            batch = @views train_x[:, :, :, i:i+batch_size-1]
             t = rand(1:T)
 
-            # Forward diffusion
             ε = randn(Float32, size(batch))
-            x_t = sqrt(ᾱ[t]) .* batch .+ sqrt(1 - ᾱ[t]) .* ε
+            x_t = @. sqrt(ᾱ[t]) * batch + sqrt(1 - ᾱ[t]) * ε
 
-            # Compute loss and gradients
             loss, grads = Flux.withgradient(model) do m
                 ε_pred = m(x_t, t)
-                mean((ε_pred .- ε).^2)
+                mean(abs2, ε_pred .- ε)
             end
 
-            # Update
             Flux.update!(opt, model, grads[1])
-
             total_loss += loss
             num_batches += 1
         end
 
-        avg_loss = total_loss / num_batches
-        println("Epoch $epoch: Loss = $avg_loss")
+        println("Epoch $epoch: Loss = $(total_loss / num_batches)")
     end
 
     return model
@@ -772,18 +717,12 @@ function sample_dit(model, schedule, num_samples=16)
     @showprogress for t in T:-1:1
         ε_pred = model(x_t, t)
 
-        α_t = schedule.α[t]
-        ᾱ_t = schedule.ᾱ[t]
-        β_t = schedule.β[t]
+        α_t  = schedule.α[t]
+        ᾱ_t  = schedule.ᾱ[t]
+        β_t  = schedule.β[t]
+        z    = t > 1 ? randn(Float32, size(x_t)) : zeros(Float32, size(x_t))
 
-        # DDPM update
-        if t > 1
-            z = randn(Float32, size(x_t))
-        else
-            z = zeros(Float32, size(x_t))
-        end
-
-        x_t = (x_t .- β_t / sqrt(1 - ᾱ_t) .* ε_pred) ./ sqrt(α_t) .+ sqrt(β_t) .* z
+        @. x_t = (x_t - β_t / sqrt(1 - ᾱ_t) * ε_pred) / sqrt(α_t) + sqrt(β_t) * z
     end
 
     return x_t
@@ -809,12 +748,14 @@ println("✅ Tiny DiT trained and sampled!")
 - Epoch 5: Loss = 0.05-0.10
 - 生成品質: MNIST 数字の rough shape が生成される (5 epoch で recognizable)
 
+**損失の読み方**: MSE loss = $\mathbb{E}[\|\epsilon_\text{pred} - \epsilon\|^2]$。ランダム予測の期待値は $\mathbb{E}[\|\epsilon\|^2] = D = 28 \times 28 = 784$（入力次元）。Loss=0.2 は次元あたり $0.2/784 \approx 2.5 \times 10^{-4}$ の誤差 → 有意な学習が起きている。Loss が 1.0 以上なら学習が発散している可能性がある。
+
 **演習課題**:
 1. **Patch size を変える**: 4×4 → 7×7 (patch数 16 → 4) — どう変わる？
 2. **Depth を増やす**: 4 layers → 8 layers — 性能向上？
 3. **AdaLN-Zero を追加**: Class-conditional DiT (数字ラベルで条件付け)
 
-### 5.3 aMUSEd vs DiT のアーキテクチャ比較
+#### 5.2.3 aMUSEd vs DiT のアーキテクチャ比較
 
 **比較実験**: MNIST で aMUSEd-style MIM と DiT-style Diffusion を比較
 
@@ -844,8 +785,7 @@ function train_mim_mnist(; epochs=1)
             # Predict masked tokens
             loss, grads = Flux.withgradient(model) do m
                 pred = m(batch_masked, 0)  # no timestep
-                # CrossEntropy loss
-                mean((pred .- batch).^2)  # simplified as MSE
+                mean(abs2, pred .- batch)  # simplified as MSE
             end
 
             Flux.update!(opt, model, grads[1])
@@ -866,7 +806,11 @@ end
 | DiT (DDPM) | 5 min | 2 min (1000 steps) | High |
 | MIM (aMUSEd-style) | 5 min | 10 sec (12 steps) | Medium |
 
+> **⚠️ Warning:** aMUSEd-style MIM を MNIST に適用する場合、トークン化（量子化）が品質に直結する。`round.(Int, (x .+ 1) .* 7.5)` で 16 レベルに量子化すると情報損失が大きい。256 レベル（8bit）にすると MIM のトークン数が増えて訓練が難しくなる。このトレードオフが実用 Codec（EnCodec/WavTokenizer）設計の核心と同じ問題構造だ。
+
 **結論**: MIM は Sampling が圧倒的に速いが、品質は Diffusion に劣る。用途に応じて選択。
+
+**なぜ品質差が生じるか**: Diffusion はガウスノイズから連続的に「なめらか」に復元するが、MIM は独立した離散トークンを予測するため、隣接パッチ間の空間的一貫性が弱い。12 ステップの masked prediction は各ステップで「局所的な修正」しか行えず、大域的な構造の学習が Diffusion より困難になる。
 
 ### 5.4 自己診断テスト
 
@@ -921,11 +865,17 @@ $$
 - 例: "a dog in a spacesuit", "abstract art with geometric shapes"
 - 観察: どのプロンプトで品質が高い？
 
-:::message
-**ここまでで全体の85%完了！** 実験ゾーン完走。aMUSEd-256 デモと Tiny DiT on MNIST で、理論を実装に落とした。次は発展ゾーン — 最新研究とフロンティア。
-:::
+> **Note:** **ここまでで全体の85%完了！** 実験ゾーン完走。aMUSEd-256 デモと Tiny DiT on MNIST で、理論を実装に落とした。次は発展ゾーン — 最新研究とフロンティア。
 
 ---
+
+
+> Progress: 85%
+> **理解度チェック**
+> 1. $epoch: MIM Loss = $ の各記号の意味と、この式が表す操作を説明してください。
+>    - *ヒント*: MIM Loss の目標トークンは何か。Diffusion の MSE(ε_pred, ε_true) と何が違うか？
+> 2. このゾーンで学んだ手法の直感的な意味と、なぜこの定式化が必要なのかを説明してください。
+>    - *ヒント*: aMUSEd が 12 ステップで完了できる理由を「離散トークン空間の確信度」の観点で述べよ。
 
 ## 🚀 6. 発展ゾーン（30分）— 最新研究とフロンティア + まとめ
 
@@ -953,6 +903,8 @@ graph TD
 2. **第2世代 (2023)**: DiT — Transformer を Diffusion に適用
 3. **第3世代 (2024)**: MM-DiT — Multimodal 統合 (画像+テキスト)
 4. **第4世代 (2025-)**: Inference-Time Scaling — Test-time での性能向上
+
+**進化のパターン**: 各世代は「入力モダリティの拡張」と「スケーリング則の適用」を繰り返す。ViT が Transformer の画像適用性を示し、DiT がそれを Diffusion の denoising に繋いだ。MM-DiT は画像+テキストの同一空間処理、第4世代は「推論時の計算増加で品質向上」という LLM のスケーリング則の拡散版。
 
 ### 6.2 2024-2026 最新研究
 
@@ -991,6 +943,8 @@ graph TD
 - Quality: FLUX > SD3 (特にプロンプト忠実度)
 - Speed: FLUX-schnell = 4 ステップで high quality
 
+**なぜ 4 ステップで高品質生成できるか**: FLUX は Rectified Flow を採用し、かつ Consistency Distillation で蒸留。直線 ODE 経路 + 蒸留の組み合わせが「数ステップでの収束」を可能にする。DPM-Solver++ の 20 ステップより少ないのは、蒸留で ODE ソルバーの精度要求自体を下げているため。
+
 #### SiT (Scalable Interpolant Transformers) — 理論的統合
 
 **論文**: Ma+ (2024) "SiT: Exploring Flow and Diffusion-based Generative Models with Scalable Interpolant Transformers" [^8]
@@ -1006,6 +960,8 @@ $$
 $$
 - $\gamma(t) = 0$ → Flow Matching
 - $\gamma(t) > 0$ → Stochastic Interpolant
+
+**SiT の重要性**: これは「Flow と Diffusion は全く別物ではなく、$\gamma(t)$ の値で連続的につながる同一の枠組み」を示す。$\gamma = 0$ が最も訓練安定（直線経路）、$\gamma > 0$ が多様性向上（確率的揺らぎ）。SD3/FLUX は $\gamma = 0$ に近い設定を採用している。
 
 **性能**:
 - ImageNet 256×256: FID = 2.06 (DiT-XL/2: FID = 2.27)
@@ -1077,10 +1033,12 @@ $$
 - Training Scaling Laws の限界 → Inference-Time Scaling へシフト
 - 「大きなモデル」→「賢い推論」
 
+**LLM との類比**: LLM の Chain-of-Thought（推論ステップを増やす）= 画像生成の Reflect-DiT（生成ステップを増やす）。どちらも「推論時計算 $\propto$ 品質」という共通の Scaling 則を持つ。DiT の場合、Reflection 1回 = ODE ステップ100ステップ相当の品質向上を1/10のモデル呼び出しで実現できるため、実用的な高品質生成への道が開ける。
+
 ### 6.4 未解決問題
 
 **問題1: Scaling の限界**
-- DiT は 8B params まで訓練されているが、さらに大きくすると？
+- DiT は 8B params まで訓練されているが、もっと大きくすると？
 - **仮説**: 100B params DiT は意味があるか？
 - **課題**: GPU メモリ・訓練時間・データ量
 
@@ -1088,6 +1046,8 @@ $$
 - Self-Attention は $O(N^2)$ — 高解像度画像 (4K) では計算不可能
 - **現状**: Latent space で圧縮 (SD3 は 64×64 latent)
 - **未来**: Sparse Attention / Linear Attention / State Space Models (Mamba 等)
+
+**数値で理解**: 4K 画像 (3840×2160) を 16×16 パッチに分割すると $N = 240 \times 135 = 32,400$ トークン。Self-Attention の QKV が $O(N^2 \cdot d) = 32,400^2 \times 1024 \approx 10^{12}$ flops → A100 (312 TFLOPS) で3秒/ステップ。1000ステップ生成だと約50分。これが「4K Diffusion が普及しない」理由だ。
 
 **問題3: Controllability**
 - DiT は Text-conditional だが、細かい制御 (ポーズ・構図) は困難
@@ -1149,9 +1109,7 @@ $$
 - HuggingFace Diffusers: https://huggingface.co/docs/diffusers/
 - Papers With Code — Diffusion Models: https://paperswithcode.com/task/image-generation
 
-:::message
-**ここまでで全体の95%完了！** 発展ゾーン完走。最新研究と未解決問題を整理した。次は最終ゾーン — 振り返りと次回予告。
-:::
+> **Note:** **ここまでで全体の95%完了！** 発展ゾーン完走。最新研究と未解決問題を整理した。次は最終ゾーン — 振り返りと次回予告。
 
 ---
 
@@ -1184,6 +1142,16 @@ $$
 - **DiT** — 連続ノイズ空間 (DDPM) で高品質生成
 - **用途**: aMUSEd = リアルタイム / DiT = 高品質
 
+**要点の繋がり**: U-Net → DiT（帰納バイアス除去）→ AdaLN-Zero（条件注入の効率化）→ MM-DiT（モダリティ統合）→ DPM-Solver++（推論高速化）→ aMUSEd（離散化による別アプローチ）という進化の論理は一貫している。全て「品質と速度のトレードオフを数学的に解決する」という一つのテーマの変奏だ。
+
+
+> Progress: 95%
+> **理解度チェック**
+> 1. $O(N^2)$ の Self-Attention で、256×256 画像（16×16 パッチ）の計算量はいくらか？また 512×512 に倍増した場合何倍になるか？
+>    - *ヒント*: $N = (H/P)^2$。倍倍則で計算せよ。
+> 2. このゾーンで学んだ手法の直感的な意味と、なぜこの定式化が必要なのかを説明してください。
+>    - *ヒント*: DiT が U-Net の局所的 CNN を Transformer の大域的 Attention に置き換えた利点を、FID の Scaling 曲線（パラメータ数 vs FID）で説明せよ。
+
 ### 6.8 FAQ
 
 **Q1: DiT は U-Net を完全に置き換える？**
@@ -1200,6 +1168,8 @@ A: **DPM-Solver++ / EDM で 20 ステップまで削減可能**。ただし、aM
 
 **Q5: DiT の未来は？**
 A: **3つの方向**: (1) Inference-Time Scaling (Reflect-DiT) — 推論時に性能向上、(2) Multimodal 統合 (第49回) — 全モダリティを1モデルで、(3) World Models (第41回・第49回) — 物理法則を理解する生成モデル。
+
+**補足 (Inference-Time Scaling の数理)**: LLM では推論時のコンピュート増加（より多くのサンプリング、思考ステップ）で品質が上がることが分かっている。Reflect-DiT はこの原理を画像生成に適用し、1回の生成ではなく「生成 → 評価 → 再生成」のループを推論時に実行する。DiT の ODE ステップを増やすのとは異なる次元の「思考量増加」。
 
 ### 6.9 よくある間違い
 
@@ -1229,23 +1199,16 @@ attn_img = attn(z_img)
 attn_txt = attn(z_txt)
 
 # ✅ Correct: Joint Attention
-z = vcat(z_img, z_txt)
-attn = attn_joint(z)
+attn = vcat(z_img, z_txt) |> attn_joint
 ```
 
-### 6.10 学習スケジュール (1週間プラン)
+**間違い4: DDPM の $\bar{\alpha}_t$ をシングル $\alpha_t$ と混同する**
 
-| 日 | タスク | 時間 |
-|:---|:-------|:-----|
-| 1 | Zone 0-2 読了 + AdaLN-Zero 実装 | 2h |
-| 2 | Zone 3 読了 (数式修行) + Boss Battle | 3h |
-| 3 | Zone 4 前半 (Julia 訓練) | 2h |
-| 4 | Zone 4 後半 (Rust 推論 + Elixir) | 2h |
-| 5 | Zone 5 (aMUSEd デモ + Tiny DiT) | 2h |
-| 6 | Zone 6 (最新研究) + 論文3本読む | 3h |
-| 7 | 演習課題 + 総復習 | 2h |
+$$
+\bar{\alpha}_t = \prod_{s=1}^t \alpha_s \neq \alpha_t
+$$
 
-**合計**: 16時間 (1日 2-3時間 × 1週間)
+`schedule.α_bar[t]` は累積積（cumprod）。`schedule.α[t]` は単ステップの $1 - \beta_t$。forward diffusion で `sqrt(schedule.α[t])` を使うと、$t=500$ で `α_bar[500] ≈ 0.02` vs `α[500] ≈ 0.98` という天と地の差が生じる。常に `α_bar` (累積積) を使うこと。
 
 ### 6.11 次回予告: 第44回 音声生成
 
@@ -1262,6 +1225,8 @@ attn = attn_joint(z)
 - **第43回 DiT**: 画像生成の次世代アーキテクチャ
 - **第44回 音声**: 音声モダリティへの拡張
 - **第45回 動画**: 時空間拡張 (画像+音声 → 動画)
+
+**第43回の視点から見た第44回の予習**: DiT で学んだ「Transformer + Diffusion」の組み合わせが音声でも同じ形で登場する。F5-TTS の DiT backbone は第43回の DiTBlock とほぼ同一の構造。変わるのは「入力がメルスペクトログラム」「条件がテキスト埋め込み」という点だけ。第43回の数式（AdaLN-Zero、Patchify/Unpatchify）を完全に理解していれば、第44回の音声生成を素早く習得できる。
 
 **Course V の流れ**:
 ```mermaid
@@ -1286,9 +1251,9 @@ graph LR
 - HuggingFace Transformers (音声モデル用)
 - Diffusers (Stable Audio 用)
 
-:::message
-**第43回完了！ Course V スタートダッシュ成功。** DiT・MM-DiT・SiT・高速Sampling を完全習得した。次は音声モダリティへ — 静止画から時系列データへの拡張。第44回で会おう！
-:::
+> **Note:** **第43回完了！ Course V スタートダッシュ成功。** DiT・MM-DiT・SiT・高速Sampling を完全習得した。次は音声モダリティへ — 静止画から時系列データへの拡張。第44回で会おう！
+
+> **⚠️ Warning:** この講義で実装した Tiny DiT on MNIST は教育用の簡略実装であり、本番品質には不十分な点がある。特に: (1) `MultiHeadAttention` の実装が Flux の低レイテンシ版ではなく、(2) `patchify/unpatchify` が純粋 Julia（BLAS 最適化なし）、(3) AdaLN-Zero の Zero 初期化が省略されている。Production 利用には DiT 公式実装（PyTorch）または Lux.jl の最適化版を参照のこと。
 
 ---
 
@@ -1307,6 +1272,8 @@ graph LR
 - DALL-E 4 (未公開だが DiT と推測)
 - Midjourney v7 (DiT ベースと噂)
 - 中国の主要モデル (Wan-2.1 / HunyuanVideo) も DiT
+
+**2023年の懐疑論者が間違えた理由**: U-Net の CNN 帰納バイアスは「少ないデータで学習しやすい」という利点だった。しかし SD3/FLUX レベルのデータ規模（数億枚）では、帰納バイアスは制約になる。Scaling Laws は「帰納バイアスを破り、データに任せる」という結論を導く — これは ImageNet での CNN → ViT の移行と全く同じパターン。
 
 **問い**:
 1. **U-Net の帰納バイアスは本当に必要だったのか？** — それとも、データ量が増えれば不要になる？
@@ -1327,6 +1294,8 @@ graph LR
 
 **あなたの考えは？** — 次の革命は何か？
 
+**一つの答え**: 2015→2020→2023→2025 の各革命は「帰納バイアスの削減」という共通の方向性を持つ（CNN の局所性 → ViT の大域性 → DiT のスケーリング）。次の革命は「モダリティの壁」の崩壊かもしれない — 画像・音声・テキスト・動画を単一のトークン列として扱う「Universal Generative Transformer」が第49回の世界モデルで議論される。
+
 ---
 
 ## 参考文献
@@ -1334,83 +1303,54 @@ graph LR
 ### 主要論文
 
 [^1]: Dosovitskiy, A., Beyer, L., Kolesnikov, A., Weissenborn, D., Zhai, X., Unterthiner, T., ... & Houlsby, N. (2020). "An Image is Worth 16x16 Words: Transformers for Image Recognition at Scale". *ICLR 2021*.
-@[card](https://arxiv.org/abs/2010.11929)
+<https://arxiv.org/abs/2010.11929>
 
 [^2]: Peebles, W., & Xie, S. (2023). "Scalable Diffusion Models with Transformers". *ICCV 2023*.
-@[card](https://arxiv.org/abs/2212.09748)
+<https://arxiv.org/abs/2212.09748>
 
 [^3]: Esser, P., Kulal, S., Blattmann, A., Entezari, R., Müller, J., Saini, H., ... & Rombach, R. (2024). "Scaling Rectified Flow Transformers for High-Resolution Image Synthesis". *arXiv:2403.03206*.
-@[card](https://arxiv.org/abs/2403.03206)
+<https://arxiv.org/abs/2403.03206>
 
 [^4]: Black Forest Labs. (2024). "FLUX: A New Era of Generative AI". *Official Blog*.
-@[card](https://blackforestlabs.ai/announcing-black-forest-labs/)
+<https://blackforestlabs.ai/announcing-black-forest-labs/>
 
 [^5]: Ba, J. L., Kiros, J. R., & Hinton, G. E. (2016). "Layer Normalization". *arXiv:1607.06450*.
-@[card](https://arxiv.org/abs/1607.06450)
+<https://arxiv.org/abs/1607.06450>
 
 [^7]: Hendrycks, D., & Gimpel, K. (2016). "Gaussian Error Linear Units (GELUs)". *arXiv:1606.08415*.
-@[card](https://arxiv.org/abs/1606.08415)
+<https://arxiv.org/abs/1606.08415>
 
 [^8]: Ma, N., Goldstein, M., Albergo, M. S., Boffi, N. M., Vanden-Eijnden, E., & Xie, S. (2024). "SiT: Exploring Flow and Diffusion-based Generative Models with Scalable Interpolant Transformers". *ICML 2024*.
-@[card](https://arxiv.org/abs/2401.08740)
+<https://arxiv.org/abs/2401.08740>
 
 [^9]: Lu, C., Zhou, Y., Bao, F., Chen, J., Li, C., & Zhu, J. (2022). "DPM-Solver++: Fast Solver for Guided Sampling of Diffusion Probabilistic Models". *NeurIPS 2022*.
-@[card](https://arxiv.org/abs/2211.01095)
+<https://arxiv.org/abs/2211.01095>
 
 [^10]: Karras, T., Aittala, M., Aila, T., & Laine, S. (2022). "Elucidating the Design Space of Diffusion-Based Generative Models". *NeurIPS 2022*.
-@[card](https://arxiv.org/abs/2206.00364)
+<https://arxiv.org/abs/2206.00364>
 
 [^11]: Patel, S., Katsch, M., Thulke, D., Daras, G., Shi, H., Karrer, B., ... & Susskind, J. (2024). "aMUSEd: An Open MUSE Reproduction". *arXiv:2410.14086*.
-@[card](https://arxiv.org/abs/2410.14086)
+<https://arxiv.org/abs/2410.14086>
 
 [^12]: Jia, W., Huang, M., Chen, N., Zhang, L., & Mao, Z. (2025). "D2iT: Dynamic Diffusion Transformer for Accurate Image Generation". *CVPR 2025*. arXiv:2504.09454.
-@[card](https://arxiv.org/abs/2504.09454)
+<https://arxiv.org/abs/2504.09454>
 
-[^13]: DyDiT++ (2025). "Improved Dynamic Diffusion Transformers". *arXiv:2504.06803*.
-@[card](https://arxiv.org/abs/2504.06803)
+[^13]: Zhao, W., et al. (2025). "DyDiT++: Diffusion Transformers with Timestep and Spatial Dynamics for Efficient Visual Generation". *arXiv:2504.06803*.
+<https://arxiv.org/abs/2504.06803>
 
 [^14]: Z-Image Team. (2025). "Z-Image: An Efficient Image Generation Foundation Model with Single-Stream Diffusion Transformer". *arXiv:2511.22699*.
-@[card](https://arxiv.org/abs/2511.22699)
+<https://arxiv.org/abs/2511.22699>
 
-[^15]: Reflect-DiT. (2025). "Reflect-DiT: Inference-Time Scaling for Diffusion Transformers via Self-Reflection". *arXiv:2503.12271*.
-@[card](https://arxiv.org/abs/2503.12271)
+[^15]: Li, S., et al. (2025). "Reflect-DiT: Inference-Time Scaling for Text-to-Image Diffusion Transformers via In-Context Reflection". *arXiv:2503.12271*.
+<https://arxiv.org/abs/2503.12271>
 
 ### 教科書
 
 - Goodfellow, I., Bengio, Y., & Courville, A. (2016). *Deep Learning*. MIT Press. Chapter 20: Generative Models.
-@[card](https://www.deeplearningbook.org/)
+<https://www.deeplearningbook.org/>
 
 - Murphy, K. P. (2022). *Probabilistic Machine Learning: Advanced Topics*. MIT Press. Chapter 27: Diffusion Models.
-@[card](https://probml.github.io/pml-book/book2.html)
-
----
-
-## 記法規約
-
-| 記号 | 意味 | 例 |
-|:-----|:-----|:---|
-| $\mathbf{x}$ | データ (ベクトル) | $\mathbf{x} \in \mathbb{R}^D$ |
-| $\mathbf{z}$ | 潜在変数 / トークン | $\mathbf{z} \in \mathbb{R}^{N \times D}$ |
-| $\theta$ | モデルパラメータ | $\epsilon_\theta(\mathbf{x}_t, t)$ |
-| $t$ | 拡散ステップ (timestep) | $t \in [0, T]$ |
-| $\mathbf{c}$ | 条件 (condition) | $\mathbf{c} = [\mathbf{t}, \mathbf{c}_{\text{text}}]$ |
-| $P$ | パッチサイズ | $P = 16$ |
-| $N$ | トークン数 / パッチ数 | $N = \frac{H}{P} \times \frac{W}{P}$ |
-| $D$ | Hidden dimension | $D = 768$ (DiT-B) |
-| $L$ | レイヤー数 | $L = 12$ (DiT-B) |
-| $H$ | Attention heads | $H = 12$ |
-| $\alpha(t), \beta(t)$ | ノイズスケジュール | $\alpha(t) = 1 - \beta(t)$ |
-| $\bar{\alpha}_t$ | 累積積 $\prod_{s=1}^t \alpha_s$ | DDPM の forward process |
-| $\text{AdaLN-Zero}$ | Adaptive Layer Normalization (Zero-initialized) | DiT の心臓部 |
-| $\text{MM-DiT}$ | Multimodal DiT | SD3 / FLUX |
-| $\text{SiT}$ | Scalable Interpolant Transformers | Stochastic Interpolants + DiT |
-
----
-
-**Course V スタート！ 第43回完了。次は音声モダリティへ — 第44回で会おう！**
-
----
-
+<https://probml.github.io/pml-book/book2.html>
 ## 📚 補足資料: 詳細導出と実装ガイド
 
 ### A. SiT (Stochastic Interpolants) の完全導出
@@ -1565,15 +1505,8 @@ function sit_sample(model, num_steps=50)
     dt = 1.0 / num_steps
     for i in 1:num_steps
         t = (i - 1) * dt
-
-        # Predict vector field
         v_pred = model(x_t, t)
-
-        # Euler-Maruyama step
-        drift = v_pred * dt
-        diffusion = γ_prime(t) * sqrt(dt) * randn(D)
-
-        x_t = x_t + drift + diffusion
+        @. x_t += v_pred * dt + γ_prime(t) * sqrt(dt) * randn()
     end
 
     return x_t
@@ -1589,13 +1522,11 @@ function sit_sample_heun(model, num_steps=50)
     for i in 1:num_steps
         t = (i - 1) * dt
 
-        # 1st-order prediction
         v1 = model(x_t, t)
-        x_euler = x_t + v1 * dt
+        x_euler = @. x_t + v1 * dt
 
-        # 2nd-order correction
         v2 = model(x_euler, t + dt)
-        x_t = x_t + (v1 + v2) / 2 * dt + γ_prime(t) * sqrt(dt) * randn(D)
+        @. x_t += (v1 + v2) / 2 * dt + γ_prime(t) * sqrt(dt) * randn()
     end
 
     return x_t
@@ -1604,643 +1535,13 @@ end
 
 ---
 
-### B. Rust 実装の詳細ガイド
-
-#### B.1 Candle の基礎
-
-**Tensor 作成**:
-```rust
-use candle_core::{Tensor, Device, DType};
-
-// Create tensor
-let device = Device::Cpu;
-let x = Tensor::randn(0f32, 1.0, &[4, 256], &device)?;  // [4, 256] shape
-
-// Operations
-let y = x.sqr()?;  // element-wise square
-let z = (&x + &y)?;  // addition
-let w = x.matmul(&y.t()?)?;  // matrix multiplication
-```
-
-**GPU 対応**:
-```rust
-// Check CUDA availability
-let device = if candle_core::utils::cuda_is_available() {
-    Device::new_cuda(0)?  // GPU 0
-} else {
-    Device::Cpu
-};
-
-// Move tensor to GPU
-let x_gpu = x.to_device(&device)?;
-```
-
-#### B.2 DiT Layer の詳細実装
-
-**Layer Normalization**:
-```rust
-use candle_nn::{LayerNorm, VarBuilder};
-
-struct LayerNormConfig {
-    eps: f64,
-}
-
-impl LayerNormConfig {
-    fn build(&self, vb: VarBuilder, dim: usize) -> Result<LayerNorm> {
-        let gamma = vb.get((dim,), "gamma")?;
-        let beta = vb.get((dim,), "beta")?;
-        Ok(LayerNorm::new(gamma, beta, self.eps))
-    }
-}
-
-// Usage
-let config = LayerNormConfig { eps: 1e-6 };
-let ln = config.build(vb.pp("ln"), 768)?;
-let x_norm = ln.forward(&x)?;
-```
-
-**Multi-Head Attention** (詳細):
-```rust
-struct MultiHeadAttention {
-    num_heads: usize,
-    head_dim: usize,
-    q_proj: Linear,
-    k_proj: Linear,
-    v_proj: Linear,
-    o_proj: Linear,
-}
-
-impl MultiHeadAttention {
-    fn new(vb: VarBuilder, dim: usize, num_heads: usize) -> Result<Self> {
-        let head_dim = dim / num_heads;
-        Ok(Self {
-            num_heads,
-            head_dim,
-            q_proj: Linear::new(vb.pp("q").get((dim, dim))?, None),
-            k_proj: Linear::new(vb.pp("k").get((dim, dim))?, None),
-            v_proj: Linear::new(vb.pp("v").get((dim, dim))?, None),
-            o_proj: Linear::new(vb.pp("o").get((dim, dim))?, None),
-        })
-    }
-
-    fn forward(&self, x: &Tensor) -> Result<Tensor> {
-        let (batch_size, seq_len, _) = x.dims3()?;
-
-        // Project Q, K, V
-        let q = self.q_proj.forward(x)?;
-        let k = self.k_proj.forward(x)?;
-        let v = self.v_proj.forward(x)?;
-
-        // Reshape to [batch, heads, seq, head_dim]
-        let q = q.reshape((batch_size, seq_len, self.num_heads, self.head_dim))?
-                 .transpose(1, 2)?;  // [batch, heads, seq, head_dim]
-        let k = k.reshape((batch_size, seq_len, self.num_heads, self.head_dim))?
-                 .transpose(1, 2)?;
-        let v = v.reshape((batch_size, seq_len, self.num_heads, self.head_dim))?
-                 .transpose(1, 2)?;
-
-        // Scaled dot-product attention
-        let scale = (self.head_dim as f64).sqrt();
-        let scores = q.matmul(&k.t()?)? / scale;  // [batch, heads, seq, seq]
-        let attn = candle_nn::ops::softmax(&scores, -1)?;
-        let out = attn.matmul(&v)?;  // [batch, heads, seq, head_dim]
-
-        // Concatenate heads
-        let out = out.transpose(1, 2)?  // [batch, seq, heads, head_dim]
-                     .reshape((batch_size, seq_len, self.num_heads * self.head_dim))?;
-
-        // Output projection
-        self.o_proj.forward(&out)
-    }
-}
-```
-
-#### B.3 バッチ処理とパフォーマンス
-
-**バッチ推論**:
-```rust
-async fn batch_inference(
-    model: &DiT,
-    requests: Vec<GenerateRequest>,
-    max_batch_size: usize,
-) -> Result<Vec<Tensor>> {
-    let mut results = Vec::new();
-
-    for chunk in requests.chunks(max_batch_size) {
-        // Stack inputs
-        let batch_prompts: Vec<_> = chunk.iter().map(|r| &r.prompt).collect();
-        let text_embeddings = encode_batch_text(&batch_prompts)?;
-
-        // Run model
-        let noise = Tensor::randn(0f32, 1.0, &[chunk.len(), 3, 256, 256], &Device::Cpu)?;
-        let images = ddpm_sample_batch(model, &noise, &text_embeddings, 50)?;
-
-        results.extend(images);
-    }
-
-    Ok(results)
-}
-```
-
-**メモリ管理**:
-```rust
-// Gradient checkpointing (memory-efficient)
-fn forward_with_checkpointing(
-    &self,
-    x: &Tensor,
-    checkpoint_layers: &[usize],
-) -> Result<Tensor> {
-    let mut x = x.clone();
-
-    for (i, block) in self.blocks.iter().enumerate() {
-        if checkpoint_layers.contains(&i) {
-            // Recompute activations during backward
-            x = candle_nn::ops::checkpoint(|| block.forward(&x))?;
-        } else {
-            x = block.forward(&x)?;
-        }
-    }
-
-    Ok(x)
-}
-```
-
-#### B.4 HTTP API の実装 (Axum)
-
-**完全な API サーバー**:
-```rust
-use axum::{
-    routing::{get, post},
-    Router,
-    Json,
-    extract::State,
-};
-use serde::{Deserialize, Serialize};
-use std::sync::Arc;
-use tokio::sync::Mutex;
-
-#[derive(Clone)]
-struct AppState {
-    model: Arc<Mutex<DiT>>,
-    config: GenerationConfig,
-}
-
-#[derive(Deserialize)]
-struct GenerateRequest {
-    prompt: String,
-    num_inference_steps: Option<usize>,
-    guidance_scale: Option<f32>,
-}
-
-#[derive(Serialize)]
-struct GenerateResponse {
-    image_base64: String,
-    latency_ms: u64,
-}
-
-async fn generate_image(
-    State(state): State<AppState>,
-    Json(req): Json<GenerateRequest>,
-) -> Json<GenerateResponse> {
-    let start = std::time::Instant::now();
-
-    let model = state.model.lock().await;
-    let steps = req.num_inference_steps.unwrap_or(50);
-
-    // Generate
-    let image = generate_with_prompt(&model, &req.prompt, steps).unwrap();
-    let image_base64 = encode_image_base64(&image);
-
-    Json(GenerateResponse {
-        image_base64,
-        latency_ms: start.elapsed().as_millis() as u64,
-    })
-}
-
-async fn health_check() -> &'static str {
-    "OK"
-}
-
-#[tokio::main]
-async fn main() -> Result<()> {
-    // Load model
-    let vb = VarBuilder::from_safetensors(&["model.safetensors"], DType::F32, &Device::Cpu)?;
-    let model = DiT::new(vb, 12, 768)?;
-
-    let state = AppState {
-        model: Arc::new(Mutex::new(model)),
-        config: GenerationConfig::default(),
-    };
-
-    // Build router
-    let app = Router::new()
-        .route("/health", get(health_check))
-        .route("/generate", post(generate_image))
-        .with_state(state);
-
-    // Run server
-    let listener = tokio::net::TcpListener::bind("0.0.0.0:3000").await?;
-    axum::serve(listener, app).await?;
-
-    Ok(())
-}
-```
-
-**レート制限**:
-```rust
-use tower::ServiceBuilder;
-use tower_governor::{GovernorLayer, GovernorConfigBuilder};
-
-let governor_conf = Box::new(
-    GovernorConfigBuilder::default()
-        .per_second(10)  // 10 requests/sec per IP
-        .burst_size(5)
-        .finish()
-        .unwrap(),
-);
-
-let app = Router::new()
-    .route("/generate", post(generate_image))
-    .layer(ServiceBuilder::new().layer(GovernorLayer { config: governor_conf }))
-    .with_state(state);
-```
-
----
-
-### C. Tiny DiT 訓練ログと可視化
-
-#### C.1 詳細な訓練ログ
-
-**Epoch ごとの損失推移** (実測値の例):
-```
-Epoch 1/10: Loss = 0.2847 | Grad Norm = 1.234 | LR = 0.0001 | Time = 245s
-Epoch 2/10: Loss = 0.1523 | Grad Norm = 0.876 | LR = 0.0001 | Time = 243s
-Epoch 3/10: Loss = 0.0987 | Grad Norm = 0.654 | LR = 0.0001 | Time = 244s
-Epoch 4/10: Loss = 0.0743 | Grad Norm = 0.521 | LR = 0.0001 | Time = 246s
-Epoch 5/10: Loss = 0.0612 | Grad Norm = 0.432 | LR = 0.0001 | Time = 245s
-Epoch 6/10: Loss = 0.0531 | Grad Norm = 0.378 | LR = 0.0001 | Time = 244s
-Epoch 7/10: Loss = 0.0478 | Grad Norm = 0.341 | LR = 0.0001 | Time = 245s
-Epoch 8/10: Loss = 0.0441 | Grad Norm = 0.315 | LR = 0.0001 | Time = 246s
-Epoch 9/10: Loss = 0.0414 | Grad Norm = 0.296 | LR = 0.0001 | Time = 244s
-Epoch 10/10: Loss = 0.0393 | Grad Norm = 0.281 | LR = 0.0001 | Time = 245s
-
-Training complete! Total time: 40.75 minutes
-```
-
-**バッチごとの詳細ログ**:
-```julia
-function train_dit_with_logging(; epochs=10, batch_size=128)
-    # ... (model initialization)
-
-    log_file = open("training_log.csv", "w")
-    println(log_file, "epoch,batch,loss,grad_norm,lr")
-
-    for epoch in 1:epochs
-        epoch_losses = Float32[]
-        epoch_start = time()
-
-        for (batch_idx, batch) in enumerate(train_loader)
-            t = rand(1:T)
-            ε = randn(Float32, size(batch))
-            x_t = sqrt(ᾱ[t]) .* batch .+ sqrt(1 - ᾱ[t]) .* ε
-
-            # Compute loss and gradients
-            loss, grads = Flux.withgradient(model) do m
-                ε_pred = m(x_t, t)
-                mean((ε_pred .- ε).^2)
-            end
-
-            # Gradient norm
-            grad_norm = sqrt(sum(x -> sum(x.^2), grads[1]))
-
-            # Update
-            Flux.update!(opt, model, grads[1])
-
-            # Log
-            push!(epoch_losses, loss)
-            println(log_file, "$epoch,$batch_idx,$loss,$grad_norm,$(opt.eta)")
-
-            if batch_idx % 10 == 0
-                println("Epoch $epoch Batch $batch_idx: Loss = $loss")
-            end
-        end
-
-        epoch_time = time() - epoch_start
-        avg_loss = mean(epoch_losses)
-        println("Epoch $epoch/$epochs: Loss = $avg_loss | Time = $(round(epoch_time, digits=1))s")
-    end
-
-    close(log_file)
-    return model
-end
-```
-
-#### C.2 損失曲線の可視化
-
-**プロット**:
-```julia
-using Plots
-
-# Load training log
-log_data = CSV.read("training_log.csv", DataFrame)
-
-# Plot loss curve
-plot(log_data.epoch, log_data.loss,
-     xlabel="Epoch", ylabel="Loss",
-     title="Tiny DiT Training Loss",
-     label="Training Loss",
-     linewidth=2,
-     legend=:topright)
-savefig("loss_curve.png")
-
-# Plot gradient norm
-plot(log_data.epoch, log_data.grad_norm,
-     xlabel="Epoch", ylabel="Gradient Norm",
-     title="Gradient Norm Evolution",
-     label="Grad Norm",
-     linewidth=2,
-     color=:red)
-savefig("grad_norm.png")
-```
-
-#### C.3 生成画像の品質推移
-
-**各 Epoch での生成結果**:
-```julia
-function visualize_generation_progress(model, schedule, epochs=[1, 3, 5, 10])
-    grid = []
-
-    for epoch in epochs
-        # Load checkpoint
-        model_checkpoint = load("model_epoch_$epoch.jld2", "model")
-
-        # Generate samples
-        samples = sample_dit(model_checkpoint, schedule, 16)
-
-        # Create grid
-        epoch_grid = mosaicview([samples[:,:,1,i] for i in 1:16], nrow=4, npad=2)
-        push!(grid, epoch_grid)
-    end
-
-    # Combine all epochs
-    combined = mosaicview(grid, nrow=1, npad=10)
-    save("generation_progress.png", colorview(Gray, combined))
-end
-```
-
-**品質メトリクスの計算**:
-```julia
-using Distances
-
-function compute_fid_approximation(real_samples, generated_samples)
-    # Simplified FID (real FID requires Inception features)
-    μ_real = mean(real_samples, dims=4)
-    μ_gen = mean(generated_samples, dims=4)
-
-    Σ_real = cov(reshape(real_samples, :, size(real_samples, 4)))
-    Σ_gen = cov(reshape(generated_samples, :, size(generated_samples, 4)))
-
-    # Frechet distance
-    fid = sum((μ_real .- μ_gen).^2) + tr(Σ_real + Σ_gen - 2 * sqrt(Σ_real * Σ_gen))
-    return fid
-end
-
-# Track FID over epochs
-fid_scores = Float32[]
-for epoch in 1:10
-    model_checkpoint = load("model_epoch_$epoch.jld2", "model")
-    samples = sample_dit(model_checkpoint, schedule, 1000)
-    fid = compute_fid_approximation(test_data, samples)
-    push!(fid_scores, fid)
-    println("Epoch $epoch FID: $fid")
-end
-
-plot(1:10, fid_scores,
-     xlabel="Epoch", ylabel="FID Score",
-     title="Generation Quality (lower = better)",
-     linewidth=2, marker=:circle)
-```
-
-#### C.4 Attention Map の可視化
-
-**DiT の Attention パターン**:
-```julia
-function visualize_attention_maps(model, x, layer_idx=6)
-    # Extract attention weights from specific layer
-    z = patchify(x, 4)
-    z = model.patchify(z)
-    z = z .+ model.pos_emb
-
-    for (i, block) in enumerate(model.blocks)
-        if i == layer_idx
-            # Extract attention weights (modify block to return attn)
-            attn_weights = block.attn.attention_weights  # [num_heads, N, N]
-            break
-        end
-        z = block(z)
-    end
-
-    # Average over heads
-    avg_attn = mean(attn_weights, dims=1)[1, :, :]  # [N, N]
-
-    # Visualize
-    heatmap(avg_attn,
-            xlabel="Key Position", ylabel="Query Position",
-            title="Attention Map (Layer $layer_idx)",
-            color=:viridis)
-    savefig("attention_map_layer_$layer_idx.png")
-end
-```
-
-#### C.5 パッチ埋め込みの t-SNE 可視化
-
-**潜在空間の可視化**:
-```julia
-using TSne
-
-function visualize_patch_embeddings(model, dataset, num_samples=1000)
-    # Extract patch embeddings
-    all_embeddings = []
-    all_labels = []
-
-    for (x, y) in Iterators.take(dataset, num_samples)
-        z = patchify(x, 4)
-        z = model.patchify(z)  # [N, D]
-        push!(all_embeddings, z)
-        push!(all_labels, y)
-    end
-
-    embeddings_matrix = vcat(all_embeddings...)  # [num_samples * N, D]
-    labels_vector = repeat(all_labels, inner=N)
-
-    # t-SNE
-    embeddings_2d = tsne(embeddings_matrix', 2, 50, 1000, 20.0)
-
-    # Plot
-    scatter(embeddings_2d[1, :], embeddings_2d[2, :],
-            group=labels_vector,
-            xlabel="t-SNE 1", ylabel="t-SNE 2",
-            title="Patch Embeddings (t-SNE)",
-            markersize=2, alpha=0.5)
-    savefig("patch_embeddings_tsne.png")
-end
-```
-
----
-
-### D. パフォーマンス比較: DiT vs U-Net
-
-#### D.1 実測ベンチマーク
-
-**実験設定**:
-- タスク: MNIST 28×28 grayscale
-- 訓練データ: 60,000 samples
-- 評価: FID score (1,000 generated samples)
-- ハードウェア: CPU (M1 MacBook Pro)
-
-**結果**:
-| モデル | パラメータ数 | 訓練時間/epoch | 推論時間/sample | FID (10 epoch) |
-|:-------|:-------------|:---------------|:----------------|:---------------|
-| U-Net-Small | 1.2M | 3.5 min | 120 ms | 15.3 |
-| DiT-Tiny | 0.8M | 4.2 min | 150 ms | 18.7 |
-| U-Net-Medium | 4.5M | 8.1 min | 180 ms | 12.4 |
-| DiT-Small | 3.2M | 9.3 min | 220 ms | 14.1 |
-
-**解釈**:
-- **小規模 (MNIST)**: U-Net が DiT をわずかに上回る (帰納バイアスの利点)
-- **推論速度**: U-Net が高速 (CNN の効率性)
-- **Scaling**: DiT は大規模データで U-Net を超える (ImageNet では DiT が勝つ)
-
-#### D.2 大規模データでの比較
-
-**ImageNet 256×256 での結果** (DiT 論文より):
-| モデル | パラメータ数 | FID-50K | Inception Score |
-|:-------|:-------------|:--------|:----------------|
-| LDM-4 (U-Net) | 400M | 10.56 | 103.5 |
-| DiT-XL/2 | 675M | 9.62 | 121.5 |
-| DiT-XL/2 (cfg=1.5) | 675M | **2.27** | **278.2** |
-
-**結論**: 大規模データ + 大規模モデルでは DiT が圧倒的に勝つ。
-
----
-
-### E. 実践ガイド: DiT を実プロジェクトで使う
-
-#### E.1 モデル選択のガイドライン
-
-**用途別の推奨モデル**:
-| 用途 | 推奨モデル | 理由 |
-|:-----|:-----------|:-----|
-| 研究プロトタイプ | DiT-B/4 | 訓練が速い、論文再現に十分 |
-| プロダクション (高品質) | FLUX.1-dev | 最高品質、商用可能 |
-| プロダクション (高速) | aMUSEd-512 | 12 ステップで生成 |
-| リソース制約 | DiT-S/8 | 軽量、CPU でも実行可能 |
-| カスタムドメイン | DiT-B/4 + fine-tune | 転移学習で小規模データ対応 |
-
-#### E.2 Fine-tuning のベストプラクティス
-
-**データ準備**:
-```julia
-# Custom dataset
-struct CustomImageDataset
-    images::Vector{Array{Float32, 3}}
-    captions::Vector{String}
-end
-
-function prepare_dataset(image_dir, caption_file)
-    images = []
-    captions = []
-
-    for (img_path, caption) in zip(image_paths, caption_texts)
-        img = load(img_path)
-        img = imresize(img, (256, 256))
-        img = Float32.(channelview(img))  # [C, H, W]
-        img = (img .- 0.5) ./ 0.5  # normalize to [-1, 1]
-
-        push!(images, img)
-        push!(captions, caption)
-    end
-
-    return CustomImageDataset(images, captions)
-end
-```
-
-**Fine-tuning 戦略**:
-```julia
-function finetune_dit(pretrained_model, custom_dataset; epochs=50, lr=1e-5)
-    # Freeze early layers (optional)
-    for (i, block) in enumerate(pretrained_model.blocks)
-        if i <= 6  # freeze first half
-            Flux.freeze!(block)
-        end
-    end
-
-    # Lower learning rate for fine-tuning
-    opt = Adam(lr)
-
-    # Training loop (same as before, but with custom dataset)
-    train_dit_mnist(model=pretrained_model, dataset=custom_dataset,
-                   epochs=epochs, opt=opt)
-
-    return pretrained_model
-end
-```
-
-#### E.3 デプロイメントの考慮事項
-
-**モデル量子化**:
-```rust
-// INT8 quantization for faster inference
-use candle_transformers::quantized_var_builder::VarBuilder as QVarBuilder;
-
-let vb = QVarBuilder::from_gguf("model_q8_0.gguf", &device)?;
-let model = DiT::new(vb, 12, 768)?;
-```
-
-**バッチサイズの最適化**:
-```python
-# Find optimal batch size
-def find_optimal_batch_size(model, device):
-    for batch_size in [1, 2, 4, 8, 16, 32]:
-        try:
-            dummy_input = torch.randn(batch_size, 3, 256, 256).to(device)
-            with torch.no_grad():
-                _ = model(dummy_input)
-            print(f"Batch size {batch_size}: OK")
-        except RuntimeError as e:
-            print(f"Batch size {batch_size}: OOM")
-            return batch_size // 2
-
-    return 32
-```
-
-**キャッシング戦略**:
-```rust
-use lru::LruCache;
-
-struct CachedDiTServer {
-    model: DiT,
-    prompt_cache: LruCache<String, Tensor>,  // cache text embeddings
-}
-
-impl CachedDiTServer {
-    async fn generate(&mut self, prompt: &str) -> Result<Tensor> {
-        // Check cache
-        if let Some(text_emb) = self.prompt_cache.get(prompt) {
-            return self.generate_from_embedding(text_emb);
-        }
-
-        // Compute and cache
-        let text_emb = encode_text(prompt)?;
-        self.prompt_cache.put(prompt.to_string(), text_emb.clone());
-
-        self.generate_from_embedding(&text_emb)
-    }
-}
-```
-
----
----
+## 著者リンク
+
+- Blog: https://fumishiki.dev
+- X: https://x.com/fumishiki
+- LinkedIn: https://www.linkedin.com/in/fumitakamurakami
+- GitHub: https://github.com/fumishiki
+- Hugging Face: https://huggingface.co/fumishiki
 
 ## ライセンス
 

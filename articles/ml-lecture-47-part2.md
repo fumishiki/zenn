@@ -4,6 +4,11 @@ emoji: "🕺"
 type: "tech"
 topics: ["machinelearning", "deeplearning", "motion", "4d", "robotics"]
 published: true
+slug: "ml-lecture-47-part2"
+difficulty: "advanced"
+time_estimate: "90 minutes"
+languages: ["Julia", "Rust"]
+keywords: ["機械学習", "深層学習", "生成モデル"]
 ---
 ## 💻 4. 実装ゾーン（45分）— 3言語フルスタック実装
 
@@ -95,14 +100,9 @@ end
 function load_motion_dataset(path::String)
     # In practice: Load from .npy or .jld2
     # Here: Generate dummy data
-    motions = []
     texts = ["walking", "jumping", "dancing", "sitting"]
 
-    for text in texts
-        # Generate dummy motion (replace with real data)
-        pos = randn(Float32, 30, 22, 3)
-        push!(motions, MotionData(pos, text))
-    end
+    motions = [MotionData(randn(Float32, 30, 22, 3), text) for text in texts]
 
     return motions
 end
@@ -612,8 +612,7 @@ defmodule RobotSwarm.RobotAgent do
   @impl true
   def handle_call({:execute, action}, _from, state) do
     # Simulate action execution
-    new_position = Enum.zip(state.position, action)
-                   |> Enum.map(fn {p, a} -> p + a end)
+    new_position = Enum.zip_with(state.position, action, &(&1 + &2))
 
     new_state = %{state | position: new_position, status: :executing}
 
@@ -667,11 +666,8 @@ defmodule RobotSwarm.Coordinator do
   def broadcast_action(action) do
     # Broadcast to all robots
     Registry.select(RobotSwarm.Registry, [{{:"$1", :_, :_}, [], [:"$1"]}])
-    |> Enum.each(fn robot_id ->
-      Task.async(fn ->
-        RobotSwarm.RobotAgent.execute_action(robot_id, action)
-      end)
-    end)
+    |> Task.async_stream(&RobotSwarm.RobotAgent.execute_action(&1, action), max_concurrency: 16)
+    |> Stream.run()
   end
 end
 ```
@@ -699,9 +695,7 @@ iex> RobotSwarm.Coordinator.broadcast_action([0.0, 0.1, 0.0])
 - **耐障害性**: 1つのロボットがクラッシュしても、Supervisor が自動再起動
 - **分散**: 複数マシンにまたがるロボット群も透過的に制御可能
 
-:::message
-**ここまでで全体の70%完了！** Zone 4 で3言語フルスタック実装を完成。次は実験 — Zone 5 で実際に動かして検証する。
-:::
+> **Note:** **ここまでで全体の70%完了！** Zone 4 で3言語フルスタック実装を完成。次は実験 — Zone 5 で実際に動かして検証する。
 
 ---
 
@@ -722,17 +716,13 @@ using LinearAlgebra, Statistics, Plots
 function generate_walking_motion(T=30, J=22)
     motion = zeros(Float32, T, J, 3)
 
-    # Define simple walking pattern
-    for t in 1:T
-        phase = 2π * t / T
+    # Define simple walking pattern (vectorized)
+    phases = 2π .* (1:T) ./ T
+    motion[:, 1, 2] .= 0.3f0 .* abs.(sin.(phases))        # Left leg height
+    motion[:, 2, 2] .= 0.3f0 .* abs.(sin.(phases .+ π))   # Right leg height
 
-        # Legs (joints 1, 2): alternate up-down
-        motion[t, 1, 2] = 0.3 * abs(sin(phase))        # Left leg height
-        motion[t, 2, 2] = 0.3 * abs(sin(phase + π))   # Right leg height
-
-        # Forward movement
-        motion[t, :, 1] .= 0.05 * t / T  # All joints move forward slightly
-    end
+    # Forward movement
+    motion[:, :, 1] .= 0.05f0 .* (1:T) ./ T  # All joints move forward slightly
 
     return motion
 end
@@ -910,44 +900,18 @@ $$
 
 function foot_contact_accuracy(motion)
     T, J, _ = size(motion)
-    total_violations = 0
-
-    for t in 1:(T-1)
-        # Check left and right foot (joints 1, 2)
-        for j in [1, 2]
-            height = motion[t, j, 2]
-            velocity = norm(motion[t+1, j, :] - motion[t, j, :])
-
-            # If foot is on ground (height < threshold), velocity should be small
-            if height < 0.05 && velocity > 0.1
-                total_violations += 1
-            end
-        end
-    end
-
-    accuracy = 1.0 - (total_violations / (2 * (T-1)))
-    return accuracy
+    violations = sum(
+        @views(motion[t, j, 2] < 0.05 && norm(motion[t+1,j,:] .- motion[t,j,:]) > 0.1)
+        for t in 1:T-1, j in (1, 2)
+    )
+    return 1.0 - violations / (2 * (T-1))
 end
 
 function motion_diversity(motions)
     n = length(motions)
-    if n < 2
-        return 0.0
-    end
-
-    total_dist = 0.0
-    count = 0
-
-    for i in 1:n
-        for j in (i+1):n
-            # Simple distance: MSE of flattened motions
-            dist = mean((vec(motions[i]) - vec(motions[j])).^2)
-            total_dist += dist
-            count += 1
-        end
-    end
-
-    return sqrt(total_dist / count)
+    n < 2 && return 0.0
+    dists = [mean((vec(motions[i]) .- vec(motions[j])).^2) for i in 1:n for j in i+1:n]
+    return sqrt(mean(dists))
 end
 
 # Evaluate
@@ -1290,11 +1254,15 @@ compare_training_configs()
 
 → **推奨**: LR 1e-3 でスタート、収束後に 1e-4 に下げる (LR scheduling)
 
-:::message
-**ここまでで全体の85%完了！** Zone 5 で実験を完了。次は発展 — Zone 6 で最新研究と未解決問題を探る。
-:::
+> **Note:** **ここまでで全体の85%完了！** Zone 5 で実験を完了。次は発展 — Zone 6 で最新研究と未解決問題を探る。
 
 ---
+
+
+> Progress: 85%
+> **理解度チェック**
+> 1. Tiny Motion DiffusionのMDMで$\mathbf{x}_0$予測を使う場合とノイズ$\epsilon$予測を使う場合の訓練目標の違いを式で示せ。
+> 2. 歩行モーション生成の評価にFID代わりにFMD（Fréchet Motion Distance）を使う理由を説明せよ。
 
 ## 🚀 6. 発展ゾーン（30分）— 最新研究と未解決問題 + まとめ
 
@@ -1363,7 +1331,8 @@ compare_training_configs()
 2. **Causal 4D**: 因果関係を理解する4D生成 (物理法則推論)
 3. **Real-time interactive 4D**: VRヘッドセット内でリアルタイム生成
 
-:::details 推奨リーディングリスト
+<details><summary>推奨リーディングリスト</summary>
+
 **Motion Generation**:
 - MDM [^1]: 基礎を学ぶ
 - MLD [^2]: 高速化の設計思想
@@ -1384,7 +1353,8 @@ compare_training_configs()
 - Deformable 3DGS: 4DGSの前身
 - Neural ODE: 連続時間モデリング
 - Imitation Learning survey: ロボット学習の全体像
-:::
+
+</details>
 
 ---
 
@@ -1438,7 +1408,7 @@ compare_training_configs()
 
 ### 6.7 FAQ: よくある質問
 
-:::details Q1: Motion Diffusion と Video Diffusion の違いは？
+<details><summary>Q1: Motion Diffusion と Video Diffusion の違いは？</summary>
 
 **Motion Diffusion**:
 - データ: 関節座標 $(T, J, 3)$ — 構造化データ
@@ -1451,9 +1421,10 @@ compare_training_configs()
 - 評価: Visual quality (FVD, IS)
 
 **関係**: Motion → Video rendering で統合可能。モーション生成 → SMPL mesh → レンダリング → 動画。
-:::
 
-:::details Q2: 4DGS は動画生成と何が違う？
+</details>
+
+<details><summary>Q2: 4DGS は動画生成と何が違う？</summary>
 
 **4DGS**:
 - **3D 表現**: Gaussian primitives
@@ -1466,9 +1437,10 @@ compare_training_configs()
 - **編集困難**: ピクセル操作は非直感的
 
 4DGS は "3D-aware video generation" と言える。
-:::
 
-:::details Q3: Diffusion Policy は強化学習か模倣学習か？
+</details>
+
+<details><summary>Q3: Diffusion Policy は強化学習か模倣学習か？</summary>
 
 **基本は模倣学習 (Imitation Learning)**:
 - Expert demonstration から学習
@@ -1480,9 +1452,10 @@ compare_training_configs()
 - Fine-tuning: BC で pre-train → RL で fine-tune
 
 Hierarchical Diffusion Policy の GRPO [^6] は post-training RL の一種。
-:::
 
-:::details Q4: なぜ Elixir?
+</details>
+
+<details><summary>Q4: なぜ Elixir?</summary>
 
 **Elixir の3つの強み**:
 
@@ -1495,9 +1468,10 @@ Hierarchical Diffusion Policy の GRPO [^6] は post-training RL の一種。
 - **Elixir**: 複数ロボットの調整、障害管理、スケジューリング
 
 NIFやRustlerでRustとElixirを連携 → 最強の組み合わせ。
-:::
 
-:::details Q5: 次に学ぶべき論文は？
+</details>
+
+<details><summary>Q5: 次に学ぶべき論文は？</summary>
 
 **Motion 深掘り**:
 - HumanML3D dataset [^12]: Motion-text paired data
@@ -1513,7 +1487,8 @@ NIFやRustlerでRustとElixirを連携 → 最強の組み合わせ。
 - Diffusion models for manipulation survey
 - RT-1/RT-2 (Google Robotics Transformer)
 - Imitation learning: GAIL, DAGGER
-:::
+
+</details>
 
 ### 6.8 学習ロードマップ (1週間)
 
@@ -1548,11 +1523,15 @@ NIFやRustlerでRustとElixirを連携 → 最強の組み合わせ。
 
 生成モデルが、**新薬発見・新材料開発を数年→数ヶ月に短縮**する最前線へ。
 
-:::message
-**ここまでで全体の100%完了！** 第47回を完走した。静的3Dから動的4Dへ、空間から運動へ。Motion・4D・Robotics の全てを理解し、実装できるようになった。次は科学応用 — 第48回で待っている。
-:::
+> **Note:** **ここまでで全体の100%完了！** 第47回を完走した。静的3Dから動的4Dへ、空間から運動へ。Motion・4D・Robotics の全てを理解し、実装できるようになった。次は科学応用 — 第48回で待っている。
 
 ---
+
+
+> Progress: 95%
+> **理解度チェック**
+> 1. Flow Matchingをモーション生成に適用した場合、条件付きベクトル場$u_t = \mathbf{x}_1 - \mathbf{x}_0$の学習がDiffusionのスコアマッチングより単純になる理由を述べよ。
+> 2. Diffusion PolicyにおけるDDIM samplingを使うことで推論時ステップを削減できる理由を、学習したスコア関数との関係で説明せよ。
 
 ## 💀 パラダイム転換の問い
 
@@ -1585,7 +1564,7 @@ NIFやRustlerでRustとElixirを連携 → 最強の組み合わせ。
 
 **4D生成が、映画制作・ゲーム開発の民主化を加速する。**
 
-:::details 歴史的文脈: 写真→映画→3D→4D の進化
+<details><summary>歴史的文脈: 写真→映画→3D→4D の進化</summary>
 
 - **1826年**: 世界初の写真 (静止画)
 - **1895年**: リュミエール兄弟が映画を発明 (動画)
@@ -1593,7 +1572,8 @@ NIFやRustlerでRustとElixirを連携 → 最強の組み合わせ。
 - **2025年**: 4D生成モデル (誰でも動的3Dコンテンツ作成)
 
 各ステップで「前段階は不十分だった」と言われる。静的3D→4D も同じ流れ。
-:::
+
+</details>
 
 **あなたはどう考えるか？**
 - 静的3Dで十分な応用はあるか？ (建築ビジュアライゼーション？)
@@ -1607,33 +1587,33 @@ NIFやRustlerでRustとElixirを連携 → 最強の組み合わせ。
 ### 主要論文
 
 [^1]: Tevet, G., Raab, S., Gordon, B., Shafir, Y., Cohen-Or, D., & Bermano, A. H. (2022). Human Motion Diffusion Model. *ICLR 2023*.
-@[card](https://arxiv.org/abs/2209.14916)
+<https://arxiv.org/abs/2209.14916>
 
 [^2]: Chen, X., Jiang, B., Liu, W., Huang, Z., Fu, B., Chen, T., & Yu, G. (2023). Executing your Commands via Motion Diffusion in Latent Space. *CVPR 2023*.
-@[card](https://arxiv.org/abs/2212.04048)
+<https://arxiv.org/abs/2212.04048>
 
 [^3]: Wu, G., Yi, T., Fang, J., Xie, L., Zhang, X., Wei, W., Liu, W., Tian, Q., & Wang, X. (2024). 4D Gaussian Splatting for Real-Time Dynamic Scene Rendering. *CVPR 2024*.
-@[card](https://arxiv.org/abs/2310.08528)
+<https://arxiv.org/abs/2310.08528>
 
 [^4]: Bahmani, S., Liu, X., Yifan, W., Skorokhodov, I., Ramamoorthi, R., & Wetzstein, G. (2024). TC4D: Trajectory-Conditioned Text-to-4D Generation. *ECCV 2024*.
-@[card](https://arxiv.org/abs/2403.17920)
+<https://arxiv.org/abs/2403.17920>
 
 [^5]: Chi, C., Xu, Z., Feng, S., Cousineau, E., Du, Y., Burchfiel, B., Tedrake, R., & Song, S. (2023). Diffusion Policy: Visuomotor Policy Learning via Action Diffusion. *Robotics: Science and Systems (RSS) 2023*.
-@[card](https://arxiv.org/abs/2303.04137)
+<https://arxiv.org/abs/2303.04137>
 
 [^6]: Wang, Z., Liu, Z., & Liu, H. (2025). Hierarchical Diffusion Policy: Manipulation Trajectory Generation via Contact Guidance. *IEEE Transactions on Robotics*.
-@[card](https://ieeexplore.ieee.org/document/10912754)
+<https://ieeexplore.ieee.org/document/10912754>
 
 [^7]: Loper, M., Mahmood, N., Romero, J., Pons-Moll, G., & Black, M. J. (2015). SMPL: A Skinned Multi-Person Linear Model. *SIGGRAPH Asia 2015*.
 
-[^8]: Jiang, B., Chen, X., Liu, W., Yu, J., Yu, G., & Chen, T. (2025). MotionGPT3: Human Motion as a Second Modality. *arXiv preprint*.
-@[card](https://arxiv.org/abs/2506.24086)
+[^8]: Zhu, B., Jiang, B., et al. (2025). MotionGPT3: Human Motion as a Second Modality. *arXiv preprint*.
+<https://arxiv.org/abs/2506.24086>
 
-[^9]: Wang, Y., Chen, S., Liu, Z., & Zhang, L. (2026). UniMo: Unified Motion Generation and Understanding with Chain of Thought. *arXiv preprint*.
-@[card](https://arxiv.org/abs/2601.12126)
+[^9]: Wang, G., Liu, K., Lin, J., Song, G., & Li, J. (2026). UniMo: Unified Motion Generation and Understanding with Chain of Thought. *arXiv preprint*.
+<https://arxiv.org/abs/2601.12126>
 
 [^10]: Zhou, S., Wang, Y., Li, J., & Chen, F. (2025). RDT-1B: a Diffusion Foundation Model for Bimanual Manipulation. *ICLR 2025*.
-@[card](https://arxiv.org/abs/2410.07864)
+<https://arxiv.org/abs/2410.07864>
 
 ### 教科書
 
@@ -1652,45 +1632,18 @@ NIFやRustlerでRustとElixirを連携 → 最強の組み合わせ。
 
 ---
 
-## 記法規約
 
-本講義で使用する記法の統一規則:
+## 🔗 前編・後編リンク
 
-| 記号 | 意味 | 例 |
-|:-----|:-----|:---|
-| $\mathbf{x}$ | ベクトル (太字小文字) | モーション $\mathbf{x} \in \mathbb{R}^{T \times J \times 3}$ |
-| $\mathbf{X}$ | 行列 (太字大文字) | 共分散行列 $\boldsymbol{\Sigma}$ |
-| $x_t$ | 時刻 $t$ の値 | Diffusion の $x_t$ |
-| $\mathbf{x}(t)$ | 時間の関数 | 4DGS の $\boldsymbol{\mu}_i(t)$ |
-| $T$ | 時間ステップ数 or 拡散ステップ数 | Motion: $T=30$ frames, Diffusion: $T=1000$ steps |
-| $J$ | 関節数 | SMPL: $J=22$ |
-| $\pi_\theta$ | Policy (パラメータ $\theta$) | Diffusion Policy $\pi_\theta(a \| o)$ |
-| $\mathcal{N}(\mu, \sigma^2)$ | ガウス分布 | Forward diffusion ノイズ |
-| $\mathbb{E}[\cdot]$ | 期待値 | 損失関数 $\mathbb{E}_{t, \epsilon}[\cdots]$ |
-| $\nabla_\theta$ | パラメータ $\theta$ に関する勾配 | 最適化 $\theta \leftarrow \theta - \eta \nabla_\theta \mathcal{L}$ |
-| $\odot$ | 要素ごとの積 (Hadamard product) | $\mathbf{s} \odot \Delta \mathbf{s}$ |
-| $\| \cdot \|$ | ノルム (特に $L^2$) | 距離 $\| \mathbf{x} - \mathbf{y} \|$ |
-| $\sim$ | 「〜に従う」 | $\epsilon \sim \mathcal{N}(0, I)$ |
-| $:=$ | 定義 | $\bar{\alpha}_t := \prod_{s=1}^t (1 - \beta_s)$ |
+- **前編 (Part 1 — 理論編)**: [第47回: モーション・4D生成 & Diffusion Policy (Part 1)](ml-lecture-47-part1)
 
-**略語**:
+## 著者リンク
 
-| 略語 | 正式名称 |
-|:-----|:---------|
-| MDM | Motion Diffusion Model |
-| MLD | Motion Latent Diffusion |
-| 4DGS | 4D Gaussian Splatting |
-| TC4D | Trajectory-Conditioned 4D Generation |
-| RDT | Robot Diffusion Transformer |
-| GRPO | Group Relative Policy Optimization |
-| CoT | Chain-of-Thought |
-| CoM | Chain-of-Motion |
-| OTP | Open Telecom Platform (Erlang/Elixir) |
-| SMPL | Skinned Multi-Person Linear Model |
-
----
-
----
+- Blog: https://fumishiki.dev
+- X: https://x.com/fumishiki
+- LinkedIn: https://www.linkedin.com/in/fumitakamurakami
+- GitHub: https://github.com/fumishiki
+- Hugging Face: https://huggingface.co/fumishiki
 
 ## ライセンス
 

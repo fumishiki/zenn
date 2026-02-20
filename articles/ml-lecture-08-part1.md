@@ -45,7 +45,7 @@ np.random.seed(0)
 x = np.concatenate([np.random.normal(-2, 0.7, 200), np.random.normal(2, 0.7, 200)])
 pi, mu, var = np.array([0.5, 0.5]), np.array([-1.0, 1.0]), np.array([1.0, 1.0])
 
-def gauss(x, mu, var):
+def gauss(x: np.ndarray, mu: float, var: float) -> np.ndarray:
     return np.exp(-0.5 * (x - mu)**2 / var) / np.sqrt(2 * np.pi * var)
 
 for _ in range(8):
@@ -609,7 +609,7 @@ $$
 
 等号成立確認 ✅。
 
-さらに $q(z) \neq p(z|x)$ の場合（E-step 前の初期 $q$）:
+$q(z) \neq p(z|x)$ の場合（E-step 前の初期 $q$）:
 
 $q(z=1) = 1$（$K=1$ では変動なし）。一般には $D_{KL}(q \| p_\theta(z|x)) > 0$ → ELBO < $\log p$（E-step で縮む）。
 

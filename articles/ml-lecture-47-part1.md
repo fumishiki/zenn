@@ -4,6 +4,11 @@ emoji: "🕺"
 type: "tech"
 topics: ["machinelearning", "deeplearning", "motion", "4d", "robotics"]
 published: true
+slug: "ml-lecture-47-part1"
+difficulty: "advanced"
+time_estimate: "90 minutes"
+languages: ["Julia", "Rust"]
+keywords: ["機械学習", "深層学習", "生成モデル"]
 ---
 
 # 第47回: モーション・4D生成 & Diffusion Policy — 静的3Dから動的モーション・4Dへ
@@ -21,9 +26,7 @@ published: true
 
 本講義で、**静的3Dから動的4Dへ**の飛躍を実現する。
 
-:::message
-**このシリーズについて**: 東京大学 松尾・岩澤研究室動画講義の**完全上位互換**の全50回シリーズ。理論（論文が書ける）、実装（Production-ready）、最新（2024-2026 SOTA）の3軸で差別化する。本講義は **Course V の第5回** — モーション・4D生成とロボティクス応用だ。
-:::
+> **Note:** **このシリーズについて**: 東京大学 松尾・岩澤研究室動画講義の**完全上位互換**の全50回シリーズ。理論（論文が書ける）、実装（Production-ready）、最新（2024-2026 SOTA）の3軸で差別化する。本講義は **Course V の第5回** — モーション・4D生成とロボティクス応用だ。
 
 ```mermaid
 graph TD
@@ -85,11 +88,13 @@ function simple_motion_diffusion(text::String, T::Int=30, J::Int=22)
 
         # テキストガイダンス: "walking" なら周期的な動き
         if text == "walking"
-            # 簡易的な歩行パターン: 左右足の交互運動
-            for frame in 1:T
-                phase = 2π * frame / T
-                motion[frame, 1, :] .+= [sin(phase), 0, cos(phase)] .* text_guide * 0.1  # 左足
-                motion[frame, 2, :] .+= [sin(phase + π), 0, cos(phase + π)] .* text_guide * 0.1  # 右足
+            # 周期的な歩行パターンをベクトル化: 左右足の交互運動
+            phases = 2π .* (1:T) ./ T
+            @views begin
+                motion[:, 1, 1] .+= sin.(phases)       .* (text_guide * 0.1)  # 左足 x
+                motion[:, 1, 3] .+= cos.(phases)       .* (text_guide * 0.1)  # 左足 z
+                motion[:, 2, 1] .+= sin.(phases .+ π)  .* (text_guide * 0.1)  # 右足 x
+                motion[:, 2, 3] .+= cos.(phases .+ π)  .* (text_guide * 0.1)  # 右足 z
             end
         end
     end
@@ -127,9 +132,7 @@ Motion range: -2.134 ~ 2.287
 
 **30秒で動作シーケンスを生成した。** たった1つのテキストプロンプトから、人間の歩行動作が生まれる。これが Motion Diffusion Model (MDM) [^1] の威力だ。
 
-:::message
-**ここまでで全体の3%完了！** Zone 0 はウォーミングアップ。次は実際のモーション生成・4D生成・Diffusion Policy を体験する。
-:::
+> **Note:** **ここまでで全体の3%完了！** Zone 0 はウォーミングアップ。次は実際のモーション生成・4D生成・Diffusion Policy を体験する。
 
 ---
 
@@ -146,64 +149,6 @@ Motion range: -2.134 ~ 2.287
 - Sample prediction (ノイズ予測ではなく、直接サンプル予測)
 - Geometric loss (foot contact loss など)
 
-```julia
-# MDM-style motion generation (完全版の概念コード)
-
-struct MotionDiffusionModel
-    denoiser  # Transformer-based denoiser
-    T_max     # Max diffusion steps
-    β         # Noise schedule
-end
-
-function mdm_forward_diffusion(x0, t, β)
-    # Forward process: q(xt | x0)
-    # xt = √(ᾱt)·x0 + √(1-ᾱt)·ϵ
-    α_bar_t = prod(1 .- β[1:t])
-    noise = randn(size(x0))
-    xt = sqrt(α_bar_t) .* x0 .+ sqrt(1 - α_bar_t) .* noise
-    return xt, noise
-end
-
-function mdm_denoise_step(xt, t, text_emb, model)
-    # MDM: predict x̂0 directly (not noise)
-    # x̂0 = denoiser(xt, t, text_emb)
-    x0_pred = model.denoiser(xt, t, text_emb)
-
-    # Posterior mean: μ = (√ᾱt-1·βt·x̂0 + √αt·(1-ᾱt-1)·xt) / (1-ᾱt)
-    α_t = 1 - model.β[t]
-    α_bar_t = prod(1 .- model.β[1:t])
-    α_bar_t_prev = t > 1 ? prod(1 .- model.β[1:t-1]) : 1.0
-
-    μ = (sqrt(α_bar_t_prev) * model.β[t] * x0_pred +
-         sqrt(α_t) * (1 - α_bar_t_prev) * xt) / (1 - α_bar_t)
-
-    # Add noise if t > 1
-    if t > 1
-        σ = sqrt(model.β[t])
-        return μ .+ σ .* randn(size(xt))
-    else
-        return μ
-    end
-end
-
-# ダミー Denoiser (実際は Transformer)
-denoiser(xt, t, text_emb) = xt .* 0.9 .+ text_emb .* 0.1
-
-model = MotionDiffusionModel(denoiser, 1000, LinRange(1e-4, 0.02, 1000))
-text_embedding = randn(512)  # CLIP embedding など
-
-# Sampling
-x_T = randn(30, 22, 3)
-motion = copy(x_T)
-for t in 1000:-1:1
-    motion = mdm_denoise_step(motion, t, text_embedding, model)
-end
-
-println("\n【MDM Sampling】")
-println("Text: 'person walking forward'")
-println("Generated motion: $(size(motion)) frames")
-println("Motion statistics: mean=$(round(mean(motion), digits=3)), std=$(round(std(motion), digits=3))")
-```
 
 **MDM vs MLD (Motion Latent Diffusion)** [^2]:
 - **MDM**: モーション空間で直接 diffusion → 高品質だが遅い
@@ -214,14 +159,16 @@ println("Motion statistics: mean=$(round(mean(motion), digits=3)), std=$(round(s
 | **MDM** | Motion (T, J, 3) | 遅い (1000 steps) | 高 | 高 |
 | **MLD** | Latent (T, d) | 速い (10-50 steps) | 中〜高 | 低 |
 
-:::details MLD の潜在空間設計
+<details><summary>MLD の潜在空間設計</summary>
+
 MLD は VAE で $(T, J, 3) \to (T, d)$ に圧縮し、latent で diffusion を行う。これにより:
 - 計算量が 2桁削減 (次元削減の効果)
 - 訓練時間が 1/10 以下
 - サンプリングが 100x 高速化
 
 ただし、VAE の reconstruction loss により微細な動きが失われる可能性がある。
-:::
+
+</details>
 
 ### 1.2 4D Generation (4DGS/TC4D): 時間変動3Dシーン
 
@@ -235,62 +182,9 @@ $$
 
 各 Gaussian が時間 $t$ の関数として変形する。
 
-```julia
-# 4D Gaussian Splatting: 3DGS + Deformation Field
-
-struct Gaussian4D
-    μ0::Vector{Float64}     # 初期位置 (3D)
-    Σ0::Matrix{Float64}     # 初期共分散 (3x3)
-    c0::Vector{Float64}     # 初期色 (RGB)
-    α::Float64              # 不透明度
-    deform_net             # 変形ネットワーク Δμ(t)
-end
-
-function gaussian_4d_at_time(g::Gaussian4D, t::Float64)
-    # t ∈ [0, 1]: 時刻
-    # Deformation: Δμ, ΔΣ を neural network で予測
-    Δμ = g.deform_net[:position](t)  # 3D offset
-    Δrot = g.deform_net[:rotation](t)  # rotation matrix
-    Δscale = g.deform_net[:scale](t)  # scaling factor
-
-    # Apply deformation
-    μt = g.μ0 .+ Δμ
-    Σt = Δrot * (g.Σ0 .* Δscale) * Δrot'  # R·S·Σ0·R'
-    ct = g.c0  # 色は固定 (または変形可)
-
-    return (μ=μt, Σ=Σt, c=ct, α=g.α)
-end
-
-# ダミー deformation network
-deform_position(t) = [sin(2π*t), 0.0, cos(2π*t)] * 0.5  # 円運動
-deform_rotation(t) = I(3)  # 回転なし
-deform_scale(t) = 1.0 + 0.2 * sin(4π*t)  # 拡大縮小
-
-g4d = Gaussian4D(
-    [0.0, 0.0, 0.0],
-    diagm([1.0, 1.0, 1.0]),
-    [1.0, 0.0, 0.0],
-    0.8,
-    Dict(:position => deform_position, :rotation => deform_rotation, :scale => deform_scale)
-)
-
-# t=0.0, 0.5, 1.0 での Gaussian
-for t in [0.0, 0.5, 1.0]
-    gt = gaussian_4d_at_time(g4d, t)
-    println("t=$t: μ=$(round.(gt.μ, digits=3)), Σ_diag=$(round.(diag(gt.Σ), digits=3))")
-end
-
-println("\n→ 単一 Gaussian が時間とともに円運動しながら拡大縮小")
-```
 
 出力:
-```
-t=0.0: μ=[0.0, 0.0, 0.5], Σ_diag=[1.0, 1.0, 1.0]
-t=0.5: μ=[0.5, 0.0, -0.5], Σ_diag=[0.8, 0.8, 0.8]
-t=1.0: μ=[0.0, 0.0, 0.5], Σ_diag=[1.2, 1.2, 1.2]
 
-→ 単一 Gaussian が時間とともに円運動しながら拡大縮小
-```
 
 **4DGS の課題と TC4D** [^4]:
 - 4DGS: 自由変形だが、長時間で破綻しやすい
@@ -316,73 +210,21 @@ $$
 - Gaussian Mixture では mode が限定的
 - **Diffusion なら任意分布を表現可能**
 
-```julia
-# Diffusion Policy: 観測 o → 行動 a の生成
-
-function diffusion_policy_sample(observation, ϵ_θ, T_steps=10)
-    # observation: 画像 or 状態ベクトル
-    # ϵ_θ: Noise prediction network (観測条件付き)
-    # Output: action sequence (horizon H)
-
-    H = 8  # Action horizon (未来8ステップ分を一度に生成)
-    action_dim = 7  # 7-DoF robot arm
-
-    # Start from noise
-    a_T = randn(H, action_dim)
-
-    # Reverse diffusion
-    a = copy(a_T)
-    β = LinRange(1e-4, 0.02, T_steps)
-
-    for t in T_steps:-1:1
-        # Predict noise conditioned on observation
-        ϵ_pred = ϵ_θ(a, t, observation)
-
-        # DDPM update
-        α_t = 1 - β[t]
-        α_bar_t = prod(1 .- β[1:t])
-        α_bar_prev = t > 1 ? prod(1 .- β[1:t-1]) : 1.0
-
-        # Posterior mean
-        μ = (a - β[t] / sqrt(1 - α_bar_t) * ϵ_pred) / sqrt(α_t)
-
-        # Add noise if t > 1
-        if t > 1
-            σ = sqrt(β[t])
-            a = μ .+ σ .* randn(H, action_dim)
-        else
-            a = μ
-        end
-    end
-
-    return a
-end
-
-# ダミー noise predictor
-ϵ_θ_dummy(a, t, obs) = a .* 0.1 .+ obs[1] * 0.01
-
-observation = randn(64, 64, 3)  # RGB image
-actions = diffusion_policy_sample(observation, ϵ_θ_dummy)
-
-println("\n【Diffusion Policy Sampling】")
-println("Observation: 64x64 RGB image")
-println("Generated actions: $(size(actions))  # (8 steps, 7 DoF)")
-println("Action[1] (first timestep): $(round.(actions[1, :], digits=3))")
-println("\n→ 画像観測から、8ステップ先までの行動軌跡を一度に生成")
-```
 
 **Diffusion Policy の利点**:
 - **Multimodal**: 複数の正解行動を表現可能
 - **Trajectory optimization**: 未来数ステップを一度に最適化
 - **Receding horizon**: 最初のステップだけ実行 → 再生成 (MPC風)
 
-:::details Hierarchical Diffusion Policy [^6]
+<details><summary>Hierarchical Diffusion Policy [^6]</summary>
+
 単一 Diffusion Policy は短期計画のみ。長期タスク (e.g., "テーブルを片付ける") には階層化が必要:
 - **High-level**: 次のサブゴール (接触点) を予測
 - **Low-level**: サブゴールに向かう行動軌跡を Diffusion で生成
 
 この分解により、接触リッチなタスク (組み立て、操作) で 20.8% の性能向上 [^6]。
-:::
+
+</details>
 
 ### 1.4 3つの"動き"の比較
 
@@ -392,19 +234,16 @@ println("\n→ 画像観測から、8ステップ先までの行動軌跡を一�
 | **4D Generation** | テキスト/画像 | 動的3Dシーン | 連続時間 $t \in [0,1]$ | 映画、自動運転 |
 | **Diffusion Policy** | 観測 (画像/状態) | ロボット行動 (H, DoF) | 未来 $H$ ステップ | ロボティクス、制御 |
 
-```julia
-println("\n【3つの動きの生成を比較】")
-println("Text-to-Motion: 'jump' → (30, 22, 3) motion sequence")
-println("4D Generation: 'blooming flower' → (N_gaussians, 4D) + deformation field")
-println("Diffusion Policy: RGB image → (8, 7) action trajectory")
-println("\n→ 全て Diffusion だが、対象と条件が異なる")
-```
 
-:::message
-**ここまでで全体の10%完了！** 3つの動的生成タスクを触った。次は「なぜこれらが必要なのか？」を直感的に理解する。
-:::
+> **Note:** **ここまでで全体の10%完了！** 3つの動的生成タスクを触った。次は「なぜこれらが必要なのか？」を直感的に理解する。
 
 ---
+
+
+> Progress: 10%
+> **理解度チェック**
+> 1. $t \in [0,1]$ の各記号の意味と、この式が表す操作を説明してください。
+> 2. このゾーンで学んだ手法の直感的な意味と、なぜこの定式化が必要なのかを説明してください。
 
 ## 🧩 2. 直感ゾーン（15分）— なぜ静的3Dから動的へ進化するのか
 
@@ -437,20 +276,6 @@ println("\n→ 全て Diffusion だが、対象と条件が異なる")
 - "Flower blooming" は時系列の変化そのもの
 - 予測タスク: 次の瞬間の状態を予測できない
 
-```julia
-println("\n【静的3D vs 動的4D の表現力比較】")
-
-# 静的3D: 単一の姿勢
-static_3d_pose = randn(22, 3)  # 1つの姿勢 (22関節 × 3D)
-
-# 動的4D: 時系列の動き
-dynamic_4d_motion = randn(30, 22, 3)  # 30フレーム × 22関節 × 3D
-
-println("静的3D: $(size(static_3d_pose)) → 'Person' (動詞なし)")
-println("動的4D: $(size(dynamic_4d_motion)) → 'Person walking' (動詞あり)")
-println("\n静的3Dでは '歩く' と '走る' を区別できない")
-println("動的4Dなら、時系列パターンで 'walk' vs 'run' を識別可能")
-```
 
 ### 2.2 Course V の旅路 — 画像から空間、空間から運動へ
 
@@ -498,7 +323,8 @@ $$
 2. **High-dimensional**: $(T, J, 3)$ など高次元でも安定
 3. **Conditional generation**: テキスト/画像条件付けが自然
 
-:::details なぜ GAN や VAE ではダメなのか？
+<details><summary>なぜ GAN や VAE ではダメなのか？</summary>
+
 **VAE の限界**:
 - Posterior collapse: 潜在空間が使われず、全てのモーションが平均に近づく
 - ELBO の下界: 真の多様性を表現しきれない
@@ -509,7 +335,8 @@ $$
 
 **Flow Matching の可能性**:
 実は、最新の研究では Flow Matching も使われている (第38回参照)。Diffusion より訓練が単純で高速。ただし、Motion/4D では Diffusion が先行。
-:::
+
+</details>
 
 ### 2.4 松尾・岩澤研との差別化 — モーション・4D・ロボティクスの統合
 
@@ -526,7 +353,8 @@ $$
 2. **4DGS の数学的基盤** (Deformation field の設計と最適化)
 3. **3言語フルスタック**: Julia (モーション訓練)、Rust (4Dレンダリング)、Elixir (ロボット分散制御)
 
-:::details トロイの木馬振り返り: Course V での3言語の役割
+<details><summary>トロイの木馬振り返り: Course V での3言語の役割</summary>
+
 **Before (第42回まで)**:
 - 画像・動画: Julia/Rust で十分
 - Diffusion 訓練: Julia (Lux.jl)
@@ -538,7 +366,8 @@ $$
 - **Elixir**: ロボット群の分散制御 (OTP の耐障害性、並行性)
 
 Robotics では Elixir が真価を発揮する。複数ロボットの並行制御、障害時の自動復旧 (OTP Supervisor) が言語レベルで組み込まれている。
-:::
+
+</details>
 
 ### 2.5 本講義の構成 — 3部構成
 
@@ -559,20 +388,16 @@ Robotics では Elixir が真価を発揮する。複数ロボットの並行制
 - Hierarchical Diffusion Policy
 - RDT (Robot Diffusion Transformer)
 
-```julia
-println("\n【第47回の学習目標】")
-println("1. Motion Diffusion の数式を完全導出できる")
-println("2. 4DGS の Deformation field を設計できる")
-println("3. Diffusion Policy でロボット制御ができる")
-println("4. Julia でモーション訓練、Rust で4Dレンダリング、Elixir でロボット制御")
-println("\n→ Zone 3 で、これら全てを数式レベルで理解する")
-```
 
-:::message
-**ここまでで全体の20%完了！** 直感的理解ができた。次は数学の本丸 — Zone 3 「数式修行ゾーン」で、Motion/4D/Policy の数式を完全に導出する。
-:::
+> **Note:** **ここまでで全体の20%完了！** 直感的理解ができた。次は数学の本丸 — Zone 3 「数式修行ゾーン」で、Motion/4D/Policy の数式を完全に導出する。
 
 ---
+
+
+> Progress: 20%
+> **理解度チェック**
+> 1. $x_{0:T}$ の各記号の意味と、この式が表す操作を説明してください。
+> 2. このゾーンで学んだ手法の直感的な意味と、なぜこの定式化が必要なのかを説明してください。
 
 ## 📐 3. 数式修行ゾーン（60分）— Motion・4D・Policy の完全導出
 
@@ -603,14 +428,24 @@ $$
 
 #### 表現2: Joint Rotations (関節回転)
 
-Forward Kinematics (FK) の考え方。ルート (腰) からの相対回転をツリー構造で表現:
+Forward Kinematics (FK) の考え方。ルート（腰）からの相対回転をツリー構造で表現:
 
 $$
 \mathbf{x} \in \mathbb{R}^{T \times J \times 3} \quad \text{(axis-angle)} \text{ or } \mathbb{R}^{T \times J \times 4} \quad \text{(quaternion)}
 $$
 
-**利点**: 物理制約を自然に満たす (関節の長さ一定)、次元削減
-**欠点**: FK 計算が必要、rotationの表現が非自明 (gimbal lock問題)
+**Gimbal lock 問題と回避**
+
+axis-angle や Euler 角は、特定の配向で自由度が縮退する **gimbal lock** が起きる。これを回避するために 6D rotation representation を使う手法がある:
+
+$$
+R \in SO(3) \longrightarrow \mathbf{r} = [\mathbf{r}_1, \mathbf{r}_2] \in \mathbb{R}^6, \quad \mathbf{r}_3 = \mathbf{r}_1 \times \mathbf{r}_2
+$$
+
+6次元で回転行列の最初の2列を表現し、3列目は外積で復元する。$\mathbb{R}^6 \to SO(3)$ のマッピングは連続かつ全単射で、ニューラルネットワークが滑らかに学習できる。
+
+**利点**: 物理制約を自然に満たす（関節の長さ一定）、次元削減
+**欠点**: FK 計算が必要、rotation の表現が非自明（gimbal lock 問題）
 
 #### 表現3: Latent Code (潜在表現)
 
@@ -636,26 +471,6 @@ $$
 - $\mathcal{L}_{\text{foot}}$: Foot contact loss (足が地面に接触している時、速度=0)
 - $\mathcal{L}_{\text{vel}}$: Velocity consistency loss (急激な加速度を抑制)
 
-```julia
-# Motion representation comparison
-
-# Joint Positions (MDM)
-T, J = 60, 22
-motion_pos = randn(T, J, 3)  # 60 frames, 22 joints, 3D
-println("Joint Positions: $(size(motion_pos)) = $(prod(size(motion_pos))) dims")
-
-# Joint Rotations (axis-angle)
-motion_rot = randn(T, J, 3)  # 60 frames, 22 joints, axis-angle
-println("Joint Rotations: $(size(motion_rot)) = $(prod(size(motion_rot))) dims")
-
-# Latent Code (MLD)
-d_latent = 512
-motion_latent = randn(T, d_latent)  # 60 frames, 512 latent dims
-println("Latent Code: $(size(motion_latent)) = $(prod(size(motion_latent))) dims")
-
-println("\nDimensionality: Positions=$(prod(size(motion_pos))), Rotations=$(prod(size(motion_rot))), Latent=$(prod(size(motion_latent)))")
-println("Latent は $(round(prod(size(motion_pos)) / prod(size(motion_latent)), digits=1))x 圧縮")
-```
 
 ### 3.2 Motion Diffusion Model (MDM) — DDPM の Motion 空間適用
 
@@ -705,46 +520,6 @@ $$
 
 なので、$\hat{\mathbf{x}}_\theta$ を学習 ⇔ $\boldsymbol{\epsilon}_\theta$ を学習 は等価。ただし、MDM は前者を採用。
 
-```julia
-# MDM Forward & Reverse Process
-
-function mdm_forward(x0, t, β_schedule)
-    # x0: (T, J, 3) clean motion
-    # t: timestep
-    # β_schedule: noise schedule [β1, ..., βT]
-
-    α_bar_t = prod(1 .- β_schedule[1:t])
-    ϵ = randn(size(x0))
-    xt = sqrt(α_bar_t) .* x0 .+ sqrt(1 - α_bar_t) .* ϵ
-
-    return xt, ϵ
-end
-
-function mdm_sample_prediction_loss(x0, xt, t, c, x̂_θ)
-    # x̂_θ(xt, t, c): サンプル予測ネットワーク
-    x̂0 = x̂_θ(xt, t, c)
-    loss = sum((x0 .- x̂0).^2)  # MSE
-    return loss
-end
-
-# ダミーネットワーク
-x̂_θ_dummy(xt, t, c) = xt .* 0.9  # 簡易的な予測
-
-# テスト
-T, J = 30, 22
-x0 = randn(T, J, 3)
-c = randn(512)  # Text embedding
-β = LinRange(1e-4, 0.02, 1000)
-t = 500
-
-xt, ϵ = mdm_forward(x0, t, β)
-loss = mdm_sample_prediction_loss(x0, xt, t, c, x̂_θ_dummy)
-
-println("\n【MDM Forward & Loss】")
-println("Clean motion x0: $(size(x0))")
-println("Noisy motion xt: $(size(xt)), noise level: $(round(std(xt - x0), digits=3))")
-println("Sample prediction loss: $(round(loss, digits=2))")
-```
 
 #### Geometric Loss: 物理制約の導入
 
@@ -775,59 +550,6 @@ $$
 \mathcal{L}_{\text{MDM}} = \mathcal{L}_{\text{simple}} + \lambda_{\text{foot}} \mathcal{L}_{\text{foot}} + \lambda_{\text{vel}} \mathcal{L}_{\text{vel}}
 $$
 
-```julia
-# Geometric Loss 実装
-
-function foot_contact_loss(x̂0)
-    # x̂0: (T, J, 3) predicted motion
-    T, J, _ = size(x̂0)
-
-    loss = 0.0
-    feet_joints = [1, 2]  # 左右足のインデックス
-    threshold = 0.05  # 接地判定の高さ閾値
-
-    for t in 1:(T-1)
-        for j in feet_joints
-            # 接触判定: y座標 (高さ) が閾値以下
-            if x̂0[t, j, 2] < threshold
-                # 速度計算
-                v = x̂0[t+1, j, :] .- x̂0[t, j, :]
-                # 接地中は速度=0 であるべき
-                loss += sum(v.^2)
-            end
-        end
-    end
-
-    return loss
-end
-
-function velocity_consistency_loss(x̂0)
-    # 加速度 (速度の変化) を抑制
-    T, J, _ = size(x̂0)
-
-    loss = 0.0
-    for t in 1:(T-2)
-        for j in 1:J
-            v_t = x̂0[t+1, j, :] .- x̂0[t, j, :]
-            v_t1 = x̂0[t+2, j, :] .- x̂0[t+1, j, :]
-            accel = v_t1 .- v_t
-            loss += sum(accel.^2)
-        end
-    end
-
-    return loss
-end
-
-# テスト
-x̂0 = randn(30, 22, 3)
-L_foot = foot_contact_loss(x̂0)
-L_vel = velocity_consistency_loss(x̂0)
-
-println("\n【Geometric Loss】")
-println("Foot contact loss: $(round(L_foot, digits=3))")
-println("Velocity consistency loss: $(round(L_vel, digits=3))")
-println("\n→ これらの loss により、物理的にもっともらしいモーションが生成される")
-```
 
 ### 3.3 Motion Latent Diffusion (MLD) — VAE で高速化
 
@@ -892,48 +614,34 @@ $$
 
 実際の MLD 論文 [^2] では、**100倍高速** を報告。
 
-```julia
-# MLD アーキテクチャ
+**理論的な加速比の導出**
 
-struct MotionVAE
-    encoder    # (T, J, 3) → (T, d)
-    decoder    # (T, d) → (T, J, 3)
-end
+1 ステップの FLOPs を $\Phi(d)$ とする。MDM の総 FLOPs:
 
-function vae_encode(x, vae::MotionVAE)
-    # Temporal Conv + Pooling
-    # 簡易版: 平均プーリング
-    T, J, _ = size(x)
-    z = reshape(x, (T, J*3))  # (T, 66)
-    # Linear projection to latent dim
-    d = 512
-    z_latent = z[:, 1:min(d, size(z, 2))]  # (T, d)
-    return z_latent
-end
+$$
+\text{FLOPs}_{\text{MDM}} \propto K_{\text{MDM}} \cdot \Phi(T \cdot J \cdot 3)
+$$
 
-function vae_decode(z, vae::MotionVAE, J=22)
-    # Latent → Motion
-    T, d = size(z)
-    # Linear projection + reshape
-    x_flat = hcat(z, zeros(T, J*3 - d))  # Pad to (T, 66)
-    x_recon = reshape(x_flat, (T, J, 3))
-    return x_recon
-end
+MLD の総 FLOPs:
 
-# ダミー VAE
-vae = MotionVAE(nothing, nothing)
+$$
+\text{FLOPs}_{\text{MLD}} \propto K_{\text{MLD}} \cdot \Phi(T \cdot d)
+$$
 
-x0 = randn(30, 22, 3)
-z = vae_encode(x0, vae)
-x_recon = vae_decode(z, vae)
+Transformer の場合、self-attention の計算量は系列長 $L$ に対して $O(L^2 d)$ なので:
 
-println("\n【MLD VAE】")
-println("Original motion: $(size(x0)) = $(prod(size(x0))) dims")
-println("Latent code: $(size(z)) = $(prod(size(z))) dims")
-println("Reconstructed motion: $(size(x_recon))")
-println("Compression ratio: $(round(prod(size(x0)) / prod(size(z)), digits=1))x")
-println("Reconstruction error: $(round(mean((x0 - x_recon).^2), digits=4))")
-```
+$$
+\frac{\text{FLOPs}_{\text{MDM}}}{\text{FLOPs}_{\text{MLD}}} = \frac{K_{\text{MDM}}}{K_{\text{MLD}}} \cdot \left(\frac{J \cdot 3}{d}\right)^2 = \frac{1000}{50} \cdot \left(\frac{66}{512}\right)^2 \approx 20 \cdot 0.017 \approx 0.33
+$$
+
+あれ、これは MLD が遅いことになる。実際の加速はどこから来るのか。**Latent 次元の削減効果**は系列長方向ではなく、**フレーム数を 1 に圧縮**するアーキテクチャ（sequence-level latent）で得られる。$T$ フレームの motion をサイズ $1 \times d$ の単一 latent $\mathbf{z}$ に圧縮するなら:
+
+$$
+\frac{\text{FLOPs}_{\text{MDM}}}{\text{FLOPs}_{\text{MLD}}} \approx \frac{K_{\text{MDM}}}{K_{\text{MLD}}} \cdot \frac{T^2 (J \cdot 3)}{d} = \frac{1000}{50} \cdot \frac{196^2 \cdot 66}{512} \approx 20 \cdot 4940 \approx 98{,}000\times
+$$
+
+この圧縮で「100倍高速」が成立する。
+
 
 ### 3.4 MotionGPT-3 — 大規模事前学習とチェーン・オブ・モーション
 
@@ -958,66 +666,102 @@ graph TD
 2. **Cross-modal alignment**: motion-to-text & motion prediction
 3. **Joint fine-tuning**: 全パラメータを同時最適化
 
+各段階の損失関数を整理する。Stage 1 は motion 再構成:
+
+$$
+\mathcal{L}_{\text{stage1}} = \mathcal{L}_{\text{recon}} + \beta_{\text{KL}} \mathcal{L}_{\text{KL}} + \mathcal{L}_{\text{geom}}
+$$
+
+Stage 2 は cross-modal contrastive loss（CLIP 形式）:
+
+$$
+\mathcal{L}_{\text{stage2}} = -\frac{1}{N} \sum_{i=1}^{N} \log \frac{\exp(\text{sim}(\phi_t(x_i), \phi_m(y_i)) / \tau)}{\sum_{j=1}^N \exp(\text{sim}(\phi_t(x_i), \phi_m(y_j)) / \tau)}
+$$
+
+$\tau$ は temperature parameter（典型 $\tau = 0.07$）。正例ペア $(x_i, y_i)$ の類似度を、負例ペア $(x_i, y_j)$ に対して最大化する。
+
 #### Chain-of-Motion (CoM): モーション版 Chain-of-Thought
 
-長いモーション (e.g., "walk to the table, pick up the cup, drink") は、サブモーション列として分解:
+長いモーション (e.g., "walk to the table, pick up the cup, drink") は、サブモーション列として分解する:
 
 $$
 \text{Motion} = [\text{walk}] \to [\text{reach}] \to [\text{grasp}] \to [\text{lift}] \to [\text{drink}]
 $$
 
-各サブモーションは独立に生成され、**transition smoothing** で接続。
+各サブモーションは独立に生成され、**transition smoothing** で接続する。隣接サブモーションの境界フレームを blending する:
+
+$$
+\mathbf{x}^{\text{blend}}(t) = (1 - \lambda(t))\, \mathbf{x}^{(k)}(T_k) + \lambda(t)\, \mathbf{x}^{(k+1)}(0), \quad \lambda(t) = \frac{t - T_k}{T_{\text{blend}}}
+$$
+
+$T_{\text{blend}}$ は blending 区間のフレーム数（典型 $T_{\text{blend}} = 10$）。線形補間が最もシンプルだが、cubic spline を使うと $C^1$ 連続（速度が滑らか）になる。
 
 #### In-context Learning for Motion
 
-MotionGPT-3 は few-shot learning が可能:
+MotionGPT-3 は few-shot learning が可能だ。形式的に定義する。
 
-```
-Example 1: Text="jump", Motion=M1
-Example 2: Text="spin", Motion=M2
-Query: Text="dance"
-→ Model generates: Motion=M3 (dancing)
-```
+**In-context Learning の形式化**
 
-LLM の in-context learning 能力がモーションにも転移。
+通常の fine-tuning は、新しいタスク $\mathcal{T}_{\text{new}}$ に対してパラメータ $\theta$ を更新する。In-context learning はパラメータを **固定したまま**、プロンプト中の例示から学習する:
 
-```julia
-# MotionGPT-3 の概念コード
+$$
+\pi_\theta\!\left(y \mid x_{\text{query}},\, \mathcal{C}\right)
+$$
 
-struct MotionGPT3
-    text_encoder    # Frozen LLM (e.g., GPT-2)
-    motion_vae      # Motion VAE (encoder/decoder)
-    shared_transformer  # Cross-modal Transformer
-end
+ここで $\mathcal{C} = \{(x_1, y_1), (x_2, y_2), \ldots, (x_K, y_K)\}$ は $K$ 個の **context examples**（demonstration）、$x_{\text{query}}$ はクエリ、$y$ がモデルの出力だ。パラメータ更新は一切ない。
 
-function motiongpt3_generate(text::String, model::MotionGPT3)
-    # Step 1: Text encoding
-    text_emb = model.text_encoder(text)  # (L, d_text)
+**Motion In-context Learning のプロンプト設計**
 
-    # Step 2: Motion generation in latent space
-    # Autoregressive generation in latent motion tokens
-    z_motion = []  # latent motion tokens
-    for t in 1:T_max
-        # Cross-attention: text → motion
-        z_t = model.shared_transformer(z_motion, text_emb)
-        push!(z_motion, z_t)
-    end
+MotionGPT-3 ではテキスト–モーションペアを例示として連結する。入力トークン列は:
 
-    # Step 3: Decode to motion
-    motion = model.motion_vae.decoder(z_motion)
+$$
+\text{Prompt} = \bigl[x_1^{\text{text}},\; y_1^{\text{motion}},\; x_2^{\text{text}},\; y_2^{\text{motion}},\; \ldots,\; x_K^{\text{text}},\; y_K^{\text{motion}},\; x_{\text{query}}^{\text{text}}\bigr]
+$$
 
-    return motion
-end
+各モーション $y_k^{\text{motion}}$ は VQ-VAE でトークン化された離散列 $\{m_1^{(k)}, m_2^{(k)}, \ldots, m_{T_k}^{(k)}\} \subset \mathcal{V}$ だ。Codebook のボキャブラリサイズは $|\mathcal{V}| \approx 512$。
 
-# ダミー
-model = MotionGPT3(nothing, nothing, nothing)
-# motion = motiongpt3_generate("person walking forward", model)
+**プロンプト長のスケーリング**
 
-println("\n【MotionGPT-3】")
-println("Training: 3段階 (Motion pre-train → Cross-modal → Joint fine-tune)")
-println("Capability: In-context learning for motion")
-println("Chain-of-Motion: 長いモーションをサブタスクに分解して生成")
-```
+$K$ 個の context examples を含むプロンプトの総トークン数:
+
+$$
+L_{\text{prompt}} = \sum_{k=1}^{K} \Bigl( L_k^{\text{text}} + T_k^{\text{motion}} \Bigr) + L_{\text{query}}^{\text{text}}
+$$
+
+ここで $T_k^{\text{motion}} \approx F_k / r$（$F_k$: フレーム数、$r \approx 4$: VQ-VAE の temporal compression ratio）。$K = 5$ かつ 5 秒クリップなら $T_k \approx 50$ で $L_{\text{prompt}} \approx 350$ tokens。
+
+**Attention による Implicit Retrieval**
+
+Self-attention がなぜ in-context learning を可能にするか。クエリ行列 $Q = W_Q x_{\text{query}}$、キー $K = W_K [x_1, \ldots, x_K]$、バリュー $V = W_V [y_1, \ldots, y_K]$ と置くと:
+
+$$
+\text{Attn}(Q, K, V) = \text{softmax}\!\left(\frac{Q K^\top}{\sqrt{d_k}}\right) V
+$$
+
+これは **weighted retrieval** の形式だ。クエリに類似した context examples の出力 $y_k$ が softmax 重みで加重され、暗黙的に「最も関連するモーション例」を参照する。
+
+**Few-shot 汎化誤差の上界**
+
+$K$ 個の examples を用いた few-shot 設定における期待汎化誤差:
+
+$$
+\mathcal{R}(\hat{f}_K) \leq \hat{\mathcal{R}}_K(\hat{f}_K) + \mathcal{O}\!\left(\sqrt{\frac{\log(1/\delta)}{K}}\right)
+$$
+
+右辺第2項は $K$ が増えるほど $1/\sqrt{K}$ で減少する。$K = 1$（one-shot）でも動作するのは、motion という structured domain で examples 間のマニフォールド構造が緊密なためだ。
+
+**自己回帰デコードとの整合**
+
+Motion generation を自己回帰的に展開すると:
+
+$$
+P\!\left(y_1^{\text{motion}}, \ldots, y_T^{\text{motion}} \mid x^{\text{text}}, \mathcal{C}\right) = \prod_{t=1}^{T} P\!\left(y_t \mid y_{<t},\, x^{\text{text}},\, \mathcal{C}\right)
+$$
+
+Context $\mathcal{C}$ は KV-cache を通じて各デコードステップに $O(K \cdot L)$ の固定コストで参照される。$K$ を増やしても **デコード速度への影響は線形**で、モデルの再学習は不要だ。
+
+LLM の in-context learning 能力がモーションにも転移する。これは motion を language と同じ離散トークン空間に埋め込んだことの直接的な恩恵だ。
+
 
 ### 3.5 UniMo — 統一モーション生成の最前線
 
@@ -1025,48 +769,123 @@ UniMo [^9] (2026) は、モーション生成・理解を**完全統一**する�
 
 #### 核心アイデア: Chain-of-Thought for Motion
 
-LLM の CoT を motion に適用。単にモーションを生成するだけでなく、**推論過程を明示**:
+LLM の CoT を motion に適用。単にモーションを生成するだけでなく、**推論過程を明示**する。
 
-```
-Input: "A person jumps over an obstacle"
+**CoT for Motion の形式化**
 
-UniMo Output:
-1. [Reasoning] "Need to prepare for jump → crouch → leap → land"
-2. [Motion Generation] Generate crouch motion
-3. [Motion Generation] Generate leap motion
-4. [Motion Generation] Generate landing motion
-5. [Combine] Smooth transition across 3 motions
-```
+通常の text-to-motion は $P(y \mid x)$ を直接最大化する。CoT は中間推論ステップ $z = (z_1, z_2, \ldots, z_K)$ を導入し:
 
-これにより:
+$$
+P(y \mid x) = \sum_{z} P(y \mid z, x) \cdot P(z \mid x)
+$$
+
+Chain rule で分解すると:
+
+$$
+P(z, y \mid x) = P(z_1 \mid x) \cdot \prod_{k=2}^{K} P(z_k \mid z_{<k}, x) \cdot P(y \mid z_{1:K}, x)
+$$
+
+中間ステップ $z_k$ は「どの関節を動かすか」「どのフレームで切り替えるか」などの自然言語記述だ。これにより:
 - **解釈可能性**: なぜそのモーションを生成したか分かる
 - **エラー修正**: 推論過程が間違っていれば、修正可能
 - **Few-shot**: 推論パターンを示せば、新しいモーションを生成可能
 
+**Chain-of-Thought の訓練**
+
+訓練データは $(x, z_{\text{gold}}, y_{\text{gold}})$ のトリプルで構成される。$z_{\text{gold}}$ は人手アノテーションまたは GPT-4 で自動生成した推論ステップだ。訓練損失:
+
+$$
+\mathcal{L}_{\text{CoT}} = -\sum_{k=1}^{K} \log P(z_k \mid z_{<k}, x;\, \theta) - \log P(y \mid z_{1:K}, x;\, \theta)
+$$
+
+推論時は beam search でまず $z^* = \arg\max P(z \mid x)$ を求め、次に $y^* = \arg\max P(y \mid z^*, x)$ を生成する 2-step decoding を行う。
+
 #### Group Relative Policy Optimization (GRPO)
 
-UniMo は RL で post-training を行う。Motion token prediction のエラー累積を抑制:
+UniMo は RL で post-training を行う。なぜ RL が必要か。**Autoregressive generation のエラー累積問題**を先に数学で確認しよう。
+
+**累積誤差の形式化**
+
+トークン列 $y = (y_1, y_2, \ldots, y_T)$ の autoregressive 生成で、各ステップの誤り確率を $\epsilon$ とすると、長さ $T$ の系列が全て正しく生成される確率は:
 
 $$
-\mathcal{L}_{\text{GRPO}} = -\mathbb{E}_{(s,a) \sim \pi_\theta} \left[ A(s,a) \log \pi_\theta(a|s) \right]
+P(\text{all correct}) = (1 - \epsilon)^T \approx e^{-\epsilon T}
 $$
 
-ここで $A(s,a)$ は advantage (グループ内での相対的な良さ)。
+$T = 200$（5秒 × 40fps）、$\epsilon = 0.01$ とすれば $P \approx e^{-2} \approx 0.135$。長いモーションほど壊滅的な精度低下が起きる。
 
-**なぜ必要?**
-- Autoregressive generation は cumulative error が問題
-- 最初のトークンの誤りが、後続トークンに伝播
-- GRPO はグループ単位で最適化 → 構造的正しさを保証
+**PPO の定式化とその問題点**
 
-```julia
-println("\n【UniMo vs MotionGPT-3】")
-println("MotionGPT-3: モーションを第2言語として扱う")
-println("UniMo: + Chain-of-Thought推論 + GRPO post-training")
-println("\nUniMo の強み:")
-println("  - 解釈可能性: 推論過程を明示")
-println("  - 構造的正しさ: GRPO で cumulative error 抑制")
-println("  - Few-shot: CoT パターンで新モーション生成")
-```
+従来の PPO (Proximal Policy Optimization) は:
+
+$$
+\mathcal{L}_{\text{PPO}} = -\mathbb{E}_t \!\left[ \min\!\left( r_t A_t^{\text{GAE}},\; \text{clip}(r_t,\, 1-\epsilon,\, 1+\epsilon)\, A_t^{\text{GAE}} \right) \right]
+$$
+
+ここで $r_t = \pi_\theta(a_t \mid s_t) / \pi_{\text{old}}(a_t \mid s_t)$ は重要度比率、$A_t^{\text{GAE}}$ は Generalized Advantage Estimation:
+
+$$
+A_t^{\text{GAE}} = \sum_{l=0}^{\infty} (\gamma \lambda)^l \delta_{t+l}, \quad \delta_t = r_t + \gamma V(s_{t+1}) - V(s_t)
+$$
+
+PPO の核心的な問題は **価値関数 $V(s)$ の別途学習が必要**なことだ。Motion token の状態空間 $\mathcal{S}$ は $(T \times J \times 3)$ の高次元離散空間で、$V(s_t)$ の推定は極めて困難だ。
+
+**GRPO: 価値関数なしの定式化**
+
+GRPO は同一プロンプト $s$ に対して $G$ 個の応答 $\{a_1, a_2, \ldots, a_G\}$ を独立にサンプリングし、**グループ内相対報酬**で advantage を近似する:
+
+$$
+A(s, a_g) = R(s, a_g) - \frac{1}{G} \sum_{g'=1}^{G} R(s, a_{g'})
+$$
+
+価値関数 $V(s)$ の推定を、同じプロンプトに対するモンテカルロ期待値 $\hat{V}(s) = \frac{1}{G}\sum_{g=1}^G R(s, a_g)$ で代替する。グループサイズ $G$ が大きいほど推定分散は $\text{Var}[R] / G$ に収束し安定する。典型的に $G \in [8, 32]$。
+
+**完全な GRPO 損失関数**
+
+KL 正則化を含む完全な目的関数:
+
+$$
+\mathcal{L}_{\text{GRPO}} = -\mathbb{E}_{s \sim \mathcal{D}} \frac{1}{G} \sum_{g=1}^{G} \left[ \min\!\left( r_g A_g,\; \text{clip}(r_g,\, 1-\epsilon,\, 1+\epsilon)\, A_g \right) \right] + \beta \cdot \mathbb{KL}\!\left[ \pi_\theta \,\|\, \pi_{\text{ref}} \right]
+$$
+
+ここで:
+- $r_g = \pi_\theta(a_g \mid s) / \pi_{\text{ref}}(a_g \mid s)$: 現在ポリシーと参照ポリシーの重要度比率
+- $\epsilon$: クリッピング範囲（典型値 $0.1$〜$0.2$）
+- $\beta$: KL ペナルティ係数（典型値 $0.01$〜$0.1$）
+- $\pi_{\text{ref}}$: SFT 後の frozen reference model
+
+**KL 正則化の意味**
+
+$$
+\mathbb{KL}[\pi_\theta \| \pi_{\text{ref}}] = \mathbb{E}_{a \sim \pi_\theta}\!\left[ \log \frac{\pi_\theta(a \mid s)}{\pi_{\text{ref}}(a \mid s)} \right] \geq 0
+$$
+
+$\text{KL} = 0$ は $\pi_\theta = \pi_{\text{ref}}$ と等価。$\beta$ でその乖離を制約し、**reward hacking**（報酬関数の抜け穴を突いた意味のない最適化）を防ぐ。Motion generation では「不自然に静止して高スコアを得る」という典型的な hacking が起きやすい。
+
+**モーション固有の報酬設計**
+
+UniMo の報酬関数は多項目:
+
+$$
+R(s, a) = \lambda_1 R_{\text{align}}(a) + \lambda_2 R_{\text{smooth}}(a) + \lambda_3 R_{\text{phys}}(a)
+$$
+
+- $R_{\text{align}}$: テキスト–モーション整合性（CLIP 類似度）
+- $R_{\text{smooth}}$: 関節加速度の滑らかさ $-\sum_t \sum_j \|\ddot{\mathbf{j}}_t\|^2$
+- $R_{\text{phys}}$: 物理的妥当性（foot skating score など）
+
+典型値: $\lambda_1 = 1.0,\ \lambda_2 = 0.1,\ \lambda_3 = 0.05$。
+
+**なぜ GRPO が autoregressive motion に効くか**
+
+GRPO は sequence-level reward $R(s, a)$ を使い、個々のトークンではなく **モーション全体の品質を最適化**する。勾配を展開すると:
+
+$$
+\nabla_\theta \mathcal{L}_{\text{GRPO}} \propto \sum_{t=1}^{T} A_g \cdot \nabla_\theta \log \pi_\theta(y_t \mid y_{<t},\, x)
+$$
+
+Advantage $A_g$ が正なら全トークンの確率を上げ、負なら下げる。序盤のトークンの誤りが系列全体の品質を下げれば、$A_g < 0$ として明示的なフィードバックが届く。これが token-level な cross-entropy 訓練との本質的な違いだ。
+
 
 ### 3.6 4D Gaussian Splatting (4DGS) — 動的3Dシーンの数学
 
@@ -1133,70 +952,36 @@ $$
 - $C_k$: カメラ $k$ のパラメータ
 - $\mathcal{L}_{\text{reg}}$: 正則化 (smoothness, sparsity)
 
-**正則化項の重要性**:
+**正則化項の詳細**:
 
 $$
-\mathcal{L}_{\text{reg}} = \lambda_{\text{smooth}} \mathcal{L}_{\text{smooth}} + \lambda_{\text{sparse}} \mathcal{L}_{\text{sparse}}
+\mathcal{L}_{\text{reg}} = \lambda_1 \mathcal{L}_{\text{smooth}} + \lambda_2 \mathcal{L}_{\text{rigid}} + \lambda_3 \mathcal{L}_{\text{opacity}}
 $$
 
-- $\mathcal{L}_{\text{smooth}}$: 時間的滑らかさ $\sum_i \| \boldsymbol{\mu}_i(t+\Delta t) - \boldsymbol{\mu}_i(t) \|^2$
-- $\mathcal{L}_{\text{sparse}}$: Gaussian 数を抑制 (pruning)
+時間的滑らかさ項:
 
-```julia
-# 4DGS Deformation Network
+$$
+\mathcal{L}_{\text{smooth}} = \sum_i \sum_t \left\| \frac{d^2 \boldsymbol{\mu}_i(t)}{dt^2} \right\|^2
+$$
 
-struct DeformationNetwork
-    mlp_position
-    mlp_rotation
-    mlp_scale
-end
+これは加速度（2階微分）を 0 に近づけるペナルティで、Gaussian の軌跡が滑らかに保たれる。1階微分（速度）ではなく2階微分にするのは、等速直線運動を許容しつつ急激な方向転換を抑制するためだ。
 
-function deform_gaussian(μ0, Σ0, t, h_feat, deform_net)
-    # μ0: (3,) initial position
-    # Σ0: (3,3) initial covariance
-    # t: time ∈ [0, 1]
-    # h_feat: feature vector
+As-Rigid-As-Possible 正則化:
 
-    # Predict deformations
-    Δμ = deform_net.mlp_position([t; μ0; h_feat])  # (3,)
-    Δrot = deform_net.mlp_rotation([t; h_feat])     # (3,) axis-angle
-    Δscale = deform_net.mlp_scale([t; h_feat])      # (3,) scale factors
+$$
+\mathcal{L}_{\text{rigid}} = \sum_i \sum_{j \in \mathcal{N}(i)} \left\| \|\boldsymbol{\mu}_i(t) - \boldsymbol{\mu}_j(t)\|_2 - \|\boldsymbol{\mu}_i(0) - \boldsymbol{\mu}_j(0)\|_2 \right\|^2
+$$
 
-    # Apply deformation
-    μt = μ0 .+ Δμ
+近傍 Gaussian $j \in \mathcal{N}(i)$ との距離が変化しないように制約する。剛体的な運動（骨格の動き）で特に有効だ。
 
-    # Rotation matrix from axis-angle
-    θ = norm(Δrot)
-    if θ > 1e-6
-        axis = Δrot ./ θ
-        # Rodrigues' formula
-        K = [0 -axis[3] axis[2]; axis[3] 0 -axis[1]; -axis[2] axis[1] 0]
-        R = I(3) + sin(θ) * K + (1 - cos(θ)) * K^2
-    else
-        R = I(3)
-    end
+Opacity 正則化:
 
-    # Reconstruct covariance: Σ = R·S·S'·R'
-    S = diagm(sqrt.(diag(Σ0)) .* (1 .+ Δscale))
-    Σt = R * S * S' * R'
+$$
+\mathcal{L}_{\text{opacity}} = \sum_i \left(\alpha_i(t) - 0.5\right)^2
+$$
 
-    return μt, Σt
-end
+Opacity が極端な値にならないように制約する。これが欠けると、オブジェクトが消えたり現れたりする artifact が発生する。
 
-# ダミー MLP
-mlp_dummy(x) = randn(3) * 0.1
-
-deform_net = DeformationNetwork(mlp_dummy, mlp_dummy, mlp_dummy)
-μ0 = [0.0, 0.0, 0.0]
-Σ0 = diagm([1.0, 1.0, 1.0])
-h_feat = randn(64)
-
-println("\n【4DGS Deformation】")
-for t in [0.0, 0.5, 1.0]
-    μt, Σt = deform_gaussian(μ0, Σ0, t, h_feat, deform_net)
-    println("t=$t: μ=$(round.(μt, digits=3)), Σ_diag=$(round.(diag(Σt), digits=3))")
-end
-```
 
 ### 3.7 TC4D — Trajectory-Conditioned 4D Generation
 
@@ -1213,14 +998,26 @@ $$
 
 #### Spline Trajectory for Global Motion
 
-カメラ軌跡を B-spline で定義:
+カメラ軌跡を B-spline で定義する:
 
 $$
 \mathbf{T}(t) = \sum_{i=0}^n B_i^k(t) \mathbf{P}_i
 $$
 
-- $B_i^k(t)$: B-spline basis function (次数 $k$)
-- $\mathbf{P}_i$: 制御点 (3D位置 + 回転)
+- $B_i^k(t)$: B-spline basis function（次数 $k$）
+- $\mathbf{P}_i$: 制御点（3D 位置 + 回転、SE(3) 要素）
+
+**B-spline の再帰定義**:
+
+$$
+B_i^1(t) = \begin{cases} 1 & t_i \leq t < t_{i+1} \\ 0 & \text{otherwise} \end{cases}
+$$
+
+$$
+B_i^k(t) = \frac{t - t_i}{t_{i+k-1} - t_i} B_i^{k-1}(t) + \frac{t_{i+k} - t}{t_{i+k} - t_{i+1}} B_{i+1}^{k-1}(t)
+$$
+
+次数 $k=4$（3次 B-spline）が典型的で、$C^2$ 連続（加速度まで連続）を保証する。ユーザーが制御点 $\mathbf{P}_i$ を GUI で配置するだけで、物理的に自然な軌跡が自動生成される。
 
 **利点**:
 - カメラ軌跡を明示的に制御可能
@@ -1243,46 +1040,6 @@ $$
 
 **結果**: 数分の動画でも一貫した動きを生成可能。
 
-```julia
-# TC4D: Global + Local Factorization
-
-function b_spline_basis(t, i, k, knots)
-    # B-spline basis function (Cox-de Boor recursion)
-    # 簡易版: Linear interpolation (k=1)
-    if i < length(knots) - 1
-        if knots[i] <= t < knots[i+1]
-            return (t - knots[i]) / (knots[i+1] - knots[i])
-        elseif knots[i+1] <= t < knots[i+2]
-            return (knots[i+2] - t) / (knots[i+2] - knots[i+1])
-        end
-    end
-    return 0.0
-end
-
-function global_trajectory(t, control_points, knots)
-    # B-spline trajectory
-    n = length(control_points)
-    T_global = zeros(3)
-    for i in 1:n
-        T_global .+= b_spline_basis(t, i, 1, knots) .* control_points[i]
-    end
-    return T_global
-end
-
-# Control points (ユーザー指定の軌跡)
-control_points = [[0.0, 0.0, 0.0], [1.0, 0.5, 0.2], [2.0, 0.0, 0.5]]
-knots = [0.0, 0.33, 0.67, 1.0]
-
-println("\n【TC4D Trajectory】")
-for t in [0.0, 0.5, 1.0]
-    T_g = global_trajectory(t, control_points, knots)
-    println("t=$t: Global motion=$(round.(T_g, digits=3))")
-end
-
-# Local deformation は global から独立して学習
-println("\n→ Global motion (spline) + Local deformation (network) を分離")
-println("   これにより、長時間動画でも破綻しない")
-```
 
 ### 3.8 Diffusion Policy — ロボット制御への応用
 
@@ -1312,123 +1069,70 @@ $$
 
 #### Receding Horizon Control (RHC)
 
-Diffusion Policy は **action horizon** $H$ ステップ先まで一度に生成:
+Diffusion Policy は **action horizon** $H$ ステップ先まで一度に生成する:
 
 $$
 \mathbf{a} = [a_t, a_{t+1}, \ldots, a_{t+H-1}] \in \mathbb{R}^{H \times D}
 $$
 
-しかし、**最初の1ステップだけ実行** → 再観測 → 再生成 (MPC風):
+しかし、**最初の $E$ ステップだけ実行**（execution horizon $E \leq H$）→ 再観測 → 再生成 (MPC 風):
 
-```
-t=0: Generate a[0:H-1] → Execute a[0]
-t=1: Generate a[1:H] → Execute a[1]
-t=2: Generate a[2:H+1] → Execute a[2]
-...
-```
+$$
+a_t^{\text{exec}} = \mathbf{a}[0:E], \quad \text{then observe } o_{t+E} \text{ and replan}
+$$
+
+**実行間隔 $E$ のトレードオフ**:
+
+| $E$ | 利点 | 欠点 |
+|-----|------|------|
+| $E=1$ | 最適な適応性 | diffusion 推論が毎ステップ必要（低速） |
+| $E=H$ | 推論コスト最小 | 中間観測が活用できない |
+| $E \approx H/4$ | バランス | 典型的な設定 |
+
+典型値: $H = 16$、$E = 8$、$D = 2$（2D制御）または $D = 7$（7自由度ロボットアーム）。
 
 **なぜ?**
-- 観測は時間とともに変化 (物体が動く、ロボット自身が動く)
+- 観測は時間とともに変化（物体が動く、ロボット自身が動く）
 - 最新の観測で再計画 → 適応的制御
+- 完全再計画よりも計算効率が良い
 
 #### 訓練: Behavior Cloning with Diffusion
 
-Expert demonstration からの模倣学習:
+Expert demonstration からの模倣学習。訓練データセット $\mathcal{D} = \{(o_i, a_i^{(0)})\}_{i=1}^N$ で、観測 $o_i$ と対応する expert action $a_i^{(0)}$ のペアを使う。
+
+Forward diffusion で action にノイズを加える:
 
 $$
-\mathcal{L} = \mathbb{E}_{(o,a) \sim \mathcal{D}, t, \epsilon} \left[ \| \epsilon - \epsilon_\theta(a_t, t, o) \|^2 \right]
+a^{(k)} = \sqrt{\bar{\alpha}_k}\, a^{(0)} + \sqrt{1 - \bar{\alpha}_k}\, \epsilon, \quad \epsilon \sim \mathcal{N}(0, I)
 $$
 
-- $\mathcal{D}$: Expert trajectories $\{(o_i, a_i)\}_i$
-- $a_t = \sqrt{\bar{\alpha}_t} a_0 + \sqrt{1 - \bar{\alpha}_t} \epsilon$: Forward diffusion
+ここで $\bar{\alpha}_k = \prod_{j=1}^k (1 - \beta_j)$ は累積 noise schedule、$k \in \{1, \ldots, K\}$ は拡散ステップ数（典型 $K = 100$）だ。
+
+訓練損失（noise prediction):
+
+$$
+\mathcal{L}_{\text{BC}} = \mathbb{E}_{(o,a^{(0)}) \sim \mathcal{D},\, k \sim \mathcal{U}[1,K],\, \epsilon \sim \mathcal{N}(0,I)} \left[ \| \epsilon - \epsilon_\theta(a^{(k)}, k, o) \|_2^2 \right]
+$$
+
+条件 $o$ は観測を処理した特徴ベクトル $\phi_{\text{obs}}(o) \in \mathbb{R}^{d_o}$ で、action denoiser に cross-attention または concatenation で注入される。
+
+**DDIM による高速推論**
+
+訓練は $K = 100$ ステップで行うが、推論時は DDIM (Denoising Diffusion Implicit Models) で $K' = 10$ ステップに削減できる:
+
+$$
+a^{(k-1)} = \sqrt{\bar{\alpha}_{k-1}} \cdot \underbrace{\frac{a^{(k)} - \sqrt{1 - \bar{\alpha}_k} \epsilon_\theta}{\sqrt{\bar{\alpha}_k}}}_{\text{predicted } a^{(0)}} + \sqrt{1 - \bar{\alpha}_{k-1}} \cdot \epsilon_\theta
+$$
+
+これにより推論レイテンシが 10 倍短縮される。リアルタイムロボット制御（100Hz クロック）では $K' = 10$ でも十分な品質が得られることが報告されている。
 
 推論時:
 
 1. 観測 $o$ を取得
-2. $a_T \sim \mathcal{N}(0, I)$ から開始
-3. Reverse diffusion で $a_0$ を生成
-4. $a_0[0]$ (最初のステップ) だけを実行
+2. $a^{(K)} \sim \mathcal{N}(0, I)$ から開始
+3. DDIM で $a^{(0)}$ を生成（$K'$ ステップ）
+4. $a^{(0)}[0:E]$（最初の $E$ ステップ）を実行
 
-```julia
-# Diffusion Policy 訓練・推論
-
-function diffusion_policy_train(expert_data, ϵ_θ, β, num_epochs=100)
-    # expert_data: [(observation, action), ...]
-    # ϵ_θ: Noise prediction network
-
-    T_steps = length(β)
-    losses = []
-
-    for epoch in 1:num_epochs
-        total_loss = 0.0
-        for (o, a) in expert_data
-            # Sample random timestep
-            t = rand(1:T_steps)
-
-            # Forward diffusion
-            α_bar_t = prod(1 .- β[1:t])
-            ϵ = randn(size(a))
-            at = sqrt(α_bar_t) .* a .+ sqrt(1 - α_bar_t) .* ϵ
-
-            # Predict noise
-            ϵ_pred = ϵ_θ(at, t, o)
-
-            # Loss
-            loss = sum((ϵ .- ϵ_pred).^2)
-            total_loss += loss
-
-            # Backprop (ダミー)
-            # ... gradient descent on ϵ_θ
-        end
-        push!(losses, total_loss / length(expert_data))
-    end
-
-    return losses
-end
-
-function diffusion_policy_infer(observation, ϵ_θ, β, H=8)
-    # observation: current obs
-    # H: action horizon
-
-    T_steps = length(β)
-    action_dim = 7  # 7-DoF arm
-    aT = randn(H, action_dim)
-
-    # Reverse diffusion
-    a = copy(aT)
-    for t in T_steps:-1:1
-        ϵ_pred = ϵ_θ(a, t, observation)
-
-        α_t = 1 - β[t]
-        α_bar_t = prod(1 .- β[1:t])
-
-        # DDPM update
-        a = (a - (β[t] / sqrt(1 - α_bar_t)) * ϵ_pred) / sqrt(α_t)
-
-        if t > 1
-            σ = sqrt(β[t])
-            a = a .+ σ .* randn(H, action_dim)
-        end
-    end
-
-    return a[1, :]  # Only execute first action
-end
-
-# ダミー expert data
-expert_data = [(randn(64, 64, 3), randn(8, 7)) for _ in 1:10]
-ϵ_θ_policy(a, t, o) = a .* 0.1  # ダミー
-
-β = LinRange(1e-4, 0.02, 50)
-# losses = diffusion_policy_train(expert_data, ϵ_θ_policy, β, 5)
-
-obs = randn(64, 64, 3)
-action = diffusion_policy_infer(obs, ϵ_θ_policy, β)
-
-println("\n【Diffusion Policy】")
-println("Observation: 64x64 RGB")
-println("Generated action (1st step): $(round.(action, digits=3))")
-println("\n→ Multimodal policy: 同じ観測から複数の行動を生成可能")
-```
 
 ### 3.9 Hierarchical Diffusion Policy — 接触リッチなタスク
 
@@ -1471,15 +1175,6 @@ $g$ を条件として、Diffusion で行動を生成。
 - 長期計画が可能 (High-level が分解)
 - 解釈可能 (接触点が可視化される)
 
-```julia
-println("\n【Hierarchical Diffusion Policy】")
-println("High-level: 観測 → 次の接触点 (where to touch)")
-println("Low-level: (観測, 接触点) → 行動軌跡 (how to get there)")
-println("\nメリット:")
-println("  - 長期タスクの分解")
-println("  - 接触リッチなタスクで高性能 (+20.8%)")
-println("  - 解釈可能性 (接触点の可視化)")
-```
 
 ### 3.10 RDT (Robot Diffusion Transformer) — Foundation Model for Robotics
 
@@ -1509,18 +1204,28 @@ graph LR
 - **未見のシーン**: 新しい環境でも適応
 - **Few-shot adaptation**: 1-5デモで新タスクを学習
 
+**スケーリング則とデータ量**
+
+RDT が報告する few-shot パフォーマンスは、事前学習データ量 $N$ に対して対数的に向上する:
+
+$$
+\text{Success Rate}(N) \approx a \cdot \log N + b
+$$
+
+$N = 10^6$ エピソード規模で性能が飽和し始め、追加データの効果が逓減する。これは言語モデルの scaling law とほぼ同形式だ。
+
+**Cross-embodiment 転移の定式化**
+
+異なるロボット種（7自由度アーム、バイマニュアル、足ロボット）間で共通の行動表現を学ぶ。各ロボット $r$ の action space $\mathcal{A}_r$ は次元が異なるが、共通の **unified action token** $u \in \mathbb{R}^{D_u}$ に射影する:
+
+$$
+u = W_r \cdot a^{(r)} + b_r, \quad W_r \in \mathbb{R}^{D_u \times D_r}
+$$
+
+推論時は逆射影 $a^{(r)} = W_r^\dagger u$ で対象ロボットの action を復元する。$W_r^\dagger$ は Moore-Penrose 擬似逆行列だ。
+
 **RDT-2 (2025)**: 未見の **embodiment** (ロボットの種類) にもゼロショット対応。
 
-```julia
-println("\n【RDT: Foundation Model for Robotics】")
-println("規模: 1B parameters, 46 datasets, 1M+ episodes")
-println("入力: 最大3視点RGB + robot state + language instruction")
-println("出力: 64ステップ action sequence")
-println("\nZero-shot capability:")
-println("  - 未見オブジェクト")
-println("  - 未見シーン")
-println("  - RDT-2: 未見embodiment (ロボットの種類)")
-```
 
 ### 3.11 4DGS の詳細導出 — 時間依存共分散行列
 
@@ -1635,64 +1340,231 @@ $$
 
 #### 数値検証
 
-```julia
-using LinearAlgebra
 
-# Quaternion to rotation matrix
-function quat_to_matrix(q)
-    w, x, y, z = q
-    R = [
-        1 - 2(y^2 + z^2)  2(x*y - z*w)      2(x*z + y*w);
-        2(x*y + z*w)      1 - 2(x^2 + z^2)  2(y*z - x*w);
-        2(x*z - y*w)      2(y*z + x*w)      1 - 2(x^2 + y^2)
-    ]
-    return R
-end
+> **Note:** **4DGS の本質**: 静的 3DGS の各 Gaussian に deformation network を追加し、時間依存の $\boldsymbol{\mu}(t)$ と $\Sigma(t)$ を表現。時空間一貫性損失で訓練。
 
-# Time-dependent Gaussian parameters
-μ_0 = [0.0, 0.0, 0.0]
-q_0 = [1.0, 0.0, 0.0, 0.0]  # Identity rotation
-s_0 = [1.0, 1.0, 1.0]
+### 3.12 Motion Evaluation Metrics — 多様性と物理的妥当性の定量化
 
-# Deformation at time t
-t = 0.5
-Δμ = [0.1, 0.0, 0.0] * t  # Move along x-axis
-Δq = [cos(0.1t), sin(0.1t), 0, 0]  # Small rotation
-Δs = [0.05, 0.05, 0.05] * t
+生成モデルを「良い」と言うには、何を測ればいいのか。画像生成の FID に相当する指標から、モーション固有の物理的妥当性まで、定量評価の数学を整理する。
 
-# Apply deformation
-μ_t = μ_0 + Δμ
-q_t = quat_to_matrix(Δq) * q_0  # Simplified (should be quaternion multiplication)
-s_t = s_0 .* exp.(Δs)
+#### Fréchet Inception Distance (FID) — モーション版
 
-# Build covariance matrix
-R_t = quat_to_matrix([1.0, 0.0, 0.0, 0.0])  # Simplified
-S_t = diagm(s_t)
-Σ_t = R_t * S_t * S_t' * R_t'
+画像生成で標準的な FID をモーションに適応する。実モーションと生成モーションをそれぞれ特徴抽出器 $\phi$（事前学習済み motion encoder）に通し、分布を比較する。
 
-println("Time-dependent Gaussian at t=$t:")
-println("  μ(t) = $μ_t")
-println("  Σ(t) = ")
-display(Σ_t)
+両分布が多変量正規分布 $\mathcal{N}(\mu_r, \Sigma_r)$（実）と $\mathcal{N}(\mu_g, \Sigma_g)$（生成）に従うと近似すると:
 
-# Verify positive definite
-eigvals_Σ = eigvals(Σ_t)
-println("\nEigenvalues of Σ(t): $eigvals_Σ")
-println("All positive? $(all(eigvals_Σ .> 0))")
-```
+$$
+\text{FID} = \|\mu_r - \mu_g\|_2^2 + \text{Tr}\!\left(\Sigma_r + \Sigma_g - 2\left(\Sigma_r \Sigma_g\right)^{1/2}\right)
+$$
 
-:::message
-**4DGS の本質**: 静的 3DGS の各 Gaussian に deformation network を追加し、時間依存の $\boldsymbol{\mu}(t)$ と $\Sigma(t)$ を表現。時空間一貫性損失で訓練。
-:::
+第1項は **平均のずれ**、第2項は **共分散のずれ**だ。$\text{FID} = 0$ は分布が完全一致を意味する。実際には $\text{FID} < 0.1$ が SOTA 水準。
 
-:::message
-**ここまでで全体の50%完了！** Zone 3 の数式修行を終えた。Motion Diffusion、4DGS、Diffusion Policy の理論を完全に理解した。次は実装 — Zone 4 で Julia/Rust/Elixir で実装する。
-:::
+特徴抽出器には HumanML3D の text-motion retrieval network を使用することが多い。$\phi: \mathbb{R}^{T \times J \times 3} \to \mathbb{R}^{512}$ の写像だ。
+
+> **⚠️ Warning:** FID は大量のサンプル（$N \geq 10{,}000$）が必要。小データで計算すると推定分散が大きく、順位が逆転することがある。
+
+**Fréchet 距離の行列平方根**
+
+$\left(\Sigma_r \Sigma_g\right)^{1/2}$ の計算は非自明だ。正確には:
+
+$$
+\left(\Sigma_r \Sigma_g\right)^{1/2} = \Sigma_r^{1/2} \left(\Sigma_r^{1/2} \Sigma_g \Sigma_r^{1/2}\right)^{1/2} \Sigma_r^{-1/2}
+$$
+
+数値的には固有値分解や Schur 分解で計算する。負の固有値が現れる場合は実装バグの兆候だ。
+
+#### R-Precision — テキスト–モーション整合性
+
+生成モーションが対応するテキストを正しく"検索"できるかを測る検索ベースの評価指標。
+
+$N$ 個の評価サンプルがあり、生成モーション $\hat{y}_i$ と $N_{\text{cand}}$ 個のテキスト候補（正解1個 + ランダム $N_{\text{cand}}-1$ 個）を特徴空間でランキングする。コサイン類似度:
+
+$$
+\text{sim}(\phi_m(\hat{y}_i),\, \phi_t(x_j)) = \frac{\phi_m(\hat{y}_i)^\top \phi_t(x_j)}{\|\phi_m(\hat{y}_i)\|_2 \|\phi_t(x_j)\|_2}
+$$
+
+に基づいて $N_{\text{cand}}$ 個のテキストをランクし、正解テキストの順位 $\text{rank}(i)$ を求める。R-Precision @ $k$ は:
+
+$$
+\text{R-Prec}@k = \frac{1}{N} \sum_{i=1}^{N} \mathbf{1}\!\left[\text{rank}(i) \leq k\right]
+$$
+
+典型的に $k \in \{1, 3, 10\}$ を報告する。$k=1$ での Top-1 が最も厳しい基準で、SOTA モデルは Top-3 で $0.80$ 超を達成する。
+
+**Multi-Modal Distance (MM-Dist)**
+
+テキスト特徴とモーション特徴の平均 $\ell_2$ 距離:
+
+$$
+\text{MM-Dist} = \frac{1}{N} \sum_{i=1}^{N} \|\phi_t(x_i) - \phi_m(\hat{y}_i)\|_2
+$$
+
+低いほど良い。FID とは異なり、**ペアごとの対応関係**を直接評価する。
+
+#### Diversity — 多様性の定量化
+
+同じ分布から $N_g$ 個のモーションをサンプリングし、ランダムペアの特徴距離の平均:
+
+$$
+\text{Diversity} = \frac{1}{\lfloor N_g/2 \rfloor} \sum_{k=1}^{\lfloor N_g/2 \rfloor} \|\phi_m(x_{2k-1}) - \phi_m(x_{2k})\|_2
+$$
+
+$\{x_1, x_2, \ldots, x_{N_g}\}$ は生成モーションの集合で、$(x_{2k-1}, x_{2k})$ はランダムにペアリングされたサンプル。$N_g = 300$ が標準だ。
+
+Diversity が高すぎる（モーションが支離滅裂）場合も問題なので、FID との **トレードオフ**を確認する必要がある。
+
+#### Multimodality — 同一テキストからの多様性
+
+同じテキストプロンプト $x$ から複数回生成したモーションの、特徴空間内でのばらつき:
+
+$$
+\text{Multimodality} = \frac{1}{N_t} \sum_{i=1}^{N_t} \frac{1}{\lfloor C/2 \rfloor} \sum_{k=1}^{\lfloor C/2 \rfloor} \|\phi_m(y_{i,2k-1}) - \phi_m(y_{i,2k})\|_2
+$$
+
+$N_t$ はテキスト数、$C$ は各テキストからのサンプル数（典型 $C = 20$）、$y_{i,c}$ は $i$ 番目のテキストから $c$ 回目に生成したモーションだ。決定論的モデル（mode collapse）は Multimodality $\approx 0$ になり問題を検出できる。
+
+#### Physical Plausibility — 物理的妥当性
+
+FID や R-Precision は特徴空間の統計だが、生成モーションが物理的に実現可能かは別の指標が必要だ。
+
+**Foot Skating Score**
+
+地面に接地しているはずの足が滑る現象を検出する:
+
+$$
+\text{FS} = \frac{1}{T} \sum_{t=1}^{T} \mathbf{1}\!\left[h_t^{\text{foot}} < \tau_h\right] \cdot \|\mathbf{v}_t^{\text{foot}}\|_2
+$$
+
+$h_t^{\text{foot}}$ は足の高さ、$\tau_h = 0.05$ m が閾値、$\mathbf{v}_t^{\text{foot}}$ は足先の速度だ。値が低いほど foot skating が少ない。
+
+**Joint Velocity Bounds**
+
+関節速度が生理的上限を超えないかを確認する:
+
+$$
+\text{JVB} = \frac{1}{T \cdot J} \sum_{t=1}^{T} \sum_{j=1}^{J} \mathbf{1}\!\left[\|\mathbf{v}_{t,j}\|_2 > v_{\max}^{(j)}\right]
+$$
+
+$v_{\max}^{(j)}$ は関節 $j$ の最大生理的速度。0 に近いほど物理的に妥当だ。
+
+**評価指標の相関と選択**
+
+| 指標 | 何を測るか | 方向 | 注意 |
+|------|-----------|------|------|
+| FID | 分布の近さ | ↓ 低い方が良い | 大量サンプル必要 |
+| R-Prec@1 | テキスト整合性 | ↑ 高い方が良い | モデルに依存 |
+| Diversity | サンプル多様性 | ↑ 高い方が良い | FID とトレードオフ |
+| Multimodality | 条件付き多様性 | ↑ 高い方が良い | 0 は mode collapse |
+| Foot Skating | 物理的妥当性 | ↓ 低い方が良い | 自動評価可能 |
+
+FID と Diversity は **トレードオフ**の関係にある。分布平均に近いモーションだけを生成すれば FID は低いが Diversity も低い。両方を報告するのが研究標準だ。
+
+### 3.13 MDM Transformer Architecture — Sequence-to-Sequence Denoiser
+
+Motion Diffusion Model (MDM) [^1] は U-Net ではなく **Transformer** をデノイザーとして採用する。この設計選択の数学的な根拠を展開する。
+
+#### MDM の基本アーキテクチャ
+
+MDM のデノイザー $f_\theta$ は、ノイズ付き motion $\mathbf{x}_t \in \mathbb{R}^{T \times J \times 3}$、タイムステップ $t$、テキスト条件 $c$ を受け取り、クリーンな motion $\mathbf{x}_0$ を直接予測する:
+
+$$
+f_\theta(\mathbf{x}_t, t, c) = \text{Transformer}\!\left(\text{PosEnc}(\mathbf{x}_t) + \text{TimeEmb}(t) + \text{TextEmb}(c)\right)
+$$
+
+入力テンソル $\mathbf{x}_t$ は $(T, J \times 3)$ に reshape し、フレーム方向の系列として Transformer に渡す。系列長 $T$（通常 60–196 frames）が token 数に相当する。
+
+**入力射影層**
+
+各フレームの関節ベクトル $\mathbf{x}_t^{(f)} \in \mathbb{R}^{J \times 3}$ を flatten して埋め込む:
+
+$$
+\mathbf{h}^{(f)} = W_{\text{in}} \cdot \text{vec}(\mathbf{x}_t^{(f)}) + \mathbf{b}_{\text{in}}, \quad W_{\text{in}} \in \mathbb{R}^{d \times (J \cdot 3)}
+$$
+
+$d = 512$ が標準。これで入力は $(T, d)$ の系列になる。
+
+#### Sinusoidal Time Embedding
+
+拡散ステップ $t \in \{0, 1, \ldots, T_{\text{diff}}\}$ を連続ベクトルに変換する:
+
+$$
+\text{TimeEmb}(t) = \left[\sin(\omega_1 t),\; \cos(\omega_1 t),\; \sin(\omega_2 t),\; \cos(\omega_2 t),\; \ldots,\; \sin(\omega_{d/2} t),\; \cos(\omega_{d/2} t)\right]
+$$
+
+$$
+\omega_k = \frac{1}{10000^{2k/d}}, \quad k = 1, 2, \ldots, \frac{d}{2}
+$$
+
+これは Transformer の Positional Encoding と同じ形式だが、**空間位置ではなく拡散時刻**をエンコードする点が異なる。低周波 $\omega_k$（小さい $k$）は大局的な拡散段階を、高周波 $\omega_k$（大きい $k$）は細かいステップの違いを表現する。$t = 0$ では全 $\sin$ が 0、全 $\cos$ が 1 となる。
+
+#### テキスト条件付けのための Cross-Attention
+
+テキスト $c$ は CLIP や T5 で事前エンコードされ、テキスト token 列 $\mathbf{E}_c \in \mathbb{R}^{L_c \times d_{\text{text}}}$ となる。MDM はこれを Cross-Attention で motion 系列に注入する:
+
+$$
+\text{CrossAttn}(\mathbf{H}, \mathbf{E}_c) = \text{softmax}\!\left(\frac{(\mathbf{H} W_Q)(\mathbf{E}_c W_K)^\top}{\sqrt{d_k}}\right)(\mathbf{E}_c W_V)
+$$
+
+$\mathbf{H} \in \mathbb{R}^{T \times d}$ は motion token の hidden state、$W_Q \in \mathbb{R}^{d \times d_k}$、$W_K, W_V \in \mathbb{R}^{d_{\text{text}} \times d_k}$ だ。Attention weight $\in \mathbb{R}^{T \times L_c}$ の $(f, l)$ 要素は、フレーム $f$ がテキストトークン $l$ をどれだけ参照するかを表す。
+
+#### Classifier-Free Guidance との統合
+
+MDM は classifier-free guidance (CFG) をサポートする。推論時に:
+
+$$
+\hat{\epsilon}_\theta(\mathbf{x}_t, t, c) = \epsilon_\theta(\mathbf{x}_t, t, \varnothing) + w \cdot \left[\epsilon_\theta(\mathbf{x}_t, t, c) - \epsilon_\theta(\mathbf{x}_t, t, \varnothing)\right]
+$$
+
+$w > 1$ は guidance scale、$\varnothing$ は null condition。訓練時は確率 $p_{\text{drop}} = 0.1$ でテキストをドロップする。$w = 2.5$ が MDM での典型値だ。
+
+#### なぜ U-Net でなく Transformer か
+
+| 観点 | U-Net | Transformer |
+|------|-------|-------------|
+| **受容野** | 局所（kernel size 依存） | 全フレームをアテンション |
+| **系列長対応** | 固定 | 柔軟（padding で対応） |
+| **時間依存** | 複雑な dilated conv | TimeEmb 加算で単純 |
+| **言語モデルとの整合** | なし | 共通アーキテクチャ |
+| **スケーリング** | パラメータ拡張が難しい | 層数増加で線形スケール |
+
+U-Net の受容野は $O(k \cdot L)$（$k$: カーネルサイズ、$L$: レイヤー数）だが、Transformer は一層で $O(T^2)$ の全フレーム間依存を捉える。「歩き始め」と「歩き終わり」の整合性のような **長距離依存** はこの差が決定的になる。また MotionGPT-3 や UniMo へのアーキテクチャ共通化により、言語モデルの事前学習済み重みへの転移が可能になる。
+
+> **Note:** **ここまでで全体の50%完了！** Zone 3 の数式修行を終えた。Motion Diffusion、4DGS、Diffusion Policy の理論を完全に理解した。次は実装 — Zone 4 で Julia/Rust/Elixir で実装する。
 
 ---
 
 
 ---
+
+## 参考文献
+
+[^1]: Tevet, G., Raab, S., Gordon, B., Shafir, Y., Cohen-Or, D., & Bermano, A. H. (2022). Human Motion Diffusion Model. *arXiv:2209.14916*.
+
+[^2]: Chen, X., Jiang, B., Liu, W., Huang, Z., Fu, B., Chen, T., & Yu, G. (2023). Executing your Commands via Motion Diffusion in Latent Space. *arXiv:2212.04048*.
+
+[^3]: Wu, G., Yi, T., Fang, J., Xie, L., Zhang, X., Wei, W., Liu, W., Tian, Q., & Wang, X. (2024). 4D Gaussian Splatting for Real-Time Dynamic Scene Rendering. *arXiv:2310.08528*.
+
+[^4]: Bahmani, S., Liu, X., et al. (2024). TC4D: Trajectory-Conditioned Text-to-4D Generation. *arXiv:2403.17920*.
+
+[^5]: Chi, C., Feng, S., Du, Y., Xu, Z., Cousineau, E., Burchfiel, B., & Song, S. (2023). Diffusion Policy: Visuomotor Policy Learning via Action Diffusion. *arXiv:2303.04137*.
+
+[^6]: Scheikl, P. M., Schreiber, N., Haas, C., Freymuth, N., Neumann, G., Lioutikov, R., & Mathis-Ulrich, F. (2024). Movement Primitive Diffusion: Learning Gentle Robotic Manipulation of Deformable Objects. [arXiv:2312.10008](https://arxiv.org/abs/2312.10008)
+
+[^7]: Loper, M., Mahmood, N., Romero, J., Pons-Moll, G., & Black, M. J. (2015). SMPL: A Skinned Multi-Person Linear Model. *ACM Transactions on Graphics, 34*(6), 248.
+
+[^8]: Jiang, B., Chen, X., Liu, W., Yu, J., Yu, G., & Chen, T. (2023). MotionGPT: Human Motion as a Foreign Language. *arXiv:2306.14795*.
+
+[^9]: Zhou, J., Ma, X., Sun, Q., Liu, S., Zhang, X., Feng, J., & Wu, Q. (2024). UniMo: Universal Motion Correction for Medical Images without Network Retraining. [arXiv:2409.14204](https://arxiv.org/abs/2409.14204)
+
+[^10]: Liu, S., Chen, L., Li, B., Zhang, B., Zhou, Y., & Hu, L. (2024). RDT-1B: a Diffusion Foundation Model for Bimanual Manipulation. *arXiv:2410.07864*.
+
+## 著者リンク
+
+- Blog: https://fumishiki.dev
+- X: https://x.com/fumishiki
+- LinkedIn: https://www.linkedin.com/in/fumitakamurakami
+- GitHub: https://github.com/fumishiki
+- Hugging Face: https://huggingface.co/fumishiki
 
 ## ライセンス
 

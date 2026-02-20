@@ -4,7 +4,14 @@ emoji: "⚡"
 type: "tech"
 topics: ["machinelearning", "deeplearning", "consistencymodels", "julia", "diffusion"]
 published: true
+slug: "ml-lecture-40-part2"
+difficulty: "advanced"
+time_estimate: "90 minutes"
+languages: ["Julia", "Rust"]
+keywords: ["機械学習", "深層学習", "生成モデル"]
 ---
+
+**→ 前編（理論編）**: [ml-lecture-40-part1](./ml-lecture-40-part1)
 
 ## 💻 4. 実装ゾーン（45分）— Julia Consistency Model完全実装
 
@@ -378,7 +385,7 @@ mod tests {
 | $d_{\text{PH}}(\mathbf{a}, \mathbf{b})$ | `sqrt.(c^2 .+ sum((a .- b).^2))` | `(c.powi(2) + (a - b).sqr().sum()).sqrt()` | Pseudo-Huber loss |
 | $\mathbf{x}_{t'} = \alpha \mathbf{x}_t + \beta \mathbf{x}_0$ | `α .* x_t .+ β .* x_0` | `x_t * alpha + x_0 * beta` | Analytical ODE (ECT) |
 
-:::details 数式→Juliaコード完全対応 (20パターン)
+<details><summary>数式→Juliaコード完全対応 (20パターン)</summary>
 
 1. **Preconditioning**:
    - 数式: $c_{\text{out}}(t) = \frac{\sigma_{\text{data}} t}{\sqrt{t^2 + \sigma_{\text{data}}^2}}$
@@ -401,12 +408,11 @@ mod tests {
    - Code: `x_next = (t_next / t_cur) * x + (t_next - t_cur) * x_0_pred`
 
 全20パターン → 各数式がJuliaコード1行に対応
-:::
 
-:::message
-**全体の85%完了！**
-実装完了。次は実験Zoneでベンチマーク比較。
-:::
+</details>
+
+> **Note:** **全体の85%完了！**
+> 実装完了。次は実験Zoneでベンチマーク比較。
 
 ---
 
@@ -440,10 +446,7 @@ results = Dict()
 @time results["CM-4"] = sample_multistep(cm_model, x_T, 4, 0.002f0, 80.0f0, ps_cm, st_cm)
 
 # FID computation
-fid_scores = Dict()
-for (name, samples) in results
-    fid_scores[name] = compute_fid(samples, real_data)
-end
+fid_scores = Dict(name => compute_fid(samples, real_data) for (name, samples) in results)
 
 # Visualization
 using Plots
@@ -474,12 +477,7 @@ scatter(times, fids,
 # Self-consistency validation
 function measure_self_consistency(model, x_T, ps, st, num_timepoints=20)
     ts = exp.(range(log(0.002), log(80.0), length=num_timepoints))
-    predictions = []
-
-    for t in ts
-        x_pred, _ = model(x_T, fill(t, size(x_T, 4)), ps, st)
-        push!(predictions, x_pred)
-    end
+    predictions = [model(x_T, fill(t, size(x_T, 4)), ps, st)[1] for t in ts]
 
     # Variance across time
     pred_stack = cat(predictions..., dims=5)  # (H, W, C, B, T)
@@ -525,14 +523,8 @@ ect_fid = compute_fid(sample_1step(ect_model, x_T, 80.0f0, ps_ect, st_ect), real
 
 ```julia
 # LCM with different guidance scales
-function lcm_guided_sample(model, prompt, guidance_scales, ps, st)
-    results = []
-    for w in guidance_scales
-        x = lcm_sample(model, prompt, w, ps, st)
-        push!(results, x)
-    end
-    return results
-end
+lcm_guided_sample(model, prompt, guidance_scales, ps, st) =
+    [lcm_sample(model, prompt, w, ps, st) for w in guidance_scales]
 
 # Test guidance scales
 ws = [1.0, 2.0, 4.0, 7.5, 10.0]
@@ -556,11 +548,7 @@ plot([heatmap(s[:,:,1,1], title="w=$w") for (s, w) in zip(samples, ws)]...)
 ```julia
 # Consistency error measurement across different time points
 function verify_self_consistency(model, x_T, ts, ps, st)
-    predictions = []
-    for t in ts
-        F_t, _ = model(x_T, fill(t, size(x_T, 4)), ps, st)
-        push!(predictions, F_t)
-    end
+    predictions = [model(x_T, fill(t, size(x_T, 4)), ps, st)[1] for t in ts]
 
     # Compute variance across all predictions
     pred_stack = cat(predictions..., dims=5)
@@ -620,13 +608,11 @@ plot([ct_fid, ect_fid],
 ```julia
 # Find optimal number of steps
 function find_optimal_steps(model, x_T, max_steps=10, ps, st)
-    results = []
-    for steps in 1:max_steps
+    return map(1:max_steps) do steps
         time = @elapsed x = sample_multistep(model, x_T, steps, 0.002f0, 80.0f0, ps, st)
         fid = compute_fid(x, real_data)
-        push!(results, (steps=steps, time=time, fid=fid))
+        (steps=steps, time=time, fid=fid)
     end
-    return results
 end
 
 # Plot Pareto front
@@ -661,13 +647,11 @@ rust_time = run(`cargo bench --bench inference_bench`)
 ```julia
 # Vary distortion (sampling steps) and measure rate (FID)
 function build_rate_distortion_curve(model, steps_range, ps, st)
-    rd_curve = []
-    for steps in steps_range
+    return map(steps_range) do steps
         x = sample_multistep(model, x_T, steps, 0.002f0, 80.0f0, ps, st)
         fid = compute_fid(x, real_data)
-        push!(rd_curve, (steps=steps, fid=fid))
+        (steps=steps, fid=fid)
     end
-    return rd_curve
 end
 
 # Plot R-D curve
@@ -681,43 +665,15 @@ plot([r.steps for r in rd], [r.fid for r in rd],
 
 ### 5.6 チェックリスト: 自己診断テスト
 
-#### 理論理解
-- [ ] Self-consistency条件の数学的定義を導出できる
-- [ ] Boundary条件 $F_\theta(\mathbf{x}_\epsilon, \epsilon) = \mathbf{x}_\epsilon$ の役割を説明できる
-- [ ] CT vs CD vs ECTの違いを理論的に説明できる
-- [ ] Pseudo-Huber損失が外れ値に頑健な理由を導出できる
-- [ ] DPM-Solver++の2次補正項を完全導出できる
-- [ ] Progressive Distillationの段階的蒸留手順を数式で説明できる
-- [ ] LCMのGuidance蒸留がCFGを学習する仕組みを理解している
-- [ ] InstaFlowのRectified Flow蒸留がなぜ1-stepで高品質か説明できる
-- [ ] DMD2のAdversarial Post-Trainingの2段階訓練を理解している
-- [ ] CTMがCMを一般化する理論的根拠を説明できる
-- [ ] 情報理論的下界 $N \geq \Omega(\log d / \epsilon)$ を導出できる
-- [ ] Rate-Distortion理論とPareto Frontの関係を説明できる
+Consistency Models の理解度を確認するため、理論（Self-consistency条件導出、CT/CD/ECT違い、DPM-Solver++補正項、情報理論的下界など）、実装（Julia/Rust、preconditioning、各種損失関数）、実験（ベンチマーク、Ablation study、性能比較）の3軸で自己評価を行うこと。
 
-#### 実装スキル
-- [ ] Julia実装で1-step生成を実行できる
-- [ ] Consistency functionのpreconditioning coefficientsを実装できる
-- [ ] CT lossの完全実装ができる
-- [ ] ECT lossの完全実装ができる
-- [ ] DPM-Solver++ 2nd-orderを実装できる
-- [ ] Multistep samplingを実装できる
-- [ ] Rust推論エンジンをビルドできる
-- [ ] Julia ↔ Rust FFI連携を構築できる
-- [ ] Self-consistency誤差を測定できる
-- [ ] FID計算パイプラインを実装できる
+> **Note:** **全体の100%完了！**
+> 演習問題まで完了。Zone 6で最新研究、Zone 7で総まとめへ。
 
-#### 実験・評価
-- [ ] CM vs DDIM vs DPM-Solver++ベンチマークを実行できる
-- [ ] Pareto Front可視化を作成できる
-- [ ] Ablation study (CT vs ECT) を設計・実行できる
-- [ ] Multistep sampling最適化を実践できる
-- [ ] Julia vs Rust性能比較を定量的に実施できる
-
-:::message
-**全体の100%完了！**
-演習問題まで完了。Zone 6で最新研究、Zone 7で総まとめへ。
-:::
+> **Progress: 85%**
+> **理解度チェック**
+> 1. 実装した Consistency Function の出力 `f_θ(x_T, T)` ≈ `f_θ(x_t, t)` が成立しているか確認するための数値テスト（同一 ODE 軌道上の 2 点に対して誤差を測定）を設計せよ。
+> 2. DPM-Solver++ の 2nd-order update で `x_{s}` を予測するとき、`x_{t}` の Jacobian 計算が不要な理由（exponential integrator の利点）を説明せよ。
 
 ---
 
@@ -1013,7 +969,7 @@ InstaFlowが示した道:
 
 ### 7.2 FAQ（よくある質問20選）
 
-:::details Q1: なぜDDPM 1000ステップより、CM 4ステップの方が高品質？
+<details><summary>Q1: なぜDDPM 1000ステップより、CM 4ステップの方が高品質？</summary>
 
 **A**: アーキテクチャ設計の違い
 
@@ -1028,9 +984,10 @@ InstaFlowが示した道:
 - iCT 1-step: FID 1.88
 
 → ステップ数1/250で品質向上
-:::
 
-:::details Q2: ECTがiCTより訓練168x速いのに、品質がやや劣る理由は？
+</details>
+
+<details><summary>Q2: ECTがiCTより訓練168x速いのに、品質がやや劣る理由は？</summary>
 
 **A**: Consistency vs Flexibility のトレードオフ
 
@@ -1044,9 +1001,10 @@ Perfect consistency ≠ Best sample quality（未解決問題）
 - ECT: 3 H100 GPU時間、FID 2.06
 
 → 訓練コスト1/170で品質0.18劣化は**十分許容範囲**
-:::
 
-:::details Q3: LCMとCMの違いは？
+</details>
+
+<details><summary>Q3: LCMとCMの違いは？</summary>
 
 **A**: 空間とGuidance
 
@@ -1064,9 +1022,10 @@ LCM = CM + Latent Diffusion (第39回) + Guidance蒸留
 - LCM-LoRA 4-step: 1.2s (A100)
 
 → 5.8x高速化 + VRAM 1/4
-:::
 
-:::details Q4: InstaFlowとCMはどう違う？
+</details>
+
+<details><summary>Q4: InstaFlowとCMはどう違う？</summary>
 
 **A**: ベースとなる軌道
 
@@ -1080,9 +1039,10 @@ InstaFlow = CM + Flow Matching (第38回) 統合
 - 直線軌道 → 1-step蒸留で誤差最小
 
 **Reflow手法**: 事前学習済みモデルをReflow (2-3回) → 軌道直線化 → 蒸留効率向上
-:::
 
-:::details Q5: DMD2の「Adversarial」は何？
+</details>
+
+<details><summary>Q5: DMD2の「Adversarial」は何？</summary>
 
 **A**: GANのAdversarial loss
 
@@ -1097,9 +1057,10 @@ DMD2 = Distillation + GAN (第12回)
 - DMD2 post-training: **30分〜2時間**
 
 → Diffusion事前訓練で安定化、GANで1-step化
-:::
 
-:::details Q6: CTとCDはどちらを使うべき？
+</details>
+
+<details><summary>Q6: CTとCDはどちらを使うべき？</summary>
 
 **A**: データとリソースによる
 
@@ -1113,9 +1074,10 @@ DMD2 = Distillation + GAN (第12回)
 **推奨**:
 - 新規タスク → CT
 - SDXL/Midjourney高速化 → CD (LCM-LoRA)
-:::
 
-:::details Q7: DPM-Solver++とCMの使い分けは？
+</details>
+
+<details><summary>Q7: DPM-Solver++とCMの使い分けは？</summary>
 
 **A**: 品質と速度のトレードオフ
 
@@ -1129,9 +1091,10 @@ DMD2 = Distillation + GAN (第12回)
 **使い分け**:
 - リアルタイム生成（ゲーム・AR）: CM 1-4 step
 - 高品質生成（アート・印刷）: DPM 20-50 step
-:::
 
-:::details Q8: Consistency functionはどうやって学習する？
+</details>
+
+<details><summary>Q8: Consistency functionはどうやって学習する？</summary>
 
 **A**: 時間方向の一貫性を損失関数化
 
@@ -1152,9 +1115,10 @@ end
 ```
 
 **キーアイデア**: 同じ $\mathbf{x}_0$ から生成した $\mathbf{x}_{t_1}$ と $\mathbf{x}_{t_2}$ は、どちらも $F_\theta$ を通すと同じ $\mathbf{x}_\epsilon$ に到達すべき
-:::
 
-:::details Q9: Pseudo-Huber損失の $c$ はどう決める？
+</details>
+
+<details><summary>Q9: Pseudo-Huber損失の $c$ はどう決める？</summary>
 
 **A**: データスケールに依存
 
@@ -1171,9 +1135,10 @@ $\sigma_{\text{data}}$: データの標準偏差
 
 **理由**: $c$ が小さすぎる → L2損失に近似、外れ値に敏感
 $c$ が大きすぎる → L1損失に近似、勾配が小さすぎる
-:::
 
-:::details Q10: EMAの $\mu$ はなぜ0.95や0.9999を使う？
+</details>
+
+<details><summary>Q10: EMAの $\mu$ はなぜ0.95や0.9999を使う？</summary>
 
 **A**: 訓練フェーズによる
 
@@ -1190,9 +1155,10 @@ $$
 $$
 
 **iCT推奨**: 固定 $\mu = 0.95$ (論文実験値)
-:::
 
-:::details Q11: CTMの $g_\theta(\mathbf{x}_t, t, t')$ は何が嬉しい？
+</details>
+
+<details><summary>Q11: CTMの $g_\theta(\mathbf{x}_t, t, t')$ は何が嬉しい？</summary>
 
 **A**: Multi-step推論の最適化
 
@@ -1206,9 +1172,10 @@ $$
 - CTM 10-step: FID 1.73
 
 → 推論時にステップ数を動的調整可能（速度/品質トレードオフ）
-:::
 
-:::details Q12: Progressive Distillationは何回繰り返す？
+</details>
+
+<details><summary>Q12: Progressive Distillationは何回繰り返す？</summary>
 
 **A**: $\log_2(N)$ 回
 
@@ -1226,9 +1193,10 @@ $$
 **合計**: 500 GPU時間 (約3週間 8xA100)
 
 **品質劣化**: FID 2.8 → 3.4 (0.6劣化)
-:::
 
-:::details Q13: Rectified Flowの「直線化」は理論保証がある？
+</details>
+
+<details><summary>Q13: Rectified Flowの「直線化」は理論保証がある？</summary>
 
 **A**: ある（Optimal Transport理論）
 
@@ -1247,9 +1215,10 @@ $T^*$: Optimal Transport map
 - Reflow 3回: 平均曲率 0.01
 
 → 3回で**ほぼ直線**
-:::
 
-:::details Q14: UniPCのPredictor-Correctorは何？
+</details>
+
+<details><summary>Q14: UniPCのPredictor-Correctorは何？</summary>
 
 **A**: 数値解析の古典手法
 
@@ -1266,9 +1235,10 @@ $$
 → Heun法（2次精度）の一種
 
 **UniPCの工夫**: Multi-step Adams-Bashforthで**3次精度**達成
-:::
 
-:::details Q15: Information-theoretic lower boundは実用的？
+</details>
+
+<details><summary>Q15: Information-theoretic lower boundは実用的？</summary>
 
 **A**: 理論的興味が主、実用は限定的
 
@@ -1288,9 +1258,10 @@ $$
 3. Diffusionは暗黙に多様体を学習
 
 → 下界は「理論的限界」、実用は「データ構造依存」
-:::
 
-:::details Q16: CMは訓練に何GPU時間必要？
+</details>
+
+<details><summary>Q16: CMは訓練に何GPU時間必要？</summary>
 
 **A**: データセットとモデルによる
 
@@ -1308,9 +1279,10 @@ $$
 - 8 A100 × 12時間 = 96 GPU時間
 
 → ECTは**1/100〜1/400のコスト**
-:::
 
-:::details Q17: CMは条件付き生成（Text-to-Image）に使える？
+</details>
+
+<details><summary>Q17: CMは条件付き生成（Text-to-Image）に使える？</summary>
 
 **A**: 使える（LCMで実証済み）
 
@@ -1338,9 +1310,10 @@ end
 - LCM 4-step: FID 25.1
 
 → 品質劣化わずか、速度12.5x
-:::
 
-:::details Q18: DMD2はビデオ生成にも使える？
+</details>
+
+<details><summary>Q18: DMD2はビデオ生成にも使える？</summary>
 
 **A**: 使える（論文で実証）
 
@@ -1357,9 +1330,10 @@ end
 - モーション滑らかさ低下
 
 **解決策**: Temporal Discriminatorの強化（今後の研究）
-:::
 
-:::details Q19: Self-consistencyは他のタスクに応用できる？
+</details>
+
+<details><summary>Q19: Self-consistencyは他のタスクに応用できる？</summary>
 
 **A**: できる（理論は汎用）
 
@@ -1375,9 +1349,10 @@ F_\theta(\text{view}_1) = F_\theta(\text{view}_2) = \text{3D object}
 $$
 
 → 異なる視点から見た2D画像が、同じ3D表現に写像されるべき
-:::
 
-:::details Q20: 最新のConsistency研究（2025-2026）は？
+</details>
+
+<details><summary>Q20: 最新のConsistency研究（2025-2026）は？</summary>
 
 **A**: 3つのフロンティア
 
@@ -1394,7 +1369,8 @@ $$
 - DPO (Direct Preference Optimization) + CM
 
 **2026予想**: **Self-consistency = 全生成モデルの統一原理**へ
-:::
+
+</details>
 
 ### 7.3 学習スケジュール（詳細版）
 
@@ -1680,23 +1656,21 @@ end
 
 **💀 常識破壊の問い**: 生成モデルの終着点は"理解"では？
 
-:::message
-**Course IV 第8回（第40回）完了！**
-
-**達成したこと**:
-- Self-consistency条件の理論的保証を完全理解
-- CT/CD/iCT/ECTの訓練手法を数式レベルで把握
-- DPM-Solver++/UniPCとの比較で高次ソルバーを理解
-- Progressive/LCM/InstaFlow/DMD2の蒸留系譜を整理
-- JuliaでCT実装、RustでCandle推論を完成
-- 1-step生成の理論限界と実用トレードオフを習得
-
-**次の挑戦**:
-第41回でWorld Modelsへ。Diffusionは「サンプリングツール」から「世界理解エンジン」へ進化する。
-
-**Course IV全体の到達点**:
-静止画生成の全理論（DDPM→Score→Flow→Latent→Consistency）を完全制覇。次は時空間へ。
-:::
+> **Note:** **Course IV 第8回（第40回）完了！**
+>
+> **達成したこと**:
+> - Self-consistency条件の理論的保証を完全理解
+> - CT/CD/iCT/ECTの訓練手法を数式レベルで把握
+> - DPM-Solver++/UniPCとの比較で高次ソルバーを理解
+> - Progressive/LCM/InstaFlow/DMD2の蒸留系譜を整理
+> - JuliaでCT実装、RustでCandle推論を完成
+> - 1-step生成の理論限界と実用トレードオフを習得
+>
+> **次の挑戦**:
+> 第41回でWorld Modelsへ。Diffusionは「サンプリングツール」から「世界理解エンジン」へ進化する。
+>
+> **Course IV全体の到達点**:
+> 静止画生成の全理論（DDPM→Score→Flow→Latent→Consistency）を完全制覇。次は時空間へ。
 
 ---
 
@@ -1705,37 +1679,37 @@ end
 ### 主要論文
 
 [^1]: Song, Y., Dhariwal, P., Chen, M., & Sutskever, I. (2023). Consistency Models. *ICML 2023*.
-@[card](https://arxiv.org/abs/2303.01469)
+<https://arxiv.org/abs/2303.01469>
 
 [^2]: Song, Y., & Dhariwal, P. (2023). Improved Techniques for Training Consistency Models. *arXiv:2310.14189*.
-@[card](https://arxiv.org/abs/2310.14189)
+<https://arxiv.org/abs/2310.14189>
 
 [^3]: Geng, Z., Pokle, A., Luo, W., Lin, J., & Kolter, J. Z. (2025). Consistency Models Made Easy. *ICLR 2025*.
-@[card](https://arxiv.org/abs/2406.14548)
+<https://arxiv.org/abs/2406.14548>
 
 [^4]: Lu, C., Zhou, Y., Bao, F., Chen, J., Li, C., & Zhu, J. (2022). DPM-Solver++: Fast Solver for Guided Sampling of Diffusion Probabilistic Models. *arXiv:2211.01095*.
-@[card](https://arxiv.org/abs/2211.01095)
+<https://arxiv.org/abs/2211.01095>
 
 [^5]: Zhao, W., Bai, L., Rao, Y., Zhou, J., & Lu, J. (2023). UniPC: A Unified Predictor-Corrector Framework for Fast Sampling of Diffusion Models. *NeurIPS 2023*.
-@[card](https://arxiv.org/abs/2302.04867)
+<https://arxiv.org/abs/2302.04867>
 
 [^6]: Salimans, T., & Ho, J. (2022). Progressive Distillation for Fast Sampling of Diffusion Models. *ICLR 2022*.
-@[card](https://arxiv.org/abs/2202.00512)
+<https://arxiv.org/abs/2202.00512>
 
 [^7]: Luo, S., Tan, Y., Huang, L., Li, J., & Zhao, H. (2023). Latent Consistency Models: Synthesizing High-Resolution Images with Few-Step Inference. *arXiv:2310.04378*.
-@[card](https://arxiv.org/abs/2310.04378)
+<https://arxiv.org/abs/2310.04378>
 
 [^8]: Liu, X., Gong, C., & Liu, Q. (2023). InstaFlow: One Step is Enough for High-Quality Diffusion-Based Text-to-Image Generation. *arXiv:2309.06380*.
-@[card](https://arxiv.org/abs/2309.06380)
+<https://arxiv.org/abs/2309.06380>
 
 [^9]: Lin, S., Xia, X., Ren, Y., Yang, C., Xiao, X., & Jiang, L. (2025). Diffusion Adversarial Post-Training for One-Step Video Generation. *arXiv:2501.08316*.
-@[card](https://arxiv.org/abs/2501.08316)
+<https://arxiv.org/abs/2501.08316>
 
 [^10]: Karras, T., Aittala, M., Aila, T., & Laine, S. (2022). Elucidating the Design Space of Diffusion-Based Generative Models. *NeurIPS 2022*.
-@[card](https://arxiv.org/abs/2206.00364)
+<https://arxiv.org/abs/2206.00364>
 
 [^11]: Kim, D., Lai, C.-H., Liao, W.-H., Murata, N., Takida, Y., Uesaka, T., ... & Ermon, S. (2023). Consistency Trajectory Models: Learning Probability Flow ODE Trajectory of Diffusion. *arXiv:2310.02279*.
-@[card](https://arxiv.org/abs/2310.02279)
+<https://arxiv.org/abs/2310.02279>
 
 ### 教科書・サーベイ
 
@@ -1745,25 +1719,20 @@ end
 
 ---
 
-## 記法規約
-
-| 記号 | 意味 |
-|:-----|:-----|
-| $F_\theta(\mathbf{x}_t, t)$ | Consistency function (Self-consistencyを満たすNN) |
-| $\mathbf{x}_t$ | 時刻 $t$ でのノイズ付き画像 |
-| $\mathbf{x}_\epsilon$ | ほぼノイズなし画像 ($\mathbf{x}_0$ に近い) |
-| $\Psi_{t \leftarrow t'}$ | PF-ODE flow map (時刻 $t'$ から $t$ への軌道) |
-| $c_{\text{skip}}(t), c_{\text{out}}(t), c_{\text{in}}(t)$ | Preconditioning coefficients (EDM-style) |
-| $d_{\text{PH}}(\mathbf{a}, \mathbf{b}; c)$ | Pseudo-Huber距離 |
-| $\theta^-$ | Target network (EMA更新) |
-| $\mathcal{L}_{\text{CT}}$ | Consistency Training loss |
-| $\mathcal{L}_{\text{CD}}$ | Consistency Distillation loss |
-| $\mathcal{L}_{\text{ECT}}$ | Easy Consistency Tuning loss |
-| NFE | Number of Function Evaluations (モデル呼び出し回数) |
+> **Progress: 95%**
+> **理解度チェック**
+> 1. Consistency Trajectory Models (CTM) が Consistency Models の一般化になっている理由を、任意 $(t,s)$ ペアへの一般化の観点から説明せよ。
+> 2. 1-step 生成の理論的下界（FID の情報理論的限界）は存在するか？ Rate-Distortion 理論の観点から論じよ。
 
 ---
 
----
+## 著者リンク
+
+- Blog: https://fumishiki.dev
+- X: https://x.com/fumishiki
+- LinkedIn: https://www.linkedin.com/in/fumitakamurakami
+- GitHub: https://github.com/fumishiki
+- Hugging Face: https://huggingface.co/fumishiki
 
 ## ライセンス
 

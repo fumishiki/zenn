@@ -335,8 +335,7 @@ $$
 ```python
 def clip_grad_norm(grad: np.ndarray, max_norm: float = 1.0) -> np.ndarray:
     # grad shape: (d,) — any 1D gradient vector
-    norm = float(np.linalg.norm(grad))
-    if norm > max_norm:
+    if (norm := float(np.linalg.norm(grad))) > max_norm:
         grad = grad * (max_norm / norm)  # scale down
     return grad
 
@@ -781,7 +780,7 @@ def conditional_entropy(joint: np.ndarray) -> float:
 数式: $v_{t+1} = \mu v_t - \eta \nabla f(\theta_t + \mu v_t)$, $\theta_{t+1} = \theta_t + v_{t+1}$
 
 ```python
-def nesterov_step(theta, v, grad_fn, lr=0.01, mu=0.9):
+def nesterov_step(theta: np.ndarray, v: np.ndarray, grad_fn, lr: float = 0.01, mu: float = 0.9) -> tuple[np.ndarray, np.ndarray]:
     # Evaluate gradient at lookahead position
     grad = grad_fn(theta + mu * v)
     v = mu * v - lr * grad
@@ -1119,7 +1118,7 @@ $$
 
 #### 6.9.4 情報理論的機械学習の基礎
 
-2024年の包括的レビュー[^17]は、機械学習における情報理論的手法の統一的フレームワークを提案した。
+2024年のサーベイ論文[^17]は、機械学習における情報理論的手法の統一的フレームワークを提案した。
 
 **主要な定理**:
 
@@ -1183,7 +1182,7 @@ SimCLR, BYOL, VICReg などの自己教師あり表現学習は、情報ボト�
 
 #### Z6.2.7 Flow Matching と最適輸送 (2022-2025)
 
-Lipman ら (2022) の Flow Matching [^17] は、情報理論的最適輸送を拡散モデルに組み込んだ革新的手法:
+Lipman ら (2022) の Flow Matching [^17] は、情報理論的最適輸送を拡散モデルに組み込んだ手法:
 
 $$
 u_t(x) = \frac{x_1 - x_0}{1} = x_1 - x_0 \quad (\text{Optimal Transport path})
@@ -1192,6 +1191,10 @@ $$
 ソース分布 $p_0$ からターゲット分布 $p_1$ への直線パスが最短（Wasserstein 距離最小）。Score-based model（第5回）の複雑な SDE と比べ、シンプルで训練が安定。2025年現在 Stable Diffusion 3, FLUX.1 等の大型モデルで採用。
 
 > Progress: 95%
+
+> **理解度チェック**
+> 1. エントロピー $H(X) = -\sum_x p(x)\log p(x)$ が最大になるのはどんな分布のときか。なぜそうなるか説明せよ。
+> 2. KL divergence $D_\text{KL}(p \| q) \geq 0$ の非負性をジェンセンの不等式から証明せよ。
 
 ## 🎯 Z7. エピローグ（10分）— まとめと次回予告
 
@@ -1464,6 +1467,10 @@ $$
 > **Note:** **進捗: 100% 完了** 第6回「情報理論・最適化理論」完了。Course I の数学的武装はこれで6/8。次回から生成モデルの世界に足を踏み入れる。
 
 > Progress: 100%
+
+> **理解度チェック**
+> 1. 相互情報量 $I(X;Y) = D_\text{KL}(p(x,y) \| p(x)p(y))$ がゼロになる条件を述べ、独立性との関係を説明せよ。
+> 2. 交差エントロピー損失 $H(p,q) = -\sum_x p(x)\log q(x)$ の最小化が KL 最小化と等価になるのはなぜか。
 
 ---
 

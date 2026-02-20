@@ -187,7 +187,7 @@ def sqrtm_psd(A: np.ndarray, eps: float = 1e-10) -> np.ndarray:
     return (V * np.sqrt(w)[None, :]) @ V.T
 
 
-def fid_gaussian(mu_r, Sigma_r, mu_g, Sigma_g) -> float:
+def fid_gaussian(mu_r: np.ndarray, Sigma_r: np.ndarray, mu_g: np.ndarray, Sigma_g: np.ndarray) -> float:
     d = mu_r.shape[0]
     Sigma_r = 0.5 * (Sigma_r + Sigma_r.T) + 1e-6 * np.eye(d)
     Sigma_g = 0.5 * (Sigma_g + Sigma_g.T) + 1e-6 * np.eye(d)
@@ -254,7 +254,7 @@ def log_likelihood_gmm(params: np.ndarray, x: np.ndarray) -> float:
     pi2 = 1.0 - pi1
     s1, s2 = np.exp(log_s1), np.exp(log_s2)  # positive via exp
     # Gaussian PDF
-    def norm_pdf(x_, mu_, s_):
+    def norm_pdf(x_: np.ndarray, mu_: float, s_: float) -> np.ndarray:
         return np.exp(-0.5 * ((x_ - mu_) / s_) ** 2) / (s_ * np.sqrt(2 * np.pi))
     mixture = pi1 * norm_pdf(x, mu1, s1) + pi2 * norm_pdf(x, mu2, s2)
     return float(-np.sum(np.log(mixture + 1e-12)))
@@ -1091,7 +1091,7 @@ $$
 \ell(\theta) = \sum_{i=1}^N \log\left[\pi_1 \mathcal{N}(x_i|\mu_1, \sigma_1^2) + \pi_2 \mathcal{N}(x_i|\mu_2, \sigma_2^2)\right]
 $$
 
-は $(\mu_1, \mu_2)$ の入れ替えに対して対称なため、$\hat{\mu}_1 = -3, \hat{\mu}_2 = 3$ と $\hat{\mu}_1 = 3, \hat{\mu}_2 = -3$ の2つのグローバル最大値がある。さらに、$\sigma_k \to 0$ のとき「1点に集中した成分」が尤度を $+\infty$ にできる縮退解（degenerate solution）が存在する。
+は $(\mu_1, \mu_2)$ の入れ替えに対して対称なため、$\hat{\mu}_1 = -3, \hat{\mu}_2 = 3$ と $\hat{\mu}_1 = 3, \hat{\mu}_2 = -3$ の2つのグローバル最大値がある。$\sigma_k \to 0$ のとき「1点に集中した成分」が尤度を $+\infty$ にできる縮退解（degenerate solution）が存在する。
 
 **初期値依存性の数値証拠**: 初期値を変えると異なる解に収束する:
 
@@ -1102,7 +1102,7 @@ $$
 | `(1, -1)` | `(3, -3)` になりやすい |
 | `(-4, 4)` | `(-3, 3)` 安定 |
 
-**EM アルゴリズムとの差異**: EM の E-step は「各データ点が各成分に属する確率（責任度）」を計算し、M-step はその確率に重み付けして各成分を独立に最適化する。これにより、対称性の罠を避けやすくなる。さらに EM の M-step では $\sigma_k \to 0$ の縮退が起きないよう、各成分が少なくとも1点を担当することを保証できる。
+**EM アルゴリズムとの差異**: EM の E-step は「各データ点が各成分に属する確率（責任度）」を計算し、M-step はその確率に重み付けして各成分を独立に最適化する。これにより、対称性の罠を避けやすくなる。EM の M-step では $\sigma_k \to 0$ の縮退が起きないよう、各成分が少なくとも1点を担当することを保証できる。
 
 **期待される結論**: GMM の尤度は多峰的なため、勾配法は初期値依存。EM は各ステップで単調増加が保証される（Jensen 不等式）— これが第8回の動機。
 
@@ -1267,6 +1267,10 @@ FID との差分:
 なお、評価指標の選択もモデル開発の一部だ。FID が低いだけでは「良い生成モデル」とは言えない — それは Inception-V3 の埋め込み空間での類似性を意味するに過ぎない。最終的には、生成された画像/テキスト/音声が「人間の目的に合っているか」が問題であり、これはタスク依存の評価（例: 生成画像を用いた downstream 分類精度）で測ることが多い。
 
 > Progress: 95%
+
+> **理解度チェック**
+> 1. 最尤推定量 $\hat{\theta}_{\text{MLE}} = \arg\max_\theta \log p(\mathcal{D}|\theta)$ がバイアスを持つ場合の具体例を挙げ、なぜバイアスが生じるか説明せよ。
+> 2. フィッシャー情報量 $\mathcal{I}(\theta) = \mathbb{E}\left[\left(\frac{\partial \log p(x|\theta)}{\partial \theta}\right)^2\right]$ が推定の精度限界（クラメール・ラオ下界）にどう関係するか述べよ。
 
 ## 🎯 Z7. エピローグ（10分）— まとめと次回予告
 
@@ -1500,6 +1504,10 @@ $$
 | ESS 計算 | Z5.16 | $\sigma_q$ と ESS/N の感度 |
 
 > Progress: 100%
+
+> **理解度チェック**
+> 1. EMアルゴリズムにおけるEステップとMステップをそれぞれ一文で述べ、収束を保証する数学的根拠（ELBO の単調増加性）を説明せよ。
+> 2. GMMでEMを使う際、成分数 $K$ を過大に設定すると何が起きるか。BIC/AICによるモデル選択がどう解決するか説明せよ。
 
 ---
 

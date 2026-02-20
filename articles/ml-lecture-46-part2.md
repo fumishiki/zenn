@@ -4,6 +4,11 @@ emoji: "🧊"
 type: "tech"
 topics: ["machinelearning", "deeplearning", "3dgeneration", "nerf", "3dgs"]
 published: true
+slug: "ml-lecture-46-part2"
+difficulty: "advanced"
+time_estimate: "90 minutes"
+languages: ["Julia", "Rust"]
+keywords: ["機械学習", "深層学習", "生成モデル"]
 ---
 ## 💻 4. 実装ゾーン（45分）— Rust 3DGSラスタライザ
 
@@ -83,13 +88,7 @@ fn quat_to_mat3(q: [f32; 4]) -> [[f32; 3]; 3] {
 }
 
 fn mat3_mul(a: &[[f32; 3]; 3], b: &[[f32; 3]; 3]) -> [[f32; 3]; 3] {
-    let mut result = [[0.0; 3]; 3];
-    for i in 0..3 {
-        for j in 0..3 {
-            result[i][j] = (0..3).map(|k| a[i][k] * b[k][j]).sum();
-        }
-    }
-    result
+    std::array::from_fn(|i| std::array::from_fn(|j| (0..3).map(|k| a[i][k] * b[k][j]).sum()))
 }
 
 fn transpose(m: &[[f32; 3]; 3]) -> [[f32; 3]; 3] {
@@ -196,17 +195,9 @@ fn transform_cov3d(cov: &[[f32; 3]; 3], rot: &[[f32; 3]; 3]) -> [[f32; 3]; 3] {
 
 fn project_cov3d_to_2d(cov3d: &[[f32; 3]; 3], jac: &[[f32; 2]; 3]) -> [[f32; 2]; 2] {
     // Σ' = J Σ Jᵀ
-    let mut result = [[0.0; 2]; 2];
-    for i in 0..2 {
-        for j in 0..2 {
-            for k in 0..3 {
-                for l in 0..3 {
-                    result[i][j] += jac[i][k] * cov3d[k][l] * jac[j][l];
-                }
-            }
-        }
-    }
-    result
+    std::array::from_fn(|i| std::array::from_fn(|j|
+        (0..3).flat_map(|k| (0..3).map(move |l| jac[i][k] * cov3d[k][l] * jac[j][l])).sum()
+    ))
 }
 ```
 
@@ -439,17 +430,7 @@ end
 
 # 位置符号化
 function positional_encoding(x::AbstractVector, L::Int)
-    encoded = Float32[]
-    for i in 0:L-1
-        freq = 2.0f0^i * Float32(π)
-        for xi in x
-            push!(encoded, sin(freq * xi))
-        end
-        for xi in x
-            push!(encoded, cos(freq * xi))
-        end
-    end
-    return encoded
+    vcat([vcat(sin.(2.0f0^i * Float32(π) .* x), cos.(2.0f0^i * Float32(π) .* x)) for i in 0:L-1]...)
 end
 
 # Forward pass
@@ -476,15 +457,9 @@ function volume_render_differentiable(model, ray_o, ray_d, t_near, t_far, N_samp
     t_vals = range(t_near, stop=t_far, length=N_samples) |> collect
 
     # 各点でNeRF評価
-    colors = zeros(Float32, N_samples, 3)
-    densities = zeros(Float32, N_samples)
-
-    for i in 1:N_samples
-        pos = ray_o + t_vals[i] * ray_d
-        result = model(pos, ray_d)
-        colors[i, :] = result.color
-        densities[i] = result.density
-    end
+    results   = [model(ray_o .+ t .* ray_d, ray_d) for t in t_vals]
+    colors    = reduce(vcat, [r.color' for r in results])
+    densities = getfield.(results, :density)
 
     # Delta計算
     δ = vcat(diff(t_vals), [t_vals[end] - t_vals[end-1]])
@@ -590,7 +565,7 @@ function render_full_image(model, camera, W, H)
         for x in 1:W
             ray_o, ray_d = get_ray(camera, x, y, W, H)
             result = volume_render_differentiable(model, ray_o, ray_d, 2.0f0, 6.0f0, 64)
-            img[y, x, :] = clamp.(result.color, 0.0f0, 1.0f0)
+            @views img[y, x, :] .= clamp.(result.color, 0.0f0, 1.0f0)
         end
     end
 
@@ -647,9 +622,7 @@ pub fn clip_gradient(grad: &mut [f32], max_norm: f32) {
     let norm: f32 = grad.iter().map(|&g| g * g).sum::<f32>().sqrt();
     if norm > max_norm {
         let scale = max_norm / norm;
-        for g in grad.iter_mut() {
-            *g *= scale;
-        }
+        grad.iter_mut().for_each(|g| *g *= scale);
     }
 }
 
@@ -780,12 +753,14 @@ function render_gaussians_rust(gaussians::Vector{Gaussian3D}, camera::Camera, W:
     # 各ガウシアン: 16要素 [μ(3), q(4), s(3), c(3), α(1), padding(2)]
     flat_gaussians = zeros(Float32, N * 16)
     for (i, g) in enumerate(gaussians)
-        offset = (i - 1) * 16
-        flat_gaussians[offset+1:offset+3] = g.mean
-        flat_gaussians[offset+4:offset+7] = g.rotation
-        flat_gaussians[offset+8:offset+10] = g.scale
-        flat_gaussians[offset+11:offset+13] = g.color
-        flat_gaussians[offset+14] = g.opacity
+        o = (i - 1) * 16
+        @views begin
+            flat_gaussians[o+1:o+3]   .= g.mean
+            flat_gaussians[o+4:o+7]   .= g.rotation
+            flat_gaussians[o+8:o+10]  .= g.scale
+            flat_gaussians[o+11:o+13] .= g.color
+            flat_gaussians[o+14]       = g.opacity
+        end
     end
 
     # カメラパラメータをフラット配列に
@@ -827,9 +802,7 @@ end
 - Rustは`ptr`を読むだけ（所有権は移譲しない）
 - FFI境界で型チェック（`Float32`統一）
 
-:::message
-**進捗: 70%完了** — Rust 3DGSラスタライザ + Julia訓練パイプライン + FFI連携を実装。数値安定性の考慮とAdaptive Densificationのロジックも完備。次は実験ゾーン — 実際にNeRFと3DGSを訓練してみる。
-:::
+> **Note:** **進捗: 70%完了** — Rust 3DGSラスタライザ + Julia訓練パイプライン + FFI連携を実装。数値安定性の考慮とAdaptive Densificationのロジックも完備。次は実験ゾーン — 実際にNeRFと3DGSを訓練してみる。
 
 ---
 
@@ -841,7 +814,7 @@ end
 
 3D生成の論文を読むための記法確認。以下の数式を日本語で説明せよ。
 
-:::details **Q1**: $C(\mathbf{r}) = \int_{t_n}^{t_f} T(t) \sigma(\mathbf{r}(t)) \mathbf{c}(\mathbf{r}(t), \mathbf{d}) \, dt$
+<details><summary>**Q1**: $C(\mathbf{r}) = \int_{t_n}^{t_f} T(t) \sigma(\mathbf{r}(t)) \mathbf{c}(\mathbf{r}(t), \mathbf{d}) \, dt$</summary>
 
 **解答**:
 レイ $\mathbf{r}$ のピクセル色 $C$ は、レイ上の全ての点での「透過率×密度×色」の積分。
@@ -850,9 +823,10 @@ end
 - $\mathbf{c}(\mathbf{r}(t), \mathbf{d})$: その点から方向 $\mathbf{d}$ に放射される色
 
 これがVolume Rendering方程式の核心。
-:::
 
-:::details **Q2**: $\boldsymbol{\Sigma}_k = \mathbf{R}_k \mathbf{S}_k \mathbf{S}_k^\top \mathbf{R}_k^\top$
+</details>
+
+<details><summary>**Q2**: $\boldsymbol{\Sigma}_k = \mathbf{R}_k \mathbf{S}_k \mathbf{S}_k^\top \mathbf{R}_k^\top$</summary>
 
 **解答**:
 3Dガウシアンの共分散行列 $\boldsymbol{\Sigma}_k$ を、回転 $\mathbf{R}_k$ とスケール $\mathbf{S}_k$ で分解。
@@ -860,9 +834,10 @@ end
 - $\mathbf{R}_k$: 回転行列（楕円体の向き）
 - $\mathbf{S}_k \mathbf{S}_k^\top$: スケールの2乗行列（分散）
 - 回転で挟むことで、任意の向きの楕円体を表現。
-:::
 
-:::details **Q3**: $\nabla_\theta \mathcal{L}_{\text{SDS}} = \mathbb{E}_{t, \boldsymbol{\epsilon}} \left[ w(t) \left( \boldsymbol{\epsilon}_\phi(\mathbf{x}_t, t, y) - \boldsymbol{\epsilon} \right) \frac{\partial \mathbf{x}}{\partial \theta} \right]$
+</details>
+
+<details><summary>**Q3**: $\nabla_\theta \mathcal{L}_{\text{SDS}} = \mathbb{E}_{t, \boldsymbol{\epsilon}} \left[ w(t) \left( \boldsymbol{\epsilon}_\phi(\mathbf{x}_t, t, y) - \boldsymbol{\epsilon} \right) \frac{\partial \mathbf{x}}{\partial \theta} \right]$</summary>
 
 **解答**:
 Score Distillation Samplingの勾配式。
@@ -872,9 +847,10 @@ Score Distillation Samplingの勾配式。
 - $\frac{\partial \mathbf{x}}{\partial \theta}$: レンダリング画像の3Dパラメータに対する勾配
 
 拡散モデルの指示を3D空間にバックプロパゲーションして最適化。
-:::
 
-:::details **Q4**: $\gamma(\mathbf{x}) = \left( \sin(2^0 \pi \mathbf{x}), \cos(2^0 \pi \mathbf{x}), \ldots, \sin(2^{L-1} \pi \mathbf{x}), \cos(2^{L-1} \pi \mathbf{x}) \right)$
+</details>
+
+<details><summary>**Q4**: $\gamma(\mathbf{x}) = \left( \sin(2^0 \pi \mathbf{x}), \cos(2^0 \pi \mathbf{x}), \ldots, \sin(2^{L-1} \pi \mathbf{x}), \cos(2^{L-1} \pi \mathbf{x}) \right)$</summary>
 
 **解答**:
 位置符号化 (Positional Encoding)。
@@ -882,9 +858,10 @@ Score Distillation Samplingの勾配式。
 - 各周波数 $2^0, 2^1, \ldots, 2^{L-1}$ の正弦波成分を明示的に入力
 - MLPが高周波の詳細（テクスチャ）を学習しやすくする
 - NeRFの鮮明さを決める重要技術。
-:::
 
-:::details **Q5**: $\boldsymbol{\Sigma}'_k = \mathbf{J} \mathbf{W} \boldsymbol{\Sigma}_k \mathbf{W}^\top \mathbf{J}^\top$
+</details>
+
+<details><summary>**Q5**: $\boldsymbol{\Sigma}'_k = \mathbf{J} \mathbf{W} \boldsymbol{\Sigma}_k \mathbf{W}^\top \mathbf{J}^\top$</summary>
 
 **解答**:
 3Dガウシアンの共分散を2Dに射影する式。
@@ -894,7 +871,8 @@ Score Distillation Samplingの勾配式。
 - 結果 $\boldsymbol{\Sigma}'_k$: 2D共分散（2×2行列）
 
 3Dの楕円体が、画像平面上でどんな楕円になるかを計算。
-:::
+
+</details>
 
 ### 5.2 実装チャレンジ: Tiny NeRF on Synthetic Data
 
@@ -967,13 +945,8 @@ end
 
 # === Tiny NeRF モデル ===
 function positional_encoding(x, L=6)
-    encoded = Float32[]
-    for i in 0:L-1
-        freq = 2.0^i * π
-        append!(encoded, [sin(freq * x[j]) for j in 1:length(x)])
-        append!(encoded, [cos(freq * x[j]) for j in 1:length(x)])
-    end
-    return encoded
+    vcat([vcat([sin(2.0^i * π * x[j]) for j in 1:length(x)],
+               [cos(2.0^i * π * x[j]) for j in 1:length(x)]) for i in 0:L-1]...)
 end
 
 function create_nerf_model(L_pos=6, L_dir=4)
@@ -992,20 +965,14 @@ end
 # === Volume Rendering ===
 function volume_render(model, ray_o, ray_d, t_vals)
     N = length(t_vals)
-    colors = zeros(Float32, N, 3)
-    densities = zeros(Float32, N)
 
-    for i in 1:N
-        pos = ray_o + t_vals[i] * ray_d
-        pos_enc = positional_encoding(pos)
-        output = model(pos_enc)
-        colors[i, :] = output[1:3]
-        densities[i] = output[4]
-    end
+    results   = [(pos = ray_o .+ t .* ray_d; out = model(positional_encoding(pos)); (out[1:3], out[4])) for t in t_vals]
+    colors    = reduce(vcat, [r[1]' for r in results])
+    densities = [r[2] for r in results]
 
     # Alpha compositing
-    δ = vcat(diff(t_vals), [0.1])
-    α = 1 .- exp.(-densities .* δ)
+    δ = vcat(diff(collect(t_vals)), [0.1])
+    α = @. 1 - exp(-densities * δ)
     T = cumprod(vcat([1.0], 1 .- α[1:end-1]))
     weights = T .* α
 
@@ -1062,7 +1029,7 @@ println("Test render color: ", test_color)
 
 **課題**: 上記の `volume_render` 関数をRustで書け。
 
-:::details **解答例**
+<details><summary>**解答例**</summary>
 
 ```rust
 // volume_render.rs
@@ -1074,68 +1041,53 @@ pub fn volume_render(
     t_vals: &[f32],
 ) -> [f32; 3] {
     let n = t_vals.len();
-    let mut colors = vec![[0.0; 3]; n];
-    let mut densities = vec![0.0; n];
 
     // Evaluate NeRF at each sample point
-    for i in 0..n {
+    let (colors, densities): (Vec<[f32; 3]>, Vec<f32>) = t_vals.iter().map(|&t| {
         let pos = [
-            ray_o[0] + t_vals[i] * ray_d[0],
-            ray_o[1] + t_vals[i] * ray_d[1],
-            ray_o[2] + t_vals[i] * ray_d[2],
+            ray_o[0] + t * ray_d[0],
+            ray_o[1] + t * ray_d[1],
+            ray_o[2] + t * ray_d[2],
         ];
-        let pos_enc = positional_encoding(&pos, 6);
-        let output = model(&pos_enc);
-        colors[i] = [output[0], output[1], output[2]];
-        densities[i] = output[3];
-    }
+        let output = model(&positional_encoding(&pos, 6));
+        ([output[0], output[1], output[2]], output[3])
+    }).unzip();
 
     // Compute deltas
-    let mut delta = vec![0.0; n];
-    for i in 0..n-1 {
-        delta[i] = t_vals[i+1] - t_vals[i];
-    }
-    delta[n-1] = 0.1;
+    let mut delta: Vec<f32> = t_vals.windows(2).map(|w| w[1] - w[0]).collect();
+    delta.push(0.1);
 
     // Alpha compositing
-    let mut alpha = vec![0.0; n];
-    for i in 0..n {
-        alpha[i] = 1.0 - (-densities[i] * delta[i]).exp();
-    }
+    let alpha: Vec<f32> = densities.iter().zip(&delta)
+        .map(|(&d, &dt)| 1.0 - (-d * dt).exp())
+        .collect();
 
-    let mut transmittance = vec![1.0; n];
+    let mut transmittance = vec![1.0f32; n];
     for i in 1..n {
         transmittance[i] = transmittance[i-1] * (1.0 - alpha[i-1]);
     }
 
-    let mut final_color = [0.0; 3];
-    for i in 0..n {
-        let weight = transmittance[i] * alpha[i];
-        for c in 0..3 {
-            final_color[c] += weight * colors[i][c];
-        }
-    }
+    let mut final_color = [0.0f32; 3];
+    transmittance.iter().zip(&alpha).zip(&colors).for_each(|((t, a), col)| {
+        let w = t * a;
+        final_color.iter_mut().zip(col).for_each(|(ci, &gi)| *ci += w * gi);
+    });
 
     final_color
 }
 
 fn positional_encoding(pos: &[f32; 3], l: usize) -> Vec<f32> {
-    let mut encoded = Vec::new();
-    for i in 0..l {
+    (0..l).flat_map(|i| {
         let freq = (2.0_f32).powi(i as i32) * std::f32::consts::PI;
-        for &x in pos {
-            encoded.push((freq * x).sin());
-        }
-        for &x in pos {
-            encoded.push((freq * x).cos());
-        }
-    }
-    encoded
+        pos.iter().map(move |&x| (freq * x).sin())
+            .chain(pos.iter().map(move |&x| (freq * x).cos()))
+    }).collect()
 }
 ```
 
 数式↔コードの1:1対応を確認。
-:::
+
+</details>
 
 ### 5.4 3DGS再構成の実験
 
@@ -1156,24 +1108,15 @@ using LibGit2, LinearAlgebra
 # 1. 初期ガウシアンの生成（SfM点群から）
 function initialize_gaussians_from_points(points, colors)
     n = size(points, 1)
-    gaussians = []
-
-    for i in 1:n
-        # 初期スケール: 最近傍点との距離
-        dists = [norm(points[i, :] - points[j, :]) for j in 1:n if j != i]
-        scale = mean(sort(dists)[1:3])  # 3近傍の平均
-
-        g = Gaussian3D(
-            mean = points[i, :],
+    [let dists = sort([norm(points[i,:] - points[j,:]) for j in 1:n if j != i])
+        Gaussian3D(
+            mean     = points[i, :],
             rotation = [1.0, 0.0, 0.0, 0.0],  # 単位四元数
-            scale = fill(scale, 3),
-            color = colors[i, :],
-            opacity = 0.5
+            scale    = fill(mean(dists[1:3]), 3),
+            color    = colors[i, :],
+            opacity  = 0.5
         )
-        push!(gaussians, g)
-    end
-
-    return gaussians
+    end for i in 1:n]
 end
 
 # 2. 最適化ループ
@@ -1294,11 +1237,15 @@ save("corgi.obj", mesh)
 **6-8/10**: もう一度Zone 3を読む。
 **5以下**: Zone 0から復習。
 
-:::message
-**進捗: 85%完了** — 実験で理論を確認。Tiny NeRF訓練、3DGS再構成、DreamFusion Text-to-3Dを体験。次は発展ゾーン — 研究フロンティアと未解決問題へ。
-:::
+> **Note:** **進捗: 85%完了** — 実験で理論を確認。Tiny NeRF訓練、3DGS再構成、DreamFusion Text-to-3Dを体験。次は発展ゾーン — 研究フロンティアと未解決問題へ。
 
 ---
+
+
+> Progress: 85%
+> **理解度チェック**
+> 1. NeRFの離散化近似$\alpha_i = 1 - e^{-\sigma_i \delta_i}$において$\alpha_i$が「区間$\delta_i$での光吸収確率」を表すことを、連続積分から導出せよ。
+> 2. 3DGSのタイルベースラスタライザで前から後ろの順（Front-to-Back）に描画するとアルファ合成が正確になる理由を説明せよ。
 
 ## 🚀 6. 発展ゾーン（30分）— 研究フロンティアと未解決問題 + まとめ
 
@@ -1433,9 +1380,7 @@ $$
 - **2026年後半**: スマホでリアルタイム3DGS訓練
 - **2027年**: 物理シミュレーションと統合した4D World Models
 
-:::message
-**進捗: 95%完了** — 研究フロンティアを俯瞰。3DGS Applications、4DGS、GaussianEditor、未解決問題を把握。最後の振り返りゾーンへ。
-:::
+> **Note:** **進捗: 95%完了** — 研究フロンティアを俯瞰。3DGS Applications、4DGS、GaussianEditor、未解決問題を把握。最後の振り返りゾーンへ。
 
 ---
 
@@ -1465,7 +1410,7 @@ $$
 
 ### 6.9 よくある質問 (FAQ)
 
-:::details **Q1**: NeRFと3DGS、結局どちらを使うべき？
+<details><summary>**Q1**: NeRFと3DGS、結局どちらを使うべき？</summary>
 
 **A**: 用途次第。
 - **研究・高品質重視**: NeRF（Zip-NeRFなど最新版）
@@ -1473,9 +1418,10 @@ $$
 - **Text-to-3D**: DreamFusion系（NeRFベース）またはDreamGaussian（3DGSベース）
 
 3DGSが台頭しているが、NeRFも進化中。両方知っておくべき。
-:::
 
-:::details **Q2**: 3D生成の実用化はどこまで進んでいる？
+</details>
+
+<details><summary>**Q2**: 3D生成の実用化はどこまで進んでいる？</summary>
 
 **A**: AR/VR、自動運転、ロボティクスで実用段階。
 - **NVIDIA Instant NGP**: 商用ソフトに統合
@@ -1483,9 +1429,10 @@ $$
 - **DreamFusion系**: Adobeなどが製品化検討中
 
 ただしスマホでのリアルタイム訓練はまだ未来。
-:::
 
-:::details **Q3**: 数式が多くて挫折しそう。どうすれば？
+</details>
+
+<details><summary>**Q3**: 数式が多くて挫折しそう。どうすれば？</summary>
 
 **A**: 3段階で理解。
 1. **直感**: Zone 0-2で「何をしているか」を掴む
@@ -1493,25 +1440,28 @@ $$
 3. **数式**: Zone 3に戻って「なぜ動くか」を確認
 
 数式→コード→実験の3往復で定着する。焦らない。
-:::
 
-:::details **Q4**: ProlificDreamerのVSDが難しい。もっと簡単な説明は？
+</details>
+
+<details><summary>**Q4**: ProlificDreamerのVSDが難しい。もっと簡単な説明は？</summary>
 
 **A**: SDSの問題を例えで:
 - **SDS**: 「この写真、もっと犬っぽくして」と言われて、いつも同じ犬種になる（mode collapse）
 - **VSD**: 「この写真専用の先生」を用意して、多様な犬種を学べるようにする
 
 $\boldsymbol{\epsilon}_\psi$ = その3D専用の先生。LoRAで効率的に訓練。
-:::
 
-:::details **Q5**: 4DGSは3DGSの拡張？実装はどれくらい違う？
+</details>
+
+<details><summary>**Q5**: 4DGSは3DGSの拡張？実装はどれくらい違う？</summary>
 
 **A**: 概念は近いが実装は大幅に違う。
 - **3DGS**: 空間のガウシアン集合
 - **4DGS**: 時空間（4D）のガウシアン集合 or 時間依存の変形
 
 4D Voxelで変形を予測するアプローチが主流。メモリ管理が3DGSの10倍複雑。
-:::
+
+</details>
 
 ### 6.10 学習スケジュール（1週間プラン）
 
@@ -1593,11 +1543,15 @@ assess_lecture_46()
 - DreamFusion（本講義） → TC4D（次講義）: Text-to-4D
 - 静的3D → 動的モーション: 生成モデルの最終形態
 
-:::message
-**進捗: 100%完了** — 第46回完走！NeRF→3DGS→DreamFusionの3D生成革命を完全習得。Volume Rendering方程式、微分可能ラスタライゼーション、SDS Loss、全て導出した。Rustで3DGSラスタライザを実装し、Julia でTiny NeRFを訓練した。次は第47回でモーション・4D生成へ。
-:::
+> **Note:** **進捗: 100%完了** — 第46回完走！NeRF→3DGS→DreamFusionの3D生成革命を完全習得。Volume Rendering方程式、微分可能ラスタライゼーション、SDS Loss、全て導出した。Rustで3DGSラスタライザを実装し、Julia でTiny NeRFを訓練した。次は第47回でモーション・4D生成へ。
 
 ---
+
+
+> Progress: 95%
+> **理解度チェック**
+> 1. Zip-NeRFがInstant NGP（Hash Grid）とMip-NeRF（反エイリアス）の両方の利点を持つ理由を、multi-scale hashingの観点から説明せよ。
+> 2. 4DGS（4D Gaussian Splatting）で「長時間の一貫性」が課題になる理由を、ガウシアンパラメータの時間依存性から述べよ。
 
 ## 💀 パラダイム転換の問い
 
@@ -1623,7 +1577,7 @@ assess_lecture_46()
 - NeRF（2020）→ 3DGS（2023）: 3年
 - 加速している。次は？
 
-:::details **歴史的文脈: NeRFは本当に新しかったのか？**
+<details><summary>**歴史的文脈: NeRFは本当に新しかったのか？**</summary>
 
 Volume Rendering自体は1984年のKajiya-Von Herzen以来の古典技術。NeRFの革新は:
 1. **MLPでの連続表現**: 離散Voxelから脱却
@@ -1635,7 +1589,8 @@ Volume Rendering自体は1984年のKajiya-Von Herzen以来の古典技術。NeRF
 3DGSも同様。Splatting自体は1985年のWestoverが起源。革新は「微分可能ラスタライゼーション」。
 
 **教訓**: 新しい組み合わせが革命を起こす。全く新しい技術など稀。
-:::
+
+</details>
 
 ---
 
@@ -1644,13 +1599,13 @@ Volume Rendering自体は1984年のKajiya-Von Herzen以来の古典技術。NeRF
 ### 主要論文
 
 [^1]: He, S., et al. (2025). "A Survey on 3D Gaussian Splatting Applications: Segmentation, Editing, and Generation". *arXiv:2508.09977*.
-@[card](https://arxiv.org/abs/2508.09977)
+<https://arxiv.org/abs/2508.09977>
 
 [^3]: Lin, C.-H., Gao, J., Tang, L., et al. (2022). "Magic3D: High-Resolution Text-to-3D Content Creation". *arXiv:2211.10440*.
-@[card](https://arxiv.org/abs/2211.10440)
+<https://arxiv.org/abs/2211.10440>
 
 [^4]: Wang, Z., Lu, C., Wang, Y., et al. (2023). "ProlificDreamer: High-Fidelity and Diverse Text-to-3D Generation with Variational Score Distillation". *NeurIPS 2023 Spotlight*. *arXiv:2305.16213*.
-@[card](https://arxiv.org/abs/2305.16213)
+<https://arxiv.org/abs/2305.16213>
 
 ### 教科書・サーベイ
 
@@ -1667,59 +1622,18 @@ Volume Rendering自体は1984年のKajiya-Von Herzen以来の古典技術。NeRF
 
 ---
 
-## 記法規約
 
-本講義で使用した数学記号の一覧:
+## 🔗 前編・後編リンク
 
-| 記号 | 意味 | 初出 |
-|:-----|:-----|:-----|
-| $\mathbf{x} = (x,y,z)$ | 3D空間座標 | Zone 0 |
-| $\mathbf{d} = (\theta, \phi)$ | 視線方向（球面座標） | Zone 0 |
-| $\mathbf{c} = (r,g,b)$ | RGB色 | Zone 0 |
-| $\sigma$ | 体積密度 (volume density) | Zone 0 |
-| $F_\theta : (\mathbf{x}, \mathbf{d}) \to (\mathbf{c}, \sigma)$ | Neural Radiance Field | Zone 3.1 |
-| $C(\mathbf{r})$ | レイ $\mathbf{r}$ のピクセル色 | Zone 3.1 |
-| $T(t) = \exp(-\int \sigma ds)$ | 透過率 (transmittance) | Zone 3.1 |
-| $\gamma(\mathbf{x})$ | 位置符号化 (positional encoding) | Zone 3.1 |
-| $\boldsymbol{\mu}_k$ | ガウシアン $k$ の中心位置 | Zone 3.3 |
-| $\boldsymbol{\Sigma}_k$ | ガウシアン $k$ の共分散行列 | Zone 3.3 |
-| $\mathbf{R}_k$ | 回転行列（四元数 $\mathbf{q}_k$ から） | Zone 3.3 |
-| $\mathbf{S}_k$ | スケール行列（対角行列） | Zone 3.3 |
-| $\boldsymbol{\Sigma}'_k$ | 2Dに射影された共分散 | Zone 3.3 |
-| $\mathbf{J}$ | 透視投影のヤコビアン | Zone 3.3 |
-| $\alpha_k$ | ガウシアン $k$ の不透明度 | Zone 3.3 |
-| $\mathcal{L}_{\text{SDS}}$ | Score Distillation Sampling Loss | Zone 3.4 |
-| $\boldsymbol{\epsilon}_\phi(\mathbf{x}_t, t, y)$ | 拡散モデルのノイズ予測 | Zone 3.4 |
-| $\boldsymbol{\epsilon}$ | 真のノイズ（サンプリング） | Zone 3.4 |
-| $w(t)$ | 時刻依存の重み | Zone 3.4 |
-| $\mathcal{L}_{\text{VSD}}$ | Variational Score Distillation Loss | Zone 3.5 |
-| $\boldsymbol{\epsilon}_\psi$ | VSD用のLoRA微調整ノイズ予測 | Zone 3.5 |
+- **前編 (Part 1 — 理論編)**: [第46回: 3D生成 & Neural Rendering (Part 1)](ml-lecture-46-part1)
 
-**略語**:
+## 著者リンク
 
-| 略語 | 正式名称 | 意味 |
-|:-----|:---------|:-----|
-| NeRF | Neural Radiance Fields | 神経放射場 |
-| 3DGS | 3D Gaussian Splatting | 3Dガウシアンスプラッティング |
-| SDS | Score Distillation Sampling | スコア蒸留サンプリング |
-| VSD | Variational Score Distillation | 変分スコア蒸留 |
-| NGP | Neural Graphics Primitives | 神経グラフィックスプリミティブ |
-| MLP | Multi-Layer Perceptron | 多層パーセプトロン |
-| SDF | Signed Distance Function | 符号付き距離関数 |
-| MVS | Multi-View Stereo | 多視点ステレオ |
-| SfM | Structure from Motion | モーションからの構造復元 |
-
----
-
-**おわりに**
-
-第46回を完走した。2D画像から3D空間を再構成し、テキストから立体造形を生成する技術の全貌を見た。NeRFのVolume Rendering方程式、3DGSの微分可能ラスタライゼーション、DreamFusionのScore Distillation Sampling — 全て数学的に導出し、Rustで実装した。
-
-3D生成は、AR/VR、自動運転、ロボティクス、デジタルツインの基盤技術だ。NeRFが2020年に起こした革命を、3DGSが2023年に加速させ、2025年には応用が花開いている。
-
-次の第47回では、静的3Dから動的モーション・4D生成へ進む。MotionGPT-3、4DGS、Diffusion Policyで、時間軸を持つ3D世界を生成する。
-
----
+- Blog: https://fumishiki.dev
+- X: https://x.com/fumishiki
+- LinkedIn: https://www.linkedin.com/in/fumitakamurakami
+- GitHub: https://github.com/fumishiki
+- Hugging Face: https://huggingface.co/fumishiki
 
 ## ライセンス
 

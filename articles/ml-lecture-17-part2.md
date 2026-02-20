@@ -4,7 +4,14 @@ emoji: "🔀"
 type: "tech"
 topics: ["machinelearning", "deeplearning", "mamba", "julia", "rust"]
 published: true
+slug: "ml-lecture-17-part2"
+difficulty: "advanced"
+time_estimate: "90 minutes"
+languages: ["Julia", "Rust"]
+keywords: ["機械学習", "深層学習", "生成モデル"]
 ---
+
+**← Part1（理論編）**: [第17回 Part1](./ml-lecture-17-part1)
 
 ## 💻 4. 実装ゾーン（45分）— Julia & Rust で全て実装
 
@@ -50,19 +57,18 @@ function mamba2_forward(x::Matrix{T}, config::Mamba2Config,
         chunk_len = end_idx - start_idx + 1
 
         # Process chunk
-        for i in 1:chunk_len
+        @inbounds for i in 1:chunk_len
             global_i = start_idx + i - 1
 
             # Input projection: B * x[i]
-            input_proj = B * x[global_i, :]  # (d_state,)
+            input_proj = B * @view(x[global_i, :])  # (d_state,)
 
-            # State update (Semi-Separable structure)
-            # state += v[i] * input_proj'
-            state += v[global_i, :] * input_proj'
+            # State update (Semi-Separable structure): state += v[i] * input_proj'
+            state .+= @view(v[global_i, :]) * input_proj'
 
             # Output: C' * (u[i]' * state)
-            output_vec = state' * u[global_i, :]  # (d_model,)
-            y[global_i, :] = C' * u[global_i, :] .* output_vec
+            output_vec = state' * @view(u[global_i, :])  # (d_model,)
+            @views y[global_i, :] .= C' * u[global_i, :] .* output_vec
         end
     end
 
@@ -123,13 +129,13 @@ function rwkv7_time_mixing(x::Matrix{T}, config::RWKVConfig,
     num = zeros(T, d)  # Numerator accumulator
     den = zeros(T, d)  # Denominator accumulator
 
-    for i in 1:N
+    @inbounds for i in 1:N
+        kᵢ, vᵢ = @view(k[i, :]), @view(v[i, :])
         # Decay previous state
-        num = num .* w_decay .+ k[i, :] .* v[i, :]
-        den = den .* w_decay .+ k[i, :]
-
+        @. num = num * w_decay + kᵢ * vᵢ
+        @. den = den * w_decay + kᵢ
         # WKV[i] = num / (den + ε)
-        wkv[i, :] = num ./ (den .+ T(1e-6))
+        @. wkv[i, :] = num / (den + T(1e-6))
     end
 
     # Apply receptance and output projection
@@ -165,41 +171,35 @@ struct RetNetConfig
 end
 
 # Parallel representation (training)
-function retnet_parallel(Q::Matrix{T}, K::Matrix{T}, V::Matrix{T}, gamma::T) where T
+function retnet_parallel(Q::Matrix{T}, K::Matrix{T}, V::Matrix{T}, γ::T) where T
     N, d = size(Q)
 
-    # Retention matrix: R[i,j] = gamma^(i-j) * Q[i]' * K[j] for i ≥ j
+    # Retention matrix: R[i,j] = γ^(i-j) * Q[i]' * K[j] for i ≥ j
     R = zeros(T, N, N)
-    for i in 1:N
-        for j in 1:i
-            decay = gamma^(i - j)
-            R[i, j] = decay * dot(Q[i, :], K[j, :])
-        end
+    @inbounds @views for i in 1:N, j in 1:i
+        R[i, j] = γ^(i - j) * dot(Q[i, :], K[j, :])
     end
 
     # Normalize (simplified — GroupNorm in practice)
     R_norm = R ./ (sum(R, dims=2) .+ T(1e-6))
 
     # Output
-    output = R_norm * V
-
-    return output
+    return R_norm * V
 end
 
 # Recurrent representation (inference)
-function retnet_recurrent(Q::Matrix{T}, K::Matrix{T}, V::Matrix{T}, gamma::T) where T
+function retnet_recurrent(Q::Matrix{T}, K::Matrix{T}, V::Matrix{T}, γ::T) where T
     N, d = size(Q)
     output = zeros(T, N, d)
 
-    # Recurrent state: S[i] = Σ_{j≤i} gamma^(i-j) * K[j] * V[j]'
+    # Recurrent state: S[i] = Σ_{j≤i} γ^(i-j) * K[j] * V[j]'
     S = zeros(T, d, d)
 
-    for i in 1:N
-        # State update: S = gamma * S + K[i] * V[i]'
-        S = gamma .* S .+ K[i, :] * V[i, :]'
-
+    @inbounds for i in 1:N
+        # State update: S = γ * S + K[i] * V[i]'
+        @views S .= γ .* S .+ K[i, :] * V[i, :]'
         # Output: Q[i]' * S
-        output[i, :] = Q[i, :]' * S
+        @views output[i, :] .= Q[i, :]' * S
     end
 
     return output
@@ -207,7 +207,7 @@ end
 
 # Chunkwise recurrent (long sequences)
 function retnet_chunkwise(Q::Matrix{T}, K::Matrix{T}, V::Matrix{T},
-                          gamma::T, chunk_size::Int) where T
+                          γ::T, chunk_size::Int) where T
     N, d = size(Q)
     num_chunks = cld(N, chunk_size)
     output = zeros(T, N, d)
@@ -218,36 +218,32 @@ function retnet_chunkwise(Q::Matrix{T}, K::Matrix{T}, V::Matrix{T},
         start_idx = (c - 1) * chunk_size + 1
         end_idx = min(c * chunk_size, N)
 
-        # Extract chunk
-        Q_chunk = Q[start_idx:end_idx, :]
-        K_chunk = K[start_idx:end_idx, :]
-        V_chunk = V[start_idx:end_idx, :]
+        # Extract chunk (zero-copy views)
+        @views Q_chunk = Q[start_idx:end_idx, :]
+        @views K_chunk = K[start_idx:end_idx, :]
+        @views V_chunk = V[start_idx:end_idx, :]
 
-        # Within-chunk: parallel
+        # Within-chunk: parallel retention
         chunk_len = end_idx - start_idx + 1
         R_chunk = zeros(T, chunk_len, chunk_len)
-        for i in 1:chunk_len
-            for j in 1:i
-                decay = gamma^(i - j)
-                R_chunk[i, j] = decay * dot(Q_chunk[i, :], K_chunk[j, :])
-            end
+        @inbounds @views for i in 1:chunk_len, j in 1:i
+            R_chunk[i, j] = γ^(i - j) * dot(Q_chunk[i, :], K_chunk[j, :])
         end
         R_norm = R_chunk ./ (sum(R_chunk, dims=2) .+ T(1e-6))
         output_chunk_intra = R_norm * V_chunk
 
-        # Cross-chunk: recurrent
+        # Cross-chunk: recurrent contribution from previous chunks
         output_chunk_inter = zeros(T, chunk_len, d)
-        for i in 1:chunk_len
-            # Contribution from previous chunks
-            output_chunk_inter[i, :] = gamma^i .* (Q_chunk[i, :]' * S_cross_chunk)
+        @inbounds @views for i in 1:chunk_len
+            output_chunk_inter[i, :] .= γ^i .* (Q_chunk[i, :]' * S_cross_chunk)
         end
 
-        # Combine
-        output[start_idx:end_idx, :] = output_chunk_intra .+ output_chunk_inter
+        # Combine intra + inter
+        @views output[start_idx:end_idx, :] .= output_chunk_intra .+ output_chunk_inter
 
         # Update cross-chunk state
-        for i in 1:chunk_len
-            S_cross_chunk = gamma .* S_cross_chunk .+ K_chunk[i, :] * V_chunk[i, :]'
+        @inbounds @views for i in 1:chunk_len
+            S_cross_chunk .= γ .* S_cross_chunk .+ K_chunk[i, :] * V_chunk[i, :]'
         end
     end
 
@@ -291,26 +287,25 @@ function gla_forward(Q::Matrix{T}, K::Matrix{T}, V::Matrix{T}) where T
 
     # Feature map: φ(x) = ELU(x) + 1 (ensures positivity)
     elu(x) = x >= 0 ? x : exp(x) - 1
-    phi_Q = elu.(Q) .+ one(T)
-    phi_K = elu.(K) .+ one(T)
+    φ_Q = elu.(Q) .+ one(T)
+    φ_K = elu.(K) .+ one(T)
 
     # Data-dependent gate: g = sigmoid(sum(K, dims=2))
     g = 1 ./ (1 .+ exp.(.-sum(K, dims=2)[:]))  # (N,)
 
-    # Gated linear attention
+    # Gated linear attention accumulation
     KV_accum = zeros(T, d, d)
-    K_accum = zeros(T, d)
-    output = zeros(T, N, d)
+    K_accum  = zeros(T, d)
+    output   = zeros(T, N, d)
 
-    for i in 1:N
+    @inbounds for i in 1:N
+        φKᵢ = @view φ_K[i, :]
+        φQᵢ = @view φ_Q[i, :]
         # Accumulate with gating
-        KV_accum += g[i] * (phi_K[i, :] * V[i, :]')
-        K_accum += g[i] * phi_K[i, :]
-
-        # Compute output
-        numerator = phi_Q[i, :]' * KV_accum  # (1, d)
-        denominator = dot(phi_Q[i, :], K_accum) + T(1e-6)
-        output[i, :] = numerator[:] ./ denominator
+        KV_accum .+= g[i] .* (φKᵢ * @view(V[i, :])')
+        K_accum  .+= g[i] .* φKᵢ
+        # Compute output: numerator / denominator
+        @views output[i, :] .= (φQᵢ' * KV_accum) ./ (dot(φQᵢ, K_accum) + T(1e-6))
     end
 
     return output
@@ -364,28 +359,19 @@ function vision_mamba_forward(img::Array{T,3}, ssm_forward_fn) where T
     H, W, C = size(img)
 
     directions = [:forward, :backward, :vertical_forward, :vertical_backward]
-    outputs = []
 
-    for dir in directions
-        # Scan image in direction
-        scanned = vision_mamba_scan(img, dir)  # (H*W, C)
-
-        # Apply SSM
-        ssm_out = ssm_forward_fn(scanned)  # (H*W, C)
-
-        # Reshape back
-        if dir == :forward
-            out_2d = reshape(ssm_out, H, W, C)
-        elseif dir == :backward
-            out_2d = reverse(reshape(ssm_out, H, W, C), dims=2)
-        elseif dir == :vertical_forward
-            out_2d = permutedims(reshape(ssm_out, W, H, C), (2, 1, 3))
-        elseif dir == :vertical_backward
-            out_2d = permutedims(reverse(reshape(ssm_out, W, H, C), dims=2), (2, 1, 3))
-        end
-
-        push!(outputs, out_2d)
+    # Scan all 4 directions, apply SSM, reshape back; then average
+    reconstruct(ssm_out, dir) = if dir == :forward
+        reshape(ssm_out, H, W, C)
+    elseif dir == :backward
+        reverse(reshape(ssm_out, H, W, C), dims=2)
+    elseif dir == :vertical_forward
+        permutedims(reshape(ssm_out, W, H, C), (2, 1, 3))
+    else  # :vertical_backward
+        permutedims(reverse(reshape(ssm_out, W, H, C), dims=2), (2, 1, 3))
     end
+
+    outputs = [reconstruct(ssm_forward_fn(vision_mamba_scan(img, dir)), dir) for dir in directions]
 
     # Fuse (simple average — in practice, learned weights)
     fused = sum(outputs) ./ length(outputs)
@@ -420,27 +406,10 @@ pub fn semi_separable_matvec(
     x: &Array1<f32>,  // (N,)
 ) -> Array1<f32> {
     let n = u.nrows();
-    let r = u.ncols();
-    let mut y = Array1::<f32>::zeros(n);
-
-    // For each row i
-    for i in 0..n {
-        let mut sum = 0.0f32;
-
-        // y[i] = Σ_{j≤i} (u[i]' * v[j]) * x[j]
-        for j in 0..=i {
-            // Dot product: u[i]' * v[j]
-            let mut dot = 0.0f32;
-            for k in 0..r {
-                dot += u[[i, k]] * v[[j, k]];
-            }
-            sum += dot * x[j];
-        }
-
-        y[i] = sum;
-    }
-
-    y
+    // y[i] = Σ_{j≤i} (u[i]·v[j]) * x[j]
+    (0..n)
+        .map(|i| (0..=i).map(|j| u.row(i).dot(&v.row(j)) * x[j]).sum::<f32>())
+        .collect()
 }
 
 /// Mamba-2 style chunk-wise computation
@@ -453,7 +422,6 @@ pub fn mamba2_forward_rust(
     let (n, d_model) = x.dim();
     let d_state = u.ncols();
     let mut y = Array2::<f32>::zeros((n, d_model));
-
     let mut state = Array2::<f32>::zeros((d_state, d_model));
 
     let num_chunks = (n + chunk_size - 1) / chunk_size;
@@ -463,21 +431,13 @@ pub fn mamba2_forward_rust(
         let end = ((c + 1) * chunk_size).min(n);
 
         for i in start..end {
-            // state += v[i] * x[i]'
-            for s in 0..d_state {
-                for d in 0..d_model {
-                    state[[s, d]] += v[[i, s]] * x[[i, d]];
-                }
-            }
+            // Rank-1 update: state += v[i] ⊗ x[i]
+            v.row(i).iter().enumerate().for_each(|(s, &vs)| {
+                state.row_mut(s).iter_mut().zip(x.row(i).iter()).for_each(|(st, &xi)| *st += vs * xi)
+            });
 
-            // y[i] = u[i]' * state
-            for d in 0..d_model {
-                let mut sum = 0.0f32;
-                for s in 0..d_state {
-                    sum += u[[i, s]] * state[[s, d]];
-                }
-                y[[i, d]] = sum;
-            }
+            // Output row: y[i] = u[i]' * state  (dot per column)
+            y.row_mut(i).assign(&u.row(i).dot(&state));
         }
     }
 
@@ -530,9 +490,7 @@ mod tests {
 | $\text{WKV}_i = \frac{\text{num}_i}{\text{den}_i}$ | `num ./ (den .+ 1e-6)` | `num.iter().zip(den.iter()).map(\|(n,d)\| n/(d+1e-6))` |
 | $\phi(x) = \text{ELU}(x) + 1$ | `elu.(x) .+ 1` | `x.mapv(\|v\| if v >= 0.0 { v } else { v.exp() - 1.0 } + 1.0)` |
 
-:::message
-**進捗: 70% 完了** 実装ゾーンクリア。Mamba-2, RWKV-7, RetNet, GLA, Vision Mamba を Julia + Rust で完全実装した。次は実験ゾーン — 性能比較とトレードオフ分析。
-:::
+> **Note:** **進捗: 70% 完了** 実装ゾーンクリア。Mamba-2, RWKV-7, RetNet, GLA, Vision Mamba を Julia + Rust で完全実装した。次は実験ゾーン — 性能比較とトレードオフ分析。
 
 ---
 
@@ -568,7 +526,7 @@ V = randn(Float32, N, d)
 function standard_attention(Q, K, V)
     scores = (Q * K') / sqrt(Float32(size(Q, 2)))
     attn = exp.(scores .- maximum(scores, dims=2))
-    attn = attn ./ sum(attn, dims=2)
+    attn ./= sum(attn, dims=2)
     return attn * V
 end
 
@@ -617,7 +575,7 @@ GLA:                 10-30 ms   (O(N)だが行列積)
 - **RWKVは中堅** (TC0限界突破したが、まだ改善余地)
 - **GLAは線形Attentionの限界** (近似による性能低下)
 
-:::details タスク別の深掘り分析 (クリックで展開)
+<details><summary>タスク別の深掘り分析 (クリックで展開)</summary>
 
 **ListOps (論理演算の木構造解析)**:
 
@@ -668,7 +626,7 @@ ssm_ops = N * d_state = 16000 * 64 = 1_024_000  # 100万演算 (250倍速)
 mem_GB = d_state * d_model * 4 / 1e9 ≈ 0.001 GB  # State行列のみ
 ```
 
-:::
+</details>
 
 ### 5.3 言語モデリング Perplexity
 
@@ -688,7 +646,7 @@ mem_GB = d_state * d_model * 4 / 1e9 ≈ 0.001 GB  # State行列のみ
 - **RWKV-7が推論最速** (O(1)メモリの威力)
 - **RetNetがバランス型** (訓練・推論とも高速、品質良好)
 
-:::details 言語モデリングの詳細分析 (クリックで展開)
+<details><summary>言語モデリングの詳細分析 (クリックで展開)</summary>
 
 **WikiText-103 詳細**:
 
@@ -731,7 +689,7 @@ using BenchmarkTools
 - Mamba-2: State更新が **行列積** (d_state × d_model)
 - 小さなバッチでは、RWKV-7の単純さが有利
 
-:::
+</details>
 
 ### 5.4 Vision タスク (ImageNet)
 
@@ -756,7 +714,7 @@ using BenchmarkTools
 - 走査順序の設計が性能に影響
 - 2D構造の本質的捕捉はまだ未解決
 
-:::details Vision Mamba深掘り — なぜ画像で健闘できるのか (クリックで展開)
+<details><summary>Vision Mamba深掘り — なぜ画像で健闘できるのか (クリックで展開)</summary>
 
 **Vision Mambaが健闘する3つの理由**:
 
@@ -820,7 +778,7 @@ end
 - **物体検出**: 小物体の検出でViTに劣る (グローバル文脈の不足)
 - **高解像度画像**: 1024×1024以上で、走査順序の影響が顕著
 
-:::
+</details>
 
 ### 5.5 トレードオフ分析 — どれを選ぶか
 
@@ -857,7 +815,7 @@ graph TD
 
 ### 5.6 自己診断テスト
 
-:::details シンボル読解テスト (10問)
+<details><summary>シンボル読解テスト (10問)</summary>
 
 **問1**: $A_{ij} = u_i^\top v_j$ (i ≥ j) は何行列?
 
@@ -917,7 +875,7 @@ graph TD
 
 **答**: ハイブリッドアーキテクチャが可能 (一部層はAttention、一部層はSSM)
 
-:::
+</details>
 
 ### 5.7 実装チャレンジ (3つ)
 
@@ -946,12 +904,12 @@ end
 function mamba2_micro(x::Matrix{T}, u::Matrix{T}, v::Matrix{T}) where T
     N, d = size(x)
     r = size(u, 2)
-    y = zeros(T, N, d)
+    y     = zeros(T, N, d)
     state = zeros(T, r, d)
 
-    for i in 1:N
-        state += v[i, :] * x[i, :]'  # (r, d)
-        y[i, :] = u[i, :]' * state   # (d,)
+    @inbounds for i in 1:N
+        state .+= @view(v[i, :]) * @view(x[i, :])'  # rank-1 update (r, d)
+        @views y[i, :] .= u[i, :]' * state           # output (d,)
     end
 
     return y
@@ -980,10 +938,11 @@ function rwkv_wkv(k::Matrix{T}, v::Matrix{T}, w::Vector{T}) where T
     num = zeros(T, d)
     den = zeros(T, d)
 
-    for i in 1:N
-        num = num .* w .+ k[i, :] .* v[i, :]
-        den = den .* w .+ k[i, :]
-        wkv[i, :] = num ./ (den .+ T(1e-6))
+    @inbounds for i in 1:N
+        kᵢ, vᵢ = @view(k[i, :]), @view(v[i, :])
+        @. num = num * w + kᵢ * vᵢ
+        @. den = den * w + kᵢ
+        @. wkv[i, :] = num / (den + T(1e-6))
     end
 
     return wkv
@@ -1006,20 +965,23 @@ end
 
 **解答例**:
 ```julia
-function verify_retnet_equivalence(Q, K, V, gamma)
-    y_parallel = retnet_parallel(Q, K, V, gamma)
-    y_recurrent = retnet_recurrent(Q, K, V, gamma)
+function verify_retnet_equivalence(Q, K, V, γ)
+    y_parallel  = retnet_parallel(Q, K, V, γ)
+    y_recurrent = retnet_recurrent(Q, K, V, γ)
     max_error = maximum(abs.(y_parallel .- y_recurrent))
     println("Max error: $max_error")
     return max_error < 1e-5
 end
 ```
 
-:::message
-**進捗: 85% 完了** 実験ゾーンクリア。Mamba-2/RWKV/RetNet/GLAの性能比較、トレードオフ分析、自己診断テスト、実装チャレンジを完了。次は発展ゾーン — 研究最前線とハイブリッドへの接続。
-:::
+> **Note:** **進捗: 85% 完了** 実験ゾーンクリア。Mamba-2/RWKV/RetNet/GLAの性能比較、トレードオフ分析、自己診断テスト、実装チャレンジを完了。次は発展ゾーン — 研究最前線とハイブリッドへの接続。
 
 ---
+
+> Progress: 85%
+> **理解度チェック**
+> 1. Mamba-2のChunk-wise並列実装で、チャンクサイズ$C$を大きくする/小さくするトレードオフを述べよ。
+> 2. RWKV-7のGeneralized Delta Ruleが標準的なDelta則と異なる点を数式で示せ。
 
 ## 🎓 6. 振り返りゾーン（30分）— まとめ・発展・問い
 
@@ -1121,7 +1083,7 @@ $$
 
 ### 6.6 Glossary (用語集)
 
-:::details 本講義の全用語 (アルファベット順)
+<details><summary>本講義の全用語 (アルファベット順)</summary>
 
 **Attention=SSM Duality (双対性)**: AttentionとSSMが数学的に等価であるという定理 (SSD定理)
 
@@ -1155,7 +1117,7 @@ $$
 
 **WKV (Weighted Key-Value)**: RWKVの核心計算
 
-:::
+</details>
 
 ### 6.7 知識マップ — 本講義のトピック構造
 
@@ -1199,6 +1161,11 @@ graph TD
 
 ### 6.8 今回の学習内容
 
+> Progress: 95%
+> **理解度チェック**
+> 1. Vision Mambaの2D走査（4方向双方向）がなぜ1D走査より画像タスクに有効か？
+> 2. RWKV-7（2025年）がRWKV-4と比べて「Mamba的」になった点は何か？
+
 ### 8.2 本講義の3つの核心
 
 **1. Attention=SSM双対性の発見**
@@ -1225,13 +1192,13 @@ RWKV-7, RetNet, GLA — 全て「カーネル化されたAttention」として�
 
 ### 8.4 FAQ (5問 — 実践的 + 励ます)
 
-:::details Q1: Mamba-2とMambaの違いは?
+<details><summary>Q1: Mamba-2とMambaの違いは?</summary>
 
 **A**: **計算量削減が本質**。MambaはO(N·d²), Mamba-2はO(N·d)。SSD理論によるSemi-Separable分解で実現。性能はほぼ同等だが、訓練2-8倍速い。実装時はMamba-2を選ぶべき。
 
-:::
+</details>
 
-:::details Q2: 結局、Attention と Mamba どちらを使えばいい?
+<details><summary>Q2: 結局、Attention と Mamba どちらを使えばいい?</summary>
 
 **A**: **どちらか一方ではなく、両方**。SSD定理が証明したように、両者は数学的に等価。だから **ハイブリッド**(一部層はAttention、一部層はSSM)が最適。第18回で完全習得する。
 
@@ -1239,15 +1206,15 @@ RWKV-7, RetNet, GLA — 全て「カーネル化されたAttention」として�
 長コンテキスト → Mamba/Mamba-2
 実推論 → RWKV/RetNet (O(1)メモリ)
 
-:::
+</details>
 
-:::details Q3: 数式が難しすぎて挫折しそう...
+<details><summary>Q3: 数式が難しすぎて挫折しそう...</summary>
 
 **A**: **Zone 3の数式は"読む"ものではなく"手を動かす"もの**。紙とペンで導出を追うと、突然理解が降りてくる瞬間がある。Semi-Separable行列の定義 (定義3.1) から、1行ずつ手書きで追ってみて。Zone 4の実装を先に動かして、「動くコード」から逆算して数式を理解するのも有効。
 
-:::
+</details>
 
-:::details Q4: RWKVとRetNetの違いは?
+<details><summary>Q4: RWKVとRetNetの違いは?</summary>
 
 **A**: **減衰の仕組みが違う**:
 
@@ -1261,9 +1228,9 @@ RWKV-7, RetNet, GLA — 全て「カーネル化されたAttention」として�
 
 用途次第だが、迷ったらRetNetを推奨。
 
-:::
+</details>
 
-:::details Q5: Vision MambaはViTを超えるか?
+<details><summary>Q5: Vision MambaはViTを超えるか?</summary>
 
 **A**: **まだ超えていないが、可能性はある**。
 
@@ -1278,7 +1245,7 @@ RWKV-7, RetNet, GLA — 全て「カーネル化されたAttention」として�
 
 今後、Attention層とのハイブリッドで突破する可能性大。
 
-:::
+</details>
 
 ### 8.5 学習スケジュール (1週間プラン)
 
@@ -1371,9 +1338,7 @@ end
 
 **Course II読了**: 第18回で Course II「生成モデル理論編」が完結する。第1回から18回までの旅路を振り返り、Course III「実践編」への橋渡しをする。
 
-:::message
-**進捗: 100% 完了** 🎉 第17回コンプリート! Attention=SSM双対性を完全習得。Mamba-2/RWKV/RetNet/GLAの数学と実装をマスターした。次は第18回 — ハイブリッドアーキテクチャで全てを融合する。
-:::
+> **Note:** **進捗: 100% 完了** 🎉 第17回コンプリート! Attention=SSM双対性を完全習得。Mamba-2/RWKV/RetNet/GLAの数学と実装をマスターした。次は第18回 — ハイブリッドアーキテクチャで全てを融合する。
 
 ---
 
@@ -1403,7 +1368,7 @@ end
 
 **あなたの研究分野にも、「別物に見えて実は同じもの」が隠れていないか?**
 
-:::details 歴史的考察: なぜ2024年まで気づかれなかったか
+<details><summary>歴史的考察: なぜ2024年まで気づかれなかったか</summary>
 
 **2021年: S4登場** (Gu+ ICLR 2022)
 - 連続SSMを離散化 → 長系列モデリングで成功
@@ -1423,7 +1388,7 @@ end
 
 **教訓**: 「対立」と見えたものが「双対」だった。科学の進歩は、分断を統合することで加速する。
 
-:::
+</details>
 
 ---
 
@@ -1432,31 +1397,31 @@ end
 ### 主要論文
 
 [^1]: Dao, T., & Gu, A. (2024). Transformers are SSMs: Generalized Models and Efficient Algorithms Through Structured State Space Duality. *ICML 2024*.
-@[card](https://arxiv.org/abs/2405.21060)
+<https://arxiv.org/abs/2405.21060>
 
 [^2]: Peng, B., et al. (2023). RWKV: Reinventing RNNs for the Transformer Era. *Findings of EMNLP 2023*.
-@[card](https://arxiv.org/abs/2305.13048)
+<https://arxiv.org/abs/2305.13048>
 
-[^3]: Peng, B., et al. (2025). A Survey of RWKV. *arXiv preprint*.
-@[card](https://arxiv.org/abs/2412.14847)
+[^3]: Li, Z., et al. (2024). A Survey of RWKV. *arXiv preprint*.
+<https://arxiv.org/abs/2412.14847>
 
 [^4]: Sun, Y., et al. (2023). Retentive Network: A Successor to Transformer for Large Language Models. *arXiv preprint*.
-@[card](https://arxiv.org/abs/2307.08621)
+<https://arxiv.org/abs/2307.08621>
 
 [^5]: Yang, S., et al. (2023). Gated Linear Attention Transformers with Hardware-Efficient Training. *arXiv preprint*.
-@[card](https://arxiv.org/abs/2312.06635)
+<https://arxiv.org/abs/2312.06635>
 
 [^6]: Zhu, L., et al. (2024). Vision Mamba: Efficient Visual Representation Learning with Bidirectional State Space Model. *ICML 2024*.
-@[card](https://arxiv.org/abs/2401.09417)
+<https://arxiv.org/abs/2401.09417>
 
 [^7]: Pérez, J., et al. (2021). Attention is Turing Complete. *JMLR*.
-@[card](https://jmlr.org/papers/volume22/20-302/20-302.pdf)
+<https://jmlr.org/papers/volume22/20-302/20-302.pdf>
 
 [^8]: Merrill, W., et al. (2024). The Expressive Capacity of State Space Models: A Formal Language Perspective. *arXiv preprint*.
-@[card](https://arxiv.org/abs/2405.17394)
+<https://arxiv.org/abs/2405.17394>
 
 [^9]: Lahoti, A., Li, K., Chen, B., Wang, C., Bick, A., Kolter, J. Z., Dao, T., & Gu, A. (2025). Mamba-3: Improved Sequence Modeling using State Space Principles. *ICLR 2026 (Oral)*.
-@[card](https://openreview.net/forum?id=HwCvaJOiCj)
+<https://openreview.net/forum?id=HwCvaJOiCj>
 
 ### 教科書
 
@@ -1464,98 +1429,19 @@ end
 - Vaswani, A., et al. (2017). Attention Is All You Need. *NeurIPS 2017* (Transformer原論文)
 - Katharopoulos, A., et al. (2020). Transformers are RNNs: Fast Autoregressive Transformers with Linear Attention. *ICML 2020* (線形Attention起源)
 
-## 記法規約
-
-本講義で使用した記法の統一規則:
-
-| 記号 | 意味 | 次元 | 備考 |
-|:-----|:-----|:-----|:-----|
-| $N$ | 系列長 (sequence length) | - | 可変 |
-| $d$ | モデル次元 (d_model) | - | 通常64-512 |
-| $d_s$ | 状態次元 (d_state) | - | SSMの隠れ状態 |
-| $r$ | ランク (rank) | - | Semi-Separableの低ランク |
-| $Q, K, V$ | Query, Key, Value | $(N, d)$ | Attention入力 |
-| $u_i, v_j$ | Semi-Separable分解 | $(r,)$ | $A_{ij} = u_i^\top v_j$ |
-| $\bar{A}, \bar{B}, \bar{C}$ | SSMパラメータ | 各種 | 離散化後 |
-| $h_i$ | SSM状態 (hidden state) | $(d_s,)$ | 時刻$i$の状態 |
-| $\gamma$ | Decay factor | - | RetNetなど |
-| $w$ | Decay weights | $(d,)$ | RWKV (チャネルごと) |
-| $\phi, \psi$ | Feature map | $(d,) \to (r,)$ | カーネルトリック |
-| $g$ | Gate | $(N,)$ or $(d,)$ | GLA等 |
-| $\odot$ | 要素ごとの積 | - | Hadamard product |
-| $\text{WKV}$ | Weighted Key-Value | $(N, d)$ | RWKV出力 |
-
-**行列形状の慣例**:
-- 入力: $(N, d)$ (バッチ次元省略)
-- 重み: $(d_{\text{in}}, d_{\text{out}})$ (列ベクトル右乗)
-- 注意行列: $(N, N)$
-
-**数式記法**:
-- $\mathbb{R}^{N \times d}$: N行d列の実行列
-- $O(N^2)$: 計算量のオーダー記法
-- $\sum_{j=1}^{i}$: 累積和 (Causal)
-- $\text{softmax}(x)_i = \frac{\exp(x_i)}{\sum_j \exp(x_j)}$
-
----
-
-### 追加トピック: Vision Mambaの最新進展 (2024-2025)
-
-#### A1. Vision Mamba詳細サーベイの知見
-
-**"Visual Mamba: A Survey and New Outlooks"** [^24] (2024年4月):
-
-Vision SSMの包括的レビューが、主要な課題と解決策を整理:
-
-**課題1: 2D→1D変換の情報損失**
-
-画像は本質的に2D構造を持つが、SSMは1D系列を想定:
-
-$$
-\text{Image}_{H \times W \times C} \xrightarrow{\text{Flatten}} \text{Sequence}_{H \cdot W \times C}
-$$
-
-情報損失の定量化:
-$$
-\text{Lost info} \propto \frac{\text{Spatial correlation}}{\text{Sequential order}}
-$$
-
-**解決策**: 複数走査方向の併用
-
-| 走査方向 | 保存される構造 | 損失される構造 |
-|:--------|:-------------|:-------------|
-| 左→右 | 水平依存 | 垂直依存 |
-| 上→下 | 垂直依存 | 水平依存 |
-| 対角線 | 斜め依存 | 直交方向 |
-| **4方向統合** | **全方向** | **最小化** |
-
-**課題2: Position Encodingの設計**
-
-Transformerの2D位置エンコーディングは、SSMでは単純適用不可:
-
 ```julia
 # 2D Positional Encoding for Vision SSM
 function vision_ssm_positional_encoding(H::Int, W::Int, d::Int)
-    # Generate 2D grid
-    pos_h = repeat(0:(H-1), inner=W)
-    pos_w = repeat(0:(W-1), outer=H)
+    pos_h = repeat(0:(H-1), inner=W)  # row indices for each patch
+    pos_w = repeat(0:(W-1), outer=H)  # col indices for each patch
+    freq(j) = 10000.0^(j/d)
 
-    # Sinusoidal encoding
-    pos_enc = zeros(Float64, H*W, d)
-    for i in 1:(H*W)
-        for j in 1:d
-            if j % 4 == 1
-                pos_enc[i, j] = sin(pos_h[i] / 10000^(j/d))
-            elseif j % 4 == 2
-                pos_enc[i, j] = cos(pos_h[i] / 10000^(j/d))
-            elseif j % 4 == 3
-                pos_enc[i, j] = sin(pos_w[i] / 10000^(j/d))
-            else
-                pos_enc[i, j] = cos(pos_w[i] / 10000^(j/d))
-            end
-        end
-    end
-
-    return pos_enc
+    # 2D sinusoidal encoding: alternate sin/cos for row/col positions
+    return [j % 4 == 1 ? sin(pos_h[i] / freq(j)) :
+            j % 4 == 2 ? cos(pos_h[i] / freq(j)) :
+            j % 4 == 3 ? sin(pos_w[i] / freq(j)) :
+                         cos(pos_w[i] / freq(j))
+            for i in 1:(H*W), j in 1:d]
 end
 
 # Example: 14x14 patches, 64-dim
@@ -1634,22 +1520,16 @@ function v2m_2d_ssm(image::Array{Float64,3})
     H, W, C = size(image)
     d_state = 16
 
-    # Initialize states
-    h = zeros(H, W, d_state)
+    h   = zeros(H, W, d_state)
+    A_h = randn(d_state, d_state) / sqrt(d_state)  # Horizontal state matrix
+    A_v = randn(d_state, d_state) / sqrt(d_state)  # Vertical state matrix
+    B   = randn(d_state, C) / sqrt(C)              # Input projection
 
-    # 2D recurrence
-    A_h = randn(d_state, d_state) / sqrt(d_state)  # Horizontal
-    A_v = randn(d_state, d_state) / sqrt(d_state)  # Vertical
-    B = randn(d_state, C) / sqrt(C)
-
-    for i in 1:H
-        for j in 1:W
-            h_prev_i = (i > 1) ? h[i-1, j, :] : zeros(d_state)
-            h_prev_j = (j > 1) ? h[i, j-1, :] : zeros(d_state)
-
-            # 2D update
-            h[i, j, :] = A_h * h_prev_i + A_v * h_prev_j + B * image[i, j, :]
-        end
+    @inbounds for i in 1:H, j in 1:W
+        h_prev_i = i > 1 ? @view(h[i-1, j, :]) : zeros(d_state)
+        h_prev_j = j > 1 ? @view(h[i, j-1, :]) : zeros(d_state)
+        # 2D recurrence: combine horizontal + vertical + input
+        @views h[i, j, :] .= A_h * h_prev_i .+ A_v * h_prev_j .+ B * image[i, j, :]
     end
 
     return h
@@ -1704,15 +1584,9 @@ HiPPO行列の固有値 $\lambda_n \approx -(n+1)$ → 大きな$n$で不安定
 **解決策**: Eigenvalue clipping
 
 ```julia
-function stabilize_hippo_eigenvalues(λ::Vector{ComplexF64}, max_real::Float64=-50.0)
-    λ_stable = copy(λ)
-    for i in 1:length(λ)
-        if real(λ[i]) < max_real
-            λ_stable[i] = max_real + imag(λ[i])*im
-        end
-    end
-    return λ_stable
-end
+# Clip eigenvalues whose real part dips below max_real (prevents instability)
+stabilize_hippo_eigenvalues(λ::Vector{ComplexF64}, max_real::Float64=-50.0) =
+    [real(z) < max_real ? complex(max_real, imag(z)) : z for z in λ]
 ```
 
 **問題2: Discretizationの数値誤差**
@@ -1744,13 +1618,8 @@ function safe_matrix_exp(A::Matrix{Float64}, max_norm::Float64=1.0)
 
     exp_A_scaled = (V + U) / (V - U)
 
-    # Square s times
-    exp_A = exp_A_scaled
-    for _ in 1:s
-        exp_A = exp_A^2
-    end
-
-    return exp_A
+    # Repeated squaring: exp_A_scaled^(2^s)
+    return foldl((m, _) -> m^2, 1:s; init=exp_A_scaled)
 end
 ```
 
@@ -1783,7 +1652,7 @@ function mamba_batch(x_batch::Array{Float64,3}, params)
     y_batch = similar(x_batch)
 
     Threads.@threads for b in 1:batch_size
-        y_batch[b, :, :] = mamba_forward(x_batch[b, :, :], params)
+        @views y_batch[b, :, :] .= mamba_forward(x_batch[b, :, :], params)
     end
 
     return y_batch
@@ -1796,22 +1665,30 @@ end
 
 ## 参考文献 (追加: Vision関連)
 
-[^24]: Wang, Y., et al. (2024). Visual Mamba: A Survey and New Outlooks. *arXiv:2404.18861*.
-@[card](https://arxiv.org/abs/2404.18861)
+[^24]: Xu, R., et al. (2024). Visual Mamba: A Survey and New Outlooks. *arXiv:2404.18861*.
+<https://arxiv.org/abs/2404.18861>
 
-[^25]: Zhang, H., et al. (2024). LoG-VMamba: Local-Global Vision Mamba for Medical Image Segmentation. *arXiv:2408.14415*.
-@[card](https://arxiv.org/abs/2408.14415)
+[^25]: Dang, T. D. Q., Nguyen, H. H., & Tiulpin, A. (2024). LoG-VMamba: Local-Global Vision Mamba for Medical Image Segmentation. *arXiv:2408.14415*.
+<https://arxiv.org/abs/2408.14415>
 
-[^26]: Liu, Y., et al. (2024). Hi-Mamba: Hierarchical Mamba for Efficient Image Super-Resolution. *arXiv:2410.10140*.
-@[card](https://arxiv.org/abs/2410.10140)
+[^26]: Qiao, J., et al. (2024). Hi-Mamba: Hierarchical Mamba for Efficient Image Super-Resolution. *arXiv:2410.10140*.
+<https://arxiv.org/abs/2410.10140>
 
 [^27]: Chen, Z., et al. (2024). V2M: Visual 2-Dimensional Mamba for Image Representation Learning. *arXiv:2410.10382*.
-@[card](https://arxiv.org/abs/2410.10382)
+<https://arxiv.org/abs/2410.10382>
 
 [^28]: Ibrahim, F., et al. (2025). A Survey on Mamba Architecture for Vision Applications. *arXiv:2502.07161*.
-@[card](https://arxiv.org/abs/2502.07161)
+<https://arxiv.org/abs/2502.07161>
 
 ---
+
+## 著者リンク
+
+- Blog: https://fumishiki.dev
+- X: https://x.com/fumishiki
+- LinkedIn: https://www.linkedin.com/in/fumitakamurakami
+- GitHub: https://github.com/fumishiki
+- Hugging Face: https://huggingface.co/fumishiki
 
 ## ライセンス
 

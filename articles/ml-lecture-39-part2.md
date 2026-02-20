@@ -4,7 +4,14 @@ emoji: "🖼️"
 type: "tech"
 topics: ["machinelearning", "deeplearning", "ldm", "julia", "stablediffusion"]
 published: true
+slug: "ml-lecture-39-part2"
+difficulty: "advanced"
+time_estimate: "90 minutes"
+languages: ["Julia", "Rust"]
+keywords: ["機械学習", "深層学習", "生成モデル"]
 ---
+
+**→ 前編（理論編）**: [ml-lecture-39-part1](./ml-lecture-39-part1)
 
 ## 💻 4. 実装ゾーン（45分）— LDM訓練→推論パイプライン
 
@@ -167,8 +174,8 @@ function train_vae!(encoder, decoder, dataloader; epochs=10, lr=1e-3, β=0.5)
             x_recon, st_dec = decoder(z, ps_dec, st_dec)
 
             # Loss: Reconstruction + KL (simplified)
-            recon_loss = mean((x_recon .- x).^2)
-            kl_loss = 0.5 * mean(z.^2)  # Simplified KL to N(0,I)
+            recon_loss = mean((x_recon .- x) .^ 2)
+            kl_loss = 0.5f0 * mean(z .^ 2)  # Simplified KL to N(0,I)
             loss = recon_loss + β * kl_loss
 
             # Backprop
@@ -345,7 +352,8 @@ w = 7.5      # CFG scale
 x_gen = ddim_sample_cfg(unet, decoder, z_T, c, w, steps=50)
 ```
 
-:::details 完全な訓練スクリプト
+<details><summary>完全な訓練スクリプト</summary>
+
 ```julia
 using MLDatasets, Images
 
@@ -381,7 +389,8 @@ x_gen = ddim_sample_cfg(unet, decoder, z_T, nothing, 1.0, steps=50)
 using FileIO
 save("generated.png", colorview(Gray, x_gen[:,:,1,1]))
 ```
-:::
+
+</details>
 
 ### 🦀 Rust推論実装
 
@@ -484,11 +493,9 @@ fn batch_generate(
     let x_batch = cfg_sample(unet, decoder, z_T, Some(c), w, 50)?;
 
     // Split batch
-    let mut results = Vec::new();
-    for i in 0..batch_size {
-        results.push(x_batch.narrow(0, i, 1)?);
-    }
-    Ok(results)
+    (0..batch_size)
+        .map(|i| x_batch.narrow(0, i, 1))
+        .collect::<Result<Vec<_>>>()
 }
 ```
 
@@ -509,12 +516,10 @@ fn batch_generate(
 ```julia
 # Gradient clipping
 function clip_grad!(grads, max_norm=1.0)
-    total_norm = sqrt(sum(x -> sum(x.^2), grads))
+    total_norm = sqrt(sum(x -> sum(x .^ 2), grads))
     clip_coef = max_norm / (total_norm + 1e-6)
     if clip_coef < 1
-        for g in grads
-            g .*= clip_coef
-        end
+        foreach(g -> g .*= clip_coef, grads)
     end
 end
 
@@ -546,9 +551,7 @@ z_t, ε = forward_diffusion(z, T, α_bar)
 @assert !any(isnan.(ε_cfg))  # NaNチェック
 ```
 
-:::message
-**ここまでで全体の70%完了！** 実装ゾーン完了。Julia訓練→Rust推論の完全パイプラインを構築した。次は実験ゾーンでCFG実験へ。
-:::
+> **Note:** **ここまでで全体の70%完了！** 実装ゾーン完了。Julia訓練→Rust推論の完全パイプラインを構築した。次は実験ゾーンでCFG実験へ。
 
 ---
 
@@ -567,13 +570,15 @@ for w in w_values
 end
 ```
 
-:::details 解答
+<details><summary>解答</summary>
+
 - $w=0.0$: quality=低, diversity=高 (無条件生成)
 - $w=1.0$: quality=中, diversity=中 (標準条件付き)
 - $w=3.0$: quality=高, diversity=中 (軽いCFG)
 - $w=7.5$: quality=最高, diversity=低 (SD推奨値)
 - $w=15.0$: quality=過飽和, diversity=最低 (over-guidance)
-:::
+
+</details>
 
 **Q2: Negative Promptの数学**
 
@@ -582,9 +587,11 @@ Negative Prompt実装のこの行を説明せよ:
 ε_cfg = ε_neg .+ w .* (ε_pos .- ε_neg)
 ```
 
-:::details 解答
+<details><summary>解答</summary>
+
 $\tilde{\epsilon} = \epsilon_\text{neg} + w(\epsilon_\text{pos} - \epsilon_\text{neg})$ は「$\epsilon_\text{neg}$から$\epsilon_\text{pos}$へ$w$倍強く移動」を意味する。これはベクトルの線形結合で、CFGの一般化。Negative Promptは「避けたい概念」を$\epsilon_\text{neg}$として指定することで、無条件$\emptyset$の代わりに使う。
-:::
+
+</details>
 
 **Q3: Zero Terminal SNRの効果**
 
@@ -598,28 +605,28 @@ $\tilde{\epsilon} = \epsilon_\text{neg} + w(\epsilon_\text{pos} - \epsilon_\text
 # α_bar_after[end] = 1.0 → sqrt(α_bar_after[end]) = 1.0
 ```
 
-:::details 解答
+<details><summary>解答</summary>
+
 Zero Terminal SNRは $\bar{\alpha}_T = 0$ を強制する。Rescaling前は $\bar{\alpha}_T = 0.01 \neq 0$ なので、$T$ステップ目でもわずかに信号が残る。Rescaling後は $\bar{\alpha}_T = 0$ となり、完全なガウシアンノイズに到達。これにより非常に明るい/暗い画像の生成品質が向上する（Lin et al. 2023 [^zero_snr]）。
-:::
+
+</details>
 
 **Q4: Text Conditioning実装**
 
-CLIP text encodingのこのコードを解釈せよ:
-```python
-hidden = transformer(tokens)  # [77, 768]
-c = hidden  # 全トークンの隠れ状態を使用
-```
+CLIP text encodingでは `hidden = transformer(tokens)` で全77トークンの隠れ状態（shape: `[77, 768]`）を取得し、`c = hidden` としてそのまま使う。
 
 なぜ`hidden[0]` (CLSトークン)だけでなく全トークンを使うか？
 
-:::details 解答
+<details><summary>解答</summary>
+
 Stable Diffusionは **全トークンの隠れ状態** $c \in \mathbb{R}^{77 \times 768}$ をCross-Attentionに入力する。これにより:
 1. 各単語の情報を個別に保持（"red cat"で"red"と"cat"が別々に処理）
 2. Cross-Attentionで画像の各位置が関連する単語に注目できる
 3. 長文の詳細な関係性を捉えられる
 
 `hidden[0]` (BERTスタイル)だと文全体を1ベクトルに圧縮してしまい、詳細な単語レベルアライメントが失われる。
-:::
+
+</details>
 
 **Q5: Min-SNR weightingの目的**
 
@@ -630,14 +637,16 @@ weight = min.(snr, 5.0)  # γ=5
 loss = weight[t] * mse(ε_pred, ε_true)
 ```
 
-:::details 解答
+<details><summary>解答</summary>
+
 SNRが高い（ノイズ少ない）timestepは学習が簡単で、低い（ノイズ多い）timestepは難しい。均等にweightすると簡単なtimestepに過適合する。Min-SNR weightingは:
 1. $\text{SNR}(t)$を計算（信号対雑音比）
 2. $\gamma=5$でクリップ → SNR高すぎるtimestepのweightを削減
 3. 難しいtimestep（低SNR）の学習を促進
 
 Hang et al. (2023) [^min_snr]は3.4倍の訓練高速化を報告。
-:::
+
+</details>
 
 ### 実装チャレンジ: CFG Scale実験
 
@@ -653,14 +662,11 @@ results = Dict()
 
 for w in w_values
     println("Testing w=$w...")
-    images = []
-
-    for i in 1:n_samples
+    images = [begin
         z_T = randn(Float32, 32, 32, 4, 1)
         c = text_encoder("a beautiful landscape")  # CLIP encoding
-        x = ddim_sample_cfg(unet, decoder, z_T, c, w, steps=50)
-        push!(images, x)
-    end
+        ddim_sample_cfg(unet, decoder, z_T, c, w, steps=50)
+    end for _ in 1:n_samples]
 
     # 品質指標計算
     fid = compute_fid(images, real_images)
@@ -673,8 +679,8 @@ end
 
 # 結果可視化
 using Plots
-plot([r.fid for r in values(results)], label="FID↓", xlabel="w", ylabel="Score")
-plot!([r.clip for r in values(results)], label="CLIP Score↑")
+plot(values(results) .|> r -> r.fid, label="FID↓", xlabel="w", ylabel="Score")
+plot!(values(results) .|> r -> r.clip, label="CLIP Score↑")
 ```
 
 **期待される結果**:
@@ -697,24 +703,29 @@ $$
 \mathcal{L}_\text{LDM} = \mathbb{E}_{z_0 \sim q(z_0), \epsilon \sim \mathcal{N}(0,I), t} \left[ \|\epsilon - \epsilon_\theta(z_t, t)\|^2 \right]
 $$
 
-:::details 解答
+<details><summary>解答</summary>
+
 「エルLDM equals 期待値(z0 is distributed according to q of z0, epsilon is distributed according to standard Gaussian, over t) of L2 norm of epsilon minus epsilon-theta of z-t comma t squared」
 
 または日本語で:「潜在拡散モデルの損失は、潜在変数z0、標準正規ノイズε、timestep tについての期待値で、真のノイズεとモデル予測εθ(z_t, t)のL2ノルムの2乗」
-:::
+
+</details>
 
 **Q2**: この数式の意味を説明せよ:
 $$
 \tilde{\epsilon}_\theta = (1-w) \epsilon_\theta(z_t, t, \emptyset) + w \cdot \epsilon_\theta(z_t, t, c)
 $$
 
-:::details 解答
+<details><summary>解答</summary>
+
 CFG (Classifier-Free Guidance)の線形結合形式。無条件ノイズ予測 $\epsilon_\theta(z_t, t, \emptyset)$ と条件付きノイズ予測 $\epsilon_\theta(z_t, t, c)$ を、重み $(1-w)$ と $w$ で加重平均。$w=1$ で標準条件付き、$w>1$ でmode-seeking。
-:::
+
+</details>
 
 **Q3**: Zero Terminal SNRのrescaling式を書け。
 
-:::details 解答
+<details><summary>解答</summary>
+
 $$
 \tilde{\alpha}_t = \frac{\alpha_t}{\alpha_T}
 $$
@@ -725,13 +736,15 @@ $$
 $$
 
 これにより $\tilde{\bar{\alpha}}_T = 1 \to \sqrt{\tilde{\bar{\alpha}}_T} = 1 \to$ 最終ステップで完全ガウシアンノイズ。
-:::
+
+</details>
 
 ### LaTeX Writing Test
 
 **Q1**: "The encoder maps x to z" を数式で書け。
 
-:::details 解答
+<details><summary>解答</summary>
+
 $$
 z = \mathcal{E}(x), \quad x \in \mathbb{R}^{H \times W \times C}, \quad z \in \mathbb{R}^{h \times w \times c}
 $$
@@ -740,11 +753,13 @@ $$
 $$
 \mathcal{E}: \mathbb{R}^{H \times W \times C} \to \mathbb{R}^{h \times w \times c}
 $$
-:::
+
+</details>
 
 **Q2**: CFGの修正ノイズ予測式をLaTeXで書け。
 
-:::details 解答
+<details><summary>解答</summary>
+
 ```latex
 \tilde{\epsilon}_\theta(z_t, t, c, w) = \epsilon_\theta(z_t, t, \emptyset) + w \cdot \left( \epsilon_\theta(z_t, t, c) - \epsilon_\theta(z_t, t, \emptyset) \right)
 ```
@@ -753,11 +768,13 @@ $$
 $$
 \tilde{\epsilon}_\theta(z_t, t, c, w) = \epsilon_\theta(z_t, t, \emptyset) + w \cdot \left( \epsilon_\theta(z_t, t, c) - \epsilon_\theta(z_t, t, \emptyset) \right)
 $$
-:::
+
+</details>
 
 **Q3**: Multi-Head Cross-Attention式をLaTeXで書け。
 
-:::details 解答
+<details><summary>解答</summary>
+
 ```latex
 \begin{aligned}
 Q &= W_Q \mathbf{f} \\
@@ -767,13 +784,15 @@ V &= W_V \mathbf{c} \\
 \text{MultiHead}(Q, K, V) &= \text{Concat}(\text{head}_1, \ldots, \text{head}_h) W^O
 \end{aligned}
 ```
-:::
+
+</details>
 
 ### Code Translation Test
 
 **Q1**: Forward diffusionの数式 $z_t = \sqrt{\bar{\alpha}_t} z_0 + \sqrt{1-\bar{\alpha}_t} \epsilon$ をJuliaで実装せよ。
 
-:::details 解答
+<details><summary>解答</summary>
+
 ```julia
 function forward_diffusion(z₀, t, α_bar, rng)
     ε = randn(rng, Float32, size(z₀))
@@ -786,11 +805,13 @@ end
 - `.` broadcast演算子で要素ごとの演算
 - `randn` でガウシアンノイズ生成
 - `sqrt(α_bar[t])` でtimestepのスケール取得
-:::
+
+</details>
 
 **Q2**: CFGの数式をJuliaで実装せよ。
 
-:::details 解答
+<details><summary>解答</summary>
+
 ```julia
 function cfg_forward(unet, z_t, t, c, w, ps, st)
     # Unconditional
@@ -810,11 +831,13 @@ end
 ```julia
 ε_cfg = (1 - w) .* ε_uncond .+ w .* ε_cond
 ```
-:::
+
+</details>
 
 **Q3**: Cross-Attentionの式 $\text{Attention}(Q, K, V) = \text{softmax}(QK^\top/\sqrt{d_k}) V$ をJuliaで実装せよ。
 
-:::details 解答
+<details><summary>解答</summary>
+
 ```julia
 function scaled_dot_product_attention(Q, K, V; dropout_rate=0.0)
     d_k = size(K, 2)
@@ -841,7 +864,8 @@ end
 - `K'` で転置
 - `softmax(..., dims=2)` でkey次元に沿ってソフトマックス
 - `dropout` で正則化
-:::
+
+</details>
 
 ### Paper Reading Test
 
@@ -859,7 +883,8 @@ end
 4. Contributions (貢献)
 5. Clarity (明瞭性)
 
-:::details 解答
+<details><summary>解答</summary>
+
 ```julia
 pass1_info = Dict(
     "category" => "Image Synthesis / Generative Models",
@@ -884,7 +909,8 @@ pass1_info = Dict(
 - Clarity: ✓ 明瞭
 
 → **Pass 2へ進む価値あり**
-:::
+
+</details>
 
 ### Implementation Challenge: Mini LDM End-to-End
 
@@ -960,14 +986,11 @@ n_samples = 16
 
 for w in w_values
     println("  Generating with w=$w...")
-    samples = []
-
-    for i in 1:n_samples
+    samples = [begin
         z_T = randn(Float32, 7, 7, 4, 1)
         c = nothing  # Unconditioned for MNIST
-        x = ddim_sample_cfg(unet, decoder, z_T, c, w, steps=50)
-        push!(samples, x)
-    end
+        ddim_sample_cfg(unet, decoder, z_T, c, w, steps=50)
+    end for _ in 1:n_samples]
 
     # 保存
     grid = hcat(samples...)
@@ -1034,9 +1057,12 @@ end
 - [ ] Julia訓練コードを書ける
 - [ ] Rust推論コードを書ける
 
-:::message
-**ここまでで全体の85%完了！** 実験ゾーン完了。CFG実験で品質トレードオフを体感した。次は発展ゾーンへ。
-:::
+> **Note:** **ここまでで全体の85%完了！** 実験ゾーン完了。CFG実験で品質トレードオフを体感した。次は発展ゾーンへ。
+
+> **Progress: 85%**
+> **理解度チェック**
+> 1. LDM の推論パイプライン（`z = encode(x)` → 拡散 → `x = decode(z)`）で、VAE デコーダのアーティファクトを減らすための実装上の工夫（後処理、温度スケーリング等）を説明せよ。
+> 2. CFG スケール $w$ を上げすぎると品質が下がる原因を、過飽和（色飽和）・アーティファクト発生の観点から説明せよ。
 
 ---
 
@@ -1087,7 +1113,7 @@ graph TD
 | リソース | URL | 内容 |
 |:---------|:----|:-----|
 | **Hugging Face Diffusers** | [huggingface.co/docs/diffusers](https://huggingface.co/docs/diffusers) | 実装ライブラリ |
-| **Lil'Log: Diffusion** | [lilianweng.github.io](https://lilianweng.github.io/posts/2021-07-11-diffusion-models/) | 包括的解説 |
+| **Lil'Log: Diffusion** | [lilianweng.github.io](https://lilianweng.github.io/posts/2021-07-11-diffusion-models/) | 詳細解説 |
 | **MIT 6.S184** | [diffusion.csail.mit.edu](https://diffusion.csail.mit.edu/) | SDE/FM理論 (2026) |
 | **Stable Diffusion Papers** | [stability.ai/research](https://stability.ai/research) | 公式論文リスト |
 
@@ -1101,7 +1127,8 @@ graph TD
 
 ### 用語集
 
-:::details 全用語リスト (アルファベット順)
+<details><summary>全用語リスト (アルファベット順)</summary>
+
 | 用語 | 定義 |
 |:-----|:-----|
 | **CFG** | Classifier-Free Guidance: 無条件と条件付きスコアの線形結合 |
@@ -1128,7 +1155,8 @@ graph TD
 | **v-prediction** | Velocity prediction: $v = \sqrt{\bar{\alpha}} \epsilon - \sqrt{1-\bar{\alpha}} z_0$ |
 | **VQ-VAE** | Vector Quantized VAE: 離散潜在表現 |
 | **Zero Terminal SNR** | $\bar{\alpha}_T = 0$ 強制 |
-:::
+
+</details>
 
 ### LDMの知識マップ
 
@@ -1162,9 +1190,7 @@ graph TD
     Apps --> FLUX_B[FLUX.1]
 ```
 
-:::message
-**ここまでで全体の95%完了！** 発展ゾーン完了。LDMファミリーの系譜と最新研究を俯瞰した。最後は振り返りゾーンへ。
-:::
+> **Note:** **ここまでで全体の95%完了！** 発展ゾーン完了。LDMファミリーの系譜と最新研究を俯瞰した。最後は振り返りゾーンへ。
 
 ---
 
@@ -1197,25 +1223,35 @@ $$
 
 ### FAQ
 
-:::details Q1: VAEの品質劣化はないのか？
+<details><summary>Q1: VAEの品質劣化はないのか？</summary>
+
 **A**: KL-reg VAEは再構成品質を重視するため、知覚的には劣化が少ない。$\beta < 1$ のβ-VAEやVQ-VAEでさらに改善可能。LPIPS損失で人間の知覚に合わせる。
-:::
 
-:::details Q2: CFG scale $w$ の最適値は？
+</details>
+
+<details><summary>Q2: CFG scale $w$ の最適値は？</summary>
+
 **A**: タスク依存。Stable Diffusion 1.xは7.5が標準だが、写実的な写真は3-5、アートは10-15も使われる。FID/IS/CLIP Scoreで実験的に決定。
-:::
 
-:::details Q3: Negative Promptは必須？
+</details>
+
+<details><summary>Q3: Negative Promptは必須？</summary>
+
 **A**: 必須ではないが、品質向上に有効。"blurry, low quality"等で低品質サンプルを回避。無条件 $\emptyset$ との中間的な役割。
-:::
 
-:::details Q4: FLUXはSD 3より何が優れる？
+</details>
+
+<details><summary>Q4: FLUXはSD 3より何が優れる？</summary>
+
 **A**: (1) Transformer backbone → U-Netより表現力、(2) Rectified Flow → 20 stepsで収束、(3) 12B params → より豊かな表現。FID 7.2 (SD3: 8.7)。
-:::
 
-:::details Q5: LDMの訓練コストは？
+</details>
+
+<details><summary>Q5: LDMの訓練コストは？</summary>
+
 **A**: SD 1.5規模（860M params）で、V100×8で約2週間。FLUX.1 (12B)はA100×256で数週間と推定。VAE事前訓練含めると+1週間。
-:::
+
+</details>
 
 ### 学習スケジュール (1週間プラン)
 
@@ -1274,21 +1310,19 @@ end
 
 **到達目標**: 「1000ステップ→1ステップへの理論的橋渡しを完全理解」
 
-:::message
-**ここまでで全体の100%完了！ 🎉**
-
-第39回読了おめでとうございます！
-
-**獲得スキル**:
-- ✅ Latent Diffusionの理論的基盤
-- ✅ Classifier-Free Guidanceの完全導出
-- ✅ Text Conditioningの実装レベル理解
-- ✅ FLUX Architecture解析
-- ✅ Julia訓練 + Rust推論パイプライン
-- ✅ CFG実験による品質トレードオフ理解
-
-Course IV「拡散モデル理論編」は残り3回（L40-42）。理論の完成まであと少し！
-:::
+> **Note:** **ここまでで全体の100%完了！ 🎉**
+>
+> 第39回読了おめでとうございます！
+>
+> **獲得スキル**:
+> - ✅ Latent Diffusionの理論的基盤
+> - ✅ Classifier-Free Guidanceの完全導出
+> - ✅ Text Conditioningの実装レベル理解
+> - ✅ FLUX Architecture解析
+> - ✅ Julia訓練 + Rust推論パイプライン
+> - ✅ CFG実験による品質トレードオフ理解
+>
+> Course IV「拡散モデル理論編」は残り3回（L40-42）。理論の完成まであと少し！
 
 ---
 
@@ -1316,7 +1350,8 @@ Course IV「拡散モデル理論編」は残り3回（L40-42）。理論の完�
 
 **問い直し**: SD 1.5の「理論」は陳腐化したか、それとも「実装」だけが陳腐化したか？
 
-:::details 議論の種
+<details><summary>議論の種</summary>
+
 **立場1: 理論は不変**
 - VAE圧縮の原理は変わらない
 - CFGの数学は普遍的
@@ -1330,7 +1365,13 @@ Course IV「拡散モデル理論編」は残り3回（L40-42）。理論の完�
 **統合視点**: 理論を理解した上で最新実装に適応することが「真の理解」では？
 
 **問い**: FLUXを学べば十分か、それともSD 1.5から積み上げる必要があるか？
-:::
+
+</details>
+
+> **Progress: 95%**
+> **理解度チェック**
+> 1. Latent Consistency Models (LCM) が LDM + Consistency Distillation として機能する理由：潜在空間での Self-consistency 条件 $f_\theta(z_t,t,c) = f_\theta(z_{t'},t',c)$ をどう訓練で強制するか説明せよ。
+> 2. SD 3.x / FLUX 系が採用する v-prediction パラメタライズ $v_t = \alpha_t \epsilon - \sigma_t x_0$ のメリットを、$\epsilon$-prediction との学習安定性の違いで説明せよ。
 
 ---
 
@@ -1339,74 +1380,43 @@ Course IV「拡散モデル理論編」は残り3回（L40-42）。理論の完�
 ### 主要論文
 
 [^ldm]: Rombach, R., Blattmann, A., Lorenz, D., Esser, P., & Ommer, B. (2022). High-Resolution Image Synthesis with Latent Diffusion Models. *CVPR 2022*.
-@[card](https://arxiv.org/abs/2112.10752)
+<https://arxiv.org/abs/2112.10752>
 
 [^cfg]: Ho, J., & Salimans, T. (2022). Classifier-Free Diffusion Guidance. *arXiv:2207.12598*.
-@[card](https://arxiv.org/abs/2207.12598)
+<https://arxiv.org/abs/2207.12598>
 
 [^classifier_guidance]: Dhariwal, P., & Nichol, A. (2021). Diffusion Models Beat GANs on Image Synthesis. *NeurIPS 2021*.
-@[card](https://arxiv.org/abs/2105.05233)
+<https://arxiv.org/abs/2105.05233>
 
 [^flux]: Greenberg, O. (2025). Demystifying Flux Architecture. *arXiv:2507.09595*.
-@[card](https://arxiv.org/abs/2507.09595)
+<https://arxiv.org/abs/2507.09595>
 
 [^min_snr]: Hang, T., Gu, S., Li, C., et al. (2023). Efficient Diffusion Training via Min-SNR Weighting Strategy. *ICCV 2023*.
-@[card](https://arxiv.org/abs/2303.09556)
+<https://arxiv.org/abs/2303.09556>
 
 [^zero_snr]: Lin, S., et al. (2023). Common Diffusion Noise Schedules and Sample Steps are Flawed. *arXiv:2305.08891*.
-@[card](https://arxiv.org/abs/2305.08891)
+<https://arxiv.org/abs/2305.08891>
 
 [^clip]: Radford, A., et al. (2021). Learning Transferable Visual Models From Natural Language Supervision. *ICML 2021*.
-@[card](https://arxiv.org/abs/2103.00020)
+<https://arxiv.org/abs/2103.00020>
 
 [^t5]: Raffel, C., et al. (2020). Exploring the Limits of Transfer Learning with a Unified Text-to-Text Transformer. *JMLR*.
-@[card](https://arxiv.org/abs/1910.10683)
+<https://arxiv.org/abs/1910.10683>
 
 [^imagen]: Saharia, C., et al. (2022). Photorealistic Text-to-Image Diffusion Models with Deep Language Understanding. *NeurIPS 2022*.
-@[card](https://arxiv.org/abs/2205.11487)
+<https://arxiv.org/abs/2205.11487>
 
 [^sdxl]: Podell, D., et al. (2023). SDXL: Improving Latent Diffusion Models for High-Resolution Image Synthesis. *arXiv:2307.01952*.
-@[card](https://arxiv.org/abs/2307.01952)
+<https://arxiv.org/abs/2307.01952>
 
 [^sd3]: Esser, P., et al. (2024). Scaling Rectified Flow Transformers for High-Resolution Image Synthesis. *arXiv:2403.03206*.
-@[card](https://arxiv.org/abs/2403.03206)
+<https://arxiv.org/abs/2403.03206>
 
-### 教科書・サーベイ
+[^lcm]: Luo, S., et al. (2023). Latent Consistency Models: Synthesizing High-Resolution Images with Few-Step Inference. ICLR 2024. arXiv:2310.04378.
+<https://arxiv.org/abs/2310.04378>
 
-- Murphy, K. P. (2022). *Probabilistic Machine Learning: Advanced Topics*. MIT Press.
-- Prince, S. J. D. (2023). *Understanding Deep Learning*. MIT Press. [Chapter on Diffusion Models]
-- Weng, L. (2021). "What are Diffusion Models?" *Lil'Log*. [https://lilianweng.github.io/posts/2021-07-11-diffusion-models/](https://lilianweng.github.io/posts/2021-07-11-diffusion-models/)
-
-### オンラインリソース
-
-- Hugging Face Diffusers Documentation: [https://huggingface.co/docs/diffusers](https://huggingface.co/docs/diffusers)
-- MIT 6.S184: Diffusion Models (2026): [https://diffusion.csail.mit.edu/](https://diffusion.csail.mit.edu/)
-- Stability AI Research: [https://stability.ai/research](https://stability.ai/research)
-
----
-
-## 記法規約
-
-| 記号 | 意味 | 備考 |
-|:-----|:-----|:-----|
-| $x$ | ピクセル空間の画像 | $x \in \mathbb{R}^{H \times W \times C}$ |
-| $z$ | 潜在空間の表現 | $z \in \mathbb{R}^{h \times w \times c}$ |
-| $\mathcal{E}$ | VAE Encoder | $z = \mathcal{E}(x)$ |
-| $\mathcal{D}$ | VAE Decoder | $\tilde{x} = \mathcal{D}(z)$ |
-| $\epsilon_\theta$ | Noise prediction network | U-Net |
-| $t$ | Timestep | $t \in \{1, \ldots, T\}$ |
-| $\bar{\alpha}_t$ | Cumulative product | $\bar{\alpha}_t = \prod_{s=1}^t \alpha_s$ |
-| $c$ | Condition (text等) | CLIP/T5 encoding |
-| $w$ | CFG guidance scale | 典型的に 7.5 |
-| $\tilde{\epsilon}$ | CFG修正ノイズ | $\tilde{\epsilon} = \epsilon_\emptyset + w(\epsilon_c - \epsilon_\emptyset)$ |
-| $\mathbb{E}_{q}[\cdot]$ | 期待値 | 分布 $q$ の下での期待値 |
-| $\text{KL}[q \| p]$ | KLダイバージェンス | 第6回参照 |
-| $\mathcal{N}(\mu, \sigma^2)$ | ガウス分布 | 平均 $\mu$, 分散 $\sigma^2$ |
-| $\text{SNR}(t)$ | Signal-to-Noise Ratio | $\bar{\alpha}_t / (1-\bar{\alpha}_t)$ |
-
----
-
-**謝辞**: 本講義の執筆にあたり、Rombach et al. (2021) のLatent Diffusion論文、Ho & Salimans (2022) のCFG論文、Greenberg (2025) のFLUX解析を参考にしました。
+[^efficient_survey]: Shen, H., et al. (2025). "Efficient Diffusion Models: A Survey". *Transactions on Machine Learning Research (TMLR)*. arXiv:2502.06805.
+   https://arxiv.org/abs/2502.06805
 
 ---
 
@@ -1599,7 +1609,7 @@ end
 
 ### 7.3 Efficient Diffusion Models Survey (TMLR 2025)
 
-Li et al. (2025) [^efficient_survey] の包括的サーベイから重要な技術を抜粋。
+Li et al. (2025) [^efficient_survey] のサーベイから重要な技術を抜粋。
 
 #### 7.3.1 Sampling 高速化の分類
 
@@ -1663,15 +1673,13 @@ FP16 mixed precision + Tensor Core → 追加の 1.5× 高速化。
 
 ---
 
-## 参考文献
+## 著者リンク
 
-[^sdxl]: Podell, D., et al. (2023). "SDXL: Improving Latent Diffusion Models for High-Resolution Image Synthesis". *arXiv:2307.01952*.
-
-[^lcm]: Luo, S., et al. (2023). "Latent Consistency Models: Synthesizing High-Resolution Images with Few-step Inference". *OpenReview ICLR 2024*.
-
-[^efficient_survey]: Li, X., et al. (2025). "Efficient Diffusion Models: A Comprehensive Survey from Principles to Practices". *Transactions on Machine Learning Research (TMLR)*.
-
----
+- Blog: https://fumishiki.dev
+- X: https://x.com/fumishiki
+- LinkedIn: https://www.linkedin.com/in/fumitakamurakami
+- GitHub: https://github.com/fumishiki
+- Hugging Face: https://huggingface.co/fumishiki
 
 ## ライセンス
 

@@ -5,14 +5,18 @@ type: "tech"
 topics: ["machinelearning"]
 published: true
 slug: "ml-lecture-32-part1"
+difficulty: "advanced"
+time_estimate: "90 minutes"
+languages: ["Julia", "Rust", "Elixir"]
+keywords: ["機械学習", "深層学習", "生成モデル"]
 ---
 ---
+
+> **📖 後編（実装編）**: [第32回後編: Production実装編](./ml-lecture-32-part2) | **→ 実装・実験ゾーンへ**
 
 # 第32回: Production & フィードバックループ + 統合PJ 🏆
 
-:::message
-**前提知識**: 第31回でMLOps基盤を整えた。この第32回はCourse III最終回 — 14回の全技術を統合してE2Eシステムを構築する。
-:::
+> **Note:** **前提知識**: 第31回でMLOps基盤を整えた。この第32回はCourse III最終回 — 14回の全技術を統合してE2Eシステムを構築する。
 
 ## 🚀 0. クイックスタート（30秒）— 3行でE2Eシステムを体感
 
@@ -54,9 +58,7 @@ $$
 
 **これがCourse III 14回の集大成だ。**
 
-:::message
-**進捗: 3%完了！** 第32回のゴールは「Production E2Eシステムを自力で構築・運用できる」こと。
-:::
+> **Note:** **進捗: 3%完了！** 第32回のゴールは「Production E2Eシステムを自力で構築・運用できる」こと。
 
 ---
 
@@ -66,23 +68,7 @@ $$
 
 AIカスタマーサポートの本質は**問い合わせの自動分類**と**人間へのエスカレーション戦略**だ。
 
-```julia
-using CustomerSupport, Embeddings
 
-# 問い合わせを自動分類
-inquiry = "商品が届かない。注文番号は12345です。"
-category, confidence = classify_inquiry(inquiry)
-# => ("配送問題", 0.92)
-
-if confidence < 0.7
-    escalate_to_human(inquiry, reason="低信頼度")
-elseif category == "返金要求"
-    escalate_to_human(inquiry, reason="高リスク")
-else
-    auto_response = generate_faq_response(category, inquiry)
-    send_response(auto_response)
-end
-```
 
 **数式**: 問い合わせ分類はSoftmax分類
 
@@ -105,23 +91,7 @@ $$
 
 フィードバックには**暗黙的**と**明示的**の2種類がある。
 
-```julia
-# 暗黙的フィードバック: クリック・滞在時間・スクロール深度
-implicit_feedback = collect_implicit_feedback(
-    click_through=true,
-    dwell_time=45.3,  # 秒
-    scroll_depth=0.78  # 78%までスクロール
-)
-# => ImplicitFeedback(positive_signal=0.82)
 
-# 明示的フィードバック: 評価ボタン・コメント・NPS
-explicit_feedback = collect_explicit_feedback(
-    rating=4,  # 1-5 stars
-    comment="回答は役立ったが、もう少し具体例が欲しかった",
-    nps=8      # Net Promoter Score (0-10)
-)
-# => ExplicitFeedback(sentiment=0.65, topics=["具体例不足"])
-```
 
 **数式**: 暗黙的フィードバックのスコア関数
 
@@ -141,36 +111,10 @@ $$
 
 収集したフィードバックコメントを**トピッククラスタリング**して根本原因を分析する。
 
-```julia
-using UMAP, HDBSCAN
 
-# 1,000件のフィードバックコメントをクラスタリング
-comments = load_feedback_comments(n=1000)
-embeddings = embed_comments(comments)  # (1000, 384) Embedding
-
-# UMAP次元削減 → HDBSCAN クラスタリング
-umap_emb = umap(embeddings, n_components=2)
-clusters = hdbscan(umap_emb, min_cluster_size=20)
-
-# クラスタごとの代表的なコメント
-for (cluster_id, representative_comments) in clusters
-    println("Cluster $cluster_id:")
-    println("  ", join(representative_comments[1:3], "\n  "))
-end
-```
 
 **出力例**:
-```
-Cluster 1: "配送が遅い"系
-  "商品が届かない"
-  "配送状況が更新されない"
-  "配送業者に連絡がつかない"
 
-Cluster 2: "具体例不足"系
-  "もっと具体的な手順が欲しい"
-  "画像付きで説明して欲しい"
-  "サンプルコードが欲しい"
-```
 
 **数式**: UMAP次元削減
 
@@ -182,70 +126,11 @@ $$
 
 ### 1.4 PyTorchとの対応 — モデル訓練
 
-```python
-import torch
-import torch.nn as nn
 
-# フィードバックを使ったFine-tuning
-class FeedbackClassifier(nn.Module):
-    def __init__(self, embedding_dim=384, num_classes=10):
-        super().__init__()
-        self.classifier = nn.Linear(embedding_dim, num_classes)
-
-    def forward(self, x):
-        return self.classifier(x)
-
-model = FeedbackClassifier()
-optimizer = torch.optim.AdamW(model.parameters(), lr=1e-4)
-criterion = nn.CrossEntropyLoss()
-
-# フィードバックデータで訓練
-for epoch in range(10):
-    for batch in feedback_dataloader:
-        embeddings, labels = batch
-        logits = model(embeddings)
-        loss = criterion(logits, labels)
-
-        optimizer.zero_grad()
-        loss.backward()
-        optimizer.step()
-```
 
 **Julia対応** (数式 ↔ コード 1:1):
 
-```julia
-using Lux, Optimisers, Zygote
 
-# Lux.jl でフィードバック分類器
-struct FeedbackClassifier <: Lux.AbstractExplicitLayer
-    embedding_dim::Int
-    num_classes::Int
-end
-
-function (m::FeedbackClassifier)(x, ps, st)
-    W = ps.W  # (num_classes, embedding_dim)
-    b = ps.b  # (num_classes,)
-    return W * x .+ b, st
-end
-
-# 訓練ループ
-model = FeedbackClassifier(384, 10)
-ps, st = Lux.setup(rng, model)
-opt_state = Optimisers.setup(AdamW(1e-4), ps)
-
-for epoch in 1:10
-    for (embeddings, labels) in feedback_dataloader
-        # Forward + Backward
-        loss, grads = Zygote.withgradient(ps) do p
-            logits, _ = model(embeddings, p, st)
-            cross_entropy_loss(logits, labels)
-        end
-
-        # Update
-        opt_state, ps = Optimisers.update(opt_state, ps, grads[1])
-    end
-end
-```
 
 **接続図**:
 
@@ -263,9 +148,12 @@ graph LR
     I --> C
 ```
 
-:::message
-**進捗: 10%完了！** AIカスタマーサポートの設計とフィードバック収集の基礎を体験した。
-:::
+> **Note:** **進捗: 10%完了！** AIカスタマーサポートの設計とフィードバック収集の基礎を体験した。
+
+> Progress: 10%
+> **理解度チェック**
+> 1. AIカスタマーサポートの「エスカレーション戦略」において、自動応答から人間へのハンドオフを決定するトリガー条件を3つ挙げ、それぞれの設計指針を述べよ。
+> 2. 暗黙的フィードバック（クリック率・滞在時間）と明示的フィードバック（評価ボタン）はどのようにモデル改善に活用できるか。バイアスの問題も含めて論じよ。
 
 ---
 
@@ -289,8 +177,6 @@ Course IIIは**理論を動くシステムに変える14回**だった。各講�
 | 第28回 | プロンプト | Few-shot/CoT/ReAct/Self-Consistency | ⚡ |
 | 第29回 | RAG | Retrieval/Rerank/Hybrid Search | ⚡🦀 |
 | 第30回 | エージェント | ReAct/Tool Use/Multi-Agent | 🔮⚡ |
-| 第31回 | MLOps | CI/CD/Monitoring/A/Bテスト | 🦀⚡🔮 |
-| **第32回** | **Production統合** | **E2Eシステム構築** | **🦀⚡🔮** |
 
 **全てを統合したシステムアーキテクチャ**:
 
@@ -314,16 +200,10 @@ graph TD
 Productionシステムの本質は**閉ループ**だ。
 
 **従来のML開発** (開ループ):
-```
-データ収集 → 訓練 → 評価 → デプロイ → [終了]
-```
+
 
 **Productionシステム** (閉ループ):
-```
-データ収集 → 訓練 → 評価 → デプロイ → Feedback収集 ↺
-                                          ↓
-                                      分析 & 改善
-```
+
 
 **閉ループの数式**:
 
@@ -397,9 +277,12 @@ $$
 
 **第32回のメッセージ**: **Pythonは卒業した**。Production環境では🦀⚡🔮が当たり前。
 
-:::message
-**進捗: 20%完了！** Productionシステムの全体像とCourse IIIの位置づけを理解した。
-:::
+> **Note:** **進捗: 20%完了！** Productionシステムの全体像とCourse IIIの位置づけを理解した。
+
+> Progress: 20%
+> **理解度チェック**
+> 1. 「動かせる」と「理解している」は同じか？Fine-tuning済みモデルが分布外で誤答する場面を具体例で挙げ、Production品質の条件を論じよ。
+> 2. Julia訓練→Rust推論→Elixir配信の3言語E2Eアーキテクチャにおいて、各言語が担う役割とその選択理由を説明せよ。
 
 ---
 
@@ -439,21 +322,7 @@ $$
 
 典型的な重み: $w_1=0.4, w_2=0.4, w_3=0.2$。
 
-**数値検証** (Julia):
-
-```julia
-λ = 0.05  # 20秒で s ≈ 0.63
-s_dwell(t) = 1 - exp(-λ * t)
-
-# 滞在時間45.3秒、スクロール78%、クリックあり
-t = 45.3
-d = 0.78
-click = 1
-
-s_t = s_dwell(t)  # ≈ 0.90
-score = 0.4 * click + 0.4 * s_t + 0.2 * d
-# => 0.4 + 0.36 + 0.156 = 0.916
-```
+**数値検証** (Julia): $\lambda=0.05$, $t=45.3$s, $d=0.78$, click=1 → score ≈ 0.916
 
 #### 3.1.2 明示的フィードバックの定式化
 
@@ -519,6 +388,47 @@ $$
 \theta_{t+1} \leftarrow \theta_t - \eta \nabla_\theta \mathcal{L}_{\text{total}}(\theta_t)
 $$
 
+**ベイズ的解釈 — Sequential Update**: フィードバックを確率論的に定式化すると、モデル更新は事後分布の逐次更新と等価になる。
+
+$$
+p(\theta \mid \mathcal{D} \cup \mathcal{D}_{\text{feedback}}) \propto p(\mathcal{D}_{\text{feedback}} \mid \theta) \cdot p(\theta \mid \mathcal{D})
+$$
+
+$p(\theta \mid \mathcal{D})$ は既存データで学習済みの事後分布（現モデル）、$p(\mathcal{D}_{\text{feedback}} \mid \theta)$ はフィードバックデータの尤度。フィードバックが届くたびに事後分布を逐次更新するため、**オンライン学習のベイズ的根拠**が得られる。
+
+**分布シフトの検出 — KL閾値**:
+
+フィードバックデータの分布が訓練分布から乖離すると、上記の更新は破滅的になる。KL散乱で監視する。
+
+$$
+D_{\mathrm{KL}}(P_{\text{feedback}} \| P_{\text{train}}) = \sum_x P_{\text{feedback}}(x) \log \frac{P_{\text{feedback}}(x)}{P_{\text{train}}(x)}
+$$
+
+実用的な再訓練トリガー:
+
+$$
+\text{trigger} = \mathbb{1}\!\left[ D_{\mathrm{KL}}(P_{\text{feedback}} \| P_{\text{train}}) > \tau \right]
+$$
+
+典型設定: $\tau = 0.1$ で軽微なドリフト警告、$\tau = 0.5$ で即時再訓練。特徴量空間では経験的に Maximum Mean Discrepancy (MMD) を代替として使うこともある。
+
+**Stability-Plasticity Tradeoff — EWC**:
+
+継続学習の本質的ジレンマを定量化したのが **Elastic Weight Consolidation (EWC)** の損失関数だ。
+
+$$
+\mathcal{L}_{\text{EWC}}(\theta) = \underbrace{\mathcal{L}_{\text{new}}(\theta;\, \mathcal{D}_{\text{new}})}_{\text{可塑性（新データへの適応）}} + \frac{\mu}{2} \underbrace{\sum_i F_i \bigl(\theta_i - \theta_i^*\bigr)^2}_{\text{安定性（過去の知識の保持）}}
+$$
+
+ここで:
+- $F_i$ は Fisher 情報行列の対角要素 — 過去タスクにとって重要なパラメータほど大きい
+- $\theta_i^*$ は旧タスク学習後のパラメータ値
+- $\mu > 0$ は安定性と可塑性のバランスを制御するハイパーパラメータ
+
+$\mu \to 0$ で純粋な可塑性（破滅的忘却）、$\mu \to \infty$ で純粋な安定性（新データを完全に無視）。最適な $\mu$ はドメインシフトの速度に依存し、チューニングが必要だ。
+
+**数値検証**: $F_1=10, F_2=0.1$, $\theta^*=[1.0, 2.0]$, $\theta=[1.5, 2.5]$, $\mu=0.1$ → EWC正則化項 $= 0.1/2 \cdot (10 \cdot 0.25 + 0.1 \cdot 0.25) = 0.1263$。
+
 ### 3.2 Active Learning完全版
 
 #### 3.2.1 不確実性サンプリングの理論
@@ -563,25 +473,7 @@ $$
 | Margin | 決定境界を重視 | 多クラスで情報損失 | 2クラス or バランス良好 |
 | Entropy | 全クラスの情報を使う | 計算コストやや高 | 多クラス分類 |
 
-**数値検証** (Julia):
-
-```julia
-# 3クラス分類の例
-p = [0.6, 0.3, 0.1]  # クラス確率
-
-# Least Confidence
-U_LC = 1 - maximum(p)  # => 0.4
-
-# Margin
-p_sorted = sort(p, rev=true)
-U_M = -(p_sorted[1] - p_sorted[2])  # => -(0.6 - 0.3) = -0.3
-
-# Entropy
-H(p) = -sum(p .* log.(p .+ 1e-10))
-U_Ent = H(p)  # => 0.897
-
-println("LC: $U_LC, Margin: $U_M, Entropy: $U_Ent")
-```
+**数値検証** (Julia): $p=[0.6, 0.3, 0.1]$ → LC=0.4, Margin=−0.3, Entropy≈0.897
 
 #### 3.2.2 MSAL (Maximally Separated Active Learning)
 
@@ -620,34 +512,55 @@ $$
 
 **アルゴリズム**:
 
-```julia
-function msal_select_batch(model, unlabeled_pool, labeled_data, batch_size, α=0.5)
-    selected = []
+1. ラベルなしプール $\mathcal{U}$ の全点について $U(x; \theta)$ と $D(x; \mathcal{L})$ を計算
+2. $\mathrm{score}(x) = U(x; \theta) + \alpha \cdot D(x; \mathcal{L})$ でランキング
+3. 上位 $b$ サンプルをアノテーションキューへ送信
+4. アノテーション完了後、$\mathcal{L} \leftarrow \mathcal{L} \cup \{(x^*, y^*)\}$ で更新
+5. $\theta$ をファインチューン → ステップ 1 に戻る
 
-    for _ in 1:batch_size
-        scores = []
-        for x in unlabeled_pool
-            # 不確実性スコア
-            U = entropy(model(x))
+**Query-by-Committee (QBC)**: アンサンブルの不一致を利用する代替手法。
 
-            # 多様性スコア: 既選択サンプルとの最小距離
-            φ_x = embedding(x)
-            D = minimum([norm(φ_x - embedding(x')) for x' in labeled_data ∪ selected])
+$M$ 個のモデル $\{\theta^{(1)}, \ldots, \theta^{(M)}\}$ (committee) を使い、各モデルの予測が最も食い違うサンプルを選ぶ。
 
-            # 統合スコア
-            score = U + α * D
-            push!(scores, (x, score))
-        end
+**Vote Entropy**:
 
-        # 最高スコアを選択
-        x_best = argmax(s -> s[2], scores)[1]
-        push!(selected, x_best)
-        unlabeled_pool = filter(x -> x != x_best, unlabeled_pool)
-    end
+$$
+U_{\text{QBC}}(x) = - \sum_{c=1}^{C} \frac{V(c, x)}{M} \log \frac{V(c, x)}{M}
+$$
 
-    return selected
-end
-```
+ここで $V(c, x) = \sum_{m=1}^{M} \mathbb{1}[\hat{y}^{(m)}(x) = c]$ はクラス $c$ への投票数。全モデルが一致すると $U_{\text{QBC}}=0$、完全不一致で最大値 $\log M$。
+
+**BALD (Bayesian Active Learning by Disagreement)**:
+
+QBC のベイズ版として、情報理論的に最も厳密な獲得関数が BALD だ。
+
+**目標**: モデルパラメータに関する情報を最大化するサンプル $x^*$ を選ぶ。
+
+$$
+x^* = \arg\max_{x \in \mathcal{U}} \; I(y;\, \theta \mid x,\, \mathcal{L})
+$$
+
+ここで $I(y; \theta \mid x, \mathcal{L})$ は $y$ と $\theta$ の間の相互情報量。相互情報量を展開すると:
+
+$$
+I(y;\, \theta \mid x, \mathcal{L}) = H\!\left[\,p(y \mid x, \mathcal{L})\,\right] - \mathbb{E}_{p(\theta \mid \mathcal{L})}\!\left[\,H\!\left[\,p(y \mid x, \theta)\,\right]\,\right]
+$$
+
+第1項: **予測のエントロピー**（モデルアンサンブル全体の不確実性）
+
+$$
+H\!\left[\,p(y \mid x, \mathcal{L})\,\right] = -\sum_c \bar{p}(c \mid x) \log \bar{p}(c \mid x), \quad \bar{p}(c \mid x) = \frac{1}{M}\sum_{m=1}^M p(c \mid x, \theta^{(m)})
+$$
+
+第2項: **平均エントロピー**（各モデルの個別不確実性の期待値）
+
+$$
+\mathbb{E}_{p(\theta)}\!\left[H[p(y \mid x, \theta)]\right] \approx \frac{1}{M}\sum_{m=1}^M H\!\left[\,p(y \mid x, \theta^{(m)})\,\right]
+$$
+
+直感: 第1項が大きく第2項が小さいほど、「モデル全体は不確かだが、各モデルは自信を持っている」→ **モデル間の意見が真に割れているサンプル**だ。これが BALD 名前の由来 (disagreement) 。
+
+**数値検証**: 2モデルで $p_1=[0.9, 0.1]$, $p_2=[0.1, 0.9]$ のとき、$\bar{p}=[0.5, 0.5]$。第1項 $= \log 2 \approx 0.693$、第2項 $= H([0.9,0.1]) \approx 0.325$。$\text{BALD} = 0.693 - 0.325 = 0.368$ — 高い不一致を正確に捉えている。
 
 #### 3.2.3 Human-in-the-Loop (HITL) 設計
 
@@ -665,26 +578,61 @@ $$
 \kappa = \frac{p_o - p_e}{1 - p_e}
 $$
 
-ここで:
-- $p_o$ は観測一致率
-- $p_e$ は偶然の一致率
+ここで $p_o$ は観測一致率、$p_e$ は偶然の一致率。2値分類 (陽性/陰性) のケースで具体的に導出する。
+
+アノテーター A と B の混同行列を:
+
+$$
+\begin{array}{c|cc}
+ & B{=}1 & B{=}0 \\ \hline
+A{=}1 & n_{11} & n_{10} \\
+A{=}0 & n_{01} & n_{00}
+\end{array}
+$$
+
+とすれば、観測一致率と偶然一致率はそれぞれ:
+
+$$
+p_o = \frac{n_{11} + n_{00}}{N}, \quad p_e = \frac{(n_{11}+n_{10})(n_{11}+n_{01})}{N^2} + \frac{(n_{00}+n_{01})(n_{00}+n_{10})}{N^2}
+$$
+
+ここで $N = n_{11}+n_{10}+n_{01}+n_{00}$。
+
+**数値検証**: $n_{11}=40, n_{10}=10, n_{01}=5, n_{00}=45$, $N=100$。$p_o=(40+45)/100=0.85$、$p_e=(50\cdot45)/10000+(55\cdot50)/10000=0.225+0.275=0.500$。$\kappa=(0.85-0.50)/(1-0.50)=0.70$ — 実質的な一致。
 
 $\kappa > 0.6$ で「実質的な一致」、$\kappa > 0.8$ で「ほぼ完全な一致」。
 
-**Disagreement Resolution**: 2人のアノテーターが異なるラベルを付けた場合
+**Dawid-Skene モデル — クラウドソーシングの確率的基盤**:
 
-```julia
-function resolve_disagreement(x, label_A, label_B, model)
-    if label_A == label_B
-        return label_A  # 一致
-    else
-        # モデルの予測を参考に専門家が判断
-        pred = model(x)
-        println("Disagreement: A=$label_A, B=$label_B, Model=$pred")
-        return expert_review(x, label_A, label_B, pred)
-    end
-end
-```
+複数のアノテーターがいる場合、各アノテーターの**スキルレベル**を潜在変数として扱う。
+
+アノテーター $r$ がサンプル $i$ に真のクラス $j$ があるとき、クラス $k$ とラベルするエラー率:
+
+$$
+\pi_r^{jk} = P\!\left(\text{annotator}\; r \;\text{says}\; k \mid \text{true class}=j\right)
+$$
+
+ここで $\sum_k \pi_r^{jk} = 1$（各真のクラスに対して行和が1）。完璧なアノテーターは $\pi_r^{jk} = \mathbb{1}[j=k]$。
+
+**観測ラベルの尤度** (真のラベル $z_i$ を周辺化):
+
+$$
+p\!\left(\{l_{ir}\}_{r} \mid \theta, \Pi\right) = \sum_{j=1}^C \theta_j \prod_r \pi_r^{j, l_{ir}}
+$$
+
+ここで $\theta_j = P(\text{true class}=j)$ は事前クラス分布、$l_{ir}$ はアノテーター $r$ のサンプル $i$ へのラベル。EM法でパラメータ $(\theta, \Pi)$ と真のラベル $z_i$ の事後を交互推定する。
+
+**アノテーションコスト最適化**:
+
+予算 $B$ の下で期待情報量を最大化する割り当て問題:
+
+$$
+\max_{\{n_i\}} \sum_i g(n_i) \quad \text{s.t.} \quad \sum_i c_i n_i \leq B
+$$
+
+ここで $n_i$ はサンプル $i$ のアノテーター数、$c_i$ は単価、$g(n_i)$ は $n_i$ 人の合議で得られる推定精度（通常は $\sqrt{n_i}$ で逓減する凹関数）。Lagrange 緩和で解ける。
+
+**Disagreement Resolution**: 2人のアノテーターが異なるラベルを付けた場合、モデルの予測を参考に専門家が判断する。
 
 **専門家レビューのタイミング**:
 
@@ -728,24 +676,7 @@ $$
 4. **VC次元との関係**: $\mathcal{M}(\mathcal{F}, N) \leq N^{d_{VC}}$
 5. **結論**: $N = \mathcal{O}(d_{VC} / \epsilon^2 \log(1/\delta))$ サンプルで十分
 
-**数値検証** (Julia):
-
-```julia
-# 線形分類器 (VC次元 = d+1)
-d = 10  # 特徴量次元
-d_VC = d + 1
-
-# 目標誤差 ε = 0.01, 確率 δ = 0.05
-ε = 0.01
-δ = 0.05
-
-# 必要サンプル数
-N_required = ceil(Int, d_VC / ε^2 * log(1/δ))
-# => 約 32,919 サンプル
-
-println("VC次元: $d_VC")
-println("必要サンプル数: $N_required")
-```
+**数値検証**: $d=10$, $\epsilon=0.01$, $\delta=0.05$ → 必要サンプル数 ≈ 32,919。
 
 **ボス撃破の証**: 不確実性サンプリングの収束レート $\mathcal{O}(d_{VC}/T \log T)$ を導出し、数値検証で確認した。
 
@@ -772,6 +703,22 @@ $$
 ここで:
 - $F_i$ はFisher情報量: $F_i = \mathbb{E}_{x \sim \mathcal{D}_{\text{old}}} \left[ \left( \frac{\partial \log p_{\theta_{\text{old}}}(y|x)}{\partial \theta_i} \right)^2 \right]$
 - $\lambda > 0$ は正則化強度
+
+**なぜ Fisher 情報量が「重要度」を測るのか？** パラメータ $\theta_i$ を微小変化させたとき、対数尤度 $\log p_\theta(y|x)$ がどれだけ急峻に変化するかを表す。スコア関数の分散という解釈から、等価公式が成り立つ:
+
+$$
+F_i = \mathbb{E}\!\left[\!\left(\frac{\partial \log p}{\partial \theta_i}\right)^{\!2}\right] = -\mathbb{E}\!\left[\frac{\partial^2 \log p}{\partial \theta_i^2}\right]
+$$
+
+右辺の等式は、スコア方程式 $\mathbb{E}[\partial \log p / \partial \theta_i] = 0$ を $\theta_i$ で微分し期待値を取ると導ける。$F_i$ が大きい ＝ 損失が急勾配 ＝ 古いタスクにとって重要なパラメータ、という対応が直感的だ。
+
+**具体数値**: 線形モデル $p_\theta(y|x) = \mathcal{N}(\theta x, 1)$ で $x=1$ のとき、対数尤度の勾配は $\frac{\partial \log p}{\partial \theta} = (y - \theta x) \cdot x = y - \theta$。Fisher 情報量を計算すると:
+
+$$
+F = \mathbb{E}_y\!\left[(y - \theta)^2\right] = \mathbb{E}_y\!\left[(y - \theta x)^2\right] = \sigma_y^2 = 1
+$$
+
+ここでは $\theta$ の値に依らず $F=1$ で一定。一方、Softmax を含む分類モデルでは $F_i$ がパラメータごとに大きく異なるため、EWC 罰則が選択的に効く。罰則項 $F_i(\theta_i - \theta_{i,\text{old}})^2$ は「Fisher が大きいほど古い値の近くに縛る」弾性ばねそのものだ。
 
 **Experience Replay**: 古いデータのバッファを保持
 
@@ -807,25 +754,7 @@ $$
 
 **結果**: $\alpha > 0.5$ でモデルが**自己強化バイアス**に陥る。
 
-**数値シミュレーション** (Julia):
-
-```julia
-# 2クラス分類の例
-p_true = [0.5, 0.5]  # 真の分布
-α = 0.6  # フィードバック強度
-
-p_t = copy(p_true)
-for t in 1:10
-    # モデルは常にクラス1を予測 (simplified)
-    y_pred = 1
-
-    # 次の分布: クラス1が増える
-    p_t = (1 - α) .* p_true + α .* [y_pred == 1 ? 1.0 : 0.0, y_pred == 2 ? 1.0 : 0.0]
-
-    println("t=$t: p(y=1)=$(p_t[1])")
-end
-# => t=10: p(y=1) ≈ 0.94 (大きく偏る)
-```
+**数値シミュレーション**: $\alpha=0.6$ で10ステップ → $p(y=1) \approx 0.94$（大きく偏る）。
 
 **対策**: フィードバック強度 $\alpha$ を制御 or ランダムサンプリングで真の分布を保持。
 
@@ -905,9 +834,6 @@ $$
 
 **状態遷移**:
 
-```
-Closed → (失敗率 > threshold) → Open → (timeout経過) → Half-Open → (成功) → Closed
-```
 
 **数式モデル**: 失敗率 $p_{\text{fail}}$、閾値 $\theta_{\text{CB}}$
 
@@ -945,29 +871,58 @@ $$
 \end{cases}
 $$
 
-**数値例**:
+**数値例**: $B=100$, $r=10$ token/s, 消費 $7$ token/s で $t=15$ 秒後の残量 $= 100 + (10-7)\times 15 = 145$、ただしキャップは $B=100$ なので実際は $100$ 。
 
-```julia
-# Token Bucket パラメータ
-B = 100  # バケット容量
-r = 10   # 補充レート (tokens/sec)
+#### 3.4.4 システム信頼性の理論
 
-tokens = B
-t = 0
+直列接続した複数コンポーネントからなる E2E パイプラインの信頼性を定量化する。
 
-for i in 1:15
-    # 1秒ごとに7トークン要求
-    t += 1
-    tokens = min(B, tokens + r * 1 - 7)
+**直列システムの信頼性**: 各コンポーネントが独立に動作すると仮定すると、全体の信頼性はそれぞれの積になる。
 
-    println("t=$t: tokens=$tokens")
-end
-# => t=15: tokens=145 - 105 = 40 (バケット容量でキャップ)
-```
+$$
+R_{\text{system}} = \prod_{i=1}^{n} R_i
+$$
 
-:::message
+例: Julia 訓練サービス ($R_1=0.999$)、Rust 推論サービス ($R_2=0.9999$)、Elixir 配信サービス ($R_3=0.9995$) の直列システム:
+
+$$
+R_{\text{system}} = 0.999 \times 0.9999 \times 0.9995 \approx 0.9984
+$$
+
+ゆえに年間ダウンタイム $= (1 - 0.9984) \times 365 \times 24 \approx 14$ 時間。
+
+**冗長化による改善**: コンポーネント $i$ を $k$ 台並列化すると信頼性は:
+
+$$
+R_i^{(k)} = 1 - (1 - R_i)^k
+$$
+
+$R_i=0.999$, $k=2$ → $R_i^{(2)} = 1 - 0.001^2 = 0.999999$（6ナイン達成）。
+
+**エンドツーエンドレイテンシ分析 — Percentile Bound**:
+
+分散システムでは平均レイテンシより **P99 レイテンシ**が重要だ。直列 $n$ コンポーネント、各コンポーネントの P99 が $t_i$ であるとき、**独立性が成り立てば**:
+
+$$
+P\!\left(\sum_i T_i \leq \sum_i t_i\right) \geq (0.99)^n
+$$
+
+$n=3$ の場合: $(0.99)^3 \approx 0.970$、すなわち直列 P99 の合計でも P97 しか保証できない。本番環境で直列段数を増やすほど尾部レイテンシが悪化する理由だ。
+
+**アムダールの法則 — 並列化の限界**:
+
+推論サービスを $s$ の割合で並列化できず、残り $(1-s)$ を $N$ 並列化したときの理論的最大スピードアップ:
+
+$$
+S(N) = \frac{1}{s + \frac{1-s}{N}}
+$$
+
+$N \to \infty$ の極限: $S(\infty) = 1/s$。例えば前処理が 20% を占める ($s=0.2$) なら最大 $5\times$ しか高速化できない。
+
+**実務的含意**: Rust 推論サービスが CPU バウンドの場合、アムダールの法則は水平スケールの上限を示す。ボトルネックの特定 (プロファイリング) → $s$ の最小化が先決だ。
+
+**数値検証**: $s=0.1$, $N=8$ → $S(8) = 1/(0.1 + 0.9/8) = 1/0.2125 \approx 4.71\times$。理論上限 $1/0.1=10\times$ に対して約47%の効率。
 **進捗: 50%完了！** フィードバックループ数式とActive Learning理論を習得した。数式修行ゾーンクリア！
-:::
 
 ---
 
@@ -1064,23 +1019,9 @@ $$
 
 近傍データと比較して外れ値を除外 ($\tau=0.3$ が典型値)。
 
-**数値例** (Julia):
-
-```julia
-# Binary feedback から preference pair を生成
-positive_responses = [(x1, y1), (x2, y2), ...]  # f=1
-negative_responses = [(x3, y3), (x4, y4), ...]  # f=0
-
-# Construct pairs: (x, y_w=positive, y_l=negative)
-pairs = [(x, y_pos, y_neg) for (x, y_pos) in positive_responses, (_, y_neg) in negative_responses if same_prompt(x, _)]
-
-# DPO training with constructed pairs
-loss_dpo = dpo_loss(model, pairs, β=0.1)
-```
-
 #### 3.5.5 OpenRLHF Framework (2024)
 
-arXiv:2405.11143 "OpenRLHF: An Easy-to-use, Scalable and High-performance RLHF Framework" [^7] は、Production-grade RLHFの包括的実装を提供。
+arXiv:2405.11143 "OpenRLHF: An Easy-to-use, Scalable and High-performance RLHF Framework" [^7] は、Production-grade RLHFのフル実装を提供。
 
 **サポートアルゴリズム**:
 - **SFT** (Supervised Fine-Tuning)
@@ -1180,30 +1121,7 @@ $$
 \end{cases}
 $$
 
-**数値検証** (Julia):
-
-```julia
-using Statistics, StatsBase
-
-# Training data: N(0, 1)
-x_train = randn(10000)
-
-# Production data: N(0.5, 1.2) (shifted + wider)
-x_prod = 0.5 .+ 1.2 .* randn(10000)
-
-# Histogram binning
-bins = range(-4, 4, length=10)
-h_train = fit(Histogram, x_train, bins).weights
-h_prod = fit(Histogram, x_prod, bins).weights
-
-# Normalize to probabilities
-p_train = h_train ./ sum(h_train)
-p_prod = h_prod ./ sum(h_prod)
-
-# PSI calculation
-psi = sum((p_prod .- p_train) .* log.((p_prod .+ 1e-10) ./ (p_train .+ 1e-10)))
-println("PSI: $psi")  # => 0.34 (Critical drift detected!)
-```
+**数値検証**: $N(0,1)$ vs $N(0.5,1.2)$ で PSI ≈ 0.34（Critical drift detected）。
 
 #### 3.6.3 Model Performance Degradation の数学
 
@@ -1234,23 +1152,31 @@ $$
 - $\Delta\text{Acc} = \text{Acc}(t-1) - \text{Acc}(t)$: 精度低下幅
 - $\tau$: 低下閾値 (例: 0.05)
 
-**数値例**:
+**数値例**: $\text{Acc}_0=0.95$, $\text{Acc}_\infty=0.75$, $\lambda=0.01$/day → Day 57 で再訓練トリガー。
 
-```julia
-# Model deployed with Acc_0 = 0.95
-Acc_0 = 0.95
-Acc_∞ = 0.75  # Long-term equilibrium (concept drift)
-λ = 0.01  # Decay rate (per day)
+**導出**: $\text{Acc}(t^*) = \theta_{\min}$ となる $t^*$ を一般的に求める。指数減衰モデルを代入すると:
 
-# Performance over 100 days
-t_days = 0:100
-Acc_t = @. Acc_0 * exp(-λ * t_days) + Acc_∞ * (1 - exp(-λ * t_days))
+$$
+\text{Acc}_0\, e^{-\lambda t^*} + \text{Acc}_\infty (1 - e^{-\lambda t^*}) = \theta_{\min}
+$$
 
-# Find first day to retrigger
-θ_min = 0.85
-first_retrain_day = findfirst(Acc_t .< θ_min)
-println("Retrain after $first_retrain_day days")  # => Day 57
-```
+左辺を整理し $e^{-\lambda t^*}$ の係数でまとめる:
+
+$$
+(\text{Acc}_0 - \text{Acc}_\infty)\, e^{-\lambda t^*} = \theta_{\min} - \text{Acc}_\infty
+$$
+
+$$
+e^{-\lambda t^*} = \frac{\theta_{\min} - \text{Acc}_\infty}{\text{Acc}_0 - \text{Acc}_\infty}
+$$
+
+両辺の自然対数を取り $t^*$ を陽に解くと:
+
+$$
+t^* = -\frac{1}{\lambda} \ln \frac{\theta_{\min} - \text{Acc}_\infty}{\text{Acc}_0 - \text{Acc}_\infty}
+$$
+
+$\text{Acc}_0 > \theta_{\min} > \text{Acc}_\infty$ であれば、右辺の対数引数は $(0,1)$ に収まり $t^* > 0$ が保証される。直感: **初期精度と平衡精度の差 $(\text{Acc}_0 - \text{Acc}_\infty)$ が小さいほど**分母が小さくなり、$t^*$ は早まる。精度目標 $\theta_{\min}$ を厳しくするほどトリガーが前倒しになる——この $t^*$ を予算（インフラコスト）と照らして決めることが MLOps 設計の実務だ。
 
 ### 3.7 Continuous Integration for ML (CI/ML)
 
@@ -1260,29 +1186,12 @@ println("Retrain after $first_retrain_day days")  # => Day 57
 
 **テストピラミッド (ML版)**:
 
-```
-        /\
-       /  \  Model Validation Tests (少数・遅い)
-      /____\
-     /      \  Integration Tests (中程度)
-    /________\
-   /          \
-  /__Data_QA__\ Unit Tests + Data Schema Tests (多数・高速)
-```
 
 **Data Quality Tests**:
 
-1. **Schema Validation**: 型・範囲・必須フィールド
-   ```julia
-   @test all(0 .<= data.age .<= 120)  # Age range check
-   @test eltype(data.price) <: Real   # Type check
-   ```
+1. **Schema Validation**: 型・範囲・必須フィールド（age 0-120 範囲検査、price 実数型検査等）
 
-2. **Statistical Tests**: 分布の一貫性
-   ```julia
-   # Mean should be within 3σ of training data
-   @test abs(mean(prod_data) - μ_train) < 3 * σ_train
-   ```
+2. **Statistical Tests**: 分布の一貫性（平均が訓練データの3σ以内であることを確認）
 
 3. **Feature Correlation**: 特徴量間の相関変化検出
    $$
@@ -1291,22 +1200,11 @@ println("Retrain after $first_retrain_day days")  # => Day 57
 
 **Model Quality Tests**:
 
-1. **Invariance Tests**: 入力変換に対する不変性
-   ```julia
-   # Image rotation shouldn't change class (for rotation-invariant tasks)
-   @test predict(model, rotate(img, 10°)) == predict(model, img)
-   ```
+1. **Invariance Tests**: 入力変換に対する不変性（回転10°で分類結果不変等）
 
-2. **Directional Expectation Tests**: 入力変化の方向性
-   ```julia
-   # Increasing income should not decrease loan approval probability
-   @test predict_prob(model, income=100k) ≥ predict_prob(model, income=50k)
-   ```
+2. **Directional Expectation Tests**: 入力変化の方向性（収入増 → ローン承認確率不減）
 
 3. **Minimum Functionality Tests**: 簡単なケースは100%正解
-   ```julia
-   @test all(predict(model, obvious_cases) .== ground_truth)
-   ```
 
 #### 3.7.2 Shadow Deployment と Traffic Splitting
 
@@ -1344,25 +1242,34 @@ $$
 - $\sigma^2$: メトリクス分散
 - $\delta$: 検出したい効果サイズ
 
-**数値例**:
+**サンプル数の導出**: 仮説を立てる。
 
-```julia
-# CTR A/B test
-σ = 0.05  # CTR standard deviation
-δ = 0.01  # Detect 1% improvement
-α = 0.05
-β = 0.8
+- $H_0$: $\mu_A = \mu_B$（差なし）
+- $H_1$: $|\mu_A - \mu_B| = \delta$（差が $\delta$ 存在する）
 
-z_α = 1.96
-z_β = 0.84
+各グループの標本平均差は $\bar{X}_A - \bar{X}_B \sim \mathcal{N}(0,\; 2\sigma^2/n)$（$H_0$ 下）。**Type I error 制約** (有意水準 $\alpha$) から棄却域の境界を $z_{\alpha/2}$ と置く:
 
-n = ceil(Int, 2 * (z_α + z_β)^2 * σ^2 / δ^2)
-println("Required sample size per group: $n")  # => 768 samples
-```
+$$
+\frac{|\bar{X}_A - \bar{X}_B|}{\sqrt{2\sigma^2/n}} > z_{\alpha/2} \quad \Longleftrightarrow \quad \text{reject } H_0
+$$
 
-:::message
-**進捗: 70%完了！** DPO理論、MLOps成熟度、CI/MLを完全理解した。Production E2Eシステムの数学的基盤が揃った！
-:::
+**Type II error 制約** (検出力 $1-\beta$): $H_1$ 下では分布の平均が $\delta$ にシフトするため、$H_1$ 下で棄却域に入る確率が $1-\beta$ になる条件は:
+
+$$
+\frac{\delta}{\sqrt{2\sigma^2/n}} = z_{\alpha/2} + z_\beta
+$$
+
+$\sqrt{n}$ について解き両辺を二乗すると:
+
+$$
+n = \frac{2(z_{\alpha/2} + z_\beta)^2 \sigma^2}{\delta^2}
+$$
+
+**核心**: $n \propto 1/\delta^2$——検出したい効果が半分になるとサンプル数は 4 倍必要。これが A/B テストで大量トラフィックを要する本質的な理由だ。
+
+**数値例**: $\sigma=0.05$, $\delta=0.01$, $\alpha=0.05$, $\beta=0.8$ → 各グループ必要サンプル数 $n=768$。
+
+> **Note:** **進捗: 70%完了！** DPO理論、MLOps成熟度、CI/MLを完全理解した。Production E2Eシステムの数学的基盤が揃った！
 
 ---
 
@@ -1413,28 +1320,7 @@ $$
 
 例: SLO = 99.9%, 月間100万リクエスト → Error Budget = 1,000リクエスト
 
-**数値検証** (Julia):
-
-```julia
-# Monthly requests
-N_total = 1_000_000
-SLO_availability = 0.999
-
-# Error budget
-error_budget = (1 - SLO_availability) * N_total  # => 1,000
-
-# Current errors
-N_errors = 450
-
-# Remaining budget
-remaining = error_budget - N_errors  # => 550
-burn_rate = N_errors / (N_total * 0.5)  # Current month half-way
-
-println("Error Budget: $error_budget")
-println("Used: $N_errors ($(100*N_errors/error_budget)%)")
-println("Remaining: $remaining")
-println("Burn Rate: $(round(burn_rate, digits=4))")
-```
+**数値検証**: 月100万リクエスト、SLO=99.9% → Error Budget=1,000。現在450エラー使用、残り550。
 
 #### 3.8.2 Prediction Drift vs Label Drift
 
@@ -1465,23 +1351,7 @@ $$
 1. **Immediate Detection** (Prediction Drift): リアルタイム、ラベル不要
 2. **Delayed Detection** (Label Drift): ラベル取得後 (数日〜数週間)
 
-**数値例**:
-
-```julia
-# Training: Binary classification, p(y=1) = 0.3
-p_train_pos = 0.3
-
-# Production: p(y=1) = 0.5 (label drift!)
-p_prod_pos = 0.5
-
-# KL divergence for label distribution
-function binary_kl(p, q)
-    return p * log(p / q) + (1 - p) * log((1 - p) / (1 - q))
-end
-
-D_label = binary_kl(p_prod_pos, p_train_pos)
-println("Label Drift KL: $(round(D_label, digits=4))")  # => 0.0513
-```
+**数値例**: $p_{\text{train}}(y=1)=0.3$ → $p_{\text{prod}}(y=1)=0.5$ のラベルドリフトで KL ≈ 0.0513。
 
 #### 3.8.3 Explainability Monitoring (SHAP値の分布変化)
 
@@ -1514,24 +1384,7 @@ $$
 
 典型的な閾値: $\tau_{\text{KS}} = 0.15$
 
-**数値検証** (Julia with SHAP.jl concept):
-
-```julia
-using HypothesisTests
-
-# Training SHAP values for feature "age" (N=1000 samples)
-shap_age_train = randn(1000) .* 0.5 .+ 0.2
-
-# Production SHAP values (shifted distribution)
-shap_age_prod = randn(1000) .* 0.6 .+ 0.35
-
-# KS test
-ks_test = ApproximateTwoSampleKSTest(shap_age_train, shap_age_prod)
-D_KS = ks_test.δ
-
-println("KS Statistic for SHAP(age): $(round(D_KS, digits=4))")
-println("Alert: $(D_KS > 0.15)")  # => true if significant shift
-```
+**数値検証**: SHAP値分布 $N(0.2,0.5^2)$ vs $N(0.35,0.6^2)$ でKS統計量が0.15超 → Alert発火。
 
 #### 3.8.4 Feedback Loop Stability Analysis
 
@@ -1623,31 +1476,7 @@ $$
 
 高ROIメトリクスから順に監視を追加。
 
-**数値例**:
-
-```julia
-# Metrics candidates
-metrics = [
-    (name="Latency P99", EV=50_000, cost=200),
-    (name="SHAP Drift", EV=30_000, cost=800),
-    (name="Feature Correlation", EV=10_000, cost=500),
-    (name="Prediction Entropy", EV=5_000, cost=100)
-]
-
-# Calculate ROI
-roi_list = [(m.name, m.EV / m.cost) for m in metrics]
-sort!(roi_list, by=x->x[2], rev=true)
-
-println("Monitoring Priority (by ROI):")
-for (name, roi) in roi_list
-    println("  $name: ROI = $(round(roi, digits=2))")
-end
-# Output:
-#   Latency P99: ROI = 250.0
-#   Prediction Entropy: ROI = 50.0
-#   SHAP Drift: ROI = 37.5
-#   Feature Correlation: ROI = 20.0
-```
+**数値例**: ROI順 → Latency P99 (250.0) > Prediction Entropy (50.0) > SHAP Drift (37.5) > Feature Correlation (20.0)。
 
 ### 3.9 Continual Learning の理論的深掘り
 
@@ -1680,35 +1509,6 @@ $$
 重要なパラメータ (大きな $F_{ii}$) の変更にペナルティ。
 
 **Memory Efficiency**: FIMは $O(d)$ (対角のみ保存)、元データは不要。
-
-**数値検証**:
-
-```julia
-# Simplified FIM calculation (diagonal)
-function compute_fisher_diagonal(model, data, params)
-    fisher = zero(params)
-
-    for (x, y) in data
-        # Gradient of log-likelihood
-        grads = gradient(params) do p
-            logp = log_likelihood(model, x, y, p)
-            return logp
-        end
-
-        # Square of gradients
-        fisher .+= grads .^ 2
-    end
-
-    fisher ./= length(data)  # Average
-    return fisher
-end
-
-# EWC loss
-function ewc_loss(params, params_old, fisher, λ, new_loss)
-    penalty = λ / 2 * sum(fisher .* (params .- params_old).^2)
-    return new_loss + penalty
-end
-```
 
 #### 3.9.2 Progressive Neural Networks
 
@@ -1754,178 +1554,49 @@ $$
 
 **Production応用**: 新ユーザー・新ドメインへの高速適応。
 
-```julia
-# MAML pseudocode (conceptual)
-function maml_meta_update(tasks, θ, α, β)
-    meta_grad = zero(θ)
-
-    for task in tasks
-        # Inner loop: 1-step adaptation
-        θ_adapted = θ - α * gradient(task.loss, θ)
-
-        # Outer loop: meta gradient
-        meta_grad .+= gradient(task.loss, θ_adapted)
-    end
-
-    # Meta update
-    θ_new = θ - β * meta_grad / length(tasks)
-    return θ_new
-end
-```
-
-:::message
-**進捗: 90%完了！** Monitoring理論、Continual Learning、MAMLまで完全理解した。Production E2Eシステムの全数学が揃った！
-:::
+> **Note:** **進捗: 90%完了！** Monitoring理論、Continual Learning、MAMLまで完全理解した。Production E2Eシステムの全数学が揃った！
 
 ---
 
 
-## 記法規約
+## 参考文献
 
-### 数学記法
+[^1]: (2024). Maximally Separated Active Learning. arXiv:2411.17444.
+<https://arxiv.org/abs/2411.17444>
 
-| 記号 | 意味 | 例 |
-|------|------|-----|
-| $\theta$ | モデルパラメータ | $\theta \in \mathbb{R}^d$ |
-| $\mathcal{L}$ | 損失関数 | $\mathcal{L}(\theta) = \text{MSE}$ |
-| $\nabla_\theta$ | パラメータに関する勾配 | $\nabla_\theta \mathcal{L}$ |
-| $\mathbb{E}_{x \sim p}$ | 分布$p$に関する期待値 | $\mathbb{E}_{x \sim \mathcal{D}}[f(x)]$ |
-| $\mathcal{D}_{\text{pool}}$ | ラベルなしデータプール | Active Learning用 |
-| $x^{(i)}$ | $i$番目のサンプル | $(x^{(1)}, y^{(1)}), \ldots$ |
-| $\mathcal{H}$ | エントロピー | $\mathcal{H}(p) = -\sum p \log p$ |
-| $\text{MI}(X;Y)$ | 相互情報量 | $\text{MI}(y;\theta \mid x, \mathcal{D})$ |
+[^2]: Pangakis, N. & Wolken, S. (2024). Keeping Humans in the Loop: Human-Centered Automated Annotation with Generative AI. arXiv:2409.09467.
+<https://arxiv.org/abs/2409.09467>
 
-### コード規約
+[^3]: (2021). Convergence of Uncertainty Sampling. arXiv:2110.15784.
+<https://arxiv.org/abs/2110.15784>
 
-**Julia**:
-```julia
-# 関数名: snake_case
-function train_model(data::Matrix, labels::Vector)
-    # ...
-end
+[^4]: (2024). Mathematical Model of the Hidden Feedback Loop Effect. arXiv:2405.02726.
+<https://arxiv.org/abs/2405.02726>
 
-# 型名: PascalCase
-struct TrainingPipeline
-    model::Lux.AbstractExplicitLayer
-end
+[^5]: Rafailov, R. et al. (2023). Direct Preference Optimization: Your Language Model is Secretly a Reward Model. NeurIPS 2023. arXiv:2305.18290.
+<https://arxiv.org/abs/2305.18290>
 
-# 定数: UPPER_CASE
-const BATCH_SIZE = 32
-```
+[^6]: (2025). Reinforcement Learning from User Feedback. arXiv:2505.14946.
+<https://arxiv.org/abs/2505.14946>
 
-**Rust**:
-```rust
-// 関数名: snake_case
-pub fn run_inference(input: &[f32]) -> Vec<f32> {
-    // ...
-}
+[^7]: Hu, S. et al. (2024). OpenRLHF: An Easy-to-use, Scalable and High-performance RLHF Framework. arXiv:2405.11143.
+<https://arxiv.org/abs/2405.11143>
 
-// 型名: PascalCase
-pub struct InferenceEngine {
-    session: Session,
-}
+[^8]: Google Cloud. (2021). MLOps: Continuous delivery and automation pipelines in machine learning. [cloud.google.com](https://cloud.google.com/architecture/mlops-continuous-delivery-and-automation-pipelines-in-machine-learning)
 
-// 定数: SCREAMING_SNAKE_CASE
-const MAX_BATCH_SIZE: usize = 128;
-```
-
-**Elixir**:
-```elixir
-# 関数名: snake_case
-def process_request(request) do
-  # ...
-end
-
-# モジュール名: PascalCase
-defmodule FeedbackCollector do
-  # ...
-end
-
-# アトム: lowercase
-:ok, :error, :rate_limited
-```
-
-### アーキテクチャ図記法
-
-```mermaid
-graph LR
-    A[Component A] -->|REST API| B[Component B]
-    B -->|gRPC| C[Component C]
-    C -.->|Async| D[(Database)]
-
-    style A fill:#4ecdc4,stroke:#1a535c
-    style B fill:#ffe66d,stroke:#ff6b6b
-    style C fill:#95e1d3,stroke:#38ada9
-    style D fill:#f38181,stroke:#aa4465
-```
-
-- **実線**: 同期通信 (REST, gRPC)
-- **点線**: 非同期通信 (Message Queue, Event)
-- **円柱**: データストア (DB, Cache)
-- **色**: 言語別 (🦀 Rust=青, ⚡ Julia=黄, 🔮 Elixir=緑)
-
----
-
-:::message
-**🎓 Course III完全制覇おめでとう！**
-
-あなたは今、以下のスキルを獲得した:
-1. ✅ 理論（Course I-II）→ 実装（Course III）の完全橋渡し
-2. ✅ Julia/Rust/Elixir 3言語でのProduction E2Eシステム構築力
-3. ✅ 訓練→推論→配信→フィードバック→継続学習の実装
-4. ✅ 負荷テスト・Chaos Engineering・MLOpsの実践知識
-
-**ここから2つのルートが分岐する**:
-
-**🌊 Course IV: 拡散モデル理論深化（第33-42回、全10回）**
-- Normalizing Flows → EBM → Score Matching → DDPM → SDE → Flow Matching → LDM → Consistency Models → World Models → 統一理論
-- 「拡散モデル論文の理論セクションが導出できる」数学力を獲得
-- 密度モデリングの論理的チェーンを完全踏破
-
-**🎨 Course V: ドメイン特化応用（第43-50回、全8回）**
-- Vision・Audio・RL・Protein・Molecule・Climate・Robot・Simulation
-- 各ドメインの最新SOTA技術を実装
-- 実世界問題への適用力を鍛える
-
-**Course IVとVは独立** — どちらから始めても良い。両方履修で全50回完全制覇。
-
-**次回予告: 第33回 Normalizing Flows — 可逆変換で厳密尤度を手に入れる**
-:::
-
----
-
-### 主要論文
-
-[^1]: Wang, K. et al. (2024). Maximally Separated Active Learning. arXiv:2411.17444.
-@[card](https://arxiv.org/abs/2411.17444)
-
-[^2]: Kingma, D. P., & Welling, M. (2013). Auto-Encoding Variational Bayes. arXiv:1312.6114.
-@[card](https://arxiv.org/abs/1312.6114)
-
-[^3]: Goodfellow, I. et al. (2014). Generative Adversarial Networks. arXiv:1406.2661.
-@[card](https://arxiv.org/abs/1406.2661)
-
-[^4]: Perdomo, J. et al. (2024). Mathematical Model of the Hidden Feedback Loop Effect. arXiv:2405.02726.
-@[card](https://arxiv.org/abs/2405.02726)
-
-[^5]: Rafailov, R. et al. (2023). Direct Preference Optimization: Your Language Model is Secretly a Reward Model. arXiv:2305.18290.
-@[card](https://arxiv.org/abs/2305.18290)
-
-[^6]: Liu, T. et al. (2025). Reinforcement Learning from User Feedback. arXiv:2505.14946.
-@[card](https://arxiv.org/abs/2505.14946)
-
-[^7]: Hu, J. et al. (2024). OpenRLHF: An Easy-to-use, Scalable and High-performance RLHF Framework. arXiv:2405.11143.
-@[card](https://arxiv.org/abs/2405.11143)
-
-[^8]: Google Cloud. (2021). MLOps: Continuous delivery and automation pipelines in machine learning.
-@[card](https://cloud.google.com/architecture/mlops-continuous-delivery-and-automation-pipelines-in-machine-learning)
-
-[^9]: Kirkpatrick, J. et al. (2017). Overcoming catastrophic forgetting in neural networks. Proceedings of the National Academy of Sciences, 114(13), 3521-3526.
+[^9]: Kirkpatrick, J. et al. (2017). Overcoming catastrophic forgetting in neural networks. PNAS. arXiv:1612.00796.
+<https://arxiv.org/abs/1612.00796>
 
 [^10]: Finn, C., Abbeel, P., & Levine, S. (2017). Model-Agnostic Meta-Learning for Fast Adaptation of Deep Networks. ICML 2017. arXiv:1703.03400.
-@[card](https://arxiv.org/abs/1703.03400)
+<https://arxiv.org/abs/1703.03400>
 
----
+## 著者リンク
+
+- Blog: https://fumishiki.dev
+- X: https://x.com/fumishiki
+- LinkedIn: https://www.linkedin.com/in/fumitakamurakami
+- GitHub: https://github.com/fumishiki
+- Hugging Face: https://huggingface.co/fumishiki
 
 ## ライセンス
 

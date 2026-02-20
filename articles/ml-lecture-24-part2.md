@@ -4,7 +4,15 @@ emoji: "📈"
 type: "tech"
 topics: ["machinelearning", "statistics", "julia", "bayesian", "hypothesis"]
 published: true
+slug: "ml-lecture-24-part2"
+difficulty: "advanced"
+time_estimate: "90 minutes"
+languages: ["Julia", "Rust", "Elixir"]
+keywords: ["機械学習", "深層学習", "生成モデル"]
 ---
+
+> **第24回【前編】**: [第24回【前編】](https://zenn.dev/fumishiki/ml-lecture-24-part1)
+
 ## Part 2
 
 
@@ -99,9 +107,7 @@ test = MannWhitneyUTest(group1, group2)
 println("U=$(test.U), p=$(round(pvalue(test), digits=4))")
 ```
 
-:::message
-**進捗: 65% 完了** パラメトリック・ノンパラメトリック検定の理論完全版を制覇。多重比較補正へ。
-:::
+> **Note:** **進捗: 65% 完了** パラメトリック・ノンパラメトリック検定の理論完全版を制覇。多重比較補正へ。
 
 ### 3.6 多重比較補正理論
 
@@ -185,9 +191,7 @@ Bonferroni: 3 / 110 が有意
 Benjamini-Hochberg: 9 / 110 が有意
 ```
 
-:::message
-**進捗: 75% 完了** 多重比較補正（FWER/FDR）を完全理解。GLM理論へ。
-:::
+> **Note:** **進捗: 75% 完了** 多重比較補正（FWER/FDR）を完全理解。GLM理論へ。
 
 ### 3.7 一般化線形モデル（GLM）
 
@@ -341,9 +345,7 @@ $$
 2. **線形予測子**: $\eta = X\beta$
 3. **リンク関数**: $g(\mu) = \eta$（標準的リンク関数: $g(\mu) = \theta$）
 
-:::message
-**進捗: 80% 完了** GLM理論（ロジスティック・ポアソン回帰・指数型分布族）を理解。ベイズ統計へ。
-:::
+> **Note:** **進捗: 80% 完了** GLM理論（ロジスティック・ポアソン回帰・指数型分布族）を理解。ベイズ統計へ。
 
 ### 3.8 ベイズ統計入門
 
@@ -511,9 +513,7 @@ chain = sample(coinflip([data]), NUTS(), 1000)
 plot(chain)
 ```
 
-:::message
-**進捗: 90% 完了** ベイズ統計（共役事前分布・MCMC）を完全理解。実験計画法へ。
-:::
+> **Note:** **進捗: 90% 完了** ベイズ統計（共役事前分布・MCMC）を完全理解。実験計画法へ。
 
 ### 3.9 実験計画法（Experimental Design）
 
@@ -578,24 +578,28 @@ $$
 
 この問いに完全な答えはない。だが**統計学は道具であり、道具の使い方次第で科学的誠実さが問われる**ことを忘れてはならない。
 
-:::message
-**進捗: 100% 完了** 🎉 講義完走！
-:::
+> **Note:** **進捗: 100% 完了** 🎉 講義完走！
 
 ---
+
+
+> Progress: [85%]
+> **理解度チェック**
+> 1. ANOVAのF統計量が群間分散と群内分散の比で構成される数学的意味を述べよ。
+> 2. ロジスティック回帰のリンク関数がlogitである理由を確率の範囲の制約から説明せよ。
 
 ## 参考文献
 
 ### 主要論文
 
 [^1]: Neyman, J., & Pearson, E. S. (1928). *On the Use and Interpretation of Certain Test Criteria for Purposes of Statistical Inference: Part I*. Biometrika.
-@[card](https://www.jstor.org/stable/2331945)
+<https://www.jstor.org/stable/2331945>
 
 [^2]: Benjamini, Y., & Hochberg, Y. (1995). *Controlling the False Discovery Rate: A Practical and Powerful Approach to Multiple Testing*. Journal of the Royal Statistical Society: Series B.
-@[card](https://doi.org/10.1111/j.2517-6161.1995.tb02031.x)
+<https://doi.org/10.1111/j.2517-6161.1995.tb02031.x>
 
 [^3]: Hastings, W. K. (1970). *Monte Carlo Sampling Methods Using Markov Chains and Their Applications*. Biometrika.
-@[card](https://doi.org/10.1093/biomet/57.1.97)
+<https://doi.org/10.1093/biomet/57.1.97>
 
 
 ### 教科書
@@ -612,49 +616,6 @@ $$
 - [HypothesisTests.jl Documentation](https://juliastats.org/HypothesisTests.jl/stable/)
 - [GLM.jl Documentation](https://juliastats.org/GLM.jl/stable/)
 - [Turing.jl Documentation](https://turinglang.org/stable/)
-
----
-
-## 記法規約
-
-| 記号 | 意味 | 備考 |
-|:-----|:-----|:-----|
-| $\bar{x}$ | 標本平均 | $\bar{x} = \frac{1}{n} \sum_{i=1}^n x_i$ |
-| $s^2$ | 標本分散（不偏） | $s^2 = \frac{1}{n-1} \sum (x_i - \bar{x})^2$ |
-| $s$ | 標本標準偏差 | $s = \sqrt{s^2}$ |
-| $\mu$ | 母平均 | 母集団の期待値 |
-| $\sigma^2$ | 母分散 | 母集団の分散 |
-| $\text{SE}$ | 標準誤差 | $\text{SE} = \sigma / \sqrt{n} \approx s / \sqrt{n}$ |
-| $\alpha$ | 有意水準 | 第1種過誤率（通常0.05） |
-| $\beta$ | 第2種過誤率 | $1 - \beta$ = 検出力 |
-| $H_0$ | 帰無仮説 | 「差がない」「効果がない」 |
-| $H_1$ | 対立仮説 | 「差がある」「効果がある」 |
-| $p$ | p値 | $H_0$下での極端値の確率 |
-| $d$ | Cohen's d | 効果量 $d = \frac{\bar{x}_1 - \bar{x}_2}{s_{\text{pooled}}}$ |
-| $t$ | t統計量 | t検定の検定統計量 |
-| $F$ | F統計量 | ANOVAの検定統計量 |
-| $\text{df}$ | 自由度 | 推定に使える独立な情報の数 |
-| $\text{CI}$ | 信頼区間 | Confidence Interval |
-| $\text{FWER}$ | 家族誤差率 | Family-Wise Error Rate |
-| $\text{FDR}$ | 偽発見率 | False Discovery Rate |
-| $\theta$ | パラメータ | ベイズ統計での推定対象 |
-| $p(\theta \| D)$ | 事後分布 | データ観測後のパラメータ分布 |
-| $p(D \| \theta)$ | 尤度 | パラメータ下でのデータの確率 |
-| $p(\theta)$ | 事前分布 | データ観測前のパラメータ分布 |
-
-**統計検定のJulia実装対応**:
-
-| 数式 | Julia実装 |
-|:-----|:----------|
-| $\bar{x} = \frac{1}{n}\sum x_i$ | `mean(x)` |
-| $s^2 = \frac{1}{n-1}\sum(x_i - \bar{x})^2$ | `var(x)` |
-| $t = \frac{\bar{x} - \mu_0}{s/\sqrt{n}}$ | `OneSampleTTest(x, μ₀)` |
-| $p\text{-value}$ | `pvalue(test)` |
-| $\alpha_{\text{Bonf}} = \alpha / m$ | `adjust(PValues(p), Bonferroni())` |
-| $\text{logit}(p) = \log\frac{p}{1-p}$ | `glm(@formula(y ~ x), df, Binomial(), LogitLink())` |
-| $p(\theta \| D) \propto p(D \| \theta) p(\theta)$ | `@model function model(D) ... end` + `sample(...)` |
-
----
 
 ---
 
@@ -1037,16 +998,9 @@ using Distributions, Optim
 # ZIP尤度関数
 function zip_loglik(params, y)
     π, λ = params[1], exp(params[2])  # λ > 0を保証
-
-    ll = 0.0
-    for yi in y
-        if yi == 0
-            ll += log(π + (1 - π) * exp(-λ))
-        else
-            ll += log(1 - π) + logpdf(Poisson(λ), yi)
-        end
-    end
-    return -ll  # 負の対数尤度（最小化）
+    ll_zero  = log(π + (1 - π) * exp(-λ))
+    ll_pos(yi) = log(1 - π) + logpdf(Poisson(λ), yi)
+    -sum(yi == 0 ? ll_zero : ll_pos(yi) for yi in y)  # 負の対数尤度（最小化）
 end
 
 # データ生成: ゼロ過剰
@@ -1054,14 +1008,7 @@ true_π = 0.3
 true_λ = 2.0
 n = 1000
 
-y = zeros(Int, n)
-for i in 1:n
-    if rand() < true_π
-        y[i] = 0  # 構造的ゼロ
-    else
-        y[i] = rand(Poisson(true_λ))
-    end
-end
+y = [rand() < true_π ? 0 : rand(Poisson(true_λ)) for _ in 1:n]
 
 println("ゼロの割合: $(sum(y .== 0) / n) (理論値: $(true_π + (1-true_π)*exp(-true_λ)))")
 
@@ -1090,13 +1037,13 @@ $$
 **Julia実装例**:
 
 ```julia
-using Statistics, Plots
+using LinearAlgebra, Statistics, Plots
 
-# AR(1)プロセスのシミュレーション
+# AR(1)プロセスのシミュレーション（逐次的: @inbounds で高速化）
 function ar1_simulate(ϕ, σ, n)
     y = zeros(n)
     y[1] = randn() * σ / sqrt(1 - ϕ^2)  # 定常分布から初期値
-    for t in 2:n
+    @inbounds for t in 2:n
         y[t] = ϕ * y[t-1] + randn() * σ
     end
     return y
@@ -1109,21 +1056,13 @@ n = 200
 
 y = ar1_simulate(ϕ, σ, n)
 
-# 自己相関関数（ACF）
+# 自己相関関数（ACF）: @views でゼロコピースライス、dot で内積
 function acf(x, max_lag)
-    n = length(x)
-    x_centered = x .- mean(x)
-    c0 = sum(x_centered.^2) / n
-
-    acf_vals = zeros(max_lag + 1)
-    acf_vals[1] = 1.0
-
-    for k in 1:max_lag
-        ck = sum(x_centered[1:(n-k)] .* x_centered[(k+1):n]) / n
-        acf_vals[k+1] = ck / c0
-    end
-
-    return acf_vals
+    n  = length(x)
+    x_c = x .- mean(x)
+    c0  = dot(x_c, x_c) / n
+    ck(k) = @views dot(x_c[1:n-k], x_c[k+1:n]) / (n * c0)
+    [1.0; [ck(k) for k in 1:max_lag]]
 end
 
 acf_vals = acf(y, 20)
@@ -1170,7 +1109,7 @@ $$
 ```julia
 using LinearAlgebra
 
-# カルマンフィルタ実装
+# カルマンフィルタ実装（逐次的: @views + @inbounds で最適化）
 function kalman_filter(y, F, H, Q, R, x0, P0)
     n = length(y)
     d = length(x0)
@@ -1180,21 +1119,23 @@ function kalman_filter(y, F, H, Q, R, x0, P0)
     P_pred = zeros(d, d, n)
     P_filt = zeros(d, d, n)
 
-    x_filt[:, 1] = x0
-    P_filt[:, :, 1] = P0
+    @views x_filt[:, 1]    .= x0
+    @views P_filt[:, :, 1] .= P0
 
-    for t in 2:n
-        # 予測ステップ
-        x_pred[:, t] = F * x_filt[:, t-1]
-        P_pred[:, :, t] = F * P_filt[:, :, t-1] * F' + Q
+    @inbounds for t in 2:n
+        @views begin
+            # 予測ステップ
+            x_pred[:, t]    .= F * x_filt[:, t-1]
+            P_pred[:, :, t] .= F * P_filt[:, :, t-1] * F' + Q
 
-        # 更新ステップ
-        innovation = y[t] - H * x_pred[:, t]
-        S = H * P_pred[:, :, t] * H' + R
-        K = P_pred[:, :, t] * H' / S
+            # 更新ステップ
+            innovation = y[t] - H * x_pred[:, t]
+            S = H * P_pred[:, :, t] * H' + R
+            K = P_pred[:, :, t] * H' / S  # スカラー S のとき / で OK
 
-        x_filt[:, t] = x_pred[:, t] + K * innovation
-        P_filt[:, :, t] = (I - K * H) * P_pred[:, :, t]
+            x_filt[:, t]    .= x_pred[:, t] + K * innovation
+            P_filt[:, :, t] .= (I - K * H) * P_pred[:, :, t]
+        end
     end
 
     return x_filt, P_filt
@@ -1374,18 +1315,15 @@ function waic(chain, model, data)
     S = size(chain, 1)
 
     log_lik = zeros(S, n)
-    for s in 1:S
+    @inbounds for s in 1:S
         θ = chain[s, :]
-        for i in 1:n
-            log_lik[s, i] = logpdf(Normal(θ.μ, θ.σ), data[i])
-        end
+        @views log_lik[s, :] .= logpdf.(Normal(θ.μ, θ.σ), data)
     end
 
-    lppd = sum(log.(mean(exp.(log_lik), dims=1)))
+    lppd   = sum(log.(mean(exp.(log_lik), dims=1)))
     p_waic = sum(var(log_lik, dims=1))
 
-    waic_val = -2 * (lppd - p_waic)
-    return (waic=waic_val, lppd=lppd, p_waic=p_waic)
+    return (; waic = -2(lppd - p_waic), lppd, p_waic)
 end
 
 # モデル比較
@@ -1530,28 +1468,23 @@ $$
 ```julia
 using LinearAlgebra, Plots
 
-# RBFカーネル
-function rbf_kernel(x1, x2; σ=1.0, ℓ=1.0)
-    σ^2 * exp(-(x1 - x2)^2 / (2 * ℓ^2))
-end
+# RBFカーネル（短形式）
+rbf_kernel(x1, x2; σ=1.0, ℓ=1.0) = σ^2 * exp(-(x1-x2)^2 / (2ℓ^2))
 
-# ガウス過程回帰
+# ガウス過程回帰: A\b で inv(A)*b より数値安定
 function gp_predict(X_train, y_train, X_test; σ=1.0, ℓ=1.0, σ_n=0.1)
-    n_train = length(X_train)
-    n_test = length(X_test)
+    # カーネル行列（2D内包表記）
+    K    = [rbf_kernel(xi, xj; σ, ℓ) for xi in X_train, xj in X_train]
+    K_s  = [rbf_kernel(xs, xj; σ, ℓ) for xs in X_test,  xj in X_train]
+    K_ss = [rbf_kernel(xs, xt; σ, ℓ) for xs in X_test,  xt in X_test ]
 
-    # カーネル行列
-    K = [rbf_kernel(X_train[i], X_train[j]; σ=σ, ℓ=ℓ) for i in 1:n_train, j in 1:n_train]
-    K_s = [rbf_kernel(X_test[i], X_train[j]; σ=σ, ℓ=ℓ) for i in 1:n_test, j in 1:n_train]
-    K_ss = [rbf_kernel(X_test[i], X_test[j]; σ=σ, ℓ=ℓ) for i in 1:n_test, j in 1:n_test]
+    # 予測: A \ b は inv(A)*b より数値安定（Cholesky / LU 自動選択）
+    K_reg  = K + σ_n^2 * I
+    α      = K_reg \ y_train
+    μ_pred = K_s * α
+    Σ_pred = K_ss - K_s * (K_reg \ K_s')
 
-    # 予測
-    K_inv = inv(K + σ_n^2 * I)
-    μ_pred = K_s * K_inv * y_train
-    Σ_pred = K_ss - K_s * K_inv * K_s'
-
-    σ_pred = sqrt.(diag(Σ_pred))
-    return μ_pred, σ_pred
+    return μ_pred, sqrt.(diag(Σ_pred))
 end
 
 # テストデータ
@@ -1648,15 +1581,14 @@ chain = sample(normal_model(y_obs), NUTS(), 1000)
 
 # 事後予測サンプル生成
 y_rep = zeros(1000, length(y_obs))
-for s in 1:1000
-    μ_s = chain[:μ][s]
-    σ_s = chain[:σ][s]
-    y_rep[s, :] = rand(Normal(μ_s, σ_s), length(y_obs))
+@inbounds for s in 1:1000
+    μ_s, σ_s = chain[:μ][s], chain[:σ][s]
+    @views y_rep[s, :] .= rand(Normal(μ_s, σ_s), length(y_obs))
 end
 
 # 検証: 平均と標準偏差
-test_stat_obs = [mean(y_obs), std(y_obs)]
-test_stat_rep = [[mean(y_rep[s, :]), std(y_rep[s, :])] for s in 1:1000]
+test_stat_obs = (mean(y_obs), std(y_obs))
+test_stat_rep = [@views (mean(y_rep[s, :]), std(y_rep[s, :])) for s in 1:1000]
 
 # プロット
 scatter([t[1] for t in test_stat_rep], [t[2] for t in test_stat_rep],
@@ -1693,28 +1625,31 @@ function loo_cv(chain, model, data)
     S = size(chain, 1)
 
     log_lik = zeros(S, n)
-    for s in 1:S
+    @inbounds for s in 1:S
         θ = chain[s, :]
-        for i in 1:n
-            log_lik[s, i] = logpdf(Normal(θ.μ, θ.σ), data[i])
-        end
+        @views log_lik[s, :] .= logpdf.(Normal(θ.μ, θ.σ), data)
     end
 
-    # Importance sampling weights
-    loo_vals = zeros(n)
-    for i in 1:n
-        log_lik_i = log_lik[:, i]
-        # Pareto smoothing (simplified)
-        weights = 1 ./ exp.(log_lik_i)
-        loo_vals[i] = log(mean(exp.(log_lik_i)))
-    end
-
-    elpd_loo = sum(loo_vals)
+    # Importance sampling: LOO-CV（Pareto smoothing 簡略版）
+    elpd_loo = sum(@views log(mean(exp.(log_lik[:, i]))) for i in 1:n)
     return elpd_loo
 end
 ```
 
 ---
+
+
+> Progress: [95%]
+> **理解度チェック**
+> 1. MCMCの収束診断指標 $\hat{R}$ が1.0に近いとき何が保証されるか？
+> 2. 統計的有意差と実用的有意差（最小臨床的意義差）が乖離する具体例を挙げよ。
+
+## 著者リンク
+- Blog: https://fumishiki.dev
+- X: https://x.com/fumishiki
+- LinkedIn: https://www.linkedin.com/in/fumitakamurakami
+- GitHub: https://github.com/fumishiki
+- Hugging Face: https://huggingface.co/fumishiki
 
 ## ライセンス
 

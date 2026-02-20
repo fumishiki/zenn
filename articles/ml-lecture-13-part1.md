@@ -4,6 +4,11 @@ emoji: "🔄"
 type: "tech"
 topics: ["machinelearning", "deeplearning", "autoregressive", "julia", "rust"]
 published: true
+slug: "ml-lecture-13-part1"
+difficulty: "advanced"
+time_estimate: "90 minutes"
+languages: ["Julia", "Rust"]
+keywords: ["機械学習", "深層学習", "生成モデル"]
 ---
 
 # 第13回: 自己回帰モデル — 連鎖律が生成の全てである
@@ -16,9 +21,7 @@ VAEは潜在空間で近似推論をした。GANは暗黙的密度で敵対的�
 
 本講義はCourse II「生成モデル理論編」第5回 — VAE/GANに続く第三の道、自己回帰モデルの理論と実装を完全制覇する。
 
-:::message
-**このシリーズについて**: 東京大学 松尾・岩澤研究室動画講義の**完全上位互換**の全50回シリーズ。理論(論文が書ける)、実装(Production-ready)、最新(2025-2026 SOTA)の3軸で差別化する。Course IIでは生成モデルの3大柱(VAE/GAN/AR)を全て理論的に統一する。
-:::
+> **Note:** **このシリーズについて**: 東京大学 松尾・岩澤研究室動画講義の**完全上位互換**の全50回シリーズ。理論(論文が書ける)、実装(Production-ready)、最新(2025-2026 SOTA)の3軸で差別化する。Course IIでは生成モデルの3大柱(VAE/GAN/AR)を全て理論的に統一する。
 
 ```mermaid
 graph LR
@@ -58,22 +61,22 @@ using Distributions
 # Autoregressive image generation (4x4 grayscale toy example)
 # p(x) = ∏_{i=1}^{16} p(x_i | x_{<i})
 
-function ar_sample_toy(mu_base=0.5, sigma=0.2)
+function ar_sample_toy(μ_base=0.5, σ=0.2)
     img = zeros(4, 4)
     for i in 1:4, j in 1:4
         # Condition on all previous pixels (raster scan: left→right, top→bottom)
-        context = (i == 1 && j == 1) ? mu_base : mean(img[1:i, 1:j][img[1:i, 1:j] .> 0])
+        context = (i == 1 && j == 1) ? μ_base : mean(img[1:i, 1:j][img[1:i, 1:j] .> 0])
         # Sample current pixel: p(x_{i,j} | x_{<(i,j)})
-        img[i, j] = clamp(rand(Normal(context, sigma)), 0, 1)
+        img[i, j] = clamp(rand(Normal(context, σ)), 0, 1)
     end
-    return img
+    img
 end
 
 # Generate 3 samples
 samples = [ar_sample_toy() for _ in 1:3]
-println("Sample 1:\n", round.(samples[1], digits=2))
-println("\nSample 2:\n", round.(samples[2], digits=2))
-println("\nSample 3:\n", round.(samples[3], digits=2))
+for (k, s) in enumerate(samples)
+    println("Sample $k:\n", round.(s; digits=2))
+end
 ```
 
 出力:
@@ -111,9 +114,7 @@ $$
 
 連鎖律により **任意の分布を条件付き分布の積に分解** できる。この分解こそが自己回帰の全てであり、尤度 $p(\mathbf{x})$ が計算可能になる根拠だ。
 
-:::message
-**進捗: 3% 完了** 自己回帰モデルが「条件付き分解で尤度計算可能」な特性を持つことを体感した。ここから理論の深みへ。
-:::
+> **Note:** **進捗: 3% 完了** 自己回帰モデルが「条件付き分解で尤度計算可能」な特性を持つことを体感した。ここから理論の深みへ。
 
 ---
 
@@ -136,53 +137,9 @@ $$
 
 PixelCNN [^1] は **Masked Convolution** で過去のみを参照する。WaveNet [^2] は **Dilated Causal Convolution** で指数的に受容野を広げる。
 
-```julia
-# PixelCNN: masked conv (3x3 kernel, top-left region only visible)
-function masked_conv_example()
-    img = reshape(1:16, 4, 4)  # 4x4 input
-    println("Input:\n", img)
-    # For pixel (2,2), PixelCNN sees: (1,1), (1,2), (2,1) ONLY
-    receptive = [img[1,1], img[1,2], img[2,1]]
-    println("\nPixelCNN receptive field for (2,2): ", receptive)
-end
-
-# WaveNet: dilated causal conv (dilation=1,2,4,...)
-function wavenet_dilated_example()
-    signal = collect(1:16)
-    println("Input signal: ", signal)
-    # Layer 1 (dilation=1): sees [t-1, t]
-    # Layer 2 (dilation=2): sees [t-3, t-1, t]
-    # Layer 3 (dilation=4): sees [t-7, t-3, t-1, t]
-    # Receptive field grows exponentially: 2^L
-    for L in 1:4
-        receptive = 2^L
-        println("Layer $L: receptive field = $receptive steps")
-    end
-end
-
-masked_conv_example()
-println("\n" * "="^50 * "\n")
-wavenet_dilated_example()
-```
 
 出力:
-```
-Input:
- 1   5   9  13
- 2   6  10  14
- 3   7  11  15
- 4   8  12  16
 
-PixelCNN receptive field for (2,2): [1, 5, 2]
-
-==================================================
-
-Input signal: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]
-Layer 1: receptive field = 2 steps
-Layer 2: receptive field = 4 steps
-Layer 3: receptive field = 8 steps
-Layer 4: receptive field = 16 steps
-```
 
 **WaveNetは4層で16ステップの受容野を獲得** — PixelCNNなら16層必要だった。この効率が音声生成の成功につながった。
 
@@ -190,32 +147,9 @@ Layer 4: receptive field = 16 steps
 
 自己回帰モデルは「未来を見てはいけない」。Causal Maskがこれを強制する。
 
-```julia
-# Causal mask for autoregressive attention
-function causal_mask(n::Int)
-    # Lower triangular matrix: position i can only attend to j ≤ i
-    mask = tril(ones(n, n))
-    return mask
-end
-
-# Example: 5-token sequence
-mask = causal_mask(5)
-println("Causal Mask (5 tokens):")
-println(mask)
-println("\nPosition 3 can attend to: ", findall(mask[3, :] .== 1))
-```
 
 出力:
-```
-Causal Mask (5 tokens):
- 1.0  0.0  0.0  0.0  0.0
- 1.0  1.0  0.0  0.0  0.0
- 1.0  1.0  1.0  0.0  0.0
- 1.0  1.0  1.0  1.0  0.0
- 1.0  1.0  1.0  1.0  1.0
 
-Position 3 can attend to: [1, 2, 3]
-```
 
 位置3のトークンは位置1,2,3のみを見る — 4,5は未来なので見えない。この **因果性(causality)保証** が自己回帰の定義だ。
 
@@ -223,51 +157,21 @@ Position 3 can attend to: [1, 2, 3]
 
 自己回帰モデルは尤度 $p(\mathbf{x})$ を **厳密に計算** できる。
 
-```julia
-using Distributions
-
-# Autoregressive likelihood: log p(x) = Σ log p(x_i | x_{<i})
-function ar_log_likelihood(x, model_probs)
-    """
-    x: observed sequence (e.g., [2, 5, 1, 8])
-    model_probs: p(x_i | x_{<i}) for each position (precomputed from model)
-    """
-    log_prob = 0.0
-    for i in 1:length(x)
-        # log p(x_i | x_{<i})
-        log_prob += log(model_probs[i][x[i]])
-    end
-    return log_prob
-end
-
-# Example: 4-token sequence
-x = [2, 5, 1, 8]
-# Mock conditional probabilities (in reality, from PixelCNN/WaveNet forward pass)
-model_probs = [
-    [0.1, 0.6, 0.2, 0.1],  # p(x_1) — position 1
-    [0.05, 0.1, 0.05, 0.05, 0.7, 0.05],  # p(x_2 | x_1=2)
-    [0.8, 0.1, 0.05, 0.05],  # p(x_3 | x_1=2, x_2=5)
-    [0.02, 0.03, 0.05, 0.1, 0.15, 0.05, 0.05, 0.05, 0.5]  # p(x_4 | x_{<4})
-]
-
-ll = ar_log_likelihood(x, model_probs)
-println("Log-likelihood: ", round(ll, digits=4))
-println("Likelihood: ", round(exp(ll), digits=6))
-```
 
 出力:
-```
-Log-likelihood: -1.1787
-Likelihood: 0.307609
-```
+
 
 **VAEはELBO(下界)、GANは尤度計算不可、ARは厳密計算** — この違いが評価・デバッグ・理論研究の全てに影響する。
 
-:::message
-**進捗: 10% 完了** 自己回帰の3本柱を体感: (1) 条件付き分布のモデル化、(2) Causal Masking、(3) 尤度計算可能性。ここから理論的意義と実用性を深掘りする。
-:::
+> **Note:** **進捗: 10% 完了** 自己回帰の3本柱を体感: (1) 条件付き分布のモデル化、(2) Causal Masking、(3) 尤度計算可能性。ここから理論的意義と実用性を深掘りする。
 
 ---
+
+
+> Progress: 10%
+> **理解度チェック**
+> 1. $p(\mathbf{x})$ の各記号の意味と、この式が表す操作を説明してください。
+> 2. このゾーンで学んだ手法の直感的な意味と、なぜこの定式化が必要なのかを説明してください。
 
 ## 🧩 2. 直感ゾーン(15分)— なぜ自己回帰なのか
 
@@ -370,20 +274,26 @@ PixelCNNはConvだがAutoregressive — RNNではない。WaveNetも同様。Tra
 
 **最小コア**: Z0-Z2 + Z3.1-3.3 (55分)で自己回帰の本質は理解できる。PixelCNN/WaveNetは応用として後から戻れる。
 
-:::details 🎯 Trojan Horse: Julia登場の伏線
+<details><summary>🎯 Trojan Horse: Julia登場の伏線</summary>
+
 第9回でRustデビュー(ゼロコピー50x高速)、第10回でJuliaデビュー(多重ディスパッチ+数式1:1対応)を経て、本講義では ⚡Julia と 🦀Rust の **協調** を示す:
 
 - Julia: 訓練ループ(Lux.jl + 多重ディスパッチ)
 - Rust: 推論カーネル(ONNX Runtime + 並列デコード)
 
 PixelCNN訓練をJuliaで書き、推論をRustで高速化 — 「適材適所の多言語戦略」を体感する。Python一本では絶対に到達できない世界だ。
-:::
 
-:::message
-**進捗: 20% 完了** 自己回帰の位置付け(VAE/GANとの違い)、適用範囲、名前の由来、学習戦略を理解した。ここから数式修行ゾーンへ — ARの理論的基盤を完全構築する。
-:::
+</details>
+
+> **Note:** **進捗: 20% 完了** 自己回帰の位置付け(VAE/GANとの違い)、適用範囲、名前の由来、学習戦略を理解した。ここから数式修行ゾーンへ — ARの理論的基盤を完全構築する。
 
 ---
+
+
+> Progress: 20%
+> **理解度チェック**
+> 1. このゾーンの主要な概念・定義を自分の言葉で説明してください。
+> 2. この手法が他のアプローチより優れている点と、その限界を述べてください。
 
 ## 📐 3. 数式修行ゾーン(60分)— 連鎖律からPixelCNN/WaveNetまで
 
@@ -422,30 +332,10 @@ $$
 **これは数学的事実であり、仮定ではない。** 任意の分布を連鎖律で分解できる — これが自己回帰モデルの存在理由だ。
 
 **数値検証**:
-```julia
-using Distributions
 
-# Verify chain rule numerically
-p_joint(x1, x2, x3) = pdf(MvNormal([0,0,0], [1.0 0.5 0.2; 0.5 1.0 0.3; 0.2 0.3 1.0]), [x1, x2, x3])
-p_x1(x1) = pdf(Normal(0, 1), x1)
-p_x2_given_x1(x2, x1) = pdf(Normal(0.5*x1, sqrt(0.75)), x2)
-p_x3_given_x1x2(x3, x1, x2) = pdf(Normal(0.2*x1 + 0.3*x2, sqrt(0.87)), x3)
-
-x = [0.5, 1.0, -0.3]
-joint = p_joint(x...)
-chain = p_x1(x[1]) * p_x2_given_x1(x[2], x[1]) * p_x3_given_x1x2(x[3], x[1], x[2])
-
-println("Joint probability: ", round(joint, digits=6))
-println("Chain rule product: ", round(chain, digits=6))
-println("Relative error: ", round(abs(joint - chain) / joint * 100, digits=4), "%")
-```
 
 出力:
-```
-Joint probability: 0.059823
-Chain rule product: 0.059823
-Relative error: 0.0001%
-```
+
 
 連鎖律は **厳密に成立** する。数値誤差の範囲内で完全に一致する。
 
@@ -480,6 +370,69 @@ $$
 | Multi-scale | 粗→細 | VAR(解像度階層) |
 
 **VAR [^3] の革命**: 順序を「ピクセル単位」から「解像度単位」に変更することで、FID 1.73を達成し、拡散モデルを初めて超えた。順序の選択が性能を大きく左右する。
+
+#### 3.2.1 最適順序の理論 — エントロピーと相互情報量
+
+どの順序が最も「学習しやすい」か、情報理論で議論できる。
+
+**条件付きエントロピーと生成コスト**:
+
+条件付きエントロピー $H(x_i \mid \mathbf{x}_{<i})$ は、位置 $i$ の予測の**難しさ**を表す:
+
+$$
+H(x_i \mid \mathbf{x}_{<i}) = -\sum_{x_i} p(x_i \mid \mathbf{x}_{<i}) \log p(x_i \mid \mathbf{x}_{<i})
+$$
+
+全体のNLLは全位置の条件付きエントロピーの和:
+
+$$
+\mathbb{E}_{\mathbf{x} \sim p_{\text{data}}}[-\log p(\mathbf{x})] = \sum_{i=1}^n H(x_i \mid \mathbf{x}_{<i})
+$$
+
+この値は**順序によらず一定** — 連鎖律の帰結。
+
+$$
+\sum_{i=1}^n H(x_i \mid \mathbf{x}_{<i}) = H(\mathbf{x}) \quad \text{（全ての順序で等しい）}
+$$
+
+**しかし実用上の学習の難しさは順序依存**:
+
+ニューラルネットワークによる近似 $p_\theta(x_i \mid \mathbf{x}_{<i})$ の精度は、条件の**空間的局所性**に依存する。
+
+- **局所的条件**（近傍ピクセルが先行）: 畳み込みで自然にモデル化できる
+- **長距離条件**（遠方ピクセルが先行）: 表現力が必要、学習が難しい
+
+**相互情報量によるペア分析**:
+
+2変数 $x_i, x_j$ の相互情報量:
+
+$$
+I(x_i; x_j) = H(x_i) - H(x_i \mid x_j) = D_{\text{KL}}(p(x_i, x_j) \| p(x_i)p(x_j))
+$$
+
+$I(x_i; x_j)$ が大きいほど「$x_j$ を先に生成すれば $x_i$ の予測が楽になる」。
+
+**グリーディな最適順序**:
+
+$$
+\pi^* = \arg\max_\pi \sum_{i=1}^n I(x_{\pi(i)}; \mathbf{x}_{\pi(<i)})
+$$
+
+この最適順序探索は NP困難（全置換を探索 → $n!$ 通り）。代替として:
+
+1. **ラスタースキャン**: 局所相関を活用、実用的
+2. **ランダム順序 (MADE)**: 複数の順序でアンサンブル、過学習防止
+3. **スケール順序 (VAR)**: グローバル構造（低周波）→ 局所詳細（高周波）の情報階層を活用
+
+**VAR革命の情報理論的解釈**:
+
+スケール $s$ の情報 $\mathbf{z}_s$ は、より粗いスケール $\mathbf{z}_{<s}$ に対する **残差情報** を含む。この残差は空間的に一様（ホワイトノイズ的）で、独立な予測が可能:
+
+$$
+I(\mathbf{z}_s; \mathbf{z}_{<s}) \approx I(\mathbf{z}_s^{\text{global}}; \mathbf{z}_{<s}) \gg I(\mathbf{z}_s^{\text{local}}; \mathbf{z}_{<s})
+$$
+
+グローバルな依存関係はスケールをまたいで存在し、ローカルな詳細は先行スケールでほぼ決まる。これが Next-Scale Prediction の高性能の根拠だ。
 
 ### 3.3 負対数尤度(NLL)と最尤推定
 
@@ -530,6 +483,81 @@ $$
 - 256-wayソフトマックスから $3K$ パラメータ($\pi, \mu, s$ 各 $K$ 個)へ削減
 - 訓練高速化 + 品質向上(CIFAR-10でbits/dim 2.92達成)
 
+#### 3.3.1 Bits-per-dim と Perplexity の完全導出
+
+ARモデルの評価指標として最も使われる「bits per dimension」と「Perplexity」を厳密に導出する。
+
+**Bits-per-dim の定義**:
+
+NLLはnatsで測られる（自然対数）が、**bits-per-dim (BPD)** は情報理論の標準単位（bit）で測る:
+
+$$
+\text{BPD} = \frac{1}{D} \cdot \frac{-\log_2 p(\mathbf{x})}{\log_2 e} = \frac{1}{D \ln 2} \cdot \text{NLL}
+$$
+
+ここで $D$ はデータ次元数（画像なら $H \times W \times C$）。
+
+**直感**: 1次元（ピクセル）の情報を圧縮するのに必要なbit数。完璧な圧縮なら $\text{BPD} = H(X_i \mid \mathbf{X}_{<i})$（条件付きエントロピー）。
+
+**実際の値** (画像生成のbenchmark, CIFAR-10 32×32×3):
+
+| モデル | BPD ↓ | 年 |
+|:-------|:------|:---|
+| PixelCNN | 3.14 | 2016 |
+| Gated PixelCNN | 3.03 | 2016 |
+| PixelCNN++ | 2.92 | 2017 |
+| PixelSNAIL | 2.85 | 2018 |
+| Image Transformer | 2.90 | 2018 |
+
+**数値検証**: CIFAR-10の経験的ピクセルエントロピー $\approx 7.2$ bits（各ピクセルが256値）。BPD 2.92 は、単純な独立分布より**2.47倍**も効率的に圧縮できることを意味する。
+
+**Perplexity の定義**:
+
+言語モデルでよく使われる **Perplexity (PPL)** は指数関数によるNLLの変換:
+
+$$
+\text{PPL}(\mathbf{x}) = \exp\left(-\frac{1}{n}\sum_{i=1}^n \log p(x_i \mid \mathbf{x}_{<i})\right) = 2^{\text{BPD}}
+$$
+
+（ただし言語モデルでは $D = n$ = 系列長）
+
+**直感的解釈**:
+- PPL = 100: モデルは平均的に100択の問題を解いている（100語の語彙から次単語を選ぶ程度の難しさ）
+- PPL = 1: 完璧な予測（次トークンが確実に分かる）
+- PPL → ∞: 全く予測できない
+
+**GPT系モデルの実績**:
+
+| モデル | データ | PPL ↓ |
+|:-------|:-------|:-------|
+| GPT-2 (1.5B) | PTB | 35.8 |
+| GPT-3 (175B) | PTB | **20.5** |
+| Chinchilla | Pile | 7.1 |
+
+**BPDとNLLの数値変換**:
+
+CIFAR-10 $D = 3072$ ピクセルの場合:
+
+$$
+\text{NLL} = D \cdot \ln 2 \cdot \text{BPD} = 3072 \times 0.693 \times 2.92 \approx 6215.4 \text{ nats}
+$$
+
+$$
+p(\mathbf{x}) = e^{-6215.4} \approx 10^{-2698}
+$$
+
+個々の画像の尤度は天文学的に小さい — しかし **相対的な比較**（どのモデルが高い尤度を割り当てるか）が重要なのだ。
+
+**KL発散との関係**:
+
+最適なARモデルが達成できる最小BPDは:
+
+$$
+\text{BPD}_{\min} = \frac{H(p_{\text{data}})}{\ln 2 \cdot D} \quad [\text{bits/dim}]
+$$
+
+ここで $H(p_{\text{data}})$ はデータの真のエントロピー。現在の最良モデル（BPD ≈ 3.2 on ImageNet 256×256）はまだ真のエントロピーよりかなり大きい — 生成モデルの改善余地が残っている。
+
 ### 3.4 PixelCNN — Masked Convolutionの数学
 
 PixelCNN [^1] の核心は **Masked Convolution** — 未来のピクセルを見ないことを保証する。
@@ -538,66 +566,62 @@ PixelCNN [^1] の核心は **Masked Convolution** — 未来のピクセルを�
 
 初期のPixelCNN(van den Oord+ 2016a)は **Blind Spot** という致命的な問題を抱えていた。
 
-```
-Standard Masked Conv (3x3, center pixel):
-  1  1  1
-  1  X  0   ← X = current pixel, 0 = future (masked)
-  0  0  0
-```
 
 これを2層重ねると:
 
-```
-Layer 1 receptive field:   Layer 2 receptive field:
-     1  1  1                    1  1  1  1  1
-     1  X  0                    1  1  1  1  0
-     0  0  0                    1  1  X  0  0
-                                0  0  0  0  0
-                                0  0  0  0  0
-```
 
 **右下の領域が盲点(Blind Spot)になる** — 受容野に入っているはずなのに、マスクで常に遮られて情報が伝わらない。
+
+**Blind Spot の形式的証明**:
+
+Masked Conv Type A (中心を含まない):
+
+$$
+W_A[i,j] = \begin{cases} W[i,j] & \text{if } (i < h/2) \text{ or } (i = h/2, j < w/2) \\ 0 & \text{otherwise} \end{cases}
+$$
+
+ここで $h, w$ はカーネルサイズ、$(h/2, w/2)$ は中心位置。
+
+Type A の受容野（1層後）を $\mathcal{R}_A$ と定義する。中心位置 $(r_0, c_0)$ の特徴の場合:
+
+$$
+\mathcal{R}_A^{(1)} = \{(i, j) : (i < r_0) \text{ or } (i = r_0, j < c_0)\}
+$$
+
+2層スタック後の受容野 $\mathcal{R}_A^{(2)}$:
+
+$$
+\mathcal{R}_A^{(2)} = \bigcup_{(r, c) \in \mathcal{R}_A^{(1)}} \mathcal{R}_A^{(1)}(r, c)
+$$
+
+**問題の発生**: 右上ピクセル $(r_0 - 1, c_0 + 1)$ を考える。
+
+- Layer 1 では $(r_0-1, c_0+1)$ の特徴は $\mathcal{R}_A^{(1)}(r_0-1, c_0+1)$ に含まれる（$r_0-1 < r_0$ だから）
+- しかし Layer 2 で $(r_0, c_0)$ の特徴が $(r_0-1, c_0+1)$ にアクセスするには、Layer 1 で $(r_0-1, c_0+1)$ が選ばれる必要がある
+- ところが $(r_0-1, c_0+1)$ は $\mathcal{R}_A^{(1)}$ に含まれるが、その特徴からの更なる右方向への参照はマスクされる
+
+**Blind Spotの集合**:
+
+$$
+\text{BlindSpot}(\ell, \text{kernel}=k) = \{(i,j) : i = r_0 - s, j > c_0, 1 \leq s \leq \lfloor k/2 \rfloor \cdot \ell\}
+$$
+
+$\ell$ 層後の盲点は「中心より上の行、中心より右の列」の領域 — 層を深くしても**永遠に消えない**。
+
+これが「2段階解決策（Vertical + Horizontal Stack）」の必然性を生む。
 
 #### 3.4.2 Gated PixelCNNの解決策
 
 Gated PixelCNN [^1] は **Vertical Stack** と **Horizontal Stack** の2経路で盲点を解消する:
 
 **Vertical Stack**:
-```
-Vertical Mask (上のみ):
-  1  1  1
-  0  X  0   ← 現在行は見ない
-  0  0  0
-```
+
 
 **Horizontal Stack**:
-```
-Horizontal Mask (左のみ):
-  0  0  0
-  1  X  0   ← 現在行の左のみ
-  0  0  0
-```
+
 
 **接続**: Vertical Stack → Horizontal Stack へ情報を渡す。
 
-```julia
-# Gated PixelCNN architecture (conceptual)
-function gated_pixelcnn_block(v_in, h_in)
-    # Vertical stack: sees above
-    v_conv = masked_conv(v_in, mask=:vertical)  # shape: (H, W, C)
-
-    # Horizontal stack: sees left + receives from vertical
-    h_conv = masked_conv(h_in, mask=:horizontal)
-    h_from_v = conv_1x1(v_conv)  # vertical → horizontal connection
-    h_combined = h_conv .+ h_from_v
-
-    # Gated activation
-    v_out = tanh.(v_conv[:, :, 1:end÷2]) .* sigmoid.(v_conv[:, :, end÷2+1:end])
-    h_out = tanh.(h_combined[:, :, 1:end÷2]) .* sigmoid.(h_combined[:, :, end÷2+1:end])
-
-    return v_out, h_out
-end
-```
 
 **Gated Activation**:
 
@@ -622,18 +646,7 @@ $$
 ここで $\mathbf{h}$ はクラスラベル、テキスト埋め込み、latent codeなど。
 
 実装:
-```julia
-# Conditional PixelCNN: add class embedding to each layer
-function conditional_gated_block(v_in, h_in, class_embed)
-    # class_embed: shape (batch, emb_dim)
-    # Broadcast to spatial dimensions
-    class_spatial = reshape(class_embed, (1, 1, :))  # (1, 1, emb_dim)
 
-    v_conv = masked_conv(v_in, mask=:vertical) .+ class_spatial
-    h_conv = masked_conv(h_in, mask=:horizontal) .+ class_spatial
-    # ... rest same as unconditional
-end
-```
 
 **ImageNetでの成功**: Conditional PixelCNN [^1] はImageNet 64×64で class-conditional生成を実現し、多様で高品質な画像を生成した(2016年時点で画期的)。
 
@@ -681,33 +694,74 @@ WaveNetは **Dilation rateを層ごとに倍増** させる:
 
 $L$ 層で受容野 $2^L$ — 標準Convの $L+1$ と比較して **指数的に大きい**。
 
-```julia
-# WaveNet dilated stack: receptive field calculation
-function wavenet_receptive_field(num_layers, kernel_size=2)
-    dilations = [2^(i-1) for i in 1:num_layers]
-    receptive = 1
-    for d in dilations
-        receptive += (kernel_size - 1) * d
-    end
-    return receptive, dilations
-end
-
-rf, dilations = wavenet_receptive_field(10, 2)
-println("10 layers, kernel=2:")
-println("Dilations: ", dilations)
-println("Receptive field: ", rf, " samples")
-println("At 16kHz: ", round(rf / 16000 * 1000, digits=2), " ms")
-```
 
 出力:
-```
-10 layers, kernel=2:
-Dilations: [1, 2, 4, 8, 16, 32, 64, 128, 256, 512]
-Receptive field: 1024 samples
-At 16kHz: 64.0 ms
-```
+
 
 10層で64msの音声を一度に参照できる — これが音素レベルの文脈を捉える鍵だった。
+
+**受容野設計の情報理論的最適性**:
+
+受容野のサイズと分布は、どのように最適に設計すべきか。
+
+**指数的受容野と音声の自己相関構造**:
+
+音声信号の自己相関関数は、時間ラグ $\tau$ に対して指数的に減衰することが知られている:
+
+$$
+R_{xx}(\tau) = \mathbb{E}[x(t)x(t+\tau)] \approx A \cdot e^{-\alpha|\tau|}
+$$
+
+ここで $\alpha > 0$ は減衰定数（音素の継続時間に依存）。
+
+指数的受容野 $\mathcal{R}^{(L)} = 2^L$ は、この**指数的な相関構造**と完全にマッチする — 層 $\ell$ の受容野が $2^\ell$ のとき、各層が相関のスケール $2^\ell$ を担当する。
+
+**効率比較**:
+
+$T$ ステップの履歴を参照するには:
+
+| アーキテクチャ | 必要な層数 | 計算量（1 forward） |
+|:-------------|:----------|:------------------|
+| 標準Conv ($d=1$, kernel 2) | $T$ 層 | $O(T \cdot n_c^2)$ |
+| WaveNet (Dilated, factor 2) | $\log_2 T$ 層 | $O(\log_2 T \cdot n_c^2)$ |
+| RNN (LSTM/GRU) | 1層 | $O(T \cdot n_c^2)$（逐次） |
+| Transformer | 1層 | $O(T^2 \cdot n_c)$ |
+
+WaveNetは訓練時**完全並列** + $O(\log T)$層という理想的なバランスを実現。
+
+**Dilation factorの一般化**:
+
+WaveNetは factor 2 の指数増加を使うが、一般の factor $b$ では:
+
+$$
+\mathcal{R}^{(L, b)} = \sum_{\ell=1}^L (K-1) \cdot b^{\ell-1} \cdot b + 1 \approx b^L
+$$
+
+ここで $K$ はカーネルサイズ。
+
+$b = 2, K = 2$ のWaveNet標準設定では: 10層で $\mathcal{R}^{(10)} = 1023 \approx 64$ms @ 16kHz
+
+**Dilation patternの繰り返し** (WaveNet実装):
+
+WaveNetでは $d = 1, 2, 4, 8, \ldots, 512$ を1サイクルとして、これを **4回繰り返す**:
+
+$$
+[d_1, d_2, \ldots, d_{10}] \times 4 = [1, 2, 4, 8, 16, 32, 64, 128, 256, 512] \times 4
+$$
+
+繰り返しの効果:
+- 40層合計で受容野: $\approx 4 \times 1023 \approx 4 \times 64 = 256$ms の音声参照
+- 各スケールに**4つの独立なフィルタ**が対応 → 表現力が大幅向上
+
+**PixelCNNとの受容野比較**:
+
+同じ40層で:
+
+$$
+\mathcal{R}_{\text{PixelCNN}}^{(40)} = 40 + 1 = 41 \text{ ピクセル} \ll \mathcal{R}_{\text{WaveNet}}^{(40)} \approx 4000 \text{ サンプル}
+$$
+
+受容野の差が**2桁**以上 — WaveNetの優位性はここにある。
 
 #### 3.5.3 WaveNetのGated Activation
 
@@ -717,7 +771,7 @@ $$
 \mathbf{z} = \tanh(\mathbf{W}_{f,k} *_d \mathbf{x}) \odot \sigma(\mathbf{W}_{g,k} *_d \mathbf{x})
 $$
 
-さらに **Residual** と **Skip** 接続を追加:
+**Residual** と **Skip** 接続も追加:
 
 $$
 \begin{aligned}
@@ -744,53 +798,115 @@ $$
 
 これは **対数圧縮** — 小さい振幅の分解能を高め、大きい振幅を圧縮する。電話音声の標準規格(G.711)と同じ原理だ。
 
-```julia
-using SpecialFunctions
-
-# μ-law companding
-function mulaw_encode(x, mu=255)
-    return sign(x) * log(1 + mu * abs(x)) / log(1 + mu)
-end
-
-function mulaw_decode(y, mu=255)
-    return sign(y) * (1/mu) * ((1 + mu)^abs(y) - 1)
-end
-
-# Quantize to 256 levels
-function quantize_mulaw(x, mu=255, levels=256)
-    y = mulaw_encode(x, mu)
-    # Map [-1, 1] → [0, levels-1]
-    q = round(Int, (y + 1) / 2 * (levels - 1))
-    return clamp(q, 0, levels - 1)
-end
-
-# Example
-x = 0.3
-q = quantize_mulaw(x)
-x_recon = mulaw_decode((q / 255) * 2 - 1)
-println("Original: ", x)
-println("Quantized level: ", q)
-println("Reconstructed: ", round(x_recon, digits=4))
-println("Error: ", round(abs(x - x_recon), digits=6))
-```
 
 出力:
-```
-Original: 0.3
-Quantized level: 178
-Reconstructed: 0.2998
-Error: 0.000179
-```
+
 
 量子化誤差は極めて小さい — 256段階で十分な品質を維持できる。
 
-:::message alert
-**ここで混乱しやすいポイント**: WaveNetは"Conv"だが"RNN"ではない。Dilated Causal Convは全て **並列計算可能** (訓練時)。推論時は逐次だが、訓練時はRNNより遥かに速い。この非対称性がARモデルの特徴だ。
-:::
+### 3.5.5 AR Decoding戦略の理論
 
-:::message
-**進捗: 50% 完了** 自己回帰の理論的基盤を完全構築した: (1) 連鎖律の厳密な証明、(2) NLLと最尤推定、(3) PixelCNNのMasked Conv + Gating、(4) WaveNetのDilated Conv + μ-law。ここから最新手法へ — TransformerベースARとVARの革命。
-:::
+ARモデルの**生成（推論）**では、学習したモデル $p_\theta(\mathbf{x})$ からサンプリングする方法が品質に大きく影響する。
+
+**問題設定**:
+
+モデル $p_\theta(x_i \mid \mathbf{x}_{<i})$ が与えられたとき、高品質なサンプル $\hat{\mathbf{x}}$ を生成したい。
+
+#### Greedy Decoding — 最高確率の選択
+
+$$
+\hat{x}_i = \arg\max_{x} p_\theta(x \mid \hat{\mathbf{x}}_{<i})
+$$
+
+**欠点**: 局所最適に陥りやすい。「最高確率の連鎖」が「最高確率の系列」と一致しない。
+
+**反例**: $p(A) = 0.6$, $p(B \mid A) = 0.3$, $p(C \mid B) = 0.9$ の場合、Greedy は $A$ を選ぶが:
+
+$$
+\log p(A, B) = \log 0.6 + \log 0.3 = -2.81 < \log p(B, C) = \log 0.4 + \log 0.9 = -1.01
+$$
+
+$B$ から始める系列の方が対数尤度が高い — Greedy は必ずしも最良系列を返さない。
+
+#### Beam Search — 幅優先探索
+
+幅 $k$ のBeam Searchは、上位 $k$ 個の候補を並列に保持する。
+
+**ステップ $i$**: 各候補 $\mathbf{c}^{(j)}$ を展開し、$k \times |\mathcal{V}|$ 個の次状態を生成。スコアが上位 $k$ 個のみ保持:
+
+$$
+\text{score}(\mathbf{c}^{(j)} \oplus x) = \sum_{t=1}^{i} \log p_\theta(x_t \mid \mathbf{x}_{<t})
+$$
+
+**計算量**: $O(k \cdot |\mathcal{V}| \cdot T)$ — $k$ が大きいほど精度↑、速度↓
+
+**Beam Search の問題点** (Holtzman et al., 2020):
+
+1. **長さペナルティ**: 長い系列は短い系列よりスコアが低くなる（積の単調減少）
+2. **多様性の欠如**: 上位 $k$ 個が似た系列に収束しやすい
+3. **Likelihood Trap**: 高確率の系列が必ずしも高品質とは限らない
+
+#### Temperature Sampling — 確率分布の尖鋭化/平滑化
+
+ロジット $\mathbf{z} = f_\theta(\mathbf{x}_{<i})$ に対して温度 $T > 0$ を適用:
+
+$$
+p_T(x_i = k \mid \mathbf{x}_{<i}) = \frac{\exp(z_k / T)}{\sum_{k'} \exp(z_{k'} / T)}
+$$
+
+**温度の効果**:
+
+| $T$ | 分布の形 | 生成物の特徴 |
+|:----|:---------|:------------|
+| $T \to 0$ | Dirac デルタ（Greedy） | 決定論的・繰り返し |
+| $T = 1$ | モデルの分布そのまま | バランス良好 |
+| $T > 1$ | 平滑化（多様） | 創造的・ノイジー |
+
+モデルの校正が完璧（$p_\theta = p_{\text{data}}$）なら $T = 1$ が最適。実際には $T \in [0.7, 1.3]$ が経験的ベストとなる。
+
+#### Top-k / Top-p (Nucleus) Sampling
+
+**Top-k Sampling**:
+
+確率上位 $k$ 個のみに確率マスを集中させる:
+
+$$
+p_k(x_i = v \mid \mathbf{x}_{<i}) = \begin{cases} p(x_i = v) / Z_k & v \in \text{Top}_k \\ 0 & \text{otherwise} \end{cases}
+$$
+
+ここで $Z_k = \sum_{v \in \text{Top}_k} p(v)$ は正規化定数。分布の形（平坦 or 尖鋭）に関係なく常に $k$ 個を選ぶ点が問題だ。
+
+**Top-p (Nucleus) Sampling** (Holtzman et al., 2020):
+
+累積確率が $p$ に達するまでのトークンを動的に選択する核（nucleus）$\mathcal{V}_p$ を定義する:
+
+$$
+\mathcal{V}_p = \text{最小の集合} \mathcal{V}' \subseteq \mathcal{V} \quad \text{s.t.} \quad \sum_{v \in \mathcal{V}'} p(v) \geq p
+$$
+
+（確率の降順にトークンを並べ、累積確率が $p$ を超えた時点で打ち切る）
+
+分布が尖鋭なら $|\mathcal{V}_p|$ は小さく（確実な選択）、平坦なら大きい（多様な選択） — **動的な「安全圏」**の概念。
+
+**各手法のNLL最小化との関係**:
+
+訓練では $\text{NLL} = -\log p_\theta(x_i = y_i \mid \mathbf{x}_{<i})$ を最小化（正解 $y_i$ の確率を最大化）。
+
+しかし生成では「正解」がない — 探索戦略が重要になる。この **訓練と推論のギャップ (Train-Test Mismatch)** が、Decoding戦略研究の動機だ。
+
+**曝露バイアス (Exposure Bias)**:
+
+訓練時は真の系列 $\mathbf{x}_{<i}$ を条件として使うが、推論時は自分の予測 $\hat{\mathbf{x}}_{<i}$ を使う。誤差が蓄積されると分布のずれが生じる:
+
+$$
+\Delta = D_{\text{KL}}\bigl(p_\theta(x_i \mid \mathbf{x}_{<i}) \;\|\; p_\theta(x_i \mid \hat{\mathbf{x}}_{<i})\bigr) > 0
+$$
+
+この差が大きいほど生成品質が劣化する。Scheduled Sampling や REINFORCE を使って、推論時の分布に近い状態で訓練する手法も研究されているが、ARモデルではDecoding戦略のチューニングが最も実用的な対処策だ。
+
+> **⚠️ Warning:** **ここで混乱しやすいポイント**: WaveNetは"Conv"だが"RNN"ではない。Dilated Causal Convは全て **並列計算可能** (訓練時)。推論時は逐次だが、訓練時はRNNより遥かに速い。この非対称性がARモデルの特徴だ。
+
+> **Note:** **進捗: 50% 完了** 自己回帰の理論的基盤を完全構築した: (1) 連鎖律の厳密な証明、(2) NLLと最尤推定、(3) PixelCNNのMasked Conv + Gating、(4) WaveNetのDilated Conv + μ-law。ここから最新手法へ — TransformerベースARとVARの革命。
 
 ### 3.5 Transformer時代の自己回帰 — Pixelレベルから Scaleレベルへ
 
@@ -843,68 +959,6 @@ $$
 
 **実装スケッチ**:
 
-```julia
-using Flux
-
-struct VARModel
-    """Visual AutoRegressive Model with next-scale prediction."""
-    scales::Int  # number of scales (e.g., 7)
-    transformer::Chain  # decoder-only transformer
-    vq_vae::VQVAEModel  # pre-trained VQ-VAE for tokenization
-end
-
-function generate_var(model::VARModel, batch_size=1; temperature=1.0)
-    """
-    Generate images autoregressively scale by scale.
-
-    Returns:
-        images: (H, W, C, batch_size)
-    """
-    device = gpu  # use GPU if available
-    z_all = []  # list to store all scale tokens
-
-    # Start with coarse scale (1x1)
-    z_1 = sample_initial_scale(model, batch_size)  # (1, batch_size)
-    push!(z_all, z_1)
-
-    # Autoregressively generate each subsequent scale
-    for s in 2:model.scales
-        # Condition on all previous scales
-        context = cat(z_all..., dims=1)  # concatenate all previous tokens
-
-        # Predict next scale: p(z_s | z_{<s})
-        logits = model.transformer(context)  # (vocab_size, n_tokens_s, batch_size)
-
-        # Sample from categorical distribution
-        probs = softmax(logits ./ temperature, dims=1)
-        z_s = sample_categorical(probs)  # (n_tokens_s, batch_size)
-
-        push!(z_all, z_s)
-    end
-
-    # Decode all tokens to image
-    z_full = cat(z_all..., dims=1)  # (total_tokens, batch_size)
-    images = model.vq_vae.decode(z_full)  # (H, W, C, batch_size)
-
-    return images
-end
-
-function sample_initial_scale(model, batch_size)
-    """Sample z_1 from learned prior p(z_1)."""
-    # Simplified: use learned embedding
-    z_1_prior = model.transformer.scale_1_prior  # trainable parameter
-    logits = repeat(z_1_prior, 1, batch_size)
-    probs = softmax(logits, dims=1)
-    return sample_categorical(probs)
-end
-
-function sample_categorical(probs)
-    """Sample from categorical distribution (Gumbel-max trick for differentiability)."""
-    # Add Gumbel noise and take argmax
-    gumbel = -log.(-log.(rand(size(probs)...)))
-    return argmax(log.(probs) .+ gumbel, dims=1)
-end
-```
 
 **VARのBlock-wise Causal Mask**:
 
@@ -976,7 +1030,7 @@ $$
 - 各スケールを **独立に予測** → 訓練安定化
 - FID: 1.82（VAR並み）、収束が2倍高速
 
-**NFIG (Next-Frequency Image Generation)** (Zhang et al., 2025) [^25]:
+**NFIG (Multi-Scale Autoregressive via Frequency Ordering)** (Huang et al., 2025) [^25]:
 - 空間スケールではなく **周波数帯域** で自己回帰
 - 低周波 → 高周波の順に生成
 - DCT (Discrete Cosine Transform) ベース
@@ -1120,11 +1174,69 @@ $$
 
 **ARの優位性**: 尤度ベースモデルは **損失 = 目的関数** → Scaling予測が容易。
 
-### 3.8 最新の自己回帰手法サーベイ (2024-2025)
+### 3.7.4 ARモデルの限界と克服戦略 — 理論的分析
+
+#### 逐次生成の本質的遅さ
+
+AR生成の時間複雑度は回避できない:
+
+$$
+T_{\text{gen}} = D \cdot T_{\text{step}}
+$$
+
+ここで $D$ はトークン数、$T_{\text{step}}$ は1ステップの計算時間。$D = H \times W = 65536$（256×256画像、PixelCNN）の場合、リアルタイム生成（$T_{\text{gen}} \leq 100$ms）には $T_{\text{step}} \leq 1.5\mu\text{s}$ が必要 — **現行GPUでは不可能**。
+
+**速度改善の戦略**:
+
+1. **トークン削減**: VARはスケール単位生成で $D = 5461$（88%削減）
+2. **KV Cache**: Transformer ARでの冗長計算排除 → $O(D^2) \to O(D)$
+3. **Speculative Decoding**: 小モデルで候補生成 → 大モデルで検証
+
+#### Parallel WaveNetの理論: ARを並列化する逆説
+
+Oord et al. (2018) の **Parallel WaveNet** は、逐次ARを並列生成に変換する逆説的な手法だ。
+
+**基本アイデア**: 学習済みWaveNet（教師 $p_{\text{teacher}}$）を模倣する確率的フローモデル（生徒 $q_\phi$）を訓練。
+
+損失関数: 逆KLを最小化:
+
+$$
+\mathcal{L} = D_{\text{KL}}(q_\phi(\mathbf{x}) \| p_{\text{teacher}}(\mathbf{x}))
+$$
+
+逆KLの性質により、$q_\phi$ は $p_{\text{teacher}}$ のモードにフィットする（mode-seeking）。
+
+生徒モデルはフローベース（**IAF: Inverse Autoregressive Flow**）:
+
+$$
+x_i = f(z_i, \mathbf{h}_{<i}) \quad \text{（並列サンプリング可能）}
+$$
+
+ここで $z_i \sim \mathcal{N}(0,1)$ は独立ノイズ、$\mathbf{h}_{<i}$ は事前計算済み。
+
+**結果**: 24kHz音声生成速度が **20倍高速化**（WaveNet: リアルタイムの0.02倍 → Parallel WaveNet: リアルタイムの4倍）。
+
+#### 累積誤差と分布シフト
+
+AR生成では、各ステップで独立に条件付き分布からサンプリングする:
+
+$$
+\hat{x}_i \sim p_\theta(\cdot \mid \hat{x}_1, \ldots, \hat{x}_{i-1})
+$$
+
+訓練時に見た条件 $\mathbf{x}_{<i}$ と、生成時の条件 $\hat{\mathbf{x}}_{<i}$ の分布差は:
+
+$$
+D_{\text{KL}}\bigl(p_\theta(x_i \mid \mathbf{x}_{<i}) \| p_\theta(x_i \mid \hat{\mathbf{x}}_{<i})\bigr) \approx \epsilon_i
+$$
+
+この $\epsilon_i$ が蓄積すると $i$ ステップ後の誤差は $O(i \cdot \epsilon)$ オーダーで増大する — **長系列生成が特に困難な理由**だ。
+
+Non-AR手法（MaskGIT、MAR）はこの問題を回避するが、代わりに尤度の厳密計算能力を失う。ARの強みと弱みは**表裏一体**だ。
 
 #### 3.8.1 Autoregressive Models in Vision: A Survey
 
-Tao et al. (2025) [^29] による包括的サーベイ（TMLR 2025掲載）:
+Tao et al. (2025) [^29] による体系的サーベイ（TMLR 2025掲載）:
 
 **分類**:
 1. **Pixel-level AR**: PixelCNN, PixelCNN++, Gated PixelCNN
@@ -1186,79 +1298,9 @@ Tao et al. (2025) [^29] による包括的サーベイ（TMLR 2025掲載）:
 
 **解決策**: **Causal Mask** を事前計算し、全バッチで共有:
 
-```julia
-using Flux, CUDA
-
-function create_causal_mask(seq_len::Int)
-    """
-    Create causal attention mask for autoregressive generation.
-
-    Returns:
-        mask: (seq_len, seq_len) lower triangular matrix
-              mask[i, j] = 1 if i >= j (token i can attend to j)
-                         = 0 otherwise
-    """
-    mask = tril(ones(Float32, seq_len, seq_len))
-    return mask
-end
-
-# Efficient masked attention (single-head simplified)
-function masked_attention(Q, K, V, mask; scale=nothing)
-    """
-    Compute masked self-attention.
-
-    Args:
-        Q, K, V: (d_k, seq_len, batch_size)
-        mask: (seq_len, seq_len) causal mask
-
-    Returns:
-        output: (d_k, seq_len, batch_size)
-    """
-    d_k = size(Q, 1)
-    scale = scale === nothing ? sqrt(Float32(d_k)) : scale
-
-    # Attention scores: Q^T K / sqrt(d_k)
-    scores = batched_mul(permutedims(Q, [2, 1, 3]), K) ./ scale  # (seq_len, seq_len, batch)
-
-    # Apply causal mask (add large negative to masked positions)
-    mask_expanded = reshape(mask, size(mask)..., 1)  # (seq_len, seq_len, 1)
-    scores = scores .+ (1 .- mask_expanded) .* (-1f10)
-
-    # Softmax over keys dimension
-    attn_weights = softmax(scores, dims=2)  # (seq_len, seq_len, batch)
-
-    # Weighted sum of values
-    output = batched_mul(V, attn_weights)  # (d_k, seq_len, batch)
-
-    return output, attn_weights
-end
-
-# Test
-seq_len = 5
-d_k = 16
-batch_size = 2
-
-Q = randn(Float32, d_k, seq_len, batch_size)
-K = randn(Float32, d_k, seq_len, batch_size)
-V = randn(Float32, d_k, seq_len, batch_size)
-
-mask = create_causal_mask(seq_len)
-output, weights = masked_attention(Q, K, V, mask)
-
-println("Output shape: ", size(output))
-println("Attention weights (batch 1):\n", weights[:, :, 1])
-```
 
 **出力例**:
-```
-Output shape: (16, 5, 2)
-Attention weights (batch 1):
- 1.0000  0.0000  0.0000  0.0000  0.0000
- 0.5234  0.4766  0.0000  0.0000  0.0000
- 0.3102  0.3891  0.3007  0.0000  0.0000
- 0.2156  0.2893  0.2401  0.2550  0.0000
- 0.1823  0.2105  0.1987  0.2234  0.1851
-```
+
 
 各行の和が1、上三角がゼロ（Causal）が確認できる。
 
@@ -1268,100 +1310,9 @@ Attention weights (batch 1):
 
 **解決策**: **KV Cache** — 過去のKey/Valueを保存し、新しいトークンのみ計算:
 
-```julia
-mutable struct KVCache
-    """
-    Key-Value cache for efficient autoregressive generation.
-    """
-    keys::Union{Nothing, Array{Float32, 3}}    # (d_k, seq_len, batch)
-    values::Union{Nothing, Array{Float32, 3}}  # (d_v, seq_len, batch)
-    current_len::Int  # number of cached tokens
-end
-
-KVCache() = KVCache(nothing, nothing, 0)
-
-function cached_attention(Q_new, K_new, V_new, cache::KVCache, mask)
-    """
-    Compute attention with KV caching.
-
-    Args:
-        Q_new: (d_k, 1, batch) - query for new token only
-        K_new: (d_k, 1, batch) - key for new token
-        V_new: (d_v, 1, batch) - value for new token
-        cache: KVCache object
-        mask: causal mask
-
-    Returns:
-        output: (d_v, 1, batch) - attention output for new token
-        updated_cache: KVCache with new entries
-    """
-    # Append new K/V to cache
-    if cache.keys === nothing
-        # First token
-        cache.keys = K_new
-        cache.values = V_new
-        cache.current_len = 1
-    else
-        # Concatenate along sequence dimension
-        cache.keys = cat(cache.keys, K_new, dims=2)
-        cache.values = cat(cache.values, V_new, dims=2)
-        cache.current_len += 1
-    end
-
-    # Compute attention using all cached keys/values
-    d_k = size(Q_new, 1)
-    scores = batched_mul(permutedims(Q_new, [2, 1, 3]), cache.keys) ./ sqrt(Float32(d_k))
-
-    # Mask (current token can attend to all previous + itself)
-    # scores: (1, cache.current_len, batch)
-    # No masking needed since we only query the last position
-
-    attn_weights = softmax(scores, dims=2)
-    output = batched_mul(cache.values, attn_weights)
-
-    return output, cache
-end
-
-# Benchmark: with vs without cache
-function benchmark_generation(seq_len=100, d_model=512, batch_size=1)
-    # Without cache
-    @time begin
-        Q_all = randn(Float32, d_model, seq_len, batch_size)
-        K_all = randn(Float32, d_model, seq_len, batch_size)
-        V_all = randn(Float32, d_model, seq_len, batch_size)
-
-        for t in 1:seq_len
-            # Recompute attention for all previous tokens (wasteful)
-            Q_t = Q_all[:, 1:t, :]
-            K_t = K_all[:, 1:t, :]
-            V_t = V_all[:, 1:t, :]
-            mask = create_causal_mask(t)
-            output, _ = masked_attention(Q_t, K_t, V_t, mask)
-        end
-    end
-
-    # With cache
-    @time begin
-        cache = KVCache()
-        for t in 1:seq_len
-            Q_t = randn(Float32, d_model, 1, batch_size)
-            K_t = randn(Float32, d_model, 1, batch_size)
-            V_t = randn(Float32, d_model, 1, batch_size)
-            output, cache = cached_attention(Q_t, K_t, V_t, cache, nothing)
-        end
-    end
-end
-
-println("Benchmarking generation (seq_len=100, d_model=512):")
-benchmark_generation()
-```
 
 **出力例**:
-```
-Benchmarking generation (seq_len=100, d_model=512):
-Without cache:  0.523 seconds
-With cache:     0.048 seconds
-```
+
 
 **10倍以上の高速化！** Production環境では必須。
 
@@ -1371,90 +1322,6 @@ With cache:     0.048 seconds
 
 **解決策**: 確率分布からサンプル + Temperature調整。
 
-```julia
-using StatsBase
-
-function sample_with_temperature(logits, temperature=1.0)
-    """
-    Sample from logits with temperature scaling.
-
-    Args:
-        logits: (vocab_size,) raw model output
-        temperature: controls randomness
-                     T → 0: deterministic (argmax)
-                     T = 1: original distribution
-                     T → ∞: uniform distribution
-
-    Returns:
-        token_id: sampled token
-    """
-    # Scale logits
-    scaled_logits = logits ./ temperature
-
-    # Softmax
-    probs = softmax(scaled_logits)
-
-    # Sample
-    token_id = sample(1:length(probs), Weights(probs))
-
-    return token_id
-end
-
-function top_k_sampling(logits, k=50, temperature=1.0)
-    """
-    Sample from top-k most likely tokens.
-
-    Args:
-        k: number of top tokens to consider
-    """
-    # Get top-k indices
-    top_k_idx = partialsortperm(logits, 1:k, rev=true)
-
-    # Zero out non-top-k
-    filtered_logits = fill(-Inf32, length(logits))
-    filtered_logits[top_k_idx] = logits[top_k_idx]
-
-    return sample_with_temperature(filtered_logits, temperature)
-end
-
-function top_p_sampling(logits, p=0.9, temperature=1.0)
-    """
-    Nucleus sampling: sample from smallest set with cumulative prob > p.
-
-    Args:
-        p: cumulative probability threshold
-    """
-    # Get sorted probabilities
-    probs = softmax(logits ./ temperature)
-    sorted_idx = sortperm(probs, rev=true)
-    sorted_probs = probs[sorted_idx]
-
-    # Cumulative sum
-    cumsum_probs = cumsum(sorted_probs)
-
-    # Find cutoff: smallest set with cumsum > p
-    cutoff = findfirst(cumsum_probs .> p)
-    nucleus_idx = sorted_idx[1:cutoff]
-
-    # Sample from nucleus
-    nucleus_probs = probs[nucleus_idx]
-    nucleus_probs = nucleus_probs ./ sum(nucleus_probs)  # renormalize
-
-    token_id = sample(nucleus_idx, Weights(nucleus_probs))
-
-    return token_id
-end
-
-# Example
-logits = randn(Float32, 1000)  # vocab_size = 1000
-
-println("Greedy (argmax): ", argmax(logits))
-println("T=0.5 (peaked): ", sample_with_temperature(logits, 0.5))
-println("T=1.0 (original): ", sample_with_temperature(logits, 1.0))
-println("T=2.0 (flat): ", sample_with_temperature(logits, 2.0))
-println("Top-k (k=50): ", top_k_sampling(logits, 50, 1.0))
-println("Top-p (p=0.9): ", top_p_sampling(logits, 0.9, 1.0))
-```
 
 **実験結果** (PixelCNN on CIFAR-10):
 - T=0.5: 鮮明だが多様性低
@@ -1473,73 +1340,6 @@ println("Top-p (p=0.9): ", top_p_sampling(logits, 0.9, 1.0))
 
 **解決策**: Automatic Mixed Precision (AMP) with Loss Scaling
 
-```julia
-using Flux, CUDA
-
-function train_ar_amp(model, data_loader, epochs=10)
-    """
-    Train autoregressive model with mixed precision (FP16).
-
-    Uses:
-    - FP16 for forward/backward
-    - FP32 for parameter updates
-    - Dynamic loss scaling to prevent underflow
-    """
-    opt = Adam(1e-4)
-    loss_scale = 2^15  # initial scale
-    scale_factor = 2.0
-    scale_window = 1000  # steps before increasing scale
-
-    for epoch in 1:epochs
-        for (step, batch) in enumerate(data_loader)
-            # Convert input to FP16
-            x = Float16.(batch.x) |> gpu
-            target = batch.target |> gpu
-
-            # Forward pass (FP16)
-            logits = model(x)  # model uses FP16 internally
-
-            # Loss (FP32 for stability)
-            logits_fp32 = Float32.(logits)
-            loss = crossentropy(logits_fp32, target)
-
-            # Scale loss to prevent gradient underflow in FP16
-            scaled_loss = loss * loss_scale
-
-            # Backward (gradients in FP16)
-            grads = gradient(() -> scaled_loss, Flux.params(model))
-
-            # Unscale gradients (FP32)
-            for p in Flux.params(model)
-                if grads[p] !== nothing
-                    grads[p] = Float32.(grads[p]) ./ loss_scale
-                end
-            end
-
-            # Check for inf/nan (overflow in FP16)
-            if any(isnan.(grads[p]) || isinf.(grads[p]) for p in Flux.params(model) if grads[p] !== nothing)
-                # Reduce loss scale
-                loss_scale /= scale_factor
-                println("Step $step: Overflow detected, reducing loss_scale to $loss_scale")
-                continue  # skip parameter update
-            end
-
-            # Update parameters (FP32)
-            Flux.update!(opt, Flux.params(model), grads)
-
-            # Increase loss scale periodically (if stable)
-            if step % scale_window == 0
-                loss_scale *= scale_factor
-                loss_scale = min(loss_scale, 2^24)  # cap at 2^24
-            end
-
-            if step % 100 == 0
-                println("Epoch $epoch, Step $step: Loss = $(round(loss, digits=4)), Scale = $loss_scale")
-            end
-        end
-    end
-end
-```
 
 **実験結果** (VAR on ImageNet):
 - FP32 baseline: 1.2 img/sec/GPU、メモリ40GB
@@ -1550,61 +1350,9 @@ end
 
 **Data Parallel (DP)**: 各GPUが異なるバッチを処理
 
-```julia
-# Pseudo-code for Data Parallel (using MPI.jl or similar)
-using MPI
-
-MPI.Init()
-comm = MPI.COMM_WORLD
-rank = MPI.Comm_rank(comm)
-n_gpus = MPI.Comm_size(comm)
-
-# Each GPU gets a subset of data
-local_data = all_data[rank+1:n_gpus:end]
-
-for epoch in 1:epochs
-    for batch in local_data
-        loss, grads = compute_loss_and_grads(model, batch)
-
-        # All-reduce gradients across GPUs
-        for p in params(model)
-            MPI.Allreduce!(grads[p], MPI.SUM, comm)
-            grads[p] ./= n_gpus  # average
-        end
-
-        # Update parameters (synchronized)
-        update!(optimizer, params(model), grads)
-    end
-end
-```
 
 **Tensor Parallel (TP)**: モデルを分割（各GPUが異なる層/Attention Head）
 
-```julia
-# Simplified Tensor Parallel for Attention
-struct TensorParallelAttention
-    heads_per_gpu::Int
-    gpu_id::Int
-    n_gpus::Int
-    # Each GPU handles heads_per_gpu attention heads
-end
-
-function (tpa::TensorParallelAttention)(Q, K, V)
-    total_heads = tpa.heads_per_gpu * tpa.n_gpus
-
-    # Split heads across GPUs
-    start_head = tpa.gpu_id * tpa.heads_per_gpu + 1
-    end_head = start_head + tpa.heads_per_gpu - 1
-
-    # Compute attention for assigned heads only
-    local_output = multi_head_attention(Q, K, V, heads=start_head:end_head)
-
-    # All-gather outputs from all GPUs
-    global_output = all_gather(local_output, tpa.n_gpus)
-
-    return global_output
-end
-```
 
 **比較**:
 
@@ -1620,6 +1368,12 @@ end
 - Tensor Parallel (TP) = 1（モデルが1 GPUに収まる）
 - Batch size per GPU = 16 → Global batch = 128
 - 訓練時間: ~7日（ImageNet 256×256）
+
+
+> Progress: 50%
+> **理解度チェック**
+> 1. $epoch, Step $ の各記号の意味と、この式が表す操作を説明してください。
+> 2. このゾーンで学んだ手法の直感的な意味と、なぜこの定式化が必要なのかを説明してください。
 
 ### 3.10 理論と実践のまとめ — ARモデルの完全理解
 
@@ -1684,9 +1438,7 @@ graph TD
 
 例: Stable Video Diffusion = AR（キーフレーム）+ Diffusion（補間）
 
-:::message
-**進捗: 75% 完了** 自己回帰モデルの理論（連鎖律、NLL）、アーキテクチャ（PixelCNN、WaveNet、VAR）、最新手法（FlowAR、CART）、実装（Masked Attention、KV Cache、AMP）を完全制覇した。Part 2で実装と実験に進む。
-:::
+> **Note:** **進捗: 75% 完了** 自己回帰モデルの理論（連鎖律、NLL）、アーキテクチャ（PixelCNN、WaveNet、VAR）、最新手法（FlowAR、CART）、実装（Masked Attention、KV Cache、AMP）を完全制覇した。Part 2で実装と実験に進む。
 
 ---
 
@@ -1695,227 +1447,84 @@ graph TD
 ### Transformer-based Autoregressive Models
 
 [^20]: Chen, M., Radford, A., Child, R., Wu, J., Jun, H., Luan, D., & Sutskever, I. (2020). Generative Pretraining from Pixels. In ICML.
-@[card](https://cdn.openai.com/papers/Generative_Pretraining_from_Pixels_V2.pdf)
+<https://cdn.openai.com/papers/Generative_Pretraining_from_Pixels_V2.pdf>
 
-[^21]: Tian, Y., Ren, X., Shen, D., & Li, H. (2024). Visual Autoregressive Modeling: Scalable Image Generation via Next-Scale Prediction. In NeurIPS. **Best Paper Award**.
-@[card](https://arxiv.org/abs/2404.02905)
+[^21]: Tian, K., Jiang, Y., et al. (2024). Visual Autoregressive Modeling: Scalable Image Generation via Next-Scale Prediction. In NeurIPS. **Best Paper Award**.
+<https://arxiv.org/abs/2404.02905>
 
-[^22]: Ren, X., Tian, Y., & Li, H. (2024). FlowAR: Scale-wise Autoregressive Image Generation Meets Flow Matching. arXiv preprint.
-@[card](https://arxiv.org/abs/2410.02776)
+[^22]: Ren, S., Yu, Q., He, J., Shen, X., Yuille, A., & Chen, L.-C. (2024). FlowAR: Scale-wise Autoregressive Image Generation Meets Flow Matching. [arXiv:2412.15205](https://arxiv.org/abs/2412.15205)
 
-[^23]: Wu, Z., Wang, X., & Zhang, L. (2024). CART: Compositional AutoRegressive Transformer for Image Generation. arXiv preprint.
-@[card](https://arxiv.org/abs/2411.10180)
+[^23]: Roheda, S., Chowdhury, R., Bala, A., & Jaiswal, R. (2024). CART: Compositional Auto-Regressive Transformer for Image Generation. arXiv preprint.
+<https://arxiv.org/abs/2411.10180>
 
-[^24]: Li, J., Chen, Y., & Liu, Q. (2025). FlexVAR: Flexible Visual Autoregressive Modeling without Residual Prediction. arXiv preprint.
-@[card](https://arxiv.org/abs/2502.20313)
+[^24]: Jiao, S., Zhang, G., Qian, Y., & Huang, J., et al. (2025). FlexVAR: Flexible Visual Autoregressive Modeling without Residual Prediction. arXiv preprint.
+<https://arxiv.org/abs/2502.20313>
 
-[^25]: Zhang, R., Liu, X., & Wang, Y. (2025). NFIG: Autoregressive Image Generation with Next-Frequency Prediction. arXiv preprint.
-@[card](https://arxiv.org/abs/2503.07076)
+[^25]: Huang, Z., et al. (2025). NFIG: Multi-Scale Autoregressive Image Generation via Frequency Ordering. arXiv preprint.
+<https://arxiv.org/abs/2503.07076>
 
 [^26]: Chen, X., Mishra, N., Rohaninejad, M., & Abbeel, P. (2018). PixelSNAIL: An Improved Autoregressive Generative Model. In ICML.
-@[card](https://arxiv.org/abs/1712.09763)
+<https://arxiv.org/abs/1712.09763>
 
 ### Scaling Laws
 
 [^27]: Kaplan, J., McCandlish, S., Henighan, T., Brown, T. B., Chess, B., Child, R., ... & Amodei, D. (2020). Scaling Laws for Neural Language Models. arXiv preprint.
-@[card](https://arxiv.org/abs/2001.08361)
+<https://arxiv.org/abs/2001.08361>
 
-[^28]: Lin, S., Wang, Y., & Chen, T. (2024). Scaling Diffusion Language Models via Adaptation from Autoregressive Models. In NeurIPS.
-@[card](https://arxiv.org/abs/2410.17891)
+[^28]: Gong, S., et al. (2024). Scaling Diffusion Language Models via Adaptation from Autoregressive Models. In NeurIPS.
+<https://arxiv.org/abs/2410.17891>
 
 ### Surveys
 
-[^29]: Tao, C., Zhang, Y., & Liu, Q. (2025). Autoregressive Models in Vision: A Survey. Transactions on Machine Learning Research (TMLR).
-@[card](https://arxiv.org/abs/2411.05902)
+[^29]: Xiong, J., Liu, G., Huang, L., Wu, C., Wu, T., et al. (2025). Autoregressive Models in Vision: A Survey. Transactions on Machine Learning Research (TMLR).
+<https://arxiv.org/abs/2411.05902>
 
 ### Additional Resources
 
 **PixelCNN & WaveNet Foundations**:
 - van den Oord, A., Kalchbrenner, N., & Kavukcuoglu, K. (2016). Pixel Recurrent Neural Networks. In ICML.
-@[card](https://arxiv.org/abs/1601.06759)
+<https://arxiv.org/abs/1601.06759>
 
 - van den Oord, A., Dieleman, S., Zen, H., Simonyan, K., Vinyals, O., Graves, A., ... & Kavukcuoglu, K. (2016). WaveNet: A Generative Model for Raw Audio. arXiv preprint.
-@[card](https://arxiv.org/abs/1609.03499)
+<https://arxiv.org/abs/1609.03499>
 
 - Salimans, T., Karpathy, A., Chen, X., & Kingma, D. P. (2017). PixelCNN++: Improving the PixelCNN with Discretized Logistic Mixture Likelihood and Other Modifications. In ICLR.
-@[card](https://arxiv.org/abs/1701.05517)
+<https://arxiv.org/abs/1701.05517>
 
 **Recent Theoretical Advances**:
 - Raya, R., & Vidal, R. (2024). Can Language Models Discover Scaling Laws? arXiv preprint.
-@[card](https://arxiv.org/abs/2507.21184)
+<https://arxiv.org/abs/2507.21184>
 
 - Huang, C. Z., Hawthorne, C., Roberts, A., Dinculescu, M., Wexler, J., Hong, L., & Howcroft, J. (2018). Music Transformer: Generating Music with Long-Term Structure. arXiv preprint.
-@[card](https://arxiv.org/abs/1809.04281)
+<https://arxiv.org/abs/1809.04281>
 
 **Multi-Modal Extensions**:
 - Ge, S., Hayes, T., Yang, H., Yin, X., Pang, G., Jacobs, D., ... & Wang, L. (2022). Long Video Generation with Time-Agnostic VQGAN and Time-Sensitive Transformer. In ECCV.
-@[card](https://arxiv.org/abs/2204.03638)
+<https://arxiv.org/abs/2204.03638>
 
 - Hong, W., Ding, M., Zheng, W., Liu, X., & Tang, J. (2022). CogVideo: Large-scale Pretraining for Text-to-Video Generation via Transformers. arXiv preprint.
-@[card](https://arxiv.org/abs/2205.15868)
+<https://arxiv.org/abs/2205.15868>
 
 ### 追加論文リスト（実装参考用）
 
 **Efficient Inference**:
 - Peng, B., Alcaide, E., Anthony, Q., Albalak, A., Arcadinho, S., Cao, H., ... & Zhu, Y. (2023). RWKV: Reinventing RNNs for the Transformer Era. arXiv preprint.
-@[card](https://arxiv.org/abs/2305.13048)
+<https://arxiv.org/abs/2305.13048>
 
 - Katharopoulos, A., Vyas, A., Pappas, N., & Fleuret, F. (2020). Transformers are RNNs: Fast Autoregressive Transformers with Linear Attention. In ICML.
-@[card](https://arxiv.org/abs/2006.16236)
+<https://arxiv.org/abs/2006.16236>
 
 **Quantization & Compression**:
 - Dettmers, T., Svirschevski, R., Egiazarian, V., Kuznedelev, D., Frantar, E., Ashkboos, S., ... & Alistarh, D. (2024). SpQR: A Sparse-Quantized Representation for Near-Lossless LLM Weight Compression. arXiv preprint.
-@[card](https://arxiv.org/abs/2306.03078)
+<https://arxiv.org/abs/2306.03078>
 
 ### 3.11 実践例: ミニマルVARの完全実装
 
 最後に、VARの核心を凝縮した最小実装を示す（教育目的、Production非推奨）:
 
-```julia
-using Flux, CUDA
-
-# === 1. VQ-VAE Tokenizer (simplified) ===
-struct SimpleVQVAE
-    encoder::Chain
-    codebook::Matrix{Float32}  # (d_latent, n_codes)
-    decoder::Chain
-end
-
-function quantize(vqvae, z_continuous)
-    """Find nearest codebook entry."""
-    # z_continuous: (d_latent, h, w, batch)
-    d, h, w, b = size(z_continuous)
-
-    # Reshape to (d_latent, h*w*batch)
-    z_flat = reshape(z_continuous, d, :)
-
-    # Compute distances to all codes
-    dists = pairwise_l2(z_flat, vqvae.codebook)  # (h*w*batch, n_codes)
-
-    # Nearest code
-    code_idx = argmin(dists, dims=2)[:, 1]  # (h*w*batch,)
-
-    # Lookup quantized values
-    z_quantized = vqvae.codebook[:, code_idx]
-
-    # Reshape back
-    z_quantized = reshape(z_quantized, d, h, w, b)
-
-    return z_quantized, code_idx
-end
-
-# === 2. VAR Transformer ===
-struct MiniVAR
-    scales::Vector{Int}  # e.g., [1, 2, 4, 8, 16]
-    transformer::Chain   # decoder-only transformer
-    vqvae::SimpleVQVAE
-end
-
-function train_step_var(model, images, optimizer)
-    """Single training step for VAR."""
-    # Encode to multi-scale tokens
-    z_scales = []
-    for s in model.scales
-        # Downsample image to scale s
-        img_s = adaptive_avgpool(images, (s, s))
-
-        # Encode + Quantize
-        z_cont = model.vqvae.encoder(img_s)
-        z_quant, codes = quantize(model.vqvae, z_cont)
-
-        push!(z_scales, codes)
-    end
-
-    # Concatenate all scales: [z_1; z_2; ...; z_S]
-    z_all = vcat(z_scales...)  # (total_tokens, batch)
-
-    # Autoregressive loss: predict each scale conditioned on previous
-    loss = 0.0
-    offset = 0
-
-    for (i, s) in enumerate(model.scales)
-        n_tokens_s = s * s
-
-        if i == 1
-            # First scale: predict from learned prior
-            logits = model.transformer(nothing)  # or learned embedding
-        else
-            # Subsequent scales: condition on previous
-            context = z_all[1:offset, :]
-            logits = model.transformer(context)
-        end
-
-        # Cross-entropy loss for current scale
-        target = z_all[offset+1:offset+n_tokens_s, :]
-        loss += crossentropy(logits, target)
-
-        offset += n_tokens_s
-    end
-
-    # Backprop
-    grads = gradient(() -> loss, params(model))
-    Flux.update!(optimizer, params(model), grads)
-
-    return loss
-end
-
-# === 3. Generation ===
-function generate_var_sample(model; temperature=1.0)
-    """Generate one image from VAR."""
-    z_generated = []
-
-    for (i, s) in enumerate(model.scales)
-        n_tokens_s = s * s
-
-        if i == 1
-            # Sample z_1 from prior
-            logits = model.transformer(nothing)
-            codes_s = sample_categorical(logits, temperature)
-        else
-            # Sample z_s | z_{<s}
-            context = vcat(z_generated...)
-            logits = model.transformer(context)
-            codes_s = sample_categorical(logits, temperature)
-        end
-
-        push!(z_generated, codes_s)
-    end
-
-    # Decode all tokens to image
-    z_all_codes = vcat(z_generated...)
-    z_quantized = model.vqvae.codebook[:, z_all_codes]
-
-    # Reshape to spatial (assuming last scale = final resolution)
-    s_final = model.scales[end]
-    z_reshaped = reshape(z_quantized, :, s_final, s_final, 1)
-
-    # Decode
-    image = model.vqvae.decoder(z_reshaped)
-
-    return image
-end
-```
 
 **実行例** (概念的):
-```julia
-# Initialize
-scales = [1, 2, 4, 8, 16]  # 5 scales: 1×1 → 16×16
-vqvae = SimpleVQVAE(encoder, codebook, decoder)
-transformer = build_transformer(d_model=512, n_layers=12)
-model = MiniVAR(scales, transformer, vqvae)
 
-# Train
-opt = Adam(1e-4)
-for epoch in 1:100
-    for batch_images in data_loader
-        loss = train_step_var(model, batch_images, opt)
-        println("Epoch $epoch: Loss = $(round(loss, digits=3))")
-    end
-end
-
-# Generate
-samples = [generate_var_sample(model, temperature=1.0) for _ in 1:16]
-```
 
 この実装は教育用の骨格。Production環境では:
 - Block-wise causal mask（並列化）
@@ -1925,9 +1534,29 @@ samples = [generate_var_sample(model, temperature=1.0) for _ in 1:16]
 
 を追加すべき。詳細はPart 2の実装ゾーンで解説する。
 
+**VARの訓練損失の展開**:
+
+各スケール $s$ における損失は独立に計算され、合計:
+
+$$
+\mathcal{L}_{\text{VAR}} = \sum_{s=1}^{S} \mathcal{L}_s, \quad \mathcal{L}_s = -\mathbb{E}\left[\sum_{k \in \mathcal{T}_s} \log p_\theta(z_k^{(s)} \mid \mathbf{z}^{(1)}, \ldots, \mathbf{z}^{(s-1)})\right]
+$$
+
+ここで $\mathcal{T}_s$ はスケール $s$ のトークン位置集合、$|\mathcal{T}_s| = h_s \times w_s$（例: $s=3$ なら $4 \times 4 = 16$ トークン）。
+
+各スケールのカーネルはVQ-VAEで量子化されたコードブック $\mathcal{C} = \{e_1, \ldots, e_K\}$ から選ばれる。分類問題として定式化することで、標準的な交差エントロピー損失が適用できる。
+
 ---
 
 ---
+
+## 著者リンク
+
+- Blog: https://fumishiki.dev
+- X: https://x.com/fumishiki
+- LinkedIn: https://www.linkedin.com/in/fumitakamurakami
+- GitHub: https://github.com/fumishiki
+- Hugging Face: https://huggingface.co/fumishiki
 
 ## ライセンス
 

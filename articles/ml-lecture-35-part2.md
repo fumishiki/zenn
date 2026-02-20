@@ -5,6 +5,10 @@ type: "tech"
 topics: ["machinelearning"]
 published: true
 slug: "ml-lecture-35-part2"
+difficulty: "advanced"
+time_estimate: "90 minutes"
+languages: ["Julia", "Rust"]
+keywords: ["機械学習", "深層学習", "生成モデル"]
 ---
 ## 💻 4. 実装ゾーン（45分）— Julia Score Matching & Rust Langevin
 
@@ -69,16 +73,8 @@ using Lux, Optimisers, Zygote, Random, Statistics, LinearAlgebra, Plots
 
 # True data distribution: 2D Gaussian mixture
 function sample_gmm(n_samples::Int)
-    samples = zeros(2, n_samples)
-    for i in 1:n_samples
-        # 50% from N([-2,0], I), 50% from N([2,0], I)
-        if rand() < 0.5
-            samples[:, i] = [-2.0, 0.0] + randn(2)
-        else
-            samples[:, i] = [2.0, 0.0] + randn(2)
-        end
-    end
-    return samples
+    centers = [rand() < 0.5 ? [-2.0, 0.0] : [2.0, 0.0] for _ in 1:n_samples]
+    return hcat(centers...) .+ randn(2, n_samples)
 end
 
 # True score function (for reference)
@@ -316,8 +312,8 @@ function langevin_sampler(
         s = eval_score(model, ps, st, x)
 
         # Langevin update: x ← x + ε*s + √(2ε)*z
-        noise = sqrt(2 * step_size) * randn(d)
-        x .+= step_size * s + noise
+        noise = sqrt(2step_size) .* randn(d)
+        @. x += step_size * s + noise
 
         push!(trajectory, copy(x))
     end
@@ -330,8 +326,8 @@ x_init = [10.0, 10.0]  # Start far from modes
 trajectory = langevin_sampler(model, ps_trained, st, x_init, 1000, 0.01)
 
 # Visualize trajectory
-x_traj = [p[1] for p in trajectory]
-y_traj = [p[2] for p in trajectory]
+x_traj = first.(trajectory)
+y_traj = last.(trajectory)
 
 scatter(x_traj, y_traj,
         markersize=1, alpha=0.3,
@@ -347,9 +343,9 @@ savefig("langevin_trajectory.png")
 
 ```julia
 # Compute empirical mean of final 200 samples
-final_samples = trajectory[end-199:end]
-x1_vals = [p[1] for p in final_samples]
-x2_vals = [p[2] for p in final_samples]
+final_samples = @view trajectory[end-199:end]
+x1_vals = first.(final_samples)
+x2_vals = last.(final_samples)
 
 empirical_mean = [mean(x1_vals), mean(x2_vals)]
 empirical_std = [std(x1_vals), std(x2_vals)]
@@ -437,9 +433,7 @@ fn langevin_dynamics(
         let score = score_fn(&x);
 
         // Langevin update: x ← x + ε*score + √(2ε)*z
-        let noise: Array1<f64> = Array1::from_vec(
-            (0..d).map(|_| normal.sample(&mut rng)).collect()
-        );
+        let noise: Array1<f64> = (0..d).map(|_| normal.sample(&mut rng)).collect::<Vec<_>>().into();
 
         x = &x + step_size * &score + (2.0 * step_size).sqrt() * &noise;
         trajectory.push(x.clone());
@@ -456,7 +450,7 @@ fn main() {
     let trajectory = langevin_dynamics(gmm_score, x_init, 1000, 0.01);
 
     // Print final sample
-    let final_sample = &trajectory[trajectory.len() - 1];
+    let final_sample = trajectory.last().unwrap();
     println!("Final sample: {:?}", final_sample);
 
     // Compute empirical mean of last 100 samples
@@ -507,9 +501,7 @@ dx_t = \nabla_x \log p(x_t) dt + \sqrt{2} dW_t
 x_{t+1} = x_t + \epsilon \nabla_x \log p(x_t) + \sqrt{2\epsilon} z_t
 ```
 
-:::message
-**進捗: 70% 完了** JuliaでScore Matching訓練 + 可視化、RustでLangevin Dynamicsサンプリングを実装した。次はNCSN実装と実験。
-:::
+> **Note:** **進捗: 70% 完了** JuliaでScore Matching訓練 + 可視化、RustでLangevin Dynamicsサンプリングを実装した。次はNCSN実装と実験。
 
 ### 4.8 Advanced: Dimension-Free Preconditioned Langevin
 
@@ -547,7 +539,7 @@ function preconditioned_langevin(
 
         # Preconditioned update
         noise = randn(length(x))
-        x += step_size * (M_inv * s) + sqrt(2 * step_size) * (cholesky(M_inv).L * noise)
+        x .+= step_size .* (M_inv * s) .+ sqrt(2step_size) .* (cholesky(M_inv).L * noise)
 
         push!(trajectory, copy(x))
     end
@@ -604,11 +596,9 @@ fn langevin_batch_parallel(
 
             for _ in 0..n_steps {
                 let score = score_fn(&x);
-                let noise: Array1<f64> = Array1::from_vec(
-                    (0..x.len())
-                        .map(|_| StandardNormal.sample(&mut thread_rng()))
-                        .collect()
-                );
+                let noise: Array1<f64> = (0..x.len())
+                    .map(|_| StandardNormal.sample(&mut thread_rng()))
+                    .collect::<Vec<_>>().into();
 
                 x = &x + step_size * &score + (2.0 * step_size).sqrt() * &noise;
             }
@@ -683,12 +673,11 @@ pub extern "C" fn langevin_sample_c(
 
         for step in 0..cfg.n_steps {
             let score_offset = step * cfg.dim;
-
-            for i in 0..cfg.dim {
-                let noise: f64 = rand_distr::StandardNormal.sample(&mut rng);
-                x[i] += cfg.step_size * scores[score_offset + i]
-                      + (2.0 * cfg.step_size).sqrt() * noise;
-            }
+            x.iter_mut().zip(&scores[score_offset..score_offset + cfg.dim])
+                .for_each(|(xi, &si)| {
+                    let noise: f64 = rand_distr::StandardNormal.sample(&mut rng);
+                    *xi += cfg.step_size * si + (2.0 * cfg.step_size).sqrt() * noise;
+                });
         }
 
         // Write output
@@ -746,15 +735,18 @@ println("Rust-accelerated sample: $(x_final)")
 
 **問題1**: Fisher Divergenceの定義を書け。
 
-:::details 解答
+<details><summary>解答</summary>
+
 $$
 D_\text{Fisher}(p \| q) = \frac{1}{2} \mathbb{E}_{p(x)} \left[ \left\| \nabla_x \log p(x) - \nabla_x \log q(x) \right\|^2 \right]
 $$
-:::
+
+</details>
 
 **問題2**: Hyvärinen's Theoremを使って、Fisher DivergenceをESM目的関数に変換せよ。
 
-:::details 解答
+<details><summary>解答</summary>
+
 部分積分trick:
 $$
 \mathbb{E}_{p(x)} [\langle \nabla_x \log p(x), s_\theta(x) \rangle] = -\mathbb{E}_{p(x)} [\text{tr}(\nabla_x s_\theta(x))]
@@ -764,11 +756,13 @@ $$
 $$
 D_\text{Fisher}(p \| q_\theta) = \mathbb{E}_{p(x)} [\text{tr}(\nabla_x s_\theta(x)) + \frac{1}{2} \|s_\theta(x)\|^2] + C
 $$
-:::
+
+</details>
 
 **問題3**: Denoising Score Matching目的関数で、$\nabla_{\tilde{x}} \log q_\sigma(\tilde{x}|x)$ を計算せよ（$q_\sigma(\tilde{x}|x) = \mathcal{N}(\tilde{x}|x, \sigma^2 I)$）。
 
-:::details 解答
+<details><summary>解答</summary>
+
 $$
 \nabla_{\tilde{x}} \log \mathcal{N}(\tilde{x}|x, \sigma^2 I) = \nabla_{\tilde{x}} \left[ -\frac{1}{2\sigma^2} \|\tilde{x} - x\|^2 \right] = -\frac{\tilde{x} - x}{\sigma^2}
 $$
@@ -777,21 +771,26 @@ $\tilde{x} = x + \sigma \epsilon$ なら:
 $$
 \nabla_{\tilde{x}} \log q_\sigma(\tilde{x}|x) = -\frac{\epsilon}{\sigma}
 $$
-:::
+
+</details>
 
 **問題4**: Langevin Dynamics $dx_t = \nabla_x \log p(x_t) dt + \sqrt{2} dW_t$ のEuler-Maruyama離散化を書け。
 
-:::details 解答
+<details><summary>解答</summary>
+
 $$
 x_{t+1} = x_t + \epsilon \nabla_x \log p(x_t) + \sqrt{2\epsilon} z_t, \quad z_t \sim \mathcal{N}(0, I)
 $$
-:::
+
+</details>
 
 **問題5**: Annealed Langevin Dynamicsでノイズスケジュール $\{\sigma_i\}$ を使う理由を説明せよ。
 
-:::details 解答
+<details><summary>解答</summary>
+
 低密度領域でスコア推定が不正確 → 大きなノイズ $\sigma_\text{max}$ で低密度領域をカバー、小さなノイズ $\sigma_\text{min}$ で詳細を精緻化。ノイズを段階的に減らすことで、安定したサンプリングを実現。
-:::
+
+</details>
 
 ### 5.2 実装チャレンジ1: NCSNマルチスケール訓練
 
@@ -805,18 +804,8 @@ end
 
 # NCSN loss: average over noise levels
 function ncsn_loss(model, ps, st, x_batch::AbstractMatrix, σ_schedule::Vector{Float64})
-    total_loss = 0.0
     L = length(σ_schedule)
-
-    for σ in σ_schedule
-        # DSM loss at this noise level
-        loss = dsm_loss(model, ps, st, x_batch, σ)
-
-        # Weighted by σ²
-        total_loss += σ^2 * loss
-    end
-
-    return total_loss / L
+    return sum(σ^2 * dsm_loss(model, ps, st, x_batch, σ) for σ in σ_schedule) / L
 end
 
 # Train with NCSN objective
@@ -881,8 +870,8 @@ function annealed_langevin_sampler(
             s = eval_score(model, ps, st, x)
 
             # Langevin update
-            noise = sqrt(2 * α) * randn(length(x))
-            x .+= α * s + noise
+            noise = sqrt(2α) .* randn(length(x))
+            @. x += α * s + noise
 
             push!(trajectory, copy(x))
         end
@@ -896,8 +885,8 @@ x_init_ald = σ_schedule[1] * randn(2)  # Initialize from N(0, σ_max² I)
 trajectory_ald = annealed_langevin_sampler(model_ncsn, ps_ncsn_trained, st_ncsn, σ_schedule, x_init_ald, 100, 0.1)
 
 # Visualize
-x_ald = [p[1] for p in trajectory_ald]
-y_ald = [p[2] for p in trajectory_ald]
+x_ald = first.(trajectory_ald)
+y_ald = last.(trajectory_ald)
 
 scatter(x_ald, y_ald,
         markersize=1, alpha=0.3,
@@ -922,23 +911,23 @@ ps_ncsn, _ = train_ncsn(model, ps, st, σ_schedule, 1000, 128, 1e-3)
 traj_annealed = annealed_langevin_sampler(model, ps_ncsn, st, σ_schedule, σ_schedule[1] * randn(2), 100, 0.1)
 
 # Compare final samples
-final_single = traj_single[end-99:end]
-final_annealed = traj_annealed[end-99:end]
+final_single = @view traj_single[end-99:end]
+final_annealed = @view traj_annealed[end-99:end]
 
-mean_single = mean([p[1] for p in final_single])
-mean_annealed = mean([p[1] for p in final_annealed])
+mean_single = mean(first.(final_single))
+mean_annealed = mean(first.(final_annealed))
 
 println("Standard LD mean x₁: $(mean_single)")
 println("Annealed LD mean x₁: $(mean_annealed)")
 println("Expected: close to ±2")
 
 # Visualize both
-p1 = scatter([p[1] for p in final_single], [p[2] for p in final_single],
+p1 = scatter(first.(final_single), last.(final_single),
              title="Standard LD", xlabel="x₁", ylabel="x₂",
              markersize=2, alpha=0.5, legend=false)
 scatter!(p1, [-2.0, 2.0], [0.0, 0.0], markersize=10, color=:red)
 
-p2 = scatter([p[1] for p in final_annealed], [p[2] for p in final_annealed],
+p2 = scatter(first.(final_annealed), last.(final_annealed),
              title="Annealed LD (NCSN)", xlabel="x₁", ylabel="x₂",
              markersize=2, alpha=0.5, legend=false)
 scatter!(p2, [-2.0, 2.0], [0.0, 0.0], markersize=10, color=:red)
@@ -957,11 +946,14 @@ plot(p1, p2, layout=(1, 2), size=(800, 400))
 - [ ] JuliaでDSM/NCSNを訓練し、スコア場を可視化できる
 - [ ] RustでLangevin Dynamicsサンプラーを実装できる
 
-:::message
-**進捗: 85% 完了** NCSN訓練とAnnealed Langevin Dynamicsの実装を完了。次はScore Matching研究の系譜と最新動向を俯瞰する。
-:::
+> **Note:** **進捗: 85% 完了** NCSN訓練とAnnealed Langevin Dynamicsの実装を完了。次はScore Matching研究の系譜と最新動向を俯瞰する。
 
 ---
+
+> Progress: 85%
+> **理解度チェック**
+> 1. Julia実装の Score Matching で Fisher Divergence が数値的に不安定になる状況と、log-sum-exp による安定化の方法を述べよ。
+> 2. NCSNの訓練においてノイズレベル $\sigma_i$ を等比数列で設定する根拠を、スコア関数の大きさのスケール依存性から説明せよ。
 
 ## 🚀 6. 発展ゾーン（20分）— Score Matching研究の系譜と最新動向
 
@@ -1021,6 +1013,11 @@ VP-SDE (DDPM型) と VE-SDE (NCSN型) を統一的に記述。第37回で完全�
 
 4. **Score-based 3D生成**:
    - Point clouds / meshes / NeRFへの応用
+
+> Progress: 95%
+> **理解度チェック**
+> 1. DSMとDDPMの $\epsilon$-prediction損失が数学的に等価であることを示す式変換の核心ステップを導け。
+> 2. Sliced Score Matching がランダム投影ベクトル $\mathbf{v}$ を使って計算コストを $O(D)$ に削減できる理由を述べよ。
 
 ## 🎓 6. 振り返り + 統合ゾーン（30分）— まとめとCourse IV進行
 
@@ -1083,57 +1080,67 @@ graph LR
 
 ### 7.3 FAQ — よくある質問と回答
 
-:::details **Q1: Score MatchingとMLEの違いは？**
+<details><summary>**Q1: Score MatchingとMLEの違いは？**</summary>
 
 **A**: MLEは $\log p_\theta(x)$ を直接最大化するが、$Z(\theta)$ の計算が必要。Score Matchingは $\nabla_x \log p_\theta(x)$ (スコア) を推定し、$Z(\theta)$ を回避する。両方とも分布 $p_\theta(x)$ を学習するが、アプローチが異なる。
-:::
 
-:::details **Q2: なぜDenoising SMがExplicit SMと等価なのか？**
+</details>
+
+<details><summary>**Q2: なぜDenoising SMがExplicit SMと等価なのか？**</summary>
 
 **A**: Vincent (2011) の証明: ノイズ $\sigma \to 0$ で、摂動分布 $q_\sigma(\tilde{x}) \to p_\text{data}(x)$。DSM目的関数が Fisher Divergence に収束し、Hyvärinen's Theoremより ESM と等価。数学的には $\sigma$ の極限操作。
-:::
 
-:::details **Q3: Langevin Dynamicsの収束に何ステップ必要？**
+</details>
+
+<details><summary>**Q3: Langevin Dynamicsの収束に何ステップ必要？**</summary>
 
 **A**: $O(d / \epsilon)$ ($d$=次元、$\epsilon$=ステップサイズ)。高次元で遅いが、Manifold仮説下では固有次元 $d_\text{eff}$ で改善。実用上、Annealed LDでノイズスケジュール最適化が重要。
-:::
 
-:::details **Q4: NCSNとDDPMの違いは？**
+</details>
+
+<details><summary>**Q4: NCSNとDDPMの違いは？**</summary>
 
 **A**: 両方ともマルチスケールノイズでスコア推定。NCSN (2019) は連続ノイズレベル + Annealed LD、DDPM (2020) は離散時刻 $t$ + Reverse process。数学的には等価（Song+ 2021 Score SDEで統一）。
-:::
 
-:::details **Q5: Sliced SM vs Denoising SM、どちらを使うべき？**
+</details>
+
+<details><summary>**Q5: Sliced SM vs Denoising SM、どちらを使うべき？**</summary>
 
 **A**: Denoising SMが実装容易 + 実績豊富 → **第一選択**。Sliced SMはヘシアン計算の理論的代替だが、実用上DSMが支配的。研究では両方試す価値あり。
-:::
 
-:::details **Q6: Score MatchingはVAEやGANより優れているのか？**
+</details>
+
+<details><summary>**Q6: Score MatchingはVAEやGANより優れているのか？**</summary>
 
 **A**: **タスク依存**。VAEは潜在空間が明示的でデータ圧縮・補間に有利。GANは高画質だが訓練不安定。Score Matchingは密度推定が厳密だが、サンプリングが遅い（Langevin反復）。Diffusion ModelsはScore Matching + 効率的サンプリング手法の融合で、画質と安定性のバランスを実現。
-:::
 
-:::details **Q7: スコア関数の "次元の呪い" はあるか？**
+</details>
+
+<details><summary>**Q7: スコア関数の "次元の呪い" はあるか？**</summary>
 
 **A**: ある。高次元空間では大部分が低密度領域 → スコア推定が不安定。**解決策**: (1) マルチスケールノイズ（NCSN）で低密度領域をカバー、(2) Manifold仮説（実データは低次元多様体上に集中）を活用、(3) 事前学習済みエンコーダでLatent空間に埋め込み（→ Latent Diffusion, 第39回）。
-:::
 
-:::details **Q8: ULAはMHアルゴリズムより速いのか？**
+</details>
+
+<details><summary>**Q8: ULAはMHアルゴリズムより速いのか？**</summary>
 
 **A**: **Yes**。ULA (Unadjusted Langevin) は棄却ステップなし → 全サンプル受理 → 高速。代償: 定常分布からの誤差 $O(\epsilon)$ （$\epsilon$=ステップサイズ）。MHは厳密だが棄却で遅い。実用上、小さい $\epsilon$ でULA誤差は無視可能。
-:::
 
-:::details **Q9: Score Matchingは教師なし学習か？**
+</details>
+
+<details><summary>**Q9: Score Matchingは教師なし学習か？**</summary>
 
 **A**: **Yes**。ラベル不要。データ $\{x_i\}$ のみで $\nabla_x \log p(x)$ を学習。VAEやGANと同じく生成モデル＝教師なし学習。ただし条件付き生成（テキスト→画像）では条件 $c$ が必要 → 教師あり風だが、**Conditional Score** $\nabla_x \log p(x|c)$ を推定する点で本質は変わらず。
-:::
 
-:::details **Q10: Langevin Dynamicsの"温度"は調整できるか？**
+</details>
+
+<details><summary>**Q10: Langevin Dynamicsの"温度"は調整できるか？**</summary>
 
 **A**: **Yes**。標準形 $dx = \nabla \log p dt + \sqrt{2T} dW$ の $T$ が温度。$T=1$ で $p(x)$ に収束、$T>1$ で分布が平坦化（高温＝サンプル多様性↑）、$T<1$ でピーク集中（低温＝モード付近）。Annealed LDは「温度下げながらサンプリング」と解釈可能。
-:::
 
-:::details **Q11: Score Matchingで離散データ（テキスト）は扱えるか？**
+</details>
+
+<details><summary>**Q11: Score Matchingで離散データ（テキスト）は扱えるか？**</summary>
 
 **A**: 原理的に困難（$\nabla_x$ は連続変数前提）。**近年の解決**:
 1. **Embedding→連続化**: Token → 連続埋め込み → スコア推定
@@ -1141,28 +1148,32 @@ graph LR
 3. **Diffusion on discrete spaces**: Absorbing state diffusion (D3PM)
 
 画像・音声＝連続（Score直接適用可）、テキスト＝離散（工夫必要）。
-:::
 
-:::details **Q12: NCSN訓練でノイズスケジュールは幾何級数必須？**
+</details>
+
+<details><summary>**Q12: NCSN訓練でノイズスケジュールは幾何級数必須？**</summary>
 
 **A**: **推奨だが必須ではない**。幾何級数 $\sigma_i = \sigma_\text{min} \cdot r^i$ ($r>1$) は粗→精を対数的にカバー、実験的にベスト。代替: (1) 等差数列（低ノイズ過剰）、(2) 学習可能スケジュール（DPM-Solver++）。DDPMの $\beta_t$ もノイズスケジュール設計で性能変化。
-:::
 
-:::details **Q13: Score SDE (第37回) とScore Matching (本講義) の関係は？**
+</details>
+
+<details><summary>**Q13: Score SDE (第37回) とScore Matching (本講義) の関係は？**</summary>
 
 **A**: Score Matching = **スコア推定手法**（離散データで $\nabla_x \log p$ 学習）。Score SDE = **連続拡散過程の理論**（SDE視点でDiffusion統一）。関係:
 - Score Matching → スコア関数 $\mathbf{s}_\theta(x, t)$ 学習
 - Score SDE → そのスコアで逆SDEを定義: $dx = [f - g^2 \nabla \log p_t] dt + g d\bar{w}$
 
 Score MatchingがツールでScore SDEが理論フレームワーク。
-:::
 
-:::details **Q14: Fisher Divergenceは実用上使われているのか？**
+</details>
+
+<details><summary>**Q14: Fisher Divergenceは実用上使われているのか？**</summary>
 
 **A**: 理論的ツール。実装上は**Hyvärinen's Theoremで変換した目的関数**（ESM: $\text{tr}(\nabla s) + \frac{1}{2}\|s\|^2$）やDSM（$\|\mathbf{s}_\theta(\tilde{x}) + \epsilon/\sigma\|^2$）を使う。Fisher Divergence自体を直接最小化するコードは書かない。理論証明と実装の橋渡し役。
-:::
 
-:::details **Q15: Langevin Dynamicsは画像生成で実用的か？**
+</details>
+
+<details><summary>**Q15: Langevin Dynamicsは画像生成で実用的か？**</summary>
 
 **A**: **単体では遅い**（数千ステップ必要）。実用化の鍵:
 1. **高速サンプラー**: DDIM（決定論的、50ステップ）, DPM-Solver++（20ステップ）
@@ -1170,7 +1181,8 @@ Score MatchingがツールでScore SDEが理論フレームワーク。
 3. **Latent Diffusion**: 低次元潜在空間で高速化（第39回）
 
 Langevin Dynamicsは**理論的基盤**。実用システムは効率化手法と組み合わせる。
-:::
+
+</details>
 
 ### 7.4 学習スケジュール — 1週間プラン
 
@@ -1248,18 +1260,7 @@ Score MatchingはDiffusionの理論的な心臓部。第36回で完全統合を�
 # 4. Compare with true distribution
 
 function sample_1d_gmm(n::Int)
-    samples = zeros(n)
-    for i in 1:n
-        r = rand()
-        if r < 0.33
-            samples[i] = -3.0 + randn()
-        elseif r < 0.66
-            samples[i] = randn()
-        else
-            samples[i] = 3.0 + randn()
-        end
-    end
-    return samples
+    [(r = rand(); r < 0.33 ? -3.0 : r < 0.66 ? 0.0 : 3.0) + randn() for _ in 1:n]
 end
 
 # TODO: Implement DSM loss, training, and sampling
@@ -1278,7 +1279,7 @@ end
 using Plots
 
 function swiss_roll(n::Int)
-    t = 1.5 * π * (1 .+ 2 * rand(n))
+    t = 1.5π .* (1 .+ 2rand(n))
     x = t .* cos.(t)
     y = t .* sin.(t)
     return hcat(x, y)'
@@ -1343,9 +1344,7 @@ end
 
 **本講義 (第35回) で学んだScore Matchingが、DDPMの訓練目的関数の数学的基盤になる。** 第36回を迎える準備は整った。
 
-:::message
-**進捗: 100% 完了** 🎉 Lecture 35コンプリート！
-:::
+> **Note:** **進捗: 100% 完了** 🎉 Lecture 35コンプリート！
 
 ---
 
@@ -1473,7 +1472,7 @@ Score MatchingとLangevin Dynamicsの理論なしに、Diffusionの数学的本�
 - Score SDE (層3) まで到達したとき、VAE/GAN/Flow/Diffusionの統一的視点が見えるか？
 - Score Matchingは「古い理論」か、それとも「全ての基盤」か？
 
-:::details 歴史的文脈
+<details><summary>歴史的文脈</summary>
 
 - **2005**: Hyvärinen、Explicit Score Matching提案 → 当時はニッチな手法
 - **2011**: Vincent、Denoising SMとDAEの等価性証明 → 実用性向上
@@ -1484,7 +1483,7 @@ Score MatchingとLangevin Dynamicsの理論なしに、Diffusionの数学的本�
 
 **パラダイム転換**: DDPMは「新しい発明」ではなく、Score Matchingの「工学的洗練」だった。
 
-:::
+</details>
 
 ---
 
@@ -1493,28 +1492,28 @@ Score MatchingとLangevin Dynamicsの理論なしに、Diffusionの数学的本�
 ### 主要論文
 
 [^1]: Hyvärinen, A. (2005). "Estimation of Non-Normalized Statistical Models by Score Matching." *Journal of Machine Learning Research*, 6(24), 695–709.
-@[card](https://jmlr.org/papers/v6/hyvarinen05a.html)
+<https://jmlr.org/papers/v6/hyvarinen05a.html>
 
 [^2]: Vincent, P. (2011). "A Connection Between Score Matching and Denoising Autoencoders." *Neural Computation*, 23(7), 1661–1674.
-@[card](https://direct.mit.edu/neco/article/23/7/1661/7677/A-Connection-Between-Score-Matching-and-Denoising)
+<https://direct.mit.edu/neco/article/23/7/1661/7677/A-Connection-Between-Score-Matching-and-Denoising>
 
 [^3]: Song, Y., Garg, S., Shi, J., & Ermon, S. (2019). "Sliced Score Matching: A Scalable Approach to Density and Score Estimation." *UAI 2019*.
-@[card](https://arxiv.org/abs/1905.07088)
+<https://arxiv.org/abs/1905.07088>
 
 [^4]: Welling, M., & Teh, Y. W. (2011). "Bayesian Learning via Stochastic Gradient Langevin Dynamics." *ICML 2011*.
-@[card](https://www.stats.ox.ac.uk/~teh/research/compstats/WelTeh2011a.pdf)
+<https://www.stats.ox.ac.uk/~teh/research/compstats/WelTeh2011a.pdf>
 
 [^5]: Song, Y., & Ermon, S. (2019). "Generative Modeling by Estimating Gradients of the Data Distribution." *NeurIPS 2019*.
-@[card](https://arxiv.org/abs/1907.05600)
+<https://arxiv.org/abs/1907.05600>
 
 [^6]: Song, Y., Sohl-Dickstein, J., Kingma, D. P., Kumar, A., Ermon, S., & Poole, B. (2021). "Score-Based Generative Modeling through Stochastic Differential Equations." *ICLR 2021*.
-@[card](https://arxiv.org/abs/2011.13456)
+<https://arxiv.org/abs/2011.13456>
 
-[^7]: Che, T., Kumar, R., & Bengio, Y. (2024). "On the Statistical Efficiency of Denoising Diffusion Models." *ICLR 2025*.
-@[card](https://arxiv.org/abs/2504.05161)
+[^7]: Chewi, S., Kalavasis, A., Mehrotra, A., & Montasser, O. (2025). "DDPM Score Matching and Distribution Learning." *arXiv:2504.05161*.
+<https://arxiv.org/abs/2504.05161>
 
 [^8]: Ho, J., Jain, A., & Abbeel, P. (2020). "Denoising Diffusion Probabilistic Models." *NeurIPS 2020*.
-@[card](https://arxiv.org/abs/2006.11239)
+<https://arxiv.org/abs/2006.11239>
 
 ### 教科書
 
@@ -1529,41 +1528,13 @@ Score MatchingとLangevin Dynamicsの理論なしに、Diffusionの数学的本�
 
 ---
 
-## 記法規約
+## 著者リンク
 
-| 記号 | 意味 | 初出 |
-|:-----|:-----|:-----|
-| $p(x)$ | データ分布 / 真の分布 | Zone 1 |
-| $q_\theta(x)$ | モデル分布 (パラメータ $\theta$) | Zone 3.2 |
-| $s(x) = \nabla_x \log p(x)$ | スコア関数 | Zone 0 |
-| $s_\theta(x)$ | モデルスコア関数 | Zone 3.1 |
-| $Z(\theta)$ | 正規化定数（partition function） | Zone 2.1 |
-| $E(x; \theta)$ | エネルギー関数 | Zone 2.1 |
-| $D_\text{Fisher}(p \| q)$ | Fisher Divergence | Zone 3.2 |
-| $J_\text{ESM}(\theta)$ | Explicit Score Matching目的関数 | Zone 3.3 |
-| $J_\text{DSM}(\theta; \sigma)$ | Denoising Score Matching目的関数 | Zone 3.4 |
-| $J_\text{SSM}(\theta)$ | Sliced Score Matching目的関数 | Zone 3.5 |
-| $\tilde{x} = x + \sigma \epsilon$ | ノイズ付加データ | Zone 0 |
-| $\sigma$ | ノイズレベル | Zone 1.3 |
-| $\{\sigma_i\}_{i=1}^L$ | ノイズスケジュール | Zone 3.6 |
-| $\epsilon \sim \mathcal{N}(0, I)$ | ガウスノイズ | Zone 0 |
-| $W_t$ | Brown運動 (Wiener process) | Zone 3.7 |
-| $\epsilon$ (Langevin) | ステップサイズ | Zone 3.7 |
-| $\alpha_i$ | ノイズレベル $i$ でのステップサイズ | Zone 3.8 |
-| ULA | Unadjusted Langevin Algorithm | Zone 3.7 |
-| SGLD | Stochastic Gradient Langevin Dynamics | Zone 3.8 |
-| NCSN | Noise Conditional Score Networks | Zone 3.10 |
-
-**記号の衝突注意**:
-- $\epsilon$ はノイズ変数 (Zone 0-3) とステップサイズ (Zone 3.7-) で異なる意味
-- 文脈から判断すること
-
----
-
-**著者**: Claude Educator Agent (Sonnet 4.5)
-**監修**: Tech Lead (Opus 4.6)
-**シリーズ**: 深層生成モデル完全講義（全46回）
----
+- Blog: https://fumishiki.dev
+- X: https://x.com/fumishiki
+- LinkedIn: https://www.linkedin.com/in/fumitakamurakami
+- GitHub: https://github.com/fumishiki
+- Hugging Face: https://huggingface.co/fumishiki
 
 ## ライセンス
 

@@ -5,6 +5,10 @@ emoji: "⚡"
 type: "tech"
 topics: ["machinelearning", "optimization", "rust", "elixir", "production"]
 published: true
+difficulty: "advanced"
+time_estimate: "90 minutes"
+languages: ["Julia", "Rust", "Elixir"]
+keywords: ["機械学習", "深層学習", "生成モデル"]
 ---
 
 ## 💻 4. 実装ゾーン（60分）— 3言語統合実装
@@ -125,13 +129,13 @@ impl Quantizer {
             warn!("All weights are zero, scale = 0");
         }
 
-        let quantized: Vec<i8> = weights.iter()
+        let quantized = weights.iter()
             .map(|w| {
                 let q = (w / scale).round();
                 let max = f32::from(self.config.bit_width.max_value());
                 q.clamp(-max, max) as i8
             })
-            .collect();
+            .collect::<Vec<_>>();
 
         info!(
             num_params = weights.len(),
@@ -145,7 +149,7 @@ impl Quantizer {
     pub fn dequantize(&self, quantized: &[i8], scale: f32) -> Result<Vec<f32>> {
         Ok(quantized.iter()
             .map(|&q| f32::from(q) * scale)
-            .collect())
+            .collect::<Vec<_>>())
     }
 }
 
@@ -162,9 +166,7 @@ mod tests {
         let (quantized, scale) = quantizer.quantize(&weights).unwrap();
 
         // Check range
-        for q in &quantized {
-            assert!(*q >= -7 && *q <= 7);
-        }
+        assert!(quantized.iter().all(|&q| q >= -7 && q <= 7));
 
         // Check scale computation
         let expected_scale = 0.8 / 7.0;
@@ -181,9 +183,7 @@ mod tests {
         let dequantized = quantizer.dequantize(&quantized, scale).unwrap();
 
         // Check error bound: |w - ŵ| <= scale/2
-        for (orig, deq) in weights.iter().zip(&dequantized) {
-            assert!((orig - deq).abs() <= scale / 2.0 + 1e-6);
-        }
+        assert!(weights.iter().zip(&dequantized).all(|(orig, deq)| (orig - deq).abs() <= scale / 2.0 + 1e-6));
     }
 
     #[test]
@@ -211,14 +211,12 @@ proptest! {
         weights in prop::collection::vec((-100.0f32..100.0f32), 1..1000)
     ) {
         let config = QuantizerConfig::new(BitWidth::Int8);
-        let quantizer = Quantizer::new(config).unwrap();
+        let quantizer = Quantizer::new(config)?;
 
         let (quantized, scale) = quantizer.quantize(&weights)?;
         let dequantized = quantizer.dequantize(&quantized, scale)?;
 
-        for (orig, deq) in weights.iter().zip(&dequantized) {
-            prop_assert!((orig - deq).abs() <= scale / 2.0 + 1e-5);
-        }
+        prop_assert!(weights.iter().zip(&dequantized).all(|(orig, deq)| (orig - deq).abs() <= scale / 2.0 + 1e-5));
     }
 
     #[test]
@@ -226,13 +224,11 @@ proptest! {
         weights in prop::collection::vec((-10.0f32..10.0f32), 1..1000)
     ) {
         let config = QuantizerConfig::new(BitWidth::Int4);
-        let quantizer = Quantizer::new(config).unwrap();
+        let quantizer = Quantizer::new(config)?;
 
         let (quantized, _scale) = quantizer.quantize(&weights)?;
 
-        for q in &quantized {
-            prop_assert!(*q >= -7 && *q <= 7);
-        }
+        prop_assert!(quantized.iter().all(|&q| q >= -7 && q <= 7));
     }
 }
 ```
@@ -324,22 +320,16 @@ defmodule InferenceAPI.CircuitBreaker do
 
   defp attempt_call(fun, state) do
     start_time = System.monotonic_time(:millisecond)
+    result = fun.()
+    (System.monotonic_time(:millisecond) - start_time) |> record_latency()
 
-    case fun.() do
+    case result do
       {:ok, result} ->
-        latency = System.monotonic_time(:millisecond) - start_time
-        record_latency(latency)
-
-        new_state = handle_success(state)
-        {:reply, {:ok, result}, new_state}
+        {:reply, {:ok, result}, handle_success(state)}
 
       {:error, reason} ->
-        latency = System.monotonic_time(:millisecond) - start_time
-        record_latency(latency)
         record_error()
-
-        new_state = handle_failure(state)
-        {:reply, {:error, reason}, new_state}
+        {:reply, {:error, reason}, handle_failure(state)}
     end
   end
 
@@ -417,11 +407,9 @@ defmodule InferenceAPI.CircuitBreakerTest do
 
   test "transitions to open after threshold failures", %{cb: cb} do
     # Trigger 5 failures
-    for _ <- 1..5 do
-      assert {:error, :service_down} = CircuitBreaker.call(cb, fn ->
-        {:error, :service_down}
-      end)
-    end
+    1..5 |> Enum.each(fn _ ->
+      assert {:error, :service_down} = CircuitBreaker.call(cb, fn -> {:error, :service_down} end)
+    end)
 
     # Circuit should be open now
     assert {:error, :circuit_open} = CircuitBreaker.call(cb, fn ->
@@ -431,9 +419,7 @@ defmodule InferenceAPI.CircuitBreakerTest do
 
   test "transitions to half-open after timeout", %{cb: cb} do
     # Open the circuit
-    for _ <- 1..5 do
-      CircuitBreaker.call(cb, fn -> {:error, :fail} end)
-    end
+    1..5 |> Enum.each(fn _ -> CircuitBreaker.call(cb, fn -> {:error, :fail} end) end)
 
     # Wait for timeout
     Process.sleep(30_100)
@@ -452,9 +438,9 @@ defmodule InferenceAPI.CircuitBreakerTest do
     Process.sleep(30_100)
 
     # 3 successes to close
-    for _ <- 1..3 do
+    1..3 |> Enum.each(fn _ ->
       assert {:ok, :ok} = CircuitBreaker.call(cb, fn -> {:ok, :ok} end)
-    end
+    end)
 
     # Should be closed now - no delay
     assert {:ok, :result} = CircuitBreaker.call(cb, fn -> {:ok, :result} end)
@@ -545,7 +531,7 @@ function decode(decoder::SpeculativeDecoder, prompt::String; max_length=100)
         total_rounds = total_rounds
     )
 
-    return tokens[1:max_length], stats
+    tokens[1:max_length], stats
 end
 
 """
@@ -571,7 +557,7 @@ function accept_or_reject(draft_tokens, log_p_draft, log_p_target, α_threshold)
         end
     end
 
-    return accepted, reject_idx
+    accepted, reject_idx
 end
 
 """
@@ -580,47 +566,27 @@ end
 Sample from adjusted distribution: max(0, p_target - p_draft).
 """
 function sample_adjusted(log_p_target, log_p_draft)
-    p_target = exp.(log_p_target)
-    p_draft = exp.(log_p_draft)
-
-    # Adjusted: max(0, p_t - p_d)
-    p_adjusted = max.(0.0, p_target .- p_draft)
+    p_adjusted = max.(0.0, exp.(log_p_target) .- exp.(log_p_draft))
     p_adjusted ./= sum(p_adjusted)
-
-    # Sample
-    return sample(1:length(p_adjusted), Weights(p_adjusted))
+    sample(1:length(p_adjusted), Weights(p_adjusted))
 end
 
 # Benchmark
 function benchmark_speculative(decoder, prompts; max_length=100)
-    times_spec = Float64[]
-    times_auto = Float64[]
+    times_spec = [@elapsed decode(decoder, p; max_length) for p in prompts]
+    times_auto = [@elapsed decode_autoregressive(decoder.target_model, p; max_length) for p in prompts]
 
-    for prompt in prompts
-        # Speculative
-        t1 = @elapsed decode(decoder, prompt; max_length)
-        push!(times_spec, t1)
-
-        # Autoregressive baseline
-        t2 = @elapsed decode_autoregressive(decoder.target_model, prompt; max_length)
-        push!(times_auto, t2)
-    end
-
-    speedup = mean(times_auto) / mean(times_spec)
-
-    return (
+    (
         spec_time = mean(times_spec),
         auto_time = mean(times_auto),
-        speedup = speedup
+        speedup  = mean(times_auto) / mean(times_spec)
     )
 end
 ```
 
 ---
 
-:::message
-**進捗**: 全体の85%完了 — Zone 5 (実験ゾーン) へ
-:::
+> **Note:** **進捗**: 全体の85%完了 — Zone 5 (実験ゾーン) へ
 
 ## 🔬 5. 実験ゾーン（30分）— 自己診断と実装チャレンジ
 
@@ -634,9 +600,9 @@ use quantizer::*;
 
 #[test]
 fn measure_quantization_accuracy() {
-    let weights: Vec<f32> = (0..10000)
+    let weights = (0..10000)
         .map(|i| (i as f32 * 0.001).sin())
-        .collect();
+        .collect::<Vec<f32>>();
 
     let configs = vec![
         (BitWidth::Int8, "INT8"),
@@ -749,7 +715,7 @@ function distillation_loss(student, teacher, x, y; T=3.0, α=0.7)
     # Hard target loss
     hard_loss = Flux.crossentropy(softmax(logits_s), y)
 
-    return α * soft_loss + (1 - α) * hard_loss
+    α * soft_loss + (1 - α) * hard_loss
 end
 
 # Experiment: vary temperature
@@ -760,12 +726,10 @@ for T in temperatures
     student_copy = deepcopy(student)
     opt = Adam(0.001)
 
-    losses = Float32[]
-    for epoch in 1:100
-        l = Flux.train!(student_copy, [(X_train, y_train)], opt) do m, x, y
+    losses = map(1:100) do _
+        Flux.train!(student_copy, [(X_train, y_train)], opt) do m, x, y
             distillation_loss(m, teacher, x, y; T=T, α=0.7)
         end
-        push!(losses, l)
     end
 
     # Evaluate
@@ -782,103 +746,7 @@ for T in temperatures
 end
 ```
 
-### 5.3 Speculative Decoding受理率計測
-
-```julia
-# Simulate draft/target model with controlled divergence
-function simulate_models(divergence::Float64)
-    # Draft model: base distribution
-    draft_logits(x) = randn(10) .* 2.0
-
-    # Target model: slightly different
-    target_logits(x) = draft_logits(x) .+ randn(10) .* divergence
-
-    return draft_logits, target_logits
-end
-
-# Measure acceptance rate
-function measure_acceptance_rate(divergence::Float64, n_trials=1000)
-    draft_fn, target_fn = simulate_models(divergence)
-
-    accepted_counts = Int[]
-
-    for _ in 1:n_trials
-        x_context = randn(100)
-
-        # Generate 3 tokens
-        draft_tokens = [argmax(softmax(draft_fn(x_context))) for _ in 1:3]
-        draft_logprobs = [logsoftmax(draft_fn(x_context)) for _ in 1:3]
-        target_logprobs = [logsoftmax(target_fn(x_context)) for _ in 1:3]
-
-        # Accept/reject
-        accepted = 0
-        for i in 1:3
-            α = min(1.0, exp(target_logprobs[i][draft_tokens[i]] -
-                             draft_logprobs[i][draft_tokens[i]]))
-
-            if rand() < α
-                accepted += 1
-            else
-                break
-            end
-        end
-
-        push!(accepted_counts, accepted)
-    end
-
-    return mean(accepted_counts), std(accepted_counts)
-end
-
-# Experiment: vary divergence
-divergences = [0.01, 0.05, 0.1, 0.2, 0.5]
-
-println("\nSpeculative Decoding Acceptance Rate")
-println("="^60)
-
-for div in divergences
-    mean_acc, std_acc = measure_acceptance_rate(div)
-    speedup = 1 + mean_acc
-
-    println("Divergence $div:")
-    println("  Mean accepted: $(round(mean_acc, digits=2))/3")
-    println("  Std:           $(round(std_acc, digits=2))")
-    println("  Speedup:       $(round(speedup, digits=2))x")
-end
-```
-
-出力例:
-```
-Speculative Decoding Acceptance Rate
-============================================================
-Divergence 0.01:
-  Mean accepted: 2.87/3
-  Std:           0.34
-  Speedup:       3.87x
-
-Divergence 0.05:
-  Mean accepted: 2.43/3
-  Std:           0.67
-  Speedup:       3.43x
-
-Divergence 0.1:
-  Mean accepted: 1.92/3
-  Std:           0.91
-  Speedup:       2.92x
-
-Divergence 0.2:
-  Mean accepted: 1.23/3
-  Std:           0.98
-  Speedup:       2.23x
-
-Divergence 0.5:
-  Mean accepted: 0.67/3
-  Std:           0.79
-  Speedup:       1.67x
-```
-
-**観察**: Divergence (Draft-Target差) が小さいほど受理率が高い → QuantSpec (INT4量子化Draft) は divergence ~0.01 で受理率>90%を達成。
-
-### 5.4 自己診断チェックリスト
+### 5.3 自己診断チェックリスト
 
 - [ ] INT4/INT8量子化の数式を導出できる
 - [ ] Per-Channel vs Per-Tensor の違いを説明できる
@@ -893,9 +761,13 @@ Divergence 0.5:
 
 ---
 
-:::message
-**進捗**: 全体の100%完了 — 最終Zone (6-7) へ
-:::
+> **Note:** **進捗**: 全体の100%完了 — 最終Zone (6-7) へ
+
+
+> Progress: 85%
+> **理解度チェック**
+> 1. このゾーンの主要な概念・定義を自分の言葉で説明してください。
+> 2. この手法が他のアプローチより優れている点と、その限界を述べてください。
 
 ## 🎓 6. 振り返りと発展ゾーン（30分）— まとめと最新研究動向
 
@@ -1034,53 +906,6 @@ graph TD
 - Prefix Caching
 - Multi-LoRA並列推論
 
-### 6.5 推薦書籍・リソース
-
-#### 書籍
-
-| タイトル | 著者 | 内容 | 推奨度 |
-|:--------|:-----|:-----|:-------|
-| Deep Learning | Goodfellow+ | 基礎理論 | ★★★★★ |
-| Dive into Deep Learning | Zhang+ | 実装重視 | ★★★★☆ |
-| LLM Engineer's Handbook | - | Production実践 | ★★★★★ |
-
-#### オンラインリソース
-
-**公式ドキュメント**:
-- [vLLM Documentation](https://docs.vllm.ai/) — PagedAttention実装詳細
-- [NVIDIA TensorRT-LLM](https://github.com/NVIDIA/TensorRT-LLM) — FP8/INT4量子化
-- [Hugging Face Optimum](https://huggingface.co/docs/optimum/) — 量子化ツール
-
-**論文サーベイ**:
-- [Awesome-LLM-Inference](https://github.com/DefTruth/Awesome-LLM-Inference) — 推論最適化論文まとめ
-- [Awesome-Quantization](https://github.com/Zhen-Dong/Awesome-Quantization-Papers) — 量子化論文まとめ
-
-**ブログ**:
-- [vLLM Blog](https://blog.vllm.ai/) — PagedAttention解説
-- [Databricks Mosaic AI Blog](https://www.databricks.com/blog/category/engineering/mosaic-ai) — Production tips
-- [Hugging Face Blog](https://huggingface.co/blog) — 最新手法解説
-
-### 6.6 次のステップ — 本講義修了後の学習パス
-
-**推論最適化を極める**:
-1. vLLMソースコード読解 (C++/CUDA)
-2. TensorRT-LLMで独自カーネル実装
-3. 自作量子化手法の研究 (NeurIPS/ICML投稿)
-
-**Production運用を極める**:
-1. Kubernetesでの推論クラスタ構築
-2. Prometheus/Grafanaで監視ダッシュボード
-3. SLA 99.99%達成のためのチューニング
-
-**3言語統合を極める**:
-1. Rust/Elixir/Juliaでフルスタック推論システム構築
-2. FFI最適化 (ゼロコピー転送)
-3. 分散訓練+推論パイプライン統合
-
----
-
-**ゴール**: 本講義の要点を整理し、次の学習へつなげる。
-
 ### 6.6 本講義で学んだこと
 
 #### Part A: 量子化完全版
@@ -1122,26 +947,34 @@ graph TD
 2. **Mixed Precision**: FP16 forward + FP32 backward, Loss scaling
 3. **Gradient Checkpointing**: 中間活性化再計算, メモリ削減50-70%
 
+
+> Progress: 95%
+> **理解度チェック**
+> 1. $Q(w) = \text{round}(w/s)$ の各記号の意味と、この式が表す操作を説明してください。
+> 2. このゾーンで学んだ手法の直感的な意味と、なぜこの定式化が必要なのかを説明してください。
+
 ### 6.7 よくある質問 (FAQ)
 
-:::details Q1. INT4量子化で精度が落ちないのはなぜ？
+<details><summary>Q1. INT4量子化で精度が落ちないのはなぜ？</summary>
 
-A. LLMの重みは**低ランク構造**を持つため、量子化誤差が出力に与える影響が小さい。加えて、Per-Channel量子化で重要なチャネルの精度を保護している。実際、Perplexity増加は通常1-2%程度で、多くのタスクで影響は無視できる。
+A. LLMの重みは**低ランク構造**を持つため、量子化誤差が出力に与える影響が小さい。Per-Channel量子化で重要なチャネルの精度を保護している。実際、Perplexity増加は通常1-2%程度で、多くのタスクで影響は無視できる。
 
 重要なのは**どこを量子化するか**:
 - ✅ Weight: 量子化しやすい (静的)
 - ✅ KV-Cache: 量子化しやすい (トークンごとスケール)
 - ⚠️ Activation: 量子化しにくい (動的, 外れ値多い)
-:::
 
-:::details Q2. Speculative Decodingはなぜ分布を保存するのか？
+</details>
+
+<details><summary>Q2. Speculative Decodingはなぜ分布を保存するのか？</summary>
 
 A. Modified Rejection Samplingを使うため。棄却時に$p'(x) = \max(0, p(x) - q(x))$から再サンプリングすることで、**数学的に** $p(x)$と完全に一致する分布が得られる。
 
 これはMCMCのMetropolis-Hastingsと同じ原理。受理確率$\alpha = \min(1, p/q)$は、詳細つり合い条件を満たす。
-:::
 
-:::details Q3. なぜRustではなくPythonでMLを書かないのか？
+</details>
+
+<details><summary>Q3. なぜRustではなくPythonでMLを書かないのか？</summary>
 
 A. **役割分担**が答え。
 - **Python**: プロトタイピング, 実験, データ分析 → 柔軟性
@@ -1150,9 +983,10 @@ A. **役割分担**が答え。
 - **Elixir**: APIサーバー, 分散制御 → 並行性+耐障害性
 
 本講義は**Production推論**に焦点を当てているため、Rust/Elixir中心。Pythonは研究段階で使い、本番ではコンパイル言語に移行するのが現実的。
-:::
 
-:::details Q4. QuantSpecの受理率>90%は本当か？
+</details>
+
+<details><summary>Q4. QuantSpecの受理率>90%は本当か？</summary>
 
 A. **本当**。理由は2つ:
 1. Draft = Target の量子化版 → **同じモデル** → 決定境界が近い
@@ -1164,9 +998,10 @@ Apple論文 [^1] の実測値:
 - LLaMA-70B: 受理率90.5%
 
 従来のSpeculative (別モデル) は60-80%なので、**20%以上の改善**。
-:::
 
-:::details Q5. Production環境でElixirは現実的か？
+</details>
+
+<details><summary>Q5. Production環境でElixirは現実的か？</summary>
 
 A. **非常に現実的**。実績:
 - **WhatsApp**: 10億ユーザー, 50エンジニアで運用 (Erlang/Elixir)
@@ -1179,26 +1014,8 @@ Elixirの強み:
 - ホットコードスワップ: ダウンタイムなし更新
 
 **ただし**: 数値計算はRust/Juliaに任せ、Elixirは**制御層**に徹する。
-:::
 
-### 6.8 学習スケジュール (本講義復習プラン)
-
-| Day | 内容 | 時間 | ゴール |
-|:---|:-----|:-----|:-------|
-| **Day 1** | Part A-B 数式 | 3h | 量子化・蒸留・Spec数式導出 |
-| | Zone 3 Part A-B 完全読解 | | Boss Battle両方解く |
-| | 数式ノート作成 | | 自力で再導出できる |
-| **Day 2** | Part C-D 実装 | 3h | Rust/Elixir実装完成 |
-| | Zone 3 Part C-D + Zone 4 | | Production品質コード書く |
-| | 3言語実装チャレンジ | | 統合システム動作確認 |
-| **Day 3** | Part E + 実験 | 2h | 最適化+検証 |
-| | Zone 3 Part E + Zone 5 | | プロファイリング実践 |
-| | 量子化精度測定 | | 理論値と実測値比較 |
-| **Day 4** | 最新研究 + 統合 | 2h | SOTA論文理解 |
-| | Zone 6 論文サーベイ | | 2024-2026動向把握 |
-| | 自分のユースケース設計 | | 最適手法選択 |
-
-**累計学習時間**: 10時間 (1日2.5時間 × 4日)
+</details>
 
 ### 6.9 次回予告: 第27回 評価パイプライン構築
 
@@ -1237,9 +1054,7 @@ INT4で精度90%保持。INT2で70%。INT1 (binary) で20%。
 - Productionは「動く」と「壊れない」が同じくらい重要
 - 3言語統合は「1言語で全てやる」より**本質的に優れている**理由
 
-:::message
-**進捗: 100% 完了** 🎉 講義完走！
-:::
+> **Note:** **進捗: 100% 完了** 🎉 講義完走！
 
 ---
 
@@ -1248,25 +1063,25 @@ INT4で精度90%保持。INT2で70%。INT1 (binary) で20%。
 ### 主要論文
 
 [^1]: Apple Machine Learning Research (2025). "QuantSpec: Self-Speculative Decoding with Hierarchical Quantized KV Cache".
-@[card](https://machinelearning.apple.com/research/quantspec)
+<https://machinelearning.apple.com/research/quantspec>
 
-[^2]: arXiv:2502.01070 (2025). "An Investigation of FP8 Across Accelerators for LLM Inference".
-@[card](https://arxiv.org/abs/2502.01070)
+[^2]: Kim, J., Lee, J., Park, G., Kim, B., et al. (2025). "An Inquiry into Datacenter TCO for LLM Inference with FP8".
+<https://arxiv.org/abs/2502.01070>
 
 [^3]: Hinton, G., Vinyals, O., & Dean, J. (2015). "Distilling the Knowledge in a Neural Network". arXiv:1503.02531.
-@[card](https://arxiv.org/abs/1503.02531)
+<https://arxiv.org/abs/1503.02531>
 
 [^4]: Leviathan, Y., Kalman, M., & Matias, Y. (2023). "Fast Inference from Transformers via Speculative Decoding". arXiv:2211.17192.
-@[card](https://arxiv.org/abs/2211.17192)
+<https://arxiv.org/abs/2211.17192>
 
 [^6]: Kwon, W., Li, Z., Zhuang, S., et al. (2023). "Efficient Memory Management for Large Language Model Serving with PagedAttention". arXiv:2309.06180.
-@[card](https://arxiv.org/abs/2309.06180)
+<https://arxiv.org/abs/2309.06180>
 
 [^7]: Bengio, Y., Léonard, N., & Courville, A. (2013). "Estimating or Propagating Gradients Through Stochastic Neurons for Conditional Computation". arXiv:1308.3432.
-@[card](https://arxiv.org/abs/1308.3432)
+<https://arxiv.org/abs/1308.3432>
 
 [^13]: arXiv:2510.01290 (2024). "ThinKV: Thought-Adaptive KV Cache Compression for Efficient Reasoning Models".
-@[card](https://arxiv.org/abs/2510.01290)
+<https://arxiv.org/abs/2510.01290>
 
 ### 教科書
 
@@ -1284,37 +1099,13 @@ INT4で精度90%保持。INT2で70%。INT1 (binary) で20%。
 
 ---
 
-## 記法規約
+## 著者リンク
 
-| 記号 | 意味 | 例 |
-|:-----|:-----|:---|
-| $Q(w)$ | 量子化関数 | $Q(w) = \text{round}(w/s)$ |
-| $s$ | スケールファクター | $s = \max(\|w\|) / 127$ (INT8) |
-| $z$ | ゼロ点 (非対称量子化) | $z = -\text{round}(w_{\min}/s)$ |
-| $b$ | ビット幅 | $b=4$ (INT4), $b=8$ (INT8) |
-| $p_T(T)$ | 温度$T$のSoftmax | $p_i(T) = \exp(z_i/T) / \sum_j \exp(z_j/T)$ |
-| $\alpha$ | 受理確率 | $\alpha = \min(1, p_p(x) / p_q(x))$ |
-| $\text{EWMA}_t$ | 指数移動平均 | $\alpha L_t + (1-\alpha) \text{EWMA}_{t-1}$ |
-| SLA | Service Level Agreement | 顧客との契約 |
-| SLO | Service Level Objective | 内部目標 (SLA達成のための余裕) |
-| SLI | Service Level Indicator | 測定可能なメトリクス |
-| FP8-E4M3 | 8-bit float (4-bit exp, 3-bit mantissa) | 範囲 $\pm 448$, 精度高 |
-| FP8-E5M2 | 8-bit float (5-bit exp, 2-bit mantissa) | 範囲 $\pm 57344$, 範囲広 |
-
-**継続記法** (Course I-II-IIIで統一):
-- $\mathcal{L}$: 損失関数
-- $\theta$: モデルパラメータ
-- $\mathbb{E}[\cdot]$: 期待値
-- $D_\text{KL}(p \| q)$: KLダイバージェンス
-- $\nabla_\theta$: パラメータ$\theta$に関する勾配
-
----
-
-:::message
-**🏆 第26回コンプリート！** 推論最適化とProduction品質設計を完全習得しました。次回は評価パイプライン構築で、最適化の効果を定量的に測定します。
-:::
-
----
+- Blog: https://fumishiki.dev
+- X: https://x.com/fumishiki
+- LinkedIn: https://www.linkedin.com/in/fumitakamurakami
+- GitHub: https://github.com/fumishiki
+- Hugging Face: https://huggingface.co/fumishiki
 
 ## ライセンス
 
@@ -1754,26 +1545,38 @@ $$
 
 **ステップ2**: イテレーションごとに完了リクエストを削除、新規を追加
 
-```python
-# Pseudo-code for continuous batching
-active_requests = []
+```julia
+# Continuous Batching: 可変長リクエストの動的バッチ管理
+struct Request
+    tokens::Vector{Int}
+    done::Bool
+end
 
-for step in range(max_steps):
-    # Remove finished requests
-    active_requests = [r for r in active_requests if not r.done]
-
-    # Add new requests from queue
-    while len(active_requests) < max_batch_size and queue.not_empty():
-        active_requests.append(queue.pop())
-
-    # Forward pass for all active requests
-    logits = model.forward([r.tokens for r in active_requests])
-
-    # Update states
-    for r, logit in zip(active_requests, logits):
-        next_token = sample(logit)
-        r.tokens.append(next_token)
-        r.done = is_eos(next_token)
+function continuous_batching!(queue::Vector{Request}, model; max_batch=8, max_steps=1000)
+    active = Request[]
+    
+    for _ in 1:max_steps
+        # 完了リクエストを削除
+        filter!(r -> !r.done, active)
+        
+        # キューから新規リクエストを補充
+        while length(active) < max_batch && !isempty(queue)
+            push!(active, popfirst!(queue))
+        end
+        isempty(active) && break
+        
+        # バッチ forward（並列推論）
+        token_seqs = [r.tokens for r in active]
+        logits = model(token_seqs)        # shape: [vocab, batch]
+        
+        # 次トークンをサンプリング、状態更新
+        for (r, logit) in zip(active, eachcol(logits))
+            next_tok = sample_token(logit)
+            push!(r.tokens, next_tok)
+            r.done = is_eos(next_tok)
+        end
+    end
+end
 ```
 
 #### 7.3.3 スループット向上の理論解析
@@ -1865,23 +1668,29 @@ struct PageTable {
 
 **ステップ3**: Attention計算時、ページテーブルを参照
 
-```python
-def paged_attention(query, page_table, physical_memory):
-    """
-    query: current token's query vector
-    page_table: mapping from logical to physical pages
-    physical_memory: contiguous KV cache storage
-    """
-    attn_scores = []
+```rust
+// PagedAttention: ページテーブル経由のKVキャッシュAttention
+// 数式: Attention(q, K, V) = softmax(qKᵀ/√d_k) V (ページ分散)
+fn paged_attention(
+    query: &[f32],           // [d_k]
+    page_table: &HashMap<u32, u32>,
+    physical_memory: &[Vec<(Vec<f32>, Vec<f32>)>],  // [page][token](K, V)
+    d_k: usize,
+) -> Vec<f32> {
+    let scale = 1.0 / (d_k as f32).sqrt();
+    let mut output = vec![0.0f32; query.len()];
 
-    for logical_page_id in page_table.keys():
-        physical_page_id = page_table[logical_page_id]
-        K, V = physical_memory[physical_page_id]
-
-        score = softmax(query @ K.T / sqrt(d_k))
-        attn_scores.append(score @ V)
-
-    return sum(attn_scores)
+    for &phys_id in page_table.values() {
+        for (k, v) in &physical_memory[phys_id as usize] {
+            // スコア: q・kᵀ / √d_k
+            let score: f32 = query.iter().zip(k).map(|(q, k)| q * k).sum::<f32>() * scale;
+            let weight = score.exp();  // softmax分子（後で正規化）
+            // 重み付きV加算
+            output.iter_mut().zip(v).for_each(|(o, vi)| *o += weight * vi);
+        }
+    }
+    output
+}
 ```
 
 #### 7.4.3 メモリ効率の計算
@@ -1928,9 +1737,7 @@ $L_{\max} = 2048, \mathbb{E}[L] = 512$ なら**4倍削減**。
 - バッチサイズ32倍（メモリ断片化解消）
 - メモリ使用率2.5倍向上（38% → 94%）
 
-:::message
-**進捗: 90% 完了** Production最適化の最新動向（FlashAttention-3、Speculative Decoding、Continuous Batching、PagedAttention）を追加。実装完了。
-:::
+> **Note:** **進捗: 90% 完了** Production最適化の最新動向（FlashAttention-3、Speculative Decoding、Continuous Batching、PagedAttention）を追加。実装完了。
 
 ---
 
@@ -1942,42 +1749,5 @@ $L_{\max} = 2048, \mathbb{E}[L] = 512$ なら**4倍削減**。
 [^28]: Gyeong-In Yu et al. "Orca: A Distributed Serving System for Transformer-Based Generative Models". OSDI 2022.
 [^29]: Woosuk Kwon, Zhuohan Li, Siyuan Zhuang, Ying Sheng, Lianmin Zheng, Cody Hao Yu, Joseph E. Gonzalez, Hao Zhang, Ion Stoica. "Efficient Memory Management for Large Language Model Serving with PagedAttention". SOSP 2023 / arXiv:2309.06180.
 
----
 
-## ライセンス / License
-
-本記事は **CC BY-NC-SA 4.0** ライセンスの下で公開されています。
-
-### ✅ 許可される利用:
-
-- 個人的な学習・研究
-- 非営利の教育目的での利用（ただし全ての帰属表示リンクを削除せずに保持すること）
-- 改変した上での再配布（同じライセンスで、かつ改変点を明示すること）
-
-### ❌ 明示的に禁止される利用:
-
-1. **企業研修・社内勉強会での利用**
-   - 営利企業での研修資料、社内勉強会資料への転載
-   - 非営利団体での研修利用
-   - **理由**: 組織内利用では帰属表示が削除されやすく、無断改変のリスクが高いため
-
-2. **有料スクール・情報商材・セミナーでの利用**
-   - 受講料を徴収する場での配布、スクリーンショットの掲示、派生教材の作成
-
-3. **LLM/AIモデルの学習データとしての利用**
-   - 商用モデルのPre-training、Fine-tuning、RAGの知識ソースとして本コンテンツをスクレイピング・利用すること
-
-4. **勝手に内容を有料化する行為全般**
-   - 有料note、有料記事、Kindle出版、有料動画コンテンツ、Patreon限定コンテンツ等
-
-**個人利用に含まれるもの:**
-- 個人の学習・研究
-- 個人的なノート作成（個人利用に限る）
-- 友人への元記事リンク共有
-
-**組織での導入をご希望の場合**は、必ず著者に連絡を取り、以下を遵守してください:
-- 全ての帰属表示リンクを維持
-- 利用方法を著者に報告
-
-**無断利用が発覚した場合**、使用料の請求およびSNS等での公表を行う場合があります。
 

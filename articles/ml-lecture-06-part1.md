@@ -1320,6 +1320,10 @@ $$
 
 > Progress: 90%
 
+> **理解度チェック**
+> 1. エントロピー $H(X) = -\sum_x p(x)\log p(x)$ が最大になるのはどんな分布のときか。なぜそうなるか説明せよ。
+> 2. KL divergence $D_\text{KL}(p \| q) \geq 0$ の非負性をジェンセンの不等式から証明せよ。
+
 ### 3.12 ボス戦 — Cross-Entropy Loss の完全分解
 
 ボス戦。Cross-Entropy Loss を情報理論の全道具で完全分解する。
@@ -1451,6 +1455,10 @@ Wasserstein-1 距離は KR 双対性より $W_1(\mu, \nu) = \sup_{f: \text{1-Lip
 ---
 
 > Progress: 100%
+
+> **理解度チェック**
+> 1. 相互情報量 $I(X;Y) = D_\text{KL}(p(x,y) \| p(x)p(y))$ がゼロになる条件を述べ、独立性との関係を説明せよ。
+> 2. 交差エントロピー損失 $H(p,q) = -\sum_x p(x)\log q(x)$ の最小化が KL 最小化と等価になるのはなぜか。
 > **📖 続きは後編へ**
 > [【後編】第6回: 情報理論・最適化理論](/articles/ml-lecture-06-part2) では、エントロピー・KL・Adam・SGDを完全実装します。
 

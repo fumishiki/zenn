@@ -5,7 +5,13 @@ type: "tech"
 topics: ["machinelearning", "mlops", "rust", "julia", "elixir"]
 published: true
 slug: "ml-lecture-31-part2"
+difficulty: "advanced"
+time_estimate: "90 minutes"
+languages: ["Julia", "Rust", "Elixir"]
+keywords: ["機械学習", "深層学習", "生成モデル"]
 ---
+> **📖 前編（理論編）**: [第31回前編: MLOps理論編](./ml-lecture-31-part1) | **← 理論・数式ゾーンへ**
+
 ## 💻 4. 実装ゾーン（60分）— ⚡Julia実験管理 + 🦀Rust MLOpsツール + 🔮Elixir監視
 
 ### Part F: 実装編
@@ -381,9 +387,7 @@ end
 # Usage
 MLOps.Telemetry.setup()
 
-for i <- 1..100 do
-  MLOps.Model.predict("input_#{i}")
-end
+1..100 |> Enum.each(fn i -> MLOps.Model.predict("input_#{i}") end)
 ```
 
 ##### 4.3.2 SLO監視 & 自動アラート
@@ -461,12 +465,12 @@ end
 {:ok, _} = MLOps.SLOMonitor.start_link([])
 
 # Simulate requests
-for _ <- 1..1000 do
+Enum.each(1..1000, fn _ ->
   latency = :rand.uniform(150)
   success = latency < 120
   MLOps.SLOMonitor.record_request(latency, success)
   Process.sleep(10)
-end
+end)
 ```
 
 出力 (1分ごと):
@@ -559,11 +563,16 @@ Span: model.predict [12.5ms]
 
 ---
 
+> Progress: 85%
+> **理解度チェック**
+> 1. Julia + MLflowによる実験管理で、`log_metric` と `log_param` を使い分ける設計原則と、Artifact管理による再現性保証を説明せよ。
+> 2. PSI（Population Stability Index）によるデータドリフト検出において、閾値（PSI > 0.2 = Significant Shift）の統計的根拠と、KS検定との使い分けを説明せよ。
+
 ## 🔬 5. 実験ゾーン（30分）— 自己診断 & ミニPJ
 
 ### 5.1 MLOps知識チェック (10問)
 
-:::details 問題1: モデルバージョニングの5-tuple
+<details><summary>問題1: モデルバージョニングの5-tuple</summary>
 
 モデル状態 $\mathcal{M}_t$ を構成する5つの要素は？
 
@@ -576,9 +585,10 @@ Span: model.predict [12.5ms]
 - $s_t$: Random seed
 
 **再現性 = 5つ全て一致**
-:::
 
-:::details 問題2: Error Budgetの計算
+</details>
+
+<details><summary>問題2: Error Budgetの計算</summary>
 
 SLO = 99.9% (uptime) の場合、30日間のError Budgetは何分？
 
@@ -589,9 +599,10 @@ $$
 $$
 
 **月に43.2分までダウンタイムOK。超えたら新機能開発停止。**
-:::
 
-:::details 問題3: A/Bテストのサンプルサイズ
+</details>
+
+<details><summary>問題3: A/Bテストのサンプルサイズ</summary>
 
 $p_A = 0.10$, MDE = 0.02, $\alpha=0.05$, power = 0.8 の場合、必要なサンプルサイズは？
 
@@ -602,9 +613,10 @@ n = \frac{(1.96 + 0.84)^2 \cdot 2 \cdot 0.10 \cdot 0.90}{0.02^2} \approx 3528 \t
 $$
 
 **合計 7,056 ユーザー必要。**
-:::
 
-:::details 問題4: KS検定のp値解釈
+</details>
+
+<details><summary>問題4: KS検定のp値解釈</summary>
 
 KS検定で $p = 0.001$ が得られた。有意水準 $\alpha=0.01$ で帰無仮説を棄却できるか？
 
@@ -615,9 +627,10 @@ p = 0.001 < \alpha = 0.01 \Rightarrow \text{Reject } H_0
 $$
 
 **データドリフトを検出 → 再訓練をトリガー**
-:::
 
-:::details 問題5: PSIの閾値
+</details>
+
+<details><summary>問題5: PSIの閾値</summary>
 
 PSI = 0.18 が得られた。再訓練は必要か？
 
@@ -630,9 +643,10 @@ PSI = 0.18 が得られた。再訓練は必要か？
 | > 0.25 | 重大なドリフト (再訓練) |
 
 **0.18は監視継続ゾーン。**
-:::
 
-:::details 問題6: DPO lossの式
+</details>
+
+<details><summary>問題6: DPO lossの式</summary>
 
 DPO lossを書け。
 
@@ -643,9 +657,10 @@ $$
 $$
 
 **Bradley-Terry Model + KL正則化の閉形式解。**
-:::
 
-:::details 問題7: Canary Deploymentの段階
+</details>
+
+<details><summary>問題7: Canary Deploymentの段階</summary>
 
 1% → 5% → ? → 100% の ? は何%？
 
@@ -654,9 +669,10 @@ $$
 標準的なカナリアリリース: 1% → 5% → 25% → 100%
 
 **各ステージでエラー率を監視。異常なら即ロールバック。**
-:::
 
-:::details 問題8: RED Metricsの3要素
+</details>
+
+<details><summary>問題8: RED Metricsの3要素</summary>
 
 REDの3要素は？
 
@@ -667,9 +683,10 @@ REDの3要素は？
 - **Duration**: レイテンシ (p50/p95/p99)
 
 **全てのサービスで最低限監視すべきメトリクス。**
-:::
 
-:::details 問題9: Reward Modelingの損失関数
+</details>
+
+<details><summary>問題9: Reward Modelingの損失関数</summary>
 
 Bradley-Terry Modelの損失関数を書け。
 
@@ -680,9 +697,10 @@ $$
 $$
 
 **好ましい応答 $y_w$ のrewardを上げ、好ましくない応答 $y_l$ のrewardを下げる。**
-:::
 
-:::details 問題10: Git LFSとDVCの違い
+</details>
+
+<details><summary>問題10: Git LFSとDVCの違い</summary>
 
 Git LFSとDVCの主な違いは？
 
@@ -696,7 +714,8 @@ Git LFSとDVCの主な違いは？
 | **メタデータ** | `.gitattributes` | `.dvc` ファイル |
 
 **DVC = データ版Git + パイプライン管理。**
-:::
+
+</details>
 
 ### 5.2 ミニプロジェクト1: メトリクス記録システム
 
@@ -762,13 +781,12 @@ pub fn ks_test(sample1: &[f64], sample2: &[f64]) -> (f64, f64) {
 
     let mut sorted1 = sample1.to_vec();
     let mut sorted2 = sample2.to_vec();
-    sorted1.sort_by(|a, b| a.partial_cmp(b).unwrap());
-    sorted2.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    sorted1.sort_unstable_by(f64::total_cmp);
+    sorted2.sort_unstable_by(f64::total_cmp);
 
     // Merge and calculate CDFs
-    let mut all_values = sorted1.clone();
-    all_values.extend(&sorted2);
-    all_values.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    let mut all_values: Vec<f64> = sorted1.iter().chain(sorted2.iter()).copied().collect();
+    all_values.sort_unstable_by(f64::total_cmp);
     all_values.dedup();
 
     let mut max_diff = 0.0_f64;
@@ -833,12 +851,12 @@ using Distributions, Statistics
 Calculate required sample size for A/B test
 """
 function calculate_sample_size(p_baseline::Float64, mde::Float64;
-                                alpha::Float64=0.05, power::Float64=0.8)
-    z_alpha = quantile(Normal(), 1 - alpha/2)  # 1.96 for alpha=0.05
-    z_beta = quantile(Normal(), power)  # 0.84 for power=0.8
+                                α::Float64=0.05, power::Float64=0.8)
+    z_α = quantile(Normal(), 1 - α/2)  # 1.96 for α=0.05
+    z_β = quantile(Normal(), power)    # 0.84 for power=0.8
 
-    p_bar = p_baseline
-    n = ((z_alpha + z_beta)^2 * 2 * p_bar * (1 - p_bar)) / mde^2
+    p̄ = p_baseline
+    n = ((z_α + z_β)^2 * 2p̄ * (1 - p̄)) / mde^2
 
     return ceil(Int, n)
 end
@@ -846,26 +864,20 @@ end
 """
 Simulate A/B test
 """
-function simulate_ab_test(p_a::Float64, p_b::Float64, n::Int; alpha::Float64=0.05)
-    # Simulate data
+function simulate_ab_test(p_a::Float64, p_b::Float64, n::Int; α::Float64=0.05)
     a_successes = rand(Binomial(n, p_a))
     b_successes = rand(Binomial(n, p_b))
 
-    # Proportions
-    p_hat_a = a_successes / n
-    p_hat_b = b_successes / n
+    p̂_a = a_successes / n
+    p̂_b = b_successes / n
 
-    # Pooled proportion
-    p_pool = (a_successes + b_successes) / (2 * n)
+    p_pool = (a_successes + b_successes) / (2n)
 
-    # Z-test
-    se = sqrt(2 * p_pool * (1 - p_pool) / n)
-    z = (p_hat_b - p_hat_a) / se
+    se  = sqrt(2p_pool * (1 - p_pool) / n)
+    z   = (p̂_b - p̂_a) / se
+    p_val = 2(1 - cdf(Normal(), abs(z)))
 
-    # p-value (two-tailed)
-    p_value = 2 * (1 - cdf(Normal(), abs(z)))
-
-    return p_value < alpha
+    return p_val < α
 end
 
 # Example
@@ -878,7 +890,7 @@ println("Required sample size per group: $n")
 p_a = 0.10
 p_b = 0.12  # True improvement = 2%
 n_sims = 1000
-wins = sum([simulate_ab_test(p_a, p_b, n) for _ in 1:n_sims])
+wins = sum(simulate_ab_test(p_a, p_b, n) for _ in 1:n_sims)
 
 println("Power (empirical): $(wins / n_sims)")  # Should be ~0.8
 ```
@@ -906,11 +918,14 @@ Power (empirical): 0.812
 
 **10個チェックできたらMLOps完全版クリア。**
 
-:::message
-**進捗: 85% 完了** 実装と実験を完了。Zone 6で研究系譜とツール比較へ。
-:::
+> **Note:** **進捗: 85% 完了** 実装と実験を完了。Zone 6で研究系譜とツール比較へ。
 
 ---
+
+> Progress: 95%
+> **理解度チェック**
+> 1. MLOps Level 2（継続的自動再訓練）において、データドリフト検知→自動再訓練→カナリアデプロイの自動化サイクルを実現するための最小構成を述べよ。
+> 2. DPO損失の実装で、`log_ratio_chosen - log_ratio_rejected` を計算する際、数値安定化のために注意すべき点（アンダーフロー/オーバーフロー）と対策を説明せよ。
 
 ## 🎓 6. 振り返り + 統合ゾーン（30分）— MLOps完全版まとめ & ツール
 
@@ -965,7 +980,7 @@ SLO = 99.9% は「頑張る」では達成できない。
 
 ### 7.3 FAQ
 
-:::details Q1: MLflowとW&Bどちらを選ぶべき？
+<details><summary>Q1: MLflowとW&Bどちらを選ぶべき？</summary>
 
 **A**: コスト vs 生産性のトレードオフ。
 
@@ -977,9 +992,9 @@ SLO = 99.9% は「頑張る」では達成できない。
 - スタートアップ・個人研究: MLflow
 - チーム開発・企業: W&B (初期はFree tierで試す)
 
-:::
+</details>
 
-:::details Q2: DVCとGit LFSの使い分けは？
+<details><summary>Q2: DVCとGit LFSの使い分けは？</summary>
 
 **A**: データセットの性質で決める。
 
@@ -991,9 +1006,9 @@ SLO = 99.9% は「頑張る」では達成できない。
 
 **DVC = データ版Git + パイプライン**。Git LFSより高機能だが学習曲線は高い。
 
-:::
+</details>
 
-:::details Q3: カナリアデプロイの各ステージは何%が適切？
+<details><summary>Q3: カナリアデプロイの各ステージは何%が適切？</summary>
 
 **A**: 標準は 1% → 5% → 25% → 100%。
 
@@ -1004,9 +1019,9 @@ SLO = 99.9% は「頑張る」では達成できない。
 
 **各ステージで監視 (1-24時間)。異常なら即ロールバック。**
 
-:::
+</details>
 
-:::details Q4: SLO 99.9% と 99.99% の違いは？
+<details><summary>Q4: SLO 99.9% と 99.99% の違いは？</summary>
 
 **A**: ダウンタイムの許容量が10倍違う。
 
@@ -1019,9 +1034,9 @@ SLO = 99.9% は「頑張る」では達成できない。
 
 **99.99%以上は金融・医療レベル。通常のMLサービスは99.9%で十分。**
 
-:::
+</details>
 
-:::details Q5: データドリフトを検出したら必ず再訓練すべき？
+<details><summary>Q5: データドリフトを検出したら必ず再訓練すべき？</summary>
 
 **A**: **No**。ドリフト検出は"lead"であり"verdict"ではない。
 
@@ -1033,7 +1048,7 @@ SLO = 99.9% は「頑張る」では達成できない。
 
 **Evidently AIの推奨**: ドリフト検出 → 性能確認 → 劣化していたら再訓練。
 
-:::
+</details>
 
 ### 7.4 学習スケジュール (1週間)
 
@@ -1124,7 +1139,7 @@ MLOps:
 
 **全て自動化されている = 設計で"事故が起きない"を実現している。**
 
-:::details 議論の出発点
+<details><summary>議論の出発点</summary>
 
 1. **あなたのチームは「努力」に頼っていないか？** "頑張って監視" vs "自動アラート+ロールバック"
 2. **Error Budgetを設計に組み込んでいるか？** 月に何分までのダウンタイムを許容するかを決めているか？
@@ -1132,7 +1147,7 @@ MLOps:
 
 **99.9%可用性は、設計の結果として"自然に達成される"ものだ。**
 
-:::
+</details>
 
 ### 6.7 次回予告 — 第32回: Production & フィードバックループ + 統合PJ
 
@@ -1151,9 +1166,7 @@ MLOps:
 
 Course IIIのゴールまであと1回。
 
-:::message
-**進捗: 100% 完了** 🎉 MLOps完全版クリア！次回で統合PJ構築 → Course III完結へ。
-:::
+> **Note:** **進捗: 100% 完了** 🎉 MLOps完全版クリア！次回で統合PJ構築 → Course III完結へ。
 
 ---
 
@@ -1357,22 +1370,7 @@ end
 
 **Production Integration** (Airflow DAG):
 
-```python
-from airflow import DAG
-from airflow.operators.python import PythonOperator
-
-def validate_data():
-    # Run Great Expectations
-    results = context.run_checkpoint("daily_data_checkpoint")
-    if not results["success"]:
-        raise ValueError("Data quality check failed")
-
-with DAG("ml_pipeline", schedule_interval="@daily") as dag:
-    validate = PythonOperator(task_id="validate_data", python_callable=validate_data)
-    train = PythonOperator(task_id="train_model", python_callable=train_model)
-
-    validate >> train  # Train only if validation passes
-```
+Airflow では DAG オブジェクトにオペレータ（`PythonOperator` / `BashOperator`）を追加し、`validate >> train` のビットシフト構文で有向依存関係を宣言する。スケジューラが依存グラフを解析し、上流が成功した場合のみ下流タスクを起動するため、データ検証→モデル訓練→デプロイの直列パイプラインを宣言的に記述できる。
 
 #### 6.8.5 CI/CD for ML — GitHub Actions + DVC
 
@@ -1675,9 +1673,7 @@ Internet → ALB (HTTPS) → API Gateway → Private Subnet (Inference) → VPC 
                                     Security Group (port 8080 only)
 ```
 
-:::message
-**進捗: 完全制覇!** Advanced MLOps tools、分散訓練、Serverless推論、Governance、Securityまで全て習得。Production-readyシステム構築の完全知識を獲得！
-:::
+> **Note:** **進捗: 完全制覇!** Advanced MLOps tools、分散訓練、Serverless推論、Governance、Securityまで全て習得。Production-readyシステム構築の完全知識を獲得！
 
 ---
 
@@ -1690,24 +1686,7 @@ Internet → ALB (HTTPS) → API Gateway → Private Subnet (Inference) → VPC 
 - **Few-shot Example Management**: In-context learning用サンプル
 - **Token Cost Optimization**: API呼び出しコスト最小化
 
-**統合ツール**: LangChain + LangSmith
-
-```julia
-# Prompt versioning with LangSmith
-prompt_template = """
-You are a helpful assistant. Answer based on context:
-Context: {context}
-Question: {question}
-Answer:
-"""
-
-# Track prompt performance
-langsmith.log_prompt(
-    template=prompt_template,
-    version="v2.1",
-    metrics=Dict("accuracy" => 0.92, "cost_per_query" => 0.003)
-)
-```
+**統合ツール**: LangChain + LangSmith — プロンプトバージョン管理、精度・コストのメトリクス記録。
 
 #### Edge MLOps — On-device Inference
 
@@ -1730,61 +1709,31 @@ Cloud Training → Quantization → ONNX → Edge Device (ARM) → Telemetry →
 ### 主要論文
 
 [^1]: Rafailov, R., Sharma, A., Mitchell, E., Ermon, S., Manning, C. D., & Finn, C. (2023). Direct Preference Optimization: Your Language Model is Secretly a Reward Model. *NeurIPS 2023*.
-@[card](https://arxiv.org/abs/2305.18290)
+<https://arxiv.org/abs/2305.18290>
 
 [^2]: DVC: Data Version Control.
-@[card](https://dvc.org/)
+<https://dvc.org/>
 
 [^3]: Great Expectations: Data validation framework.
-@[card](https://greatexpectations.io/)
+<https://greatexpectations.io/>
 
 [^4]: MLflow: Open source platform for the machine learning lifecycle.
-@[card](https://mlflow.org/)
+<https://mlflow.org/>
 
 [^5]: CML (Continuous Machine Learning): CI/CD for Machine Learning Projects.
-@[card](https://cml.dev/)
-
-### 教科書
-
-- Huyen, C. (2022). *Designing Machine Learning Systems*. O'Reilly Media. [URL](https://www.oreilly.com/library/view/designing-machine-learning/9781098107956/)
-- Burkov, A. (2020). *Machine Learning Engineering*. True Positive. [Free PDF](http://www.mlebook.com/)
-- Chen, C., Murphy, N., Parisa, K., et al. (2022). *Reliable Machine Learning*. O'Reilly Media.
-- Google Cloud. (2021). *MLOps: Continuous delivery and automation pipelines in machine learning*. [Google Cloud Architecture](https://cloud.google.com/architecture/mlops-continuous-delivery-and-automation-pipelines-in-machine-learning)
+<https://cml.dev/>
 
 ---
 
-## 記法規約
+> **📖 前編（理論編）**: [第31回前編: MLOps理論編](./ml-lecture-31-part1) | **← 理論・数式ゾーンへ**
 
-| 記法 | 意味 |
-|:-----|:-----|
-| $\mathcal{M}_t$ | 時刻$t$のモデル状態 (5-tuple) |
-| $\mathbf{w}_t$ | パラメータベクトル |
-| $\mathcal{D}_t$ | データセット |
-| $\mathcal{H}_t$ | ハイパーパラメータ集合 |
-| $\mathcal{E}_t$ | 環境 (Python/CUDA version) |
-| $s_t$ | Random seed |
-| $e_i$ | 実験 $i$ (4-tuple: $\mathbf{h}, \mathcal{D}, \mathbf{m}, \mathcal{A}$) |
-| $\text{SLI}$ | Service Level Indicator (測定可能なメトリクス) |
-| $\text{SLO}$ | Service Level Objective (SLIの目標値) |
-| $\text{Error Budget}$ | $1 - \text{SLO}$ (許容される失敗の量) |
-| $D_{\text{KL}}(P \| Q)$ | Kullback-Leibler divergence |
-| $\text{JSD}(P \| Q)$ | Jensen-Shannon Divergence |
-| $D_{\text{KS}}$ | Kolmogorov-Smirnov統計量 |
-| $\text{PSI}$ | Population Stability Index |
-| $r(x, y)$ | Reward model |
-| $\pi_\theta(y \mid x)$ | Policy (LLM) |
-| $\pi_{\text{ref}}(y \mid x)$ | Reference policy |
-| $\beta$ | KL正則化係数 |
-| $y_w$ | 好ましい応答 (win) |
-| $y_l$ | 好ましくない応答 (lose) |
-| $\mathcal{L}_{\text{DPO}}$ | Direct Preference Optimization loss |
-| $\mathcal{L}_{\text{RM}}$ | Reward Modeling loss (Bradley-Terry) |
-| $\alpha$ | 有意水準 (Type I error rate, 通常0.05) |
-| $\beta$ | Type II error rate (通常0.2 → power = 0.8) |
-| $\delta$ | Minimum Detectable Effect (MDE) |
-| $n$ | サンプルサイズ |
+## 著者リンク
 
----
+- Blog: https://fumishiki.dev
+- X: https://x.com/fumishiki
+- LinkedIn: https://www.linkedin.com/in/fumitakamurakami
+- GitHub: https://github.com/fumishiki
+- Hugging Face: https://huggingface.co/fumishiki
 
 ## ライセンス
 

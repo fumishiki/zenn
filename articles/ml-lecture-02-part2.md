@@ -656,9 +656,8 @@ explained_ratio = eigvals / total_var
 cumulative_ratio = np.cumsum(explained_ratio)
 
 print("=== 主成分の寄与率 ===")
-for i in range(5):
-    print(f"PC{i+1}: λ={eigvals[i]:.2f}, ratio={explained_ratio[i]:.3f}, "
-          f"cumulative={cumulative_ratio[i]:.3f}")
+for i, (lam, r, cum) in enumerate(zip(eigvals[:5], explained_ratio[:5], cumulative_ratio[:5]), 1):
+    print(f"PC{i}: λ={lam:.2f}, ratio={r:.3f}, cumulative={cum:.3f}")
 # 上位2主成分でどれくらい説明できるか
 print(f"\n上位2主成分の累積寄与率: {cumulative_ratio[1]:.3f}")
 print(f"上位10主成分の累積寄与率: {cumulative_ratio[9]:.3f}")
@@ -826,7 +825,7 @@ $$
 ```python
 import numpy as np
 
-def power_iteration(A: np.ndarray, n_iters: int = 100) -> tuple:
+def power_iteration(A: np.ndarray, n_iters: int = 100) -> tuple[float, np.ndarray]:
     """Power Iteration で最大固有値と固有ベクトルを求める。
 
     Algorithm:
@@ -973,6 +972,10 @@ except ValueError as e:
 
 > Progress: 85%
 
+> **理解度チェック**
+> 1. 行列 $A \in \mathbb{R}^{m \times n}$、$B \in \mathbb{R}^{n \times p}$ の積 $AB$ の shape を答えよ。積が定義できる条件は何か。
+> 2. 固有値分解 $A = Q\Lambda Q^{-1}$ において $\Lambda$ は何を表し、$Q$ の列はどう解釈されるか。
+
 ---
 
 ## 🎓 Z7. 振り返りゾーン（30分）— まとめと次回予告
@@ -1061,7 +1064,7 @@ $$
 
 ##### 最新の GPU-SVD アルゴリズム
 
-Wichmann et al. (2025)[^15] による portable SVD 実装の特徴:
+Ringoot et al. (2025)[^15] による portable SVD 実装の特徴:
 
 - **2段階 QR 簡約**: band形式 → 2対角形式の段階的変換
 - **GPU最適化**: Apple Metal、CUDA、ROCm に対応
@@ -1126,7 +1129,7 @@ graph TD
     C --> G[2段階QR簡約<br/>100-300x高速化]
     E --> H[Halko 2011]
     F --> I[Feng 2022]
-    G --> J[Wichmann 2025]
+    G --> J[Ringoot 2025]
 ```
 
 **References**:
@@ -1488,6 +1491,10 @@ $$
 
 > Progress: 100%
 
+> **理解度チェック**
+> 1. 正規直交行列 $Q$ が $Q^\top Q = I$ を満たすとき、$Q$ で変換しても長さが保たれる理由を幾何学的に説明せよ。
+> 2. 特異値分解 $A = U\Sigma V^\top$ の $\Sigma$ の対角成分が非負になる理由は何か。
+
 
 ---
 
@@ -1539,13 +1546,13 @@ Flash Attention[^12]は、Attention の計算を行列ブロック単位で再�
 <https://arxiv.org/abs/2002.01387>
 [^14]: Halko, N., Martinsson, P. G., & Tropp, J. A. (2011). Finding structure with randomness: Probabilistic algorithms for constructing approximate matrix decompositions. *SIAM Review*, 53(2), 217-288. arXiv:0909.4061.
 
-[^15]: Wichmann, N., Gupta, A., & Thiele, L. (2025). Performant Unified GPU Kernels for Portable Singular Value Computation Across Hardware and Precision.
+[^15]: Ringoot, E., Alomairy, R., Churavy, V., & Edelman, A. (2025). Performant Unified GPU Kernels for Portable Singular Value Computation Across Hardware and Precision.
 <https://arxiv.org/abs/2508.06339>
-[^16]: Liu, Y., Huang, X., & Dongarra, J. (2025). Efficient GPU-Centered Singular Value Decomposition Using the Divide-and-Conquer Method.
+[^16]: Liu, S., Li, H., et al. (2025). Efficient GPU-Centered Singular Value Decomposition Using the Divide-and-Conquer Method.
 <https://arxiv.org/abs/2508.11467>
 [^17]: Feng, Y., Xiang, H., & Saad, Y. (2022). Randomized Rank-Revealing QLP for Low-Rank Matrix Approximation.
 <https://arxiv.org/abs/2209.12464>
-[^18]: Le, H., Hsieh, T.-H., Høgsgaard, J. S., & Schmidt, M. N. (2024). (Almost) Smooth Sailing: Towards Numerical Stability of Neural Networks.
+[^18]: Nenov, R., Haider, D., & Balazs, P. (2024). (Almost) Smooth Sailing: Towards Numerical Stability of Neural Networks.
 <https://arxiv.org/abs/2410.00169>
 [^19]: Zhao, Y., Anandkumar, A., & Yu, Y. (2020). An efficient numerical method for condition number constrained covariance matrix approximation.
 <https://arxiv.org/abs/2008.06851>
