@@ -386,7 +386,7 @@ $$
 x' = x + \frac{\epsilon}{2} \nabla \log \pi(x) + \sqrt{\epsilon} Z, \quad \text{then accept/reject with } \alpha(x, x')
 $$
 
-MALAはULAより効率的（`$d$ 次元での最適スケーリングが $\epsilon = O(d^{-1/3})$ vs ULAの $O(d^{-1})$）。拡散モデルのサンプリングアルゴリズムの設計に直接影響する。
+MALAはULAより効率的（$d$ 次元での最適スケーリングが $\epsilon = O(d^{-1/3})$ vs ULAの $O(d^{-1})$）。拡散モデルのサンプリングアルゴリズムの設計に直接影響する。
 
 **Gibbs Samplerとの比較**: Gibbs Samplerは高次元の場合に全変数を一度にサンプルせず、各変数 $x_i$ を他の変数を固定して条件付き $p(x_i | \mathbf{x}_{-i})$ からサンプルする:
 
@@ -934,7 +934,7 @@ $$
 \mathcal{L}(\theta) = \mathbb{E}_{t, \mathbf{x}_0, \mathbf{x}_1, \boldsymbol{\xi}}\left[\| b_\theta(\mathbf{x}(t), t) - \dot{\mathbf{x}}(t) \|^2\right]
 $$
 
-ここで $\dot{\mathbf{x}}(t) = \dot{\alpha}(t)\mathbf{x}_0 + \dot{\beta}(t)\mathbf{x}_1 + \dot{\gamma}(t)\boldsymbol{\xi}$（補間の時間微分）。$\gamma=0$ のとき Flow Matching の損失に帰着。$\gamma > 0$ のとき `$\boldsymbol{\xi}$ が加わりスコア関数的な成分が現れる。
+ここで $\dot{\mathbf{x}}(t) = \dot{\alpha}(t)\mathbf{x}_0 + \dot{\beta}(t)\mathbf{x}_1 + \dot{\gamma}(t)\boldsymbol{\xi}$（補間の時間微分）。$\gamma=0$ のとき Flow Matching の損失に帰着。$\gamma > 0$ のとき $\boldsymbol{\xi}$ が加わりスコア関数的な成分が現れる。
 
 **スコア関数との接続**: $\gamma(t) > 0$ のとき、条件付き期待値の射影から:
 
@@ -1165,7 +1165,7 @@ Normalizing Flowsの確率密度変換（$p_z$ → $p_x = |\det J_T|^{-1} p_z \c
 **すべての生成モデルは測度輸送**: ソース測度 $\mu_0$（ガウスノイズ）からターゲット測度 $\mu_1$（データ分布）へ。
 
 - Normalizing Flow: 決定論的・可逆な写像 $T$（$T_\# \mu_0 = \mu_1$）
-- VAE: 確率的エンコーダ `$q_\phi(z|x)` と デコーダ $p_\theta(x|z)$ の間接的輸送
+- VAE: 確率的エンコーダ $q_\phi(z|x)$ と デコーダ $p_\theta(x|z)$ の間接的輸送
 - Diffusion: SDEの forward/reverse で測度を変形
 - Flow Matching: ODEのベクトル場 $v_t$ で確率パス $\mu_t$ を設計（$\mu_0 \to \mu_1$）
 
@@ -1430,9 +1430,9 @@ Langevin SDE: $dX = -\nabla U(X) dt + \sqrt{2} dW$（$\nabla \log p^* = -\nabla 
 
 $= \nabla p^* \cdot \nabla U + p^* \Delta U + \Delta p^*$
 
-`$p^* = Z^{-1}e^{-U}$ より $\nabla p^* = -p^* \nabla U$、$\Delta p^* = p^*(|\nabla U|^2 - \Delta U)$
+$p^* = Z^{-1}e^{-U}$ より $\nabla p^* = -p^* \nabla U$、$\Delta p^* = p^*(|\nabla U|^2 - \Delta U)$
 
-代入: `$-p^*|\nabla U|^2 + p^*\Delta U + p^*|\nabla U|^2 - p^*\Delta U = 0$ ✓
+代入: $-p^*|\nabla U|^2 + p^*\Delta U + p^*|\nabla U|^2 - p^*\Delta U = 0$ ✓
 </details>
 
 ### 7.11 実装チェックリスト

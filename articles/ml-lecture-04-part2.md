@@ -207,7 +207,7 @@ $$
 $$
 
 - shape: `x` は `(d,)`, `mu` は `(d,)`, `Sigma` は `(d,d)` 正定値対称行列
-- Mahalanobis距離 `$D_M^2 = (\mathbf{x}-\boldsymbol{\mu})^\top \boldsymbol{\Sigma}^{-1} (\mathbf{x}-\boldsymbol{\mu})`は「楕円体の距離」
+- Mahalanobis距離 $D_M^2 = (\mathbf{x}-\boldsymbol{\mu})^\top \boldsymbol{\Sigma}^{-1} (\mathbf{x}-\boldsymbol{\mu})$ は「楕円体の距離」
 - $\boldsymbol{\Sigma}^{-1}$ の直接計算は避ける: `np.linalg.solve(Sigma, x-mu)` を使う
 
 **条件付き分布** (Schur complement 公式):
@@ -1018,7 +1018,7 @@ flowchart TD
 | 数式 | 実装 | セクション |
 |:-----|:-----|:-----------|
 | $f(x;\mu,\sigma^2) = \frac{1}{\sqrt{2\pi\sigma^2}}\exp(-\frac{(x-\mu)^2}{2\sigma^2})$ | `stats.norm.logpdf(x, mu, sigma)` | 5.1 |
-| `$\hat{\mu} = \bar{x}$, $\hat{\sigma}^2 = \frac{1}{N}\sum(x_i-\bar{x})^2$ | `x.mean()`, `x.std(ddof=0)**2` | 5.1 |
+| $\hat{\mu} = \bar{x}$, $\hat{\sigma}^2 = \frac{1}{N}\sum(x_i-\bar{x})^2$ | `x.mean()`, `x.std(ddof=0)**2` | 5.1 |
 | $\mathcal{N}(\mathbf{x}\mid\boldsymbol{\mu},\boldsymbol{\Sigma})$ | `mvn_log_prob(x, mu, Sigma)` | 5.2 |
 | $\boldsymbol{\mu}_{1\mid 2}, \boldsymbol{\Sigma}_{1\mid 2}$（条件付き分布）| `mvn_conditional(mu, Sigma, obs_idx, obs_val)` | 5.2 |
 | $p(x\mid\boldsymbol{\eta}) = h(x)\exp(\boldsymbol{\eta}^\top T(x) - A(\boldsymbol{\eta}))$ | `ExpFamilyGaussian.mle(X)` | 5.3 |

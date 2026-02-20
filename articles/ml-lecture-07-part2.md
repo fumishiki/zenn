@@ -35,8 +35,8 @@ keywords: ["最尤推定", "MLE", "Cross-Entropy", "forward KL", "reverse KL"]
 
 記号↔変数名:
 
-- `$\hat p$` ↔ `p_hat`
-- `$q_\theta$` ↔ `softmax(theta)`
+- $\hat p$ ↔ `p_hat`
+- $q_\theta$ ↔ `softmax(theta)`
 - `\(H(\hat p,q_\theta)\)` ↔ `cross_entropy(p_hat,q)`
 
 検算（このコードの合否基準）:
@@ -1383,7 +1383,7 @@ DDPM の損失 $\|\epsilon - \hat{\epsilon}_\theta(x_t, t)\|^2$ は「ノイズ�
 
 <details><summary>Q5: MLE と MAP はどう使い分けるか？</summary>
 
-判断基準は **サンプルサイズ `$n`** と **事前情報の信頼度**:
+判断基準は **サンプルサイズ $n$** と **事前情報の信頼度**:
 
 | 条件 | 推奨 | 理由 |
 |:-----|:-----|:-----|
@@ -1414,7 +1414,7 @@ $$
 
 <details><summary>Q7: 次トークン予測 MLE のスケーリング則とは？</summary>
 
-Kaplan et al. (2020) の Scaling Laws: テストロス `$L`$ は `$N`$（パラメータ数）と `$D`$（データ量）の**べき乗則**に従う:
+Kaplan et al. (2020) の Scaling Laws: テストロス $L$ は $N$（パラメータ数）と $D$（データ量）の**べき乗則**に従う:
 
 $$
 L(N, D) \approx \left(\frac{N_c}{N}\right)^{\alpha_N} + \left(\frac{D_c}{D}\right)^{\alpha_D} + L_{\infty}
@@ -1422,7 +1422,7 @@ $$
 
 $\alpha_N \approx 0.076$, $\alpha_D \approx 0.095$（元論文の推定値）。
 
-**直感**: GPT の訓練は単純な MLE（`$\max_\theta \sum \log p_\theta(x_t|x_{<t})`$）なのに、モデルとデータを増やすだけで創発的な能力が生まれる。これは「分布 $p(\text{text})$ の圧縮」が知識の獲得と等価であることを示唆する。
+**直感**: GPT の訓練は単純な MLE（$\max_\theta \sum \log p_\theta(x_t|x_{<t})$）なのに、モデルとデータを増やすだけで創発的な能力が生まれる。これは「分布 $p(\text{text})$ の圧縮」が知識の獲得と等価であることを示唆する。
 
 ただし Hoffmann et al. (2022) の Chinchilla 論文で最適な $N:D$ 比が修正された（$D \approx 20N$）。
 </details>

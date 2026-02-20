@@ -960,7 +960,7 @@ $$
 典型例: $\eta_t = C / t$ または $\eta_t = C / \sqrt{t}$。前者は強凸で最適、後者は一般凸で広く使われる。実際の深層学習では定数学習率 + Warmup + Cosine Annealing が多く使われ、Robbins-Monro 条件を厳密には満たさないが経験的に良く動く。
 
 **学習率の影響**:
-- $\eta$ 大きすぎ → 発散（`$\mathcal{L}$ 増加）
+- $\eta$ 大きすぎ → 発散（$\mathcal{L}$ 増加）
 - $\eta = 1/L$ → 最適（L-滑らか凸の場合）
 - $\eta$ 小さすぎ → 収束が遅い
 - Warmup + Cosine schedule → 初期の大きなステップを安定化し、後半で細かく調整

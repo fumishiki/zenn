@@ -430,22 +430,22 @@ graph TD
 3. **矛盾の導出**:
 
    $[0,1]$ は $V$ を有理数だけ平行移動した集合で覆える:
-   ```math
+$$
    [0,1] \subset \bigcup_{q \in \mathbb{Q} \cap [-1,1]} (V + q) \subset [-1, 2]
-   ```
+   $$
 
    もし $\lambda(V) = c$ と仮定すると:
 
    - **Case 1**: $c = 0$ の場合
-     ```math
+$$
      \lambda([0,1]) \leq \sum_{q \in \mathbb{Q} \cap [-1,1]} \lambda(V + q) = \sum_{q} 0 = 0
-     ```
+     $$
      矛盾（$\lambda([0,1]) = 1$）
 
    - **Case 2**: $c > 0$ の場合
-     ```math
+$$
      1 = \lambda([0,1]) \geq \sum_{q} c = \infty
-     ```
+     $$
      矛盾
 
    したがって $V$ には Lebesgue測度を割り当てられない。
@@ -530,21 +530,21 @@ Lebesgue測度は、我々の直感的な「長さ・面積・体積」を数学
    - 例: $\lambda([0, 2]) = 2 \lambda([0, 1]) = 2$
 
 2. **可算加法性（一般形）**: 互いに素でなくても:
-   ```math
+$$
    \lambda(A \cup B) = \lambda(A) + \lambda(B) - \lambda(A \cap B)
-   ```
+   $$
 
 3. **単調性**: $A \subset B \Rightarrow \lambda(A) \leq \lambda(B)$
 
 4. **連続性（下から）**: $A_1 \subset A_2 \subset \cdots$ なら:
-   ```math
+$$
    \lambda\left(\bigcup_{n=1}^\infty A_n\right) = \lim_{n\to\infty} \lambda(A_n)
-   ```
+   $$
 
 5. **連続性（上から）**: $A_1 \supset A_2 \supset \cdots$ かつ $\lambda(A_1) < \infty$ なら:
-   ```math
+$$
    \lambda\left(\bigcap_{n=1}^\infty A_n\right) = \lim_{n\to\infty} \lambda(A_n)
-   ```
+   $$
 
 #### Case Study 1: 有理数の測度が0である理由
 
@@ -557,14 +557,14 @@ Lebesgue測度は、我々の直感的な「長さ・面積・体積」を数学
 1. **列挙**: 有理数は可算なので、$\mathbb{Q} \cap [0,1] = \{r_1, r_2, r_3, \ldots\}$ と列挙できる。
 
 2. **カバー構成**: 任意の $\epsilon > 0$ に対して、各 $r_n$ を幅 $\epsilon/2^n$ の区間でカバー:
-   ```math
+$$
    r_n \in I_n = \left(r_n - \frac{\epsilon}{2^{n+1}}, r_n + \frac{\epsilon}{2^{n+1}}\right)
-   ```
+   $$
 
 3. **測度の評価**:
-   ```math
+$$
    \lambda(\mathbb{Q} \cap [0,1]) \leq \lambda\left(\bigcup_{n=1}^\infty I_n\right) \leq \sum_{n=1}^\infty \lambda(I_n) = \sum_{n=1}^\infty \frac{\epsilon}{2^n} = \epsilon
-   ```
+   $$
 
 4. **極限**: $\epsilon \to 0$ で $\lambda(\mathbb{Q} \cap [0,1]) = 0$
 
@@ -645,15 +645,15 @@ $$
 
 2. **非負可測関数**: $f \geq 0$ に対して:
 
-   ```math
+$$
    \int f \, d\mu = \sup\left\{\int s \, d\mu : 0 \leq s \leq f, \; s \text{ は単関数}\right\}
-   ```
+   $$
 
 3. **一般の可測関数**: $f = f^+ - f^-$（$f^+ = \max(f, 0)$, $f^- = \max(-f, 0)$）に対して:
 
-   ```math
+$$
    \int f \, d\mu = \int f^+ d\mu - \int f^- d\mu
-   ```
+   $$
 
    （少なくとも一方が有限のとき定義される）
 
@@ -1198,27 +1198,27 @@ $$
 
 3. **Radon-Nikodym導関数**: $q_t$ は $\lambda$ に関して絶対連続。その密度:
 
-   ```math
+$$
    \frac{dq_t(\mathbf{x}_{t-1}, \cdot)}{d\lambda}(\mathbf{x}_t) = \frac{1}{(2\pi \beta_t)^{d/2}} \exp\left(-\frac{\|\mathbf{x}_t - \sqrt{1-\beta_t}\mathbf{x}_{t-1}\|^2}{2\beta_t}\right)
-   ```
+   $$
 
 4. **Markov連鎖**: $\{\mathbf{x}_t\}_{t=0}^T$ は遷移核 $q_t$ を持つMarkov連鎖。時刻 $t$ の周辺分布 $P_t$ は:
 
-   ```math
+$$
    P_t(A) = \int_{\mathbb{R}^d} q_t(\mathbf{x}_{t-1}, A) \, dP_{t-1}(\mathbf{x}_{t-1})
-   ```
+   $$
 
 5. **定常分布への収束**: $\beta_t$ を適切に選ぶと、$P_T \approx \mathcal{N}(\mathbf{0}, \mathbf{I})$（標準正規分布）。測度論的には:
 
-   ```math
+$$
    D_{KL}[P_T \| \mathcal{N}(\mathbf{0}, \mathbf{I})] \to 0 \quad \text{as } T \to \infty
-   ```
+   $$
 
 6. **連続極限（SDE）**: $\beta_t = \sigma^2 dt$ と取り、$\Delta t \to 0$ で:
 
-   ```math
+$$
    d\mathbf{x}_t = -\frac{1}{2} \sigma^2 \mathbf{x}_t dt + \sigma d\mathbf{W}_t
-   ```
+   $$
 
    これはOU過程。定常分布は $\mathcal{N}(\mathbf{0}, \mathbf{I})$。
 

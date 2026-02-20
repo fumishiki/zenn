@@ -138,7 +138,7 @@ Course I の全ての道具（行列式、Jensen不等式、KL散逸、Fisher情
 
 1. (a) $\log$ と $\int$ の順序が逆（$\log$ の中に $\int$ がある）ため、$\theta$ での勾配が事後分布 $p_\theta(z|x)$ を含む循環になる、(b) 連続 $z \in \mathbb{R}^m$ のとき数値積分コストが指数的。
 
-2. $Y$ がほぼ確実に定数のとき（`$Y = c$ a.e.`）。ELBO の文脈では $q(z) = p_\theta(z|x)$ のとき。
+2. $Y$ がほぼ確実に定数のとき（$Y = c$ a.e.）。ELBO の文脈では $q(z) = p_\theta(z|x)$ のとき。
 
 3. E-step: $q(z) \leftarrow \arg\min_{q} D_{KL}(q \| p_\theta(z|x))$、M-step: $\theta \leftarrow \arg\max_\theta \mathbb{E}_{q(z)}[\log p_\theta(x,z)]$
 
@@ -720,7 +720,7 @@ $$
 \boxed{\pi_k \leftarrow \frac{N_k}{N}}
 $$
 
-**検算**: `$\sum_k \pi_k = \sum_k N_k/N = N/N = 1$ ✅`（確率の規格化条件）
+**検算**: $\sum_k \pi_k = \sum_k N_k/N = N/N = 1$ ✅（確率の規格化条件）
 
 **解釈**: 混合重みは「全データに対する各成分の平均責任度」。$N_k = \sum_i \gamma_{ik}$ は成分 $k$ の「有効データ数」— 各データ点が持つ「成分 $k$ への所属確率」の総和。
 
@@ -775,7 +775,7 @@ $N_1 = 1.1$, $\mu_1^{new} = (0.8 \cdot (-2) + 0.3 \cdot 1)/1.1 = (-1.6+0.3)/1.1 
 
 $\Sigma_1^{new} = (0.8 \cdot (-2-(-1.18))^2 + 0.3 \cdot (1-(-1.18))^2)/1.1 = (0.8 \cdot 0.67 + 0.3 \cdot 4.75)/1.1 = (0.54 + 1.43)/1.1 \approx 1.79$
 
-検算: `$\Sigma_1^{new} > 0$ ✅`（分散は常に正）
+検算: $\Sigma_1^{new} > 0$ ✅（分散は常に正）
 
 #### 3.7 M-step の共通パターン — 「重み付き MLE」
 

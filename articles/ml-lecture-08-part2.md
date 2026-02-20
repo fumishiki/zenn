@@ -575,7 +575,7 @@ $$
 \text{BIC}(K) = \log(N) \cdot k_\text{params}(K) - 2\,\ell(\hat\theta_K)
 $$
 
-$K$ を増やすと `-2\ell$` は単調に減る（フィット改善）が、ペナルティが $\propto K$ で増える。真の $K$ 付近で BIC が最小化される。
+$K$ を増やすと $-2\ell$ は単調に減る（フィット改善）が、ペナルティが $\propto K$ で増える。真の $K$ 付近で BIC が最小化される。
 
 数値例: N=400, d=2 の2峰データで K=1から5まで:
 
@@ -833,7 +833,7 @@ $$
 (\pi_1, \pi_2, \mu_1, \mu_2) = (0.5, 0.5, 3, -3) \equiv (0.5, 0.5, -3, 3)
 $$
 
-より一般に、GMM のパラメータ空間 $\Theta$ で等価クラス $[\theta]_{\sim}$ を定義すると、モデルは $\Theta / S_K$（商空間）上で識別可能。ただし MLE は $\Theta$ 全体の `$K!` 個の点で同時に達成される。
+より一般に、GMM のパラメータ空間 $\Theta$ で等価クラス $[\theta]_{\sim}$ を定義すると、モデルは $\Theta / S_K$（商空間）上で識別可能。ただし MLE は $\Theta$ 全体の $K!$ 個の点で同時に達成される。
 
 **MCMC での label switching**: Bayesian GMM を MCMC（Gibbs sampling）で推定すると、連鎖が $K!$ 個の等価点の間を自由に移動する。事後平均 $\mathbb{E}[\mu_k|x]$ を計算すると全成分の平均になってしまう。対策: （1）MCMCチェーン後処理でアラインメント、（2）成分に順序制約（$\mu_1 < \mu_2 < \ldots$）を課す、（3）テレスコープ事前分布（overfitting 防止 + 識別）。
 
@@ -1274,7 +1274,7 @@ $$
 
 M-step: $W, \sigma^2$ を更新。特筆すべきは $\sigma^2 \to 0$ の極限で PCA（特異値分解）と完全に一致すること。つまり **PCA は PPCA の EM の特殊ケース** — これが「EM は MLE の統一フレームワーク」という主張の根拠だ。
 
-**Factor Analysis との関係**: PPCA では全次元のノイズ分散が共通の $\sigma^2$。Factor Analysis では各次元が独立の $\psi_j$（`$d$ 個のパラメータ）:
+**Factor Analysis との関係**: PPCA では全次元のノイズ分散が共通の $\sigma^2$。Factor Analysis では各次元が独立の $\psi_j$（$d$ 個のパラメータ）:
 
 $$
 x = Wz + \mu + \epsilon, \quad \epsilon \sim \mathcal{N}(0, \Psi), \quad \Psi = \text{diag}(\psi_1, \ldots, \psi_d)
