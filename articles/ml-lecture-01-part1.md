@@ -1433,10 +1433,11 @@ $$
 **Step A: 類似度（内積）**
 
 $$
-QK^\top = \begin{pmatrix}1 & 0\end{pmatrix}
-\begin{pmatrix}1 & 0\\ 0 & 1\end{pmatrix}
-=
-\begin{pmatrix}1 & 0\end{pmatrix}
+\begin{aligned}
+QK^\top &= \begin{pmatrix}1 & 0\end{pmatrix}
+\begin{pmatrix}1 & 0\\ 0 & 1\end{pmatrix} \\[4pt]
+&= \begin{pmatrix}1 & 0\end{pmatrix}
+\end{aligned}
 $$
 
 つまり「キー1とは似ている（1）」「キー2とは似ていない（0）」。
@@ -1444,45 +1445,43 @@ $$
 **Step B: スケーリング**
 
 $$
+\begin{aligned}
 \frac{QK^\top}{\sqrt{d_k}}
-=
-\frac{1}{\sqrt{2}}
-\begin{pmatrix}1 & 0\end{pmatrix}
-=
-\begin{pmatrix}\tfrac{1}{\sqrt{2}} & 0\end{pmatrix}
+&= \frac{1}{\sqrt{2}}\begin{pmatrix}1 & 0\end{pmatrix} \\[4pt]
+&= \begin{pmatrix}\dfrac{1}{\sqrt{2}} & 0\end{pmatrix}
+\end{aligned}
 $$
 
 **Step C: Softmax（重み）**
 
 $$
-\mathrm{softmax}\left(\begin{pmatrix}\tfrac{1}{\sqrt{2}} & 0\end{pmatrix}\right)
-=
-\begin{pmatrix}
-\frac{e^{1/\sqrt{2}}}{e^{1/\sqrt{2}}+e^0} &
-\frac{e^0}{e^{1/\sqrt{2}}+e^0}
+\begin{aligned}
+&\mathrm{softmax}\!\left(\begin{pmatrix}\dfrac{1}{\sqrt{2}} & 0\end{pmatrix}\right) \\[4pt]
+&= \begin{pmatrix}
+\dfrac{e^{1/\sqrt{2}}}{e^{1/\sqrt{2}}+e^0} &
+\dfrac{e^0}{e^{1/\sqrt{2}}+e^0}
 \end{pmatrix}
+\end{aligned}
 $$
 
 $1/\sqrt{2}\approx 0.707$ なので $e^{0.707}\approx 2.03$。よって重みはおおよそ、
 
 $$
 \begin{pmatrix}
-\frac{2.03}{2.03+1} &
-\frac{1}{2.03+1}
+\dfrac{2.03}{2.03+1} &
+\dfrac{1}{2.03+1}
 \end{pmatrix}
-=
-\begin{pmatrix}
-0.67 & 0.33
-\end{pmatrix}
+= \begin{pmatrix}0.67 & 0.33\end{pmatrix}
 $$
 
 **Step D: 加重平均**
 
 $$
-\begin{pmatrix}0.67 & 0.33\end{pmatrix}
-\begin{pmatrix}10 & 0\\ 0 & 10\end{pmatrix}
-=
-\begin{pmatrix}6.7 & 3.3\end{pmatrix}
+\begin{aligned}
+&\begin{pmatrix}0.67 & 0.33\end{pmatrix}
+\begin{pmatrix}10 & 0\\ 0 & 10\end{pmatrix} \\[4pt]
+&= \begin{pmatrix}6.7 & 3.3\end{pmatrix}
+\end{aligned}
 $$
 
 読み替えると「値ベクトルの(10,0)を67%採用し、(0,10)を33%採用した混合」だ。Attention は、この混合を文脈に応じて動的に作る。
