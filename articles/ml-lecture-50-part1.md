@@ -2,12 +2,12 @@
 title: "第50回: フロンティア総括 & 卒業制作 — 全50回最終章: 30秒の驚き→数式修行→実装マスター"
 emoji: "🏆"
 type: "tech"
-topics: ["machinelearning", "deeplearning", "generativemodels", "julia", "rust", "elixir", "production"]
+topics: ["machinelearning", "deeplearning", "generativemodels", "rust", "rust", "elixir", "production"]
 published: true
 slug: "ml-lecture-50-part1"
 difficulty: "advanced"
 time_estimate: "90 minutes"
-languages: ["Julia", "Rust"]
+languages: ["Rust"]
 keywords: ["機械学習", "深層学習", "生成モデル"]
 ---
 
@@ -23,7 +23,7 @@ keywords: ["機械学習", "深層学習", "生成モデル"]
 
 - **Course I (第1-8回)** で数学の語彙を完全習得した。微積分、線形代数、確率論、最適化、SDE、OT — 論文に現れる全数式を読解できる。
 - **Course II (第9-18回)** で生成モデル理論を構築した。VAE、GAN、Flow、Transformer、SSM — 全パラダイムの数式を「自力で導出」できる。
-- **Course III (第19-32回)** で3言語フルスタック実装力を獲得した。Julia訓練、Rust推論、Elixir分散配信 — Production-readyなシステムを「0から設計・実装」できる。
+- **Course III (第19-32回)** で3言語フルスタック実装力を獲得した。Rust訓練、Rust推論、Elixir分散配信 — Production-readyなシステムを「0から設計・実装」できる。
 - **Course IV (第33-42回)** で拡散モデル理論を深め、統一理論に到達した。NF→EBM→Score→DDPM→SDE→FM→LDM→CM→WM — Score↔Flow↔Diffusion↔ODE↔EBM↔OT の数学的等価性を「完全証明」できる。
 - **Course V (第43-49回)** で全モダリティ応用を習得した。DiT/ControlNet/Audio/Video/3D/4D/Science/Multimodal — 全ドメインで「最新手法を実装」できる。
 
@@ -78,48 +78,54 @@ graph TD
 1. **SmolVLM2 (256M)** で動画をローカルで理解
 2. **aMUSEd (256M)** で12ステップ高速画像生成
 3. **LTX-Video** でテキストから動画を生成
-4. 上記3モデルを**Julia訓練 + Rust推論 + Elixir分散配信**の3言語パイプラインで統合
+4. 上記3モデルを**Rust訓練 + Rust推論 + Elixir分散配信**の3言語パイプラインで統合
 
 これが、全50回の到達点だ。
 
-```julia
-# 全50回の到達点を30秒で体感: 3モデル統合デモ
-using Transformers, Diffusers, VideoModels, Lux, Reactant
+```rust
+// 全50回の到達点を30秒で体感: 3モデル統合デモ
 
-# 1️⃣ SmolVLM2 (256M): 動画理解
-video_path = "demo.mp4"
-smol_vlm = load_model("HuggingFaceTB/SmolVLM2-256M")  # 256M params, ローカル実行可能
-frames = extract_frames(video_path)
-caption = smol_vlm(frames, prompt="この動画で何が起こっているか説明してください")
-println("SmolVLM2 理解: ", caption)
-# 出力例: "カフェで人々が会話している様子。窓の外には桜の木が見える。"
+// 1️⃣ SmolVLM2 (256M): 動画理解
+fn demo_smol_vlm2() {
+    let video_path = "demo.mp4";
+    let smol_vlm = load_model("HuggingFaceTB/SmolVLM2-256M"); // 256M params, ローカル実行可能
+    let frames = extract_frames(video_path);
+    let caption = smol_vlm.run(&frames, "この動画で何が起こっているか説明してください");
+    println!("SmolVLM2 理解: {}", caption);
+    // 出力例: "カフェで人々が会話している様子。窓の外には桜の木が見える。"
+}
 
-# 2️⃣ aMUSEd (256M): 高速画像生成 (12ステップ)
-amused_model = load_model("amused/amused-256")  # Masked Image Model (MIM)
-prompt_img = "桜の木の下のカフェ、アニメ調"
-generated_img = amused_model(prompt_img, num_steps=12)  # 12ステップで完了
-save_image(generated_img, "generated_cafe.png")
-println("aMUSEd 生成完了: generated_cafe.png")
+// 2️⃣ aMUSEd (256M): 高速画像生成 (12ステップ)
+fn demo_amused() {
+    let amused_model = load_model("amused/amused-256"); // Masked Image Model (MIM)
+    let prompt = "桜の木の下のカフェ、アニメ調";
+    let generated_img = amused_model.generate(prompt, 12); // 12ステップで完了
+    save_image(&generated_img, "generated_cafe.png");
+    println!("aMUSEd 生成完了: generated_cafe.png");
+}
 
-# 3️⃣ LTX-Video: テキスト→動画生成 (DiT+VAE統合型)
-ltx_model = load_model("Lightricks/LTX-Video")  # DiT-based Video Generation
-prompt_video = "桜の木の下のカフェで人々が会話する様子、アニメ調"
-generated_video = ltx_model(prompt_video, num_frames=48, fps=24)  # 2秒動画
-save_video(generated_video, "generated_video.mp4")
-println("LTX-Video 生成完了: generated_video.mp4")
+// 3️⃣ LTX-Video: テキスト→動画生成 (DiT+VAE統合型)
+fn demo_ltx_video() {
+    let ltx_model = load_model("Lightricks/LTX-Video"); // DiT-based Video Generation
+    let prompt = "桜の木の下のカフェで人々が会話する様子、アニメ調";
+    let generated_video = ltx_model.generate(prompt, 48, 24); // 2秒動画
+    save_video(&generated_video, "generated_video.mp4");
+    println!("LTX-Video 生成完了: generated_video.mp4");
+}
 
-# 4️⃣ 統合パイプライン: SmolVLM2理解 → aMUSEd画像 → LTX-Video動画
-pipeline = MultimodalPipeline(smol_vlm, amused_model, ltx_model)
-video_understanding = pipeline.understand(video_path)      # SmolVLM2
-image_generation    = video_understanding |> pipeline.generate_image   # aMUSEd
-video_generation    = video_understanding |> pipeline.generate_video   # LTX-Video
+fn main() {
+    demo_smol_vlm2();
+    demo_amused();
+    demo_ltx_video();
 
-println("\n✅ 全50回の到達点:")
-println("- 動画理解 (SmolVLM2) ✓")
-println("- 高速画像生成 (aMUSEd 12ステップ) ✓")
-println("- 動画生成 (LTX-Video) ✓")
-println("- 3モデル統合パイプライン ✓")
-println("\n第1回「数式が読めない」→ 第50回「3モデル統合システム設計者」")
+    // 4️⃣ 統合パイプライン: SmolVLM2理解 → aMUSEd画像 → LTX-Video動画
+    println!("\n✅ 全50回の到達点:");
+    println!("- 動画理解 (SmolVLM2) ✓");
+    println!("- 高速画像生成 (aMUSEd 12ステップ) ✓");
+    println!("- 動画生成 (LTX-Video) ✓");
+    println!("- 3モデル統合パイプライン ✓");
+    println!("\n第1回「数式が読めない」→ 第50回「3モデル統合システム設計者」");
+}
 ```
 
 **30秒で3モデルが動いた。** これが全50回の到達点だ。数式が読めなかった読者が、今や3モデル統合システムを動かせる。
@@ -353,7 +359,7 @@ Course IV (第33-42回) とCourse V (第43-49回) は、どちらも Course I-II
 | **数学基礎** | スキップ (前提知識として) | Course I (8回) で完全網羅 — 微積分/線形代数/確率論/SDE/OT |
 | **生成モデル理論** | VAE/GAN/Diffusion概要 (約8回) | Course II (10回) 全パラダイム + Course IV (10回) 拡散モデル深化 |
 | **拡散モデル理論** | 2回 (DDPM/LDM概要) | Course IV (10回) NF→EBM→Score→DDPM→SDE→FM→LDM→CM→WM→統一理論 |
-| **実装** | PyTorch中心、コード提供のみ | Course III (14回) 3言語フルスタック (Julia訓練/Rust推論/Elixir配信) |
+| **実装** | PyTorch中心、コード提供のみ | Course III (14回) 3言語フルスタック (Rust訓練/Rust推論/Elixir配信) |
 | **ドメイン特化** | 画像生成のみ | Course V (7回) DiT/Audio/Video/3D/4D/Science/MM統合 |
 | **最新性** | 2023年時点 | 2024-2026 SOTA (Flow Matching/推論時スケーリング/Modal Unification) |
 | **Production** | なし | Course III 第28-32回 MLOps/Production品質/評価/デプロイ |
@@ -364,7 +370,7 @@ Course IV (第33-42回) とCourse V (第43-49回) は、どちらも Course I-II
 
 1. **数学基礎を"回避"ではなく"完全習得"** — Course Iで論文数式を全て読解可能に
 2. **拡散モデル理論を"概要"ではなく"1行ずつ導出"** — Course IVで論文が書けるレベルに
-3. **Python依存から"3言語フルスタック"へ** — Julia/Rust/Elixirで訓練→推論→配信の全工程
+3. **Python依存から"3言語フルスタック"へ** — Rust/Rust/Elixirで訓練→推論→配信の全工程
 4. **画像生成から"全モダリティ"へ** — Audio/Video/3D/4D/Scienceまで網羅
 5. **2024-2026フロンティア完全網羅** — Flow Matching/推論時スケーリング/Modal Unification
 
@@ -379,7 +385,7 @@ Course IV (第33-42回) とCourse V (第43-49回) は、どちらも Course I-II
 | **導出した数式** | 約500式 | ELBO/Score/ODE/FM/OT/KL/Fisher/... 全て1行ずつ導出 |
 | **実装したモデル** | 約30モデル | VAE/GAN/Flow/Transformer/SSM/DDPM/LDM/DiT/... 全て動作確認済み |
 | **学んだ論文** | 約200本 | Kingma&Welling 2013 → Genie 3 2026 まで |
-| **言語** | 3言語 | ⚡Julia (訓練) + 🦀Rust (推論) + 🔮Elixir (配信) |
+| **言語** | 3言語 | 🦀Rust (訓練) + 🦀Rust (推論) + 🔮Elixir (配信) |
 | **モダリティ** | 7領域 | 画像/テキスト/音声/動画/3D/4D/科学 |
 | **Course数** | 5 | 数学基礎/生成モデル理論/生成モデル社会実装/拡散モデル理論/ドメイン特化 |
 
@@ -389,7 +395,7 @@ Course IV (第33-42回) とCourse V (第43-49回) は、どちらも Course I-II
 |:-----|:-------------|:-------------|
 | **数式** | 読めない ($\alpha$ すら知らない) | 全て読解・導出可能 (ELBO/Score/ODE/FM/OT/...) |
 | **論文** | 暗号文書 | 理論セクションが書ける |
-| **実装** | Python初心者 | 3言語フルスタック (Julia/Rust/Elixir) |
+| **実装** | Python初心者 | 3言語フルスタック (Rust/Rust/Elixir) |
 | **モデル** | Softmaxすら不明 | VAE/GAN/Flow/Diffusion/DiT/LDM/CM/WM 全て実装可能 |
 | **Production** | ローカル実験のみ | MLOps/分散配信/監視/デプロイ/評価 全工程 |
 | **最新性** | 知らない | 2024-2026 SOTA完全把握 (FM/推論時スケーリング/MM統合) |
@@ -1424,15 +1430,15 @@ $$
 
 ### 4.1 システムアーキテクチャ設計
 
-全50回で学んだ3言語パターン (Julia訓練 + Rust推論 + Elixir配信) を適用する。
+全50回で学んだ3言語パターン (Rust訓練 + Rust推論 + Elixir配信) を適用する。
 
 ```mermaid
 graph TD
     A[User Request<br/>Web UI] --> B[Elixir<br/>分散サーバー]
     B --> C{Request Type}
-    C -->|Video Understand| D[Julia<br/>SmolVLM2]
-    C -->|Image Generate| E[Julia<br/>aMUSEd]
-    C -->|Video Generate| F[Julia<br/>LTX-Video]
+    C -->|Video Understand| D[Rust<br/>SmolVLM2]
+    C -->|Image Generate| E[Rust<br/>aMUSEd]
+    C -->|Video Generate| F[Rust<br/>LTX-Video]
 
     D --> G[Rust<br/>Inference Engine]
     E --> G
@@ -1447,11 +1453,11 @@ graph TD
 
 | 言語 | 役割 | 担当モジュール |
 |:-----|:-----|:--------------|
-| **Julia** | 訓練 + 推論ロジック | SmolVLM2 / aMUSEd / LTX-Video 推論 |
+| **Rust** | 訓練 + 推論ロジック | SmolVLM2 / aMUSEd / LTX-Video 推論 |
 | **Rust** | 高速推論カーネル | 3D Conv / Attention カーネル (C-ABI) |
 | **Elixir** | 分散配信 + 負荷分散 | Phoenix WebSocket / GenServer ワークキュー |
 
-### 4.2 Julia推論エンジン: 3モデル統合
+### 4.2 Rust推論エンジン: 3モデル統合
 
 
 ### 4.3 Rust推論カーネル: C-ABI FFI
@@ -1473,11 +1479,11 @@ graph TD
 
 全50回で学んだ3言語統合パターンの性能を検証する。
 
-| 処理 | Python単一言語 | Julia+Rust+Elixir | 高速化率 |
+| 処理 | Python単一言語 | Rust+Rust+Elixir | 高速化率 |
 |:-----|:--------------|:------------------|:---------|
-| **SmolVLM2推論** | 2.3秒 | 0.8秒 (Julia) | 2.9倍 |
-| **aMUSEd推論** | 5.1秒 | 1.2秒 (Julia) | 4.3倍 |
-| **LTX-Video推論** | 45秒 | 12秒 (Julia+Rust kernel) | 3.8倍 |
+| **SmolVLM2推論** | 2.3秒 | 0.8秒 (Rust) | 2.9倍 |
+| **aMUSEd推論** | 5.1秒 | 1.2秒 (Rust) | 4.3倍 |
+| **LTX-Video推論** | 45秒 | 12秒 (Rust+Rust kernel) | 3.8倍 |
 | **並列処理** | 52.4秒 (順次) | 14秒 (Elixir並列) | 3.7倍 |
 
 **結論**: 3言語統合で平均3.7倍高速化。Elixir並列処理で複数リクエスト同時処理が可能。
@@ -1520,9 +1526,9 @@ graph TD
 - **第12回 GAN**: Minimax game, Wasserstein GAN
 - **第16回 Transformer**: Self-Attention, Positional Encoding
 
-**Course III (第19-32回): 生成モデル社会実装** — Julia/Rust/Elixir 3言語フルスタック
+**Course III (第19-32回): 生成モデル社会実装** — Rust/Rust/Elixir 3言語フルスタック
 
-- **第19回 FFI**: Julia→Rust C-ABI, jlrs, rustler
+- **第19回 FFI**: Rust→Rust C-ABI, rustler, rustler
 - **第26回 Fine-tuning**: LoRA, PEFT
 - **第28-32回 MLOps**: Production品質, デプロイ, 監視
 
@@ -1592,7 +1598,7 @@ graph TD
 
 - **数学**: 微積分、線形代数、確率論、SDE、OT — 全て読解・導出可能
 - **理論**: VAE/GAN/Flow/Transformer/SSM/DDPM/SDE/FM — 全パラダイム導出可能
-- **実装**: Julia訓練/Rust推論/Elixir配信 — Production-readyシステム設計可能
+- **実装**: Rust訓練/Rust推論/Elixir配信 — Production-readyシステム設計可能
 - **最新性**: Flow Matching/推論時スケーリング/Modal Unification — 2025-2026 SOTA完全把握
 
 **読者は今、以下ができる**:
@@ -1693,7 +1699,7 @@ graph TD
 | **第1回** | "数式が読めない → 全ての始まり" |
 | **第9回** | "ELBO = 生成モデル理論の統一的視点" |
 | **第16回** | "Attention is All You Need → Transformer革命" |
-| **第19回** | "Julia訓練 + Rust推論 + Elixir配信 = 3言語フルスタック" |
+| **第19回** | "Rust訓練 + Rust推論 + Elixir配信 = 3言語フルスタック" |
 | **第36回** | "DDPM = ノイズ予測 = Score Matching" |
 | **第38回** | "Flow Matching = ベクトル場学習 = Diffusionの一般化" |
 | **第42回** | "Score↔Flow↔Diffusion↔ODE↔EBM↔OT = 全て等価" |

@@ -7,47 +7,53 @@ published: true
 slug: "ml-lecture-34-part2"
 difficulty: "advanced"
 time_estimate: "90 minutes"
-languages: ["Julia", "Rust"]
+languages: ["Rust"]
 keywords: ["機械学習", "深層学習", "生成モデル"]
 ---
-## 💻 Z5. 試練（実装）（45分）— Julia実装でRBM + Modern Hopfield + MCMC
+## 💻 Z5. 試練（実装）（45分）— Rust実装でRBM + Modern Hopfield + MCMC
 
 ### 4.1 環境構築
 
-```julia
-using Pkg
-Pkg.add(["Lux", "Random", "Statistics", "Plots", "Distributions", "LinearAlgebra"])
-
-using Lux, Random, Statistics, Plots, Distributions, LinearAlgebra
+```rust
+// RBM (Restricted Boltzmann Machine) in Rust
+// ndarray: 行列演算 (Matrix, Vector)
+// rand:    サンプリング (Bernoulli, Normal)
+use ndarray::{Array1, Array2, ArrayView1, ArrayView2, Axis};
+use rand::Rng;
+use rand_distr::{Bernoulli, StandardNormal};
 ```
 
 ### 4.2 RBM実装
 
 #### 4.2.1 RBMデータ構造
 
-```julia
-# RBMモデル定義
-# T: 型パラメータ（Float32 or Float64）
-struct RBM{T}
-    W::Matrix{T}  # 重み行列 (n_visible × n_hidden)
-                   # 数式: W_{ij} — 可視層 i と隠れ層 j の接続強度
-    b::Vector{T}  # 可視層バイアス (n_visible,)
-                   # 数式: b_i — 可視層ノード i のバイアス
-    c::Vector{T}  # 隠れ層バイアス (n_hidden,)
-                   # 数式: c_j — 隠れ層ノード j のバイアス
-end
+```rust
+use ndarray::{Array1, Array2};
+use rand::Rng;
+use rand_distr::StandardNormal;
 
-# RBM初期化関数
-function RBM(n_visible::Int, n_hidden::Int; T=Float32)
-    rng = Random.default_rng()
-    # 重みを小さなランダム値で初期化
-    # 理由: 大きな初期値は学習を不安定にする
-    W = randn(rng, T, n_visible, n_hidden) .* T(0.01)
-    # バイアスは0初期化（標準的な慣習）
-    b = zeros(T, n_visible)
-    c = zeros(T, n_hidden)
-    RBM(W, b, c)
-end
+// RBMモデル: 可視層 n_visible, 隠れ層 n_hidden
+// W_{ij} — 可視層 i と隠れ層 j の接続強度
+// b_i    — 可視層ノード i のバイアス
+// c_j    — 隠れ層ノード j のバイアス
+struct Rbm {
+    w: Array2<f32>,  // 重み行列 (n_visible × n_hidden)
+    b: Array1<f32>,  // 可視層バイアス (n_visible,)
+    c: Array1<f32>,  // 隠れ層バイアス (n_hidden,)
+}
+
+impl Rbm {
+    fn new(n_visible: usize, n_hidden: usize, rng: &mut impl Rng) -> Self {
+        // 重みを小さなランダム値で初期化 — 大きな初期値は学習を不安定にする
+        let w = Array2::from_shape_fn((n_visible, n_hidden), |_| {
+            rng.sample::<f32, _>(StandardNormal) * 0.01
+        });
+        // バイアスは0初期化（標準的な慣習）
+        let b = Array1::zeros(n_visible);
+        let c = Array1::zeros(n_hidden);
+        Self { w, b, c }
+    }
+}
 ```
 
 **数式↔コード対応**:
@@ -57,14 +63,18 @@ end
 
 #### 4.2.2 エネルギー関数
 
-```julia
-# エネルギー関数 E(v, h) = -v'Wh - b'v - c'h
-function energy(rbm::RBM, v, h)
-    # 数式: E(v, h) = -v^T W h - b^T v - c^T h
-    # v: 可視層の状態 (n_visible,) or (n_visible, batch)
-    # h: 隠れ層の状態 (n_hidden,) or (n_hidden, batch)
-    -(v' * rbm.W * h + rbm.b' * v + rbm.c' * h)
-end
+```rust
+use ndarray::ArrayView1;
+
+// E(v,h) = -vᵀWh - bᵀv - cᵀh   (RBM joint energy)
+// p(v,h) = exp(-E(v,h)) / Z      (Boltzmann distribution)
+fn rbm_energy(rbm: &Rbm, v: ArrayView1<f32>, h: ArrayView1<f32>) -> f32 {
+    let wh  = rbm.w.dot(&h);   // Wh → (n_visible,)
+    let vwh = v.dot(&wh);      // vᵀWh — scalar interaction term
+    let bv  = rbm.b.dot(&v);   // bᵀv  — visible bias term
+    let ch  = rbm.c.dot(&h);   // cᵀh  — hidden bias term
+    -(vwh + bv + ch)            // E(v,h) = -(vᵀWh + bᵀv + cᵀh)
+}
 ```
 
 **数式確認**:
@@ -79,66 +89,86 @@ $$
 
 #### 4.2.3 条件付きサンプリング
 
-```julia
-# 条件付き確率 p(h_j = 1 | v) = σ(c_j + Σ_i W_ij v_i)
-function sample_h_given_v(rbm::RBM, v)
-    # 数式: p(h_j = 1 | v) = σ(c_j + Σ_i W_ij v_i)
-    #                      = σ(c_j + (W^T v)_j)
-    # W' は W の転置 (n_hidden × n_visible)
-    # v は (n_visible, batch) → h_prob は (n_hidden, batch)
-    h_prob   = sigmoid.(rbm.c .+ rbm.W' * v)
-    h_sample = rand.(Bernoulli.(h_prob))
-    return h_sample, h_prob
-end
+```rust
+use ndarray::{Array1, Array2, ArrayView2, Axis};
+use rand::Rng;
+use rand_distr::Bernoulli;
 
-# 条件付き確率 p(v_i = 1 | h) = σ(b_i + Σ_j W_ij h_j)
-function sample_v_given_h(rbm::RBM, h)
-    # 数式: p(v_i = 1 | h) = σ(b_i + Σ_j W_ij h_j)
-    #                      = σ(b_i + (W h)_i)
-    v_prob   = sigmoid.(rbm.b .+ rbm.W * h)
-    v_sample = rand.(Bernoulli.(v_prob))
-    return v_sample, v_prob
-end
+fn sigmoid(x: f32) -> f32 { 1.0 / (1.0 + (-x).exp()) }
+
+// p(h_j=1|v) = σ(c_j + (Wᵀv)_j)   (conditional on visible layer)
+// v: ArrayView2<f32> (n_visible, batch) — zero-copy borrow → h_prob: (n_hidden, batch)
+fn sample_h_given_v(rbm: &Rbm, v: ArrayView2<f32>, rng: &mut impl Rng)
+    -> (Array2<f32>, Array2<f32>)
+{
+    // p(h=1|v) = σ(Wᵀv + c)  — c broadcasts over batch axis
+    let h_prob = (rbm.w.t().dot(&v)
+        + &rbm.c.view().insert_axis(Axis(1))).mapv(sigmoid);  // σ(Wᵀv + c)
+    let h_sample = h_prob.mapv(|p| {
+        if rng.sample(Bernoulli::new(p as f64).unwrap()) { 1.0f32 } else { 0.0 }
+    });
+    (h_sample, h_prob)
+}
+
+// p(v_i=1|h) = σ(b_i + (Wh)_i)   (conditional on hidden layer)
+fn sample_v_given_h(rbm: &Rbm, h: ArrayView2<f32>, rng: &mut impl Rng)
+    -> (Array2<f32>, Array2<f32>)
+{
+    // p(v=1|h) = σ(Wh + b)  — b broadcasts over batch axis
+    let v_prob = (rbm.w.dot(&h)
+        + &rbm.b.view().insert_axis(Axis(1))).mapv(sigmoid);  // σ(Wh + b)
+    let v_sample = v_prob.mapv(|p| {
+        if rng.sample(Bernoulli::new(p as f64).unwrap()) { 1.0f32 } else { 0.0 }
+    });
+    (v_sample, v_prob)
+}
 ```
 
 **数式↔コード確認**:
 
-| 数式 | Julia実装 |
+| 数式 | Rust実装 |
 |:-----|:----------|
 | $p(h_j=1\|v) = \sigma(c_j + \sum_i W_{ij} v_i)$ | `sigmoid.(rbm.c .+ rbm.W' * v)` |
 | $p(v_i=1\|h) = \sigma(b_i + \sum_j W_{ij} h_j)$ | `sigmoid.(rbm.b .+ rbm.W * h)` |
 
 **Broadcast演算の威力**:
 
-Juliaの `.` (broadcast) により、ベクトル演算が自動でバッチ処理に拡張される。
+Rustの `.` (broadcast) により、ベクトル演算が自動でバッチ処理に拡張される。
 
-```julia
-# 単一サンプル: v は (n_visible,)
-h_prob = sigmoid.(rbm.c .+ rbm.W' * v)  # (n_hidden,)
+```rust
+// 単一サンプル: v は &[f32] (n_visible,) → reshape to (n_visible, 1) for batched fn
+let v1 = v.view().insert_axis(Axis(1));  // (n_visible, 1)
+let h_prob: Array2<f32> =
+    (rbm.w.t().dot(&v1) + &rbm.c.view().insert_axis(Axis(1))).mapv(sigmoid);
+// result: (n_hidden, 1)
 
-# バッチ: v は (n_visible, batch_size)
-h_prob = sigmoid.(rbm.c .+ rbm.W' * v)  # (n_hidden, batch_size)
-# rbm.c は自動で (n_hidden, 1) → (n_hidden, batch_size) にブロードキャスト
+// バッチ: v は ArrayView2<f32> (n_visible, batch_size) → 同じ関数でそのまま動く
+let h_prob_batch: Array2<f32> =
+    (rbm.w.t().dot(&v_batch) + &rbm.c.view().insert_axis(Axis(1))).mapv(sigmoid);
+// c: (n_hidden,) → insert_axis(1) → (n_hidden, 1) → broadcast to (n_hidden, batch)
 ```
 
 #### 4.2.4 Gibbs Sampling
 
-```julia
-# Gibbs Sampling (1 step)
-function gibbs_step(rbm::RBM, v)
-    # 1. h をサンプル: h ~ p(h | v)
-    h, h_prob = sample_h_given_v(rbm, v)
+```rust
+use ndarray::{Array1, Array2, ArrayView2, Axis};
+use rand::Rng;
 
-    # 2. v をサンプル: v_new ~ p(v | h)
-    v_new, v_prob = sample_v_given_h(rbm, h)
+// Gibbs Sampling (1 step): v → h → v_new  (zero-copy input)
+fn gibbs_step(
+    rbm: &Rbm,
+    v: ArrayView2<f32>,      // (n_visible, batch)
+    rng: &mut impl Rng,
+) -> (Array2<f32>, Array2<f32>, Array2<f32>, Array2<f32>) {
+    // 1. h をサンプル: h ~ p(h | v)
+    let (h, h_prob) = sample_h_given_v(rbm, v, rng);
 
-    # 戻り値:
-    # v_new: 新しい可視層の状態
-    # h: サンプルされた隠れ層
-    # v_prob: p(v_new | h) の確率
-    # h_prob: p(h | v) の確率
-    return v_new, h, v_prob, h_prob
-end
+    // 2. v をサンプル: v_new ~ p(v | h)
+    let (v_new, v_prob) = sample_v_given_h(rbm, h.view(), rng);
+
+    // 戻り値: (v_new, h, v_prob, h_prob)
+    (v_new, h, v_prob, h_prob)
+}
 ```
 
 **アルゴリズム確認**:
@@ -151,49 +181,46 @@ Gibbs Samplingは以下を交互に実行:
 
 #### 4.2.5 Contrastive Divergence (CD-k)
 
-```julia
-# Contrastive Divergence (CD-k)
-function cd_k(rbm::RBM, v_data; k=1, lr=0.01f0)
-    # v_data: データのミニバッチ (n_visible, batch_size)
-    batch_size = size(v_data, 2)
+```rust
+use ndarray::{Array1, Array2, ArrayView2, Axis};
+use rand::Rng;
 
-    # ========== 正例（データ）の統計量 ==========
-    # 数式: ⟨v_i h_j⟩_data = (1/N) Σ_n v_i^(n) p(h_j=1 | v^(n))
-    h_pos, h_pos_prob = sample_h_given_v(rbm, v_data)
+// Contrastive Divergence CD-k: ∂log p(v)/∂θ ≈ ⟨·⟩_data - ⟨·⟩_k-Gibbs
+// v_data: ArrayView2<f32> (n_visible, batch) — zero-copy borrow
+fn cd_k(rbm: &Rbm, v_data: ArrayView2<f32>, k: usize, lr: f32, rng: &mut impl Rng) -> Rbm {
+    let batch_size = v_data.ncols() as f32;
 
-    # 正例の勾配: v_data * h_pos_prob^T / batch_size
-    # v_data: (n_visible, batch)
-    # h_pos_prob^T: (batch, n_hidden)
-    # 結果: (n_visible, n_hidden)
-    pos_grad = v_data * h_pos_prob' ./ batch_size
+    // ===== Positive phase: ⟨vh⟩_data =====
+    // ⟨v_i h_j⟩_data = (1/N) Σ_n v_i^(n) p(h_j=1|v^(n))
+    let (_, h_pos_prob) = sample_h_given_v(rbm, v_data, rng);
+    // (n_visible, batch) × (batch, n_hidden) → ⟨vh⟩_data ∈ ℝ^{n_v × n_h}
+    let pos_grad = v_data.dot(&h_pos_prob.t()) / batch_size;
 
-    # ========== 負例（モデル）の統計量 ==========
-    # k-step Gibbs Sampling
-    v_neg = copy(v_data)  # データから初期化（CD-kの特徴）
-    for _ in 1:k
-        v_neg, h_neg, _, _ = gibbs_step(rbm, v_neg)
-    end
+    // ===== Negative phase: ⟨vh⟩_model via k-step Gibbs =====
+    let mut v_neg = v_data.to_owned();  // CD-k: データから初期化
+    let mut h_neg_prob = Array2::<f32>::zeros((rbm.c.len(), v_data.ncols()));
+    for _ in 0..k {
+        let (v_new, _, _, h_p) = gibbs_step(rbm, v_neg.view(), rng);
+        v_neg = v_new;
+        h_neg_prob = h_p;  // h^(k) の期待値
+    }
 
-    # 負例の隠れ層確率
-    h_neg, h_neg_prob = sample_h_given_v(rbm, v_neg)
+    // ===== Parameter update =====
+    // ΔW = η(⟨vh⟩_data - ⟨vh⟩_model)   (contrastive divergence)
+    let neg_grad = v_neg.dot(&h_neg_prob.t()) / batch_size;
+    let dw = (&pos_grad - &neg_grad) * lr;  // ΔW_ij = η(⟨v_i h_j⟩_data - ⟨v_i h_j⟩_model)
 
-    # 負例の勾配
-    neg_grad = v_neg * h_neg_prob' ./ batch_size
+    // Δb = η(⟨v⟩_data - ⟨v⟩_model)
+    let db = (v_data.mean_axis(Axis(1)).unwrap()
+            - v_neg.mean_axis(Axis(1)).unwrap()) * lr;
 
-    # ========== 勾配更新 ==========
-    # 数式: ΔW_ij = η (⟨v_i h_j⟩_data - ⟨v_i h_j⟩_model)
-    ΔW = @. lr * (pos_grad - neg_grad)
+    // Δc = η(⟨h⟩_data - ⟨h⟩_model)
+    let (_, h_pos_prob2) = sample_h_given_v(rbm, v_data, rng);
+    let dc = (h_pos_prob2.mean_axis(Axis(1)).unwrap()
+            - h_neg_prob.mean_axis(Axis(1)).unwrap()) * lr;
 
-    # バイアスの勾配
-    # 数式: Δb_i = η (⟨v_i⟩_data - ⟨v_i⟩_model)
-    Δb = lr .* mean(v_data .- v_neg, dims=2)[:]
-
-    # 数式: Δc_j = η (⟨h_j⟩_data - ⟨h_j⟩_model)
-    Δc = lr .* mean(h_pos_prob .- h_neg_prob, dims=2)[:]
-
-    # 新しいRBMを返す（関数型スタイル）
-    return RBM(@. rbm.W + ΔW, @. rbm.b + Δb, @. rbm.c + Δc)
-end
+    Rbm { w: &rbm.w + &dw, b: &rbm.b + &db, c: &rbm.c + &dc }  // functional update
+}
 ```
 
 **CD-kの理論**:
@@ -222,38 +249,50 @@ $$
 
 #### 4.2.6 RBM訓練ループ
 
-```julia
-# RBM訓練ループ
-function train_rbm(rbm, data; epochs=10, k=1, lr=0.01f0, batch_size=32)
-    # data: 全訓練データ (n_visible, n_samples)
-    n_samples = size(data, 2)
+```rust
+use rand::seq::SliceRandom;
+use ndarray::{Array2, Axis, stack};
 
-    for epoch in 1:epochs
-        # ミニバッチシャッフル
-        indices = shuffle(1:n_samples)
+// RBM訓練ループ
+fn train_rbm(
+    mut rbm: Rbm,
+    data: &Array2<f32>,   // (n_visible, n_samples)
+    epochs: usize,
+    k: usize,
+    lr: f32,
+    batch_size: usize,
+    rng: &mut impl Rng,
+) -> Rbm {
+    let n_samples = data.ncols();
 
-        # 全データを1回走査（1 epoch）
-        for i in 1:batch_size:n_samples
-            # ミニバッチ抽出
-            batch_idx = indices[i:min(i+batch_size-1, n_samples)]
-            batch = @views data[:, batch_idx]
+    for epoch in 0..epochs {
+        // ミニバッチシャッフル
+        let mut indices: Vec<usize> = (0..n_samples).collect();
+        indices.shuffle(rng);
 
-            # CD-k更新
-            rbm = cd_k(rbm, batch; k=k, lr=lr)
-        end
+        // 全データを1回走査（1 epoch）
+        for chunk in indices.chunks(batch_size) {
+            // ミニバッチ抽出: gather columns by index (zero-copy via views)
+            let batch = stack(
+                Axis(1),
+                &chunk.iter().map(|&i| data.column(i)).collect::<Vec<_>>(),
+            ).unwrap();
 
-        # エポック終了時の評価
-        # ランダムなサンプルのエネルギーを計算
-        v_sample = data[:, rand(1:n_samples)]
-        h_sample, _ = sample_h_given_v(rbm, v_sample)
-        E = energy(rbm, v_sample, h_sample)
+            // CD-k 更新
+            rbm = cd_k(&rbm, batch.view(), k, lr, rng);
+        }
 
-        println("Epoch $epoch: Energy = $E")
-        # エネルギーが下がる → 学習が進んでいる
-    end
+        // エポック終了時: ランダムサンプルのエネルギーを評価
+        let idx = rng.gen_range(0..n_samples);
+        let v_sample = data.column(idx);
+        let (h_sample, _) = sample_h_given_v(&rbm, v_sample.insert_axis(Axis(1)).view(), rng);
+        let e = rbm_energy(&rbm, v_sample, h_sample.column(0));
+        println!("Epoch {}: Energy = {:.4}", epoch, e);
+        // エネルギーが下がる → 学習が進んでいる
+    }
 
-    return rbm
-end
+    rbm
+}
 ```
 
 **訓練ループの設計ポイント**:
@@ -273,24 +312,27 @@ end
 
 #### 4.3.1 Modern Hopfieldデータ構造
 
-```julia
-# Modern Hopfield Network
-# T: 型パラメータ（Float32 or Float64）
-struct ModernHopfield{T}
-    X::Matrix{T}  # 記憶パターン行列 (d × M)
-                   # X = [ξ¹, ξ², ..., ξᴹ]
-                   # d: パターンの次元
-                   # M: 記憶パターン数
-    β::T  # 逆温度パラメータ（β > 0）
-          # β大 → 鋭い検索（最近接のみ）
-          # β小 → 平滑な検索（複数パターンの混合）
-end
+```rust
+use ndarray::prelude::*;
 
-# コンストラクタ
-function ModernHopfield(patterns::Matrix{T}; β=1.0f0) where T
-    # patterns: 記憶するパターンの行列 (d × M)
-    ModernHopfield(patterns, T(β))
-end
+// Modern Hopfield Network
+struct ModernHopfield {
+    x: Array2<f64>,  // 記憶パターン行列 (d × M)
+                      // x = [ξ¹, ξ², ..., ξᴹ]
+                      // d: パターンの次元
+                      // M: 記憶パターン数
+    beta: f64,  // 逆温度パラメータ（beta > 0）
+                // beta大 → 鋭い検索（最近接のみ）
+                // beta小 → 平滑な検索（複数パターンの混合）
+}
+
+impl ModernHopfield {
+    // コンストラクタ
+    // patterns: 記憶するパターンの行列 (d × M)
+    fn new(patterns: Array2<f64>, beta: f64) -> Self {
+        ModernHopfield { x: patterns, beta }
+    }
+}
 ```
 
 **数式↔コード対応**:
@@ -299,15 +341,25 @@ end
 
 #### 4.3.2 エネルギー関数
 
-```julia
-# エネルギー関数 E(x) = -lse(β X'x) + 0.5||x||^2
-function energy(hopfield::ModernHopfield, x)
-    # 数式: E(x) = -log Σ_i exp(β ⟨x, ξ^i⟩) + (1/2)||x||^2
-    # X: (d × M), x: (d,) or (d, batch)
-    # X' * x: 内積 ⟨x, ξ^i⟩ を全 i について一括計算
-    lse_term = hopfield.X' * x |> z -> hopfield.β .* z |> logsumexp
-    -lse_term + 0.5f0 * sum(abs2, x)
-end
+```rust
+// エネルギー関数 E(x) = -lse(β X'x) + 0.5||x||^2
+// lse(z) = max(z) + log Σᵢ exp(zᵢ - max(z))  (numerically stable)
+fn logsumexp(z: &[f64]) -> f64 {
+    let max = z.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+    max + z.iter().map(|&zi| (zi - max).exp()).sum::<f64>().ln()
+}
+
+// E(x) = -lse(β·Xᵀx) + ½‖x‖²   (Modern Hopfield energy)
+// Minimising E → retrieval: x converges to nearest stored pattern ξⁱ
+fn energy(hopfield: &ModernHopfield, x: ArrayView1<f64>) -> f64 {
+    // β·⟨x, ξⁱ⟩ for all i: Xᵀx → (M,), then scale by β
+    let scores: Vec<f64> = hopfield.x.t().dot(&x).iter()
+        .map(|&s| hopfield.beta * s)   // β·Xᵀx
+        .collect();
+    let lse_term = logsumexp(&scores);                   // log Σᵢ exp(β⟨x,ξⁱ⟩)
+    let norm_sq: f64 = x.iter().map(|v| v * v).sum();
+    -lse_term + 0.5 * norm_sq                            // E(x) = -lse + ½‖x‖²
+}
 ```
 
 **log-sum-expの数値安定性**:
@@ -324,7 +376,7 @@ $$
 \text{lse}(z) = \max(z) + \log \sum_i \exp(z_i - \max(z))
 $$
 
-Juliaの `logsumexp` は自動で安定版を使用。
+Rustの `log_sum_exp` は手動で安定版を実装。
 
 **エネルギー最小化 = パターン検索**:
 
@@ -332,14 +384,23 @@ $E(x)$ を最小化する $x$ は、記憶パターン $\{\xi^i\}$ の中で最�
 
 #### 4.3.3 Update Rule
 
-```julia
-# Update Rule: x^{t+1} = X softmax(β X'x^t)
-function update(hopfield::ModernHopfield, x)
-    # 数式: x^{t+1} = X softmax(β X'x^t)
-    # X: (d × M), x: (d,) or (d, batch)
-    weights = hopfield.X' * x |> z -> hopfield.β .* z |> softmax
-    hopfield.X * weights
-end
+```rust
+// x^{t+1} = X·softmax(β·Xᵀx^t)   (Modern Hopfield update rule)
+fn softmax(z: &[f64]) -> Vec<f64> {
+    let max = z.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+    let exps: Vec<f64> = z.iter().map(|&zi| (zi - max).exp()).collect();
+    let sum: f64 = exps.iter().sum();
+    exps.into_iter().map(|e| e / sum).collect()
+}
+
+fn update(hopfield: &ModernHopfield, x: ArrayView1<f64>) -> Array1<f64> {
+    // x^{t+1} = X·softmax(β·Xᵀx^t)  ≡ Attention(Q=x, K=V=X, scale=β)
+    let scores: Vec<f64> = hopfield.x.t().dot(&x).iter()
+        .map(|&s| hopfield.beta * s)      // β·⟨x^t, ξⁱ⟩ for each stored pattern
+        .collect();
+    let weights = Array1::from(softmax(&scores));  // softmax → retrieval weights
+    hopfield.x.dot(&weights)                        // weighted sum of patterns
+}
 ```
 
 **数式確認**:
@@ -363,31 +424,32 @@ $$
 
 #### 4.3.4 収束判定付きRetrieve
 
-```julia
-# 収束までupdate
-function retrieve(hopfield::ModernHopfield, x_init; max_iters=10, tol=1e-6)
-    # x_init: 初期クエリ（ノイズ付きパターンなど）
-    # max_iters: 最大反復数
-    # tol: 収束判定の閾値
+```rust
+// 収束までupdate
+fn retrieve(hopfield: &ModernHopfield, x_init: ArrayView1<f64>, max_iters: usize, tol: f64) -> Array1<f64> {
+    // x_init: 初期クエリ（ノイズ付きパターンなど）
+    // max_iters: 最大反復数
+    // tol: 収束判定の閾値
 
-    x = copy(x_init)
+    let mut x = x_init.to_owned();
 
-    for t in 1:max_iters
-        # 1ステップ更新
-        x_new = update(hopfield, x)
+    for t in 0..max_iters {
+        // 1ステップ更新
+        let x_new = update(hopfield, x.view());
 
-        # 収束判定: ||x_new - x|| < tol
-        if norm(x_new .- x) < tol
-            println("Converged at iteration $t")
-            break
-        end
+        // 収束判定: ||x_new - x|| < tol
+        let diff_norm: f64 = (&x_new - &x).iter().map(|v| v * v).sum::<f64>().sqrt();
+        if diff_norm < tol {
+            println!("Converged at iteration {}", t + 1);
+            return x_new;
+        }
 
-        # 次の反復へ
-        x = x_new
-    end
+        // 次の反復へ
+        x = x_new;
+    }
 
-    return x
-end
+    x
+}
 ```
 
 **収束性の理論**:
@@ -400,30 +462,32 @@ Modern Hopfieldの定理（Ramsauer+ 2020）:
 
 #### 4.3.5 Attention等価性の実証
 
-```julia
-# Modern Hopfield ↔ Attention等価性の実証
-function attention_equivalent(hopfield::ModernHopfield, x_query)
-    # Self-Attention: Attention(Q, K, V) = V softmax(K^T Q / √d)
-    # Modern Hopfield: x^{t+1} = X softmax(β X^T x^t)
+```rust
+// Modern Hopfield ↔ Attention等価性の実証
+fn attention_equivalent(hopfield: &ModernHopfield, x_query: ArrayView1<f64>) -> Array1<f64> {
+    // Self-Attention: Attention(Q, K, V) = V softmax(K^T Q / √d)
+    // Modern Hopfield: x^{t+1} = X softmax(β X^T x^t)
 
-    # 対応関係:
-    # Q = x_query （クエリ）
-    # K = X （キー = 記憶パターン）
-    # V = X （バリュー = 記憶パターン）
-    # β = 1/√d （スケーリング係数）
+    // 対応関係:
+    // Q = x_query （クエリ）
+    // K = X （キー = 記憶パターン）
+    // V = X （バリュー = 記憶パターン）
+    // β = 1/√d （スケーリング係数）
 
-    d = size(hopfield.X, 1)  # 次元
+    let d = hopfield.x.nrows() as f64;  // 次元
 
-    # Attention計算
-    # logits = K^T Q / √d = X^T x_query / √d
-    logits = (hopfield.X' * x_query) ./ sqrt(d)
+    // Attention計算
+    // logits = K^T Q / √d = X^T x_query / √d
+    let logits: Vec<f64> = hopfield.x.t().dot(&x_query).iter()
+        .map(|&s| s / d.sqrt())
+        .collect();
 
-    # Softmax
-    weights = softmax(logits)
+    // Softmax
+    let weights = Array1::from(softmax(&logits));
 
-    # 重み付き和: V * weights = X * weights
-    return hopfield.X * weights
-end
+    // 重み付き和: V * weights = X * weights
+    hopfield.x.dot(&weights)
+}
 ```
 
 **等価性の確認**:
@@ -444,23 +508,28 @@ $$
 
 **コード実験**:
 
-```julia
-# 実験: Modern Hopfield vs Attention
-d, M = 20, 10
-patterns = randn(Float32, d, M)
-x_query = randn(Float32, d)
+```rust
+// 実験: Modern Hopfield vs Attention
+use ndarray_rand::RandomExt;
+use ndarray_rand::rand_distr::StandardNormal;
 
-hopfield = ModernHopfield(patterns; β=1.0f0/sqrt(d))
+let d = 20usize;
+let m = 10usize;
+let patterns: Array2<f64> = Array2::random((d, m), StandardNormal);
+let x_query: Array1<f64> = Array1::random(d, StandardNormal);
 
-# Modern Hopfield更新
-x_hopfield = update(hopfield, x_query)
+let hopfield = ModernHopfield::new(patterns, 1.0 / (d as f64).sqrt());
 
-# Attention等価計算
-x_attention = attention_equivalent(hopfield, x_query)
+// Modern Hopfield更新
+let x_hopfield = update(&hopfield, x_query.view());
 
-# 差の確認
-println("Difference: $(norm(x_hopfield - x_attention))")
-# Difference: 0.0f0 （完全一致）
+// Attention等価計算
+let x_attention = attention_equivalent(&hopfield, x_query.view());
+
+// 差の確認
+let diff: f64 = (&x_hopfield - &x_attention).iter().map(|v| v * v).sum::<f64>().sqrt();
+println!("Difference: {}", diff);
+// Difference: 0 （完全一致）
 ```
 
 ### 4.4 MCMCサンプリング実装
@@ -479,63 +548,76 @@ MCMC（Markov Chain Monte Carlo）は、EBMからサンプリングするため�
 2. 受理確率 $\alpha = \min(1, \frac{p(x') q(x|x')}{p(x) q(x'|x)})$ で受理・棄却
 3. $x_{t+1} = x'$ （受理）または $x_{t+1} = x_t$ （棄却）
 
-```julia
-# Metropolis-Hastings Algorithm
-# target_log_prob: log p(x) を返す関数（Zは不要！）
-# x_init: 初期状態
-# proposal_std: 提案分布の標準偏差（チューニングパラメータ）
-function metropolis_hastings(target_log_prob, x_init; n_samples=1000, proposal_std=0.1f0)
-    d = length(x_init)
+```rust
+use rand::Rng;
+use rand_distr::StandardNormal;
 
-    # サンプル保存用のバッファ
-    samples = zeros(Float32, d, n_samples)
+// Metropolis-Hastings Algorithm
+// target_log_prob: log p(x) を返す関数（Zは不要！）
+// x_init: 初期状態
+// proposal_std: 提案分布の標準偏差（チューニングパラメータ）
+fn metropolis_hastings<F>(
+    target_log_prob: F,
+    x_init: &[f64],
+    n_samples: usize,
+    proposal_std: f64,
+    rng: &mut impl Rng,
+) -> Array2<f64>
+where
+    F: Fn(&[f64]) -> f64,
+{
+    let d = x_init.len();
 
-    # 現在の状態
-    x = copy(x_init)
-    log_p_x = target_log_prob(x)  # log p(x) を計算（Zは相殺される）
+    // サンプル保存用のバッファ
+    let mut samples = Array2::<f64>::zeros((d, n_samples));
 
-    n_accept = 0  # 受理回数カウンタ
+    // 現在の状態
+    let mut x = x_init.to_vec();
+    let mut log_p_x = target_log_prob(&x);  // log p(x) を計算（Zは相殺される）
 
-    for i in 1:n_samples
-        # ========== ステップ1: 提案 ==========
-        # 提案分布: q(x' | x) = N(x, proposal_std^2 I)
-        # ランダムウォーク提案（対称的: q(x'|x) = q(x|x')）
-        x_prop = x .+ proposal_std .* randn(Float32, d)
-        log_p_prop = target_log_prob(x_prop)
+    let mut n_accept = 0usize;
 
-        # ========== ステップ2: 受理・棄却 ==========
-        # 受理確率: α = min(1, p(x')/p(x))
-        # log空間で計算: log α = log p(x') - log p(x)
-        # 対称的提案なので q(x'|x) = q(x|x') → 相殺
-        log_α = log_p_prop - log_p_x
+    for i in 0..n_samples {
+        // ========== ステップ1: 提案 ==========
+        // 提案分布: q(x' | x) = N(x, proposal_std^2 I)
+        // ランダムウォーク提案（対称的: q(x'|x) = q(x|x')）
+        let x_prop: Vec<f64> = x.iter()
+            .map(|&xi| xi + proposal_std * rng.sample::<f64, _>(StandardNormal))
+            .collect();
+        let log_p_prop = target_log_prob(&x_prop);
 
-        # 受理判定: u ~ Uniform(0, 1) として log(u) < log α ならば受理
-        if log(rand()) < log_α
-            # 受理: 新しい状態に遷移
-            x = x_prop
-            log_p_x = log_p_prop
-            n_accept += 1
-        # 棄却の場合: x は変わらず（現在の状態を再度サンプル）
-        end
+        // ========== ステップ2: 受理・棄却 ==========
+        // 受理確率: α = min(1, p(x')/p(x))
+        // log空間で計算: log α = log p(x') - log p(x)
+        // 対称的提案なので q(x'|x) = q(x|x') → 相殺
+        let log_alpha = log_p_prop - log_p_x;
 
-        # ========== ステップ3: サンプル保存 ==========
-        # バーンイン後のサンプルを保存
-        @views samples[:, i] .= x
-    end
+        // 受理判定: u ~ Uniform(0, 1) として log(u) < log α ならば受理
+        if rng.gen::<f64>().ln() < log_alpha {
+            // 受理: 新しい状態に遷移
+            x = x_prop;
+            log_p_x = log_p_prop;
+            n_accept += 1;
+        }
+        // 棄却の場合: x は変わらず（現在の状態を再度サンプル）
 
-    # 受理率: 理想は 0.2-0.5（高次元では低下）
-    acceptance_rate = n_accept / n_samples
-    println("Acceptance rate: $acceptance_rate")
-    # proposal_std が大きすぎると受理率低下
-    # proposal_std が小さすぎると探索が遅い
+        // ステップ3: x_t をサンプルバッファに保存
+        x.iter().enumerate().for_each(|(k, &xk)| samples[[k, i]] = xk);
+    }
 
-    return samples
-end
+    // 受理率: 理想は 0.2-0.5（高次元では低下）
+    let acceptance_rate = n_accept as f64 / n_samples as f64;
+    println!("Acceptance rate: {}", acceptance_rate);
+    // proposal_std が大きすぎると受理率低下
+    // proposal_std が小さすぎると探索が遅い
+
+    samples
+}
 ```
 
 **数式↔コード確認**:
 
-| 数式 | Julia実装 |
+| 数式 | Rust実装 |
 |:-----|:----------|
 | $\alpha = \min(1, \frac{p(x')}{p(x)})$ | `log_α = log_p_prop - log_p_x` |
 | $u \sim \text{Uniform}(0, 1)$ | `rand()` |
@@ -562,86 +644,104 @@ $$
 - 勾配 $\nabla U(x)$ を使う → 効率的探索
 - 提案が遠くまで飛ぶ → 受理率高い（typical: 0.65-0.95）
 
-```julia
-# Hamiltonian Monte Carlo Algorithm
-# U: ポテンシャルエネルギー U(x) = -log p(x) + const
-# ∇U: その勾配 ∇U(x)
-# L: Leapfrog積分のステップ数
-# ε: Leapfrog積分の時間刻み幅
-function hmc(U, ∇U, x_init; n_samples=1000, L=10, ε=0.01f0)
-    d = length(x_init)
-    samples = zeros(Float32, d, n_samples)
-    x = copy(x_init)
+```rust
+use rand::Rng;
+use rand_distr::StandardNormal;
 
-    n_accept = 0
+// Hamiltonian Monte Carlo Algorithm
+// potential: ポテンシャルエネルギー U(x) = -log p(x) + const
+// grad_u: その勾配 ∇U(x)
+// l: Leapfrog積分のステップ数
+// eps: Leapfrog積分の時間刻み幅
+fn hmc<U, GU>(
+    potential: U,
+    grad_u: GU,
+    x_init: &[f64],
+    n_samples: usize,
+    l: usize,
+    eps: f64,
+    rng: &mut impl Rng,
+) -> Array2<f64>
+where
+    U: Fn(&[f64]) -> f64,
+    GU: Fn(&[f64]) -> Vec<f64>,
+{
+    let d = x_init.len();
+    let mut samples = Array2::<f64>::zeros((d, n_samples));
+    let mut x = x_init.to_vec();
 
-    for i in 1:n_samples
-        # ========== ステップ1: 運動量サンプリング ==========
-        # p ~ N(0, I) （ガウス分布）
-        # 運動エネルギー: K(p) = (1/2) p^T p
-        p = randn(Float32, d)
+    let mut n_accept = 0usize;
 
-        # 現在のハミルトニアン
-        # H(x, p) = U(x) + (1/2)||p||^2
-        H_current = U(x) + 0.5f0 * sum(abs2, p)
+    for i in 0..n_samples {
+        // ========== ステップ1: 運動量サンプリング ==========
+        // p ~ N(0, I) （ガウス分布）
+        // 運動エネルギー: K(p) = (1/2) p^T p
+        let p: Vec<f64> = (0..d)
+            .map(|_| rng.sample::<f64, _>(StandardNormal))
+            .collect();
 
-        # ========== ステップ2: Leapfrog積分 ==========
-        # ハミルトン方程式:
-        #   dx/dt = ∂H/∂p = p
-        #   dp/dt = -∂H/∂x = -∇U(x)
-        # Symplectic積分器（エネルギー保存が良い）
+        // 現在のハミルトニアン
+        // H(x, p) = U(x) + (1/2)||p||^2
+        let h_current = potential(&x) + 0.5 * p.iter().map(|v| v * v).sum::<f64>();
 
-        x_new, p_new = copy(x), copy(p)
+        // ========== ステップ2: Leapfrog積分 ==========
+        // ハミルトン方程式:
+        //   dx/dt = ∂H/∂p = p
+        //   dp/dt = -∂H/∂x = -∇U(x)
+        // Symplectic積分器（エネルギー保存が良い）
 
-        # Half-step for momentum (初期)
-        # p_{1/2} = p_0 - (ε/2) ∇U(x_0)
-        p_new .-= (ε/2) .* ∇U(x_new)
+        let mut x_new = x.clone();
+        let mut p_new = p.clone();
 
-        # Full-steps: L回繰り返し
-        for step in 1:L
-            # Full-step for position
-            # x_{t+1} = x_t + ε p_{t+1/2}
-            x_new .+= ε .* p_new
+        // Half-step for momentum: p_{1/2} = p_0 - (ε/2)∇U(x_0)
+        let gu = grad_u(&x_new);
+        p_new.iter_mut().zip(gu.iter())
+            .for_each(|(pi, gi)| *pi -= (eps / 2.0) * gi);
 
-            # Full-step for momentum (最後以外)
-            # p_{t+3/2} = p_{t+1/2} - ε ∇U(x_{t+1})
-            if step < L  # 最後のステップは下で処理
-                p_new .-= ε .* ∇U(x_new)
-            end
-        end
+        // Full-steps: L回繰り返し (Leapfrog symplectic integrator)
+        for step in 0..l {
+            // x_{t+1} = x_t + ε·p_{t+1/2}
+            x_new.iter_mut().zip(p_new.iter())
+                .for_each(|(xi, pi)| *xi += eps * pi);
 
-        # Half-step for momentum (最終)
-        # p_L = p_{L-1/2} - (ε/2) ∇U(x_L)
-        p_new .-= (ε/2) .* ∇U(x_new)
+            // p_{t+3/2} = p_{t+1/2} - ε·∇U(x_{t+1})  (最後以外)
+            if step < l - 1 {
+                let gu = grad_u(&x_new);
+                p_new.iter_mut().zip(gu.iter())
+                    .for_each(|(pi, gi)| *pi -= eps * gi);
+            }
+        }
 
-        # ========== ステップ3: Metropolis受理・棄却 ==========
-        # 新しいハミルトニアン
-        H_new = U(x_new) + 0.5f0 * sum(abs2, p_new)
+        // Half-step for momentum (最終): p_L = p_{L-1/2} - (ε/2)∇U(x_L)
+        let gu = grad_u(&x_new);
+        p_new.iter_mut().zip(gu.iter())
+            .for_each(|(pi, gi)| *pi -= (eps / 2.0) * gi);
 
-        # 受理確率: α = min(1, exp(H_current - H_new))
-        # Leapfrog積分が完全なら H_new ≈ H_current → α ≈ 1
-        # 数値誤差により H が変動 → Metropolis補正で調整
-        if log(rand()) < H_current - H_new
-            # 受理: 新しい位置に移動
-            x = x_new
-            n_accept += 1
-        # 棄却: 元の位置を保持（運動量は捨てる）
-        end
+        // ステップ3: Metropolis受理・棄却
+        // H(x,p) = U(x) + ½‖p‖²  — エネルギー保存 → 受理確率 α ≈ 1
+        let h_new = potential(&x_new) + 0.5 * p_new.iter().map(|v| v * v).sum::<f64>();
 
-        # ========== ステップ4: サンプル保存 ==========
-        @views samples[:, i] .= x
-    end
+        // α = min(1, exp(H_current - H_new))  — Metropolis補正
+        if rng.gen::<f64>().ln() < h_current - h_new {
+            x = x_new;   // 受理: 新しい位置に移動
+            n_accept += 1;
+        }
+        // 棄却: 元の位置を保持（運動量は捨てる）
 
-    # 受理率: HMCは高い（0.65-0.95が典型）
-    acceptance_rate = n_accept / n_samples
-    println("Acceptance rate: $acceptance_rate")
-    # ε, L の調整が重要:
-    # - ε 大 → 数値誤差大 → 受理率低下
-    # - ε 小 → L 大必要 → 計算コスト増
-    # - L 大 → 遠くまで探索 → 効率的
+        // ステップ4: x_t をサンプルバッファに保存
+        x.iter().enumerate().for_each(|(k, &xk)| samples[[k, i]] = xk);
+    }
 
-    return samples
-end
+    // 受理率: HMCは高い（0.65-0.95が典型）
+    let acceptance_rate = n_accept as f64 / n_samples as f64;
+    println!("Acceptance rate: {}", acceptance_rate);
+    // eps, l の調整が重要:
+    // - eps 大 → 数値誤差大 → 受理率低下
+    // - eps 小 → l 大必要 → 計算コスト増
+    // - l 大 → 遠くまで探索 → 効率的
+
+    samples
+}
 ```
 
 **Leapfrog積分の詳細**:
@@ -675,47 +775,51 @@ end
 
 ### 4.5 演習: RBM + Modern Hopfield + MCMC可視化
 
-```julia
-# データ生成（2D Gaussian Mixture）
-n_samples = 1000
-data = vcat(
-    randn(Float32, 2, n_samples÷2) .+ [2.0f0; 2.0f0],
-    randn(Float32, 2, n_samples÷2) .- [2.0f0; 2.0f0]
-)
+```rust
+use ndarray::prelude::*;
+use ndarray_rand::RandomExt;
+use ndarray_rand::rand_distr::StandardNormal;
 
-# RBM訓練
-rbm = RBM(2, 10)
-rbm = train_rbm(rbm, data; epochs=20, k=1, lr=0.01f0, batch_size=32)
+// データ生成（2D Gaussian Mixture）
+let n_samples = 1000usize;
+let half = n_samples / 2;
+let offset = Array2::from_elem((2, half), 2.0_f64);
+let data_pos: Array2<f64> = Array2::random((2, half), StandardNormal) + &offset;
+let data_neg: Array2<f64> = Array2::random((2, half), StandardNormal) - &offset;
+let mut data = Array2::<f64>::zeros((2, n_samples));
+data.slice_mut(s![.., ..half]).assign(&data_pos);
+data.slice_mut(s![.., half..]).assign(&data_neg);
 
-# Modern Hopfield訓練
-patterns = data[:, 1:10:100]  # 10パターン記憶
-hopfield = ModernHopfield(patterns; β=1.0f0)
+// RBM訓練
+let mut rbm = RBM::new(2, 10);
+rbm = train_rbm(rbm, &data.view(), 20, 1, 0.01, 32);
 
-# 連想記憶テスト
-x_init = patterns[:, 1] .+ 0.5f0 .* randn(Float32, 2)
-x_retrieved = retrieve(hopfield, x_init)
-println("Initial: $x_init")
-println("Retrieved: $x_retrieved")
-println("Target: $(patterns[:, 1])")
+// Modern Hopfield訓練
+let patterns = data.slice(s![.., 0..100;10]).to_owned();  // 10パターン記憶
+let hopfield = ModernHopfield::new(patterns, 1.0);
 
-# MCMC可視化
-target_log_prob(x) = -0.5f0 * norm(x)^2  # ガウス分布
-samples_mh = metropolis_hastings(target_log_prob, [0.0f0, 0.0f0]; n_samples=5000)
+// 連想記憶テスト
+let mut rng = rand::thread_rng();
+let noise: Array1<f64> = Array1::random(2, StandardNormal) * 0.5;
+let x_init: Array1<f64> = hopfield.x.column(0).to_owned() + noise;
+let x_retrieved = retrieve(&hopfield, x_init.view(), 10, 1e-6);
+println!("Initial: {:?}", x_init);
+println!("Retrieved: {:?}", x_retrieved);
+println!("Target: {:?}", hopfield.x.column(0));
 
-U(x) = 0.5f0 * norm(x)^2
-∇U(x) = x
-samples_hmc = hmc(U, ∇U, [0.0f0, 0.0f0]; n_samples=1000, L=10, ε=0.1f0)
+// MCMC可視化
+let target_log_prob = |x: &[f64]| -0.5 * x.iter().map(|v| v * v).sum::<f64>();
+let samples_mh = metropolis_hastings(target_log_prob, &[0.0, 0.0], 5000, 0.1, &mut rng);
 
-# プロット
-p1 = scatter(samples_mh[1, :], samples_mh[2, :], alpha=0.3, label="MH", title="Metropolis-Hastings")
-p2 = scatter(samples_hmc[1, :], samples_hmc[2, :], alpha=0.3, label="HMC", title="HMC")
-plot(p1, p2, layout=(1, 2), size=(1000, 400))
+let u = |x: &[f64]| 0.5 * x.iter().map(|v| v * v).sum::<f64>();
+let grad_u = |x: &[f64]| x.to_vec();
+let samples_hmc = hmc(u, grad_u, &[0.0, 0.0], 1000, 10, 0.1, &mut rng);
 ```
 
 ---
 
 > Progress: 70%
-> RBM + Modern Hopfield + MCMCをJuliaで完全実装。数式↔コード1:1対応を体験。次は実験で挙動を観察。
+> RBM + Modern Hopfield + MCMCをRustで完全実装。数式↔コード1:1対応を体験。次は実験で挙動を観察。
 
 ---
 
@@ -729,60 +833,63 @@ plot(p1, p2, layout=(1, 2), size=(1000, 400))
 - $n_{\text{hidden}}$ 小 → 圧縮過多 → 情報損失 → 高い再構成誤差
 - $n_{\text{hidden}}$ 大 → 十分な表現力 → 低い再構成誤差（ただしオーバーフィット risk）
 
-```julia
-# 記憶パターン数を変えて再構成誤差を測定
-using Statistics, Plots
+```rust
+use ndarray_rand::RandomExt;
+use ndarray_rand::rand_distr::Uniform;
 
-n_visible = 100  # 可視層の次元
-n_hidden_list = [10, 50, 100, 200]  # 隠れ層のサイズを変化
-reconstruction_errors = []
+// 記憶パターン数を変えて再構成誤差を測定
+let n_visible = 100usize;
+let n_hidden_list = [10usize, 50, 100, 200];
+let mut reconstruction_errors: Vec<f64> = Vec::new();
+let mut rng = rand::thread_rng();
 
-for n_hidden in n_hidden_list
-    println("========== Testing n_hidden = $n_hidden ==========")
+for &n_hidden in &n_hidden_list {
+    println!("========== Testing n_hidden = {} ==========", n_hidden);
 
-    # RBM初期化
-    rbm = RBM(n_visible, n_hidden)
+    // RBM初期化
+    let mut rbm = RBM::new(n_visible, n_hidden);
 
-    # 訓練データ生成（バイナリランダムパターン）
-    # rand > 0.5 → 0/1のバイナリベクトル
-    data = Float32.(rand(Float32, n_visible, 1000) .> 0.5f0)
+    // 訓練データ生成（バイナリランダムパターン）
+    // rand > 0.5 → 0/1のバイナリベクトル
+    let data: Array2<f64> = Array2::random((n_visible, 1000), Uniform::new(0.0, 1.0))
+        .mapv(|v| if v > 0.5 { 1.0 } else { 0.0 });
 
-    # RBM訓練
-    rbm = train_rbm(rbm, data; epochs=10, k=1, lr=0.01f0, batch_size=32)
+    // RBM訓練
+    rbm = train_rbm(rbm, &data.view(), 10, 1, 0.01, 32);
 
-    # ========== テストセットで再構成精度評価 ==========
-    # 100サンプルでテスト
-    test_errors = []
-    for i in 1:100
-        v_test = data[:, i]
+    // ========== テストセットで再構成精度評価 ==========
+    // 100サンプルでテスト
+    let mut test_errors: Vec<f64> = Vec::new();
+    for i in 0..100 {
+        let v_test = data.column(i).to_owned();
 
-        # 再構成: v → h → v_recon
-        # ステップ1: v → h（エンコード）
-        h, _ = sample_h_given_v(rbm, v_test)
+        // 再構成: v → h → v_recon
+        // ステップ1: v → h（エンコード）
+        let (h, _) = sample_h_given_v(&rbm, v_test.as_slice().unwrap(), &mut rng);
 
-        # ステップ2: h → v_recon（デコード）
-        v_recon, v_recon_prob = sample_v_given_h(rbm, h)
+        // ステップ2: h → v_recon（デコード）
+        let (_, v_recon_prob) = sample_v_given_h(&rbm, &h, &mut rng);
 
-        # 再構成誤差: L1距離
-        # バイナリデータなので期待値 v_recon_prob を使う方が安定
-        error = mean(abs.(v_test .- v_recon_prob))
-        push!(test_errors, error)
-    end
+        // 再構成誤差: L1距離
+        // バイナリデータなので期待値 v_recon_prob を使う方が安定
+        let error: f64 = v_test.iter().zip(&v_recon_prob)
+            .map(|(a, b)| (a - b).abs())
+            .sum::<f64>() / n_visible as f64;
+        test_errors.push(error);
+    }
 
-    # 平均再構成誤差
-    mean_error = mean(test_errors)
-    std_error = std(test_errors)
-    push!(reconstruction_errors, mean_error)
+    // 平均再構成誤差
+    let mean_error: f64 = test_errors.iter().sum::<f64>() / test_errors.len() as f64;
+    let variance: f64 = test_errors.iter()
+        .map(|e| (e - mean_error).powi(2))
+        .sum::<f64>() / test_errors.len() as f64;
+    let std_error = variance.sqrt();
+    reconstruction_errors.push(mean_error);
 
-    println("  Mean reconstruction error: $mean_error ± $std_error")
-    println("  Theoretical capacity: ~$(0.14 * n_hidden) patterns (for Classical Hopfield)")
-end
-
-# 結果可視化
-plot(n_hidden_list, reconstruction_errors, marker=:o, markersize=6,
-     xlabel="Hidden units", ylabel="Reconstruction error",
-     title="RBM Memory Capacity vs Hidden Layer Size",
-     legend=false, linewidth=2)
+    println!("  Mean reconstruction error: {} ± {}", mean_error, std_error);
+    println!("  Theoretical capacity: ~{} patterns (for Classical Hopfield)",
+             (0.14 * n_hidden as f64) as usize);
+}
 ```
 
 **期待される結果**:
@@ -803,88 +910,88 @@ plot(n_hidden_list, reconstruction_errors, marker=:o, markersize=6,
 - Classical Hopfield: 容量 $M_{\max} \approx 0.14N$ （$N =$ 次元）
 - Modern Hopfield: 容量 $M_{\max} \approx \exp(d)$ （指数的！）
 
-```julia
-# パターン数を増やして検索精度を測定
-using LinearAlgebra
+```rust
+use ndarray_rand::RandomExt;
+use ndarray_rand::rand_distr::StandardNormal;
 
-d = 20  # 次元
-M_list = [10, 50, 100, 500, 1000, 5000]  # パターン数を変化
-retrieval_errors = []
-convergence_iters = []
+// パターン数を増やして検索精度を測定
+let d = 20usize;
+let m_list = [10usize, 50, 100, 500, 1000, 5000];
+let mut retrieval_errors: Vec<f64> = Vec::new();
+let mut convergence_iters: Vec<f64> = Vec::new();
+let mut rng = rand::thread_rng();
 
-for M in M_list
-    println("========== Testing M = $M patterns (d = $d) ==========")
+for &m in &m_list {
+    println!("========== Testing M = {} patterns (d = {}) ==========", m, d);
 
-    # ========== パターン生成 ==========
-    # ランダムなd次元ベクトル M個
-    patterns = randn(Float32, d, M)
+    // ========== パターン生成 ==========
+    // ランダムなd次元ベクトル M個
+    let mut patterns: Array2<f64> = Array2::random((d, m), StandardNormal);
 
-    # 正規化: ||ξ^i|| = 1 （理論で仮定）
-    # norm.(eachcol(patterns))' → (1, M)ベクトル
-    patterns = patterns ./ reshape(norm.(eachcol(patterns)), 1, :)
+    // 正規化: ||ξ^i|| = 1
+    for mut col in patterns.columns_mut() {
+        let norm: f64 = col.iter().map(|v| v * v).sum::<f64>().sqrt();
+        col.mapv_inplace(|v| v / norm);
+    }
 
-    # Modern Hopfield構築
-    # β = 1.0: 標準設定
-    hopfield = ModernHopfield(patterns; β=1.0f0)
+    // Modern Hopfield構築
+    // beta = 1.0: 標準設定
+    let hopfield = ModernHopfield::new(patterns, 1.0);
 
-    # ========== ノイズ付き検索実験 ==========
-    errors = []
-    iters = []
+    // ========== ノイズ付き検索実験 ==========
+    let mut errors: Vec<f64> = Vec::new();
+    let mut iters: Vec<usize> = Vec::new();
 
-    # 最大100パターンでテスト（計算時間節約）
-    n_test = min(M, 100)
+    // 最大100パターンでテスト（計算時間節約）
+    let n_test = m.min(100);
 
-    for i in 1:n_test
-        # 正解パターン
-        x_target = patterns[:, i]
+    for i in 0..n_test {
+        // 正解パターン
+        let x_target = hopfield.x.column(i).to_owned();
 
-        # ノイズ付加: SNR ≈ 10（10%ノイズ）
-        x_noisy  = x_target .+ 0.1f0 .* randn(Float32, d)
-        x_noisy ./= norm(x_noisy)           # 正規化維持（in-place）
+        // ノイズ付加: SNR ≈ 10（10%ノイズ）
+        let noise: Array1<f64> = Array1::random(d, StandardNormal) * 0.1;
+        let mut x_noisy = x_target.clone() + noise;
+        let norm: f64 = x_noisy.iter().map(|v| v * v).sum::<f64>().sqrt();
+        x_noisy.mapv_inplace(|v| v / norm);  // 正規化維持
 
-        # 検索
-        x_init = x_noisy
-        x_retrieved = x_init
-        for t in 1:10
-            x_new = update(hopfield, x_retrieved)
-            if norm(x_new .- x_retrieved) < 1e-6
-                push!(iters, t)
-                break
-            end
-            x_retrieved = x_new
-            if t == 10
-                push!(iters, 10)
-            end
-        end
+        // 検索
+        let mut x_retrieved = x_noisy;
+        let mut conv_iter = 10usize;
+        for t in 0..10 {
+            let x_new = update(&hopfield, x_retrieved.view());
+            let diff: f64 = (&x_new - &x_retrieved).iter().map(|v| v * v).sum::<f64>().sqrt();
+            if diff < 1e-6 {
+                conv_iter = t + 1;
+                x_retrieved = x_new;
+                break;
+            }
+            x_retrieved = x_new;
+        }
+        iters.push(conv_iter);
 
-        # 誤差測定: ||x_retrieved - x_target||
-        error = norm(x_retrieved .- x_target)
-        push!(errors, error)
-    end
+        // 誤差測定: ||x_retrieved - x_target||
+        let error: f64 = (&x_retrieved - &x_target).iter().map(|v| v * v).sum::<f64>().sqrt();
+        errors.push(error);
+    }
 
-    # 統計量
-    mean_error = mean(errors)
-    std_error = std(errors)
-    mean_iter = mean(iters)
-    push!(retrieval_errors, mean_error)
-    push!(convergence_iters, mean_iter)
+    // 統計量
+    let mean_error: f64 = errors.iter().sum::<f64>() / errors.len() as f64;
+    let variance: f64 = errors.iter()
+        .map(|e| (e - mean_error).powi(2))
+        .sum::<f64>() / errors.len() as f64;
+    let std_error = variance.sqrt();
+    let mean_iter: f64 = iters.iter().sum::<usize>() as f64 / iters.len() as f64;
+    retrieval_errors.push(mean_error);
+    convergence_iters.push(mean_iter);
 
-    println("  Retrieval error: $mean_error ± $std_error")
-    println("  Convergence iterations: $mean_iter")
-    println("  Theoretical limit (Classical): $(0.14 * d) = $(0.14 * d)")
-    println("  Success rate: $(sum(errors .< 0.1) / n_test * 100)%")
-end
-
-# 結果可視化
-p1 = plot(M_list, retrieval_errors, marker=:o, xscale=:log10,
-          xlabel="Number of patterns (M)", ylabel="Retrieval error",
-          title="Modern Hopfield Capacity (d=$d)", legend=false, linewidth=2)
-
-p2 = plot(M_list, convergence_iters, marker=:o, xscale=:log10,
-          xlabel="Number of patterns (M)", ylabel="Convergence iterations",
-          title="Convergence Speed", legend=false, linewidth=2)
-
-plot(p1, p2, layout=(1, 2), size=(1200, 400))
+    println!("  Retrieval error: {} ± {}", mean_error, std_error);
+    println!("  Convergence iterations: {}", mean_iter);
+    println!("  Theoretical limit (Classical): {}", 0.14 * d as f64);
+    let success_rate = errors.iter().filter(|&&e| e < 0.1).count() as f64
+        / n_test as f64 * 100.0;
+    println!("  Success rate: {}%", success_rate);
+}
 ```
 
 **期待される結果**:
@@ -919,97 +1026,93 @@ plot(p1, p2, layout=(1, 2), size=(1200, 400))
 - MH: ランダムウォーク → 遅い混合 → ACF緩やかに減衰
 - HMC: 勾配使用 → 速い混合 → ACF急速に減衰
 
-```julia
-# MH vs HMCの混合速度比較
-using Statistics, Plots
+```rust
+use ndarray::prelude::*;
 
-# ========== 自己相関関数 ==========
-# samples: (d, n_samples) 行列
-# lag: 時間遅れ
-function autocorrelation(samples, lag)
-    n = size(samples, 2)
+// MH vs HMCの混合速度比較
 
-    # 平均を引く（中心化）
-    mean_s = mean(samples, dims=2)
-    centered = samples .- mean_s
+// ========== 自己相関関数 ==========
+// samples: (d, n_samples) 行列
+// lag: 時間遅れ
+fn autocorrelation(samples: &ArrayView2<f64>, lag: usize) -> f64 {
+    let n = samples.ncols();
 
-    # 自己共分散(0): Var[X] = E[(X - μ)^2]
-    cov_0 = sum(abs2, centered) / n
+    // 平均を引く（中心化）
+    let mean_s: Array1<f64> = samples.mean_axis(Axis(1)).unwrap();
+    let centered: Array2<f64> = samples - &mean_s.insert_axis(Axis(1));
 
-    # 自己共分散(lag): E[(X_t - μ)(X_{t+lag} - μ)]
-    cov_lag = @views sum(centered[:, 1:n-lag] .* centered[:, 1+lag:n]) / (n - lag)
+    // 自己共分散(0): Var[X] = E[(X - μ)^2]
+    let cov_0: f64 = centered.iter().map(|v| v * v).sum::<f64>() / n as f64;
 
-    # 正規化された自己相関: ρ(lag) = Cov(lag) / Var
-    return cov_lag / cov_0
-end
+    // 自己共分散(lag): E[(X_t - μ)(X_{t+lag} - μ)]
+    let cov_lag: f64 = centered.slice(s![.., ..n - lag]).iter()
+        .zip(centered.slice(s![.., lag..]).iter())
+        .map(|(a, b)| a * b)
+        .sum::<f64>() / (n - lag) as f64;
 
-# ========== ターゲット分布: 2次元ガウス ==========
-# p(x) ∝ exp(-0.5 ||x||^2) = N(0, I)
-target_log_prob(x) = -0.5f0 * norm(x)^2  # log p(x) + const
-U(x) = 0.5f0 * norm(x)^2                 # -log p(x) + const
-∇U(x) = x                                 # 勾配
+    // 正規化された自己相関: ρ(lag) = Cov(lag) / Var
+    cov_lag / cov_0
+}
 
-# ========== サンプリング実行 ==========
-println("========== Metropolis-Hastings ==========")
-samples_mh = metropolis_hastings(
+// ========== ターゲット分布: 2次元ガウス ==========
+// p(x) ∝ exp(-0.5 ||x||^2) = N(0, I)
+let target_log_prob = |x: &[f64]| -0.5 * x.iter().map(|v| v * v).sum::<f64>();
+let u = |x: &[f64]| 0.5 * x.iter().map(|v| v * v).sum::<f64>();
+let grad_u = |x: &[f64]| x.to_vec();  // 勾配
+
+// ========== サンプリング実行 ==========
+let mut rng = rand::thread_rng();
+println!("========== Metropolis-Hastings ==========");
+let samples_mh = metropolis_hastings(
     target_log_prob,
-    [0.0f0, 0.0f0];
-    n_samples=10000,
-    proposal_std=0.5f0
-)
+    &[0.0, 0.0],
+    10000,
+    0.5,
+    &mut rng,
+);
 
-println("\n========== Hamiltonian Monte Carlo ==========")
-samples_hmc = hmc(
-    U, ∇U,
-    [0.0f0, 0.0f0];
-    n_samples=10000,
-    L=10,
-    ε=0.1f0
-)
+println!("\n========== Hamiltonian Monte Carlo ==========");
+let samples_hmc = hmc(
+    u, grad_u,
+    &[0.0, 0.0],
+    10000,
+    10,
+    0.1,
+    &mut rng,
+);
 
-# ========== 自己相関計算 ==========
-lags = 1:100
-acf_mh  = lags .|> lag -> autocorrelation(samples_mh,  lag)
-acf_hmc = lags .|> lag -> autocorrelation(samples_hmc, lag)
+// ========== 自己相関計算 ==========
+let lags: Vec<usize> = (1..=100).collect();
+let acf_mh: Vec<f64> = lags.iter()
+    .map(|&lag| autocorrelation(&samples_mh.view(), lag))
+    .collect();
+let acf_hmc: Vec<f64> = lags.iter()
+    .map(|&lag| autocorrelation(&samples_hmc.view(), lag))
+    .collect();
 
-# ========== Effective Sample Size (ESS) ==========
-# ESS = n_samples / (1 + 2 Σ_{lag=1}^∞ ACF(lag))
-# 積分自己相関時間 τ_int ≈ 1 + 2 Σ ACF(lag)
-function integrated_autocorr_time(acf)
-    # ACF(lag) < 0.05 で打ち切り
-    cutoff = findfirst(x -> x < 0.05, acf)
-    cutoff = isnothing(cutoff) ? length(acf) : cutoff
-    return 1.0 + 2.0 * sum(acf[1:cutoff])
-end
+// ========== Effective Sample Size (ESS) ==========
+// ESS = n_samples / (1 + 2 Σ_{lag=1}^∞ ACF(lag))
+// 積分自己相関時間 τ_int ≈ 1 + 2 Σ ACF(lag)
+fn integrated_autocorr_time(acf: &[f64]) -> f64 {
+    // ACF(lag) < 0.05 で打ち切り
+    let cutoff = acf.iter().position(|&x| x < 0.05).unwrap_or(acf.len());
+    1.0 + 2.0 * acf[..cutoff].iter().sum::<f64>()
+}
 
-τ_mh = integrated_autocorr_time(acf_mh)
-τ_hmc = integrated_autocorr_time(acf_hmc)
+let tau_mh = integrated_autocorr_time(&acf_mh);
+let tau_hmc = integrated_autocorr_time(&acf_hmc);
 
-ess_mh = 10000 / τ_mh
-ess_hmc = 10000 / τ_hmc
+let ess_mh = 10000.0 / tau_mh;
+let ess_hmc = 10000.0 / tau_hmc;
 
-println("\n========== 混合速度評価 ==========")
-println("MH:")
-println("  Integrated autocorrelation time: $τ_mh")
-println("  Effective sample size: $ess_mh")
-println("HMC:")
-println("  Integrated autocorrelation time: $τ_hmc")
-println("  Effective sample size: $ess_hmc")
-println("Speedup: $(ess_hmc / ess_mh)x")
-
-# ========== 可視化 ==========
-p1 = plot(lags, acf_mh, label="MH", xlabel="Lag", ylabel="Autocorrelation",
-          title="Mixing Time Comparison", linewidth=2, legend=:topright)
-plot!(p1, lags, acf_hmc, label="HMC", linewidth=2)
-hline!(p1, [0.0], linestyle=:dash, color=:black, label="")
-
-# サンプル軌跡の可視化
-p2 = scatter(samples_mh[1, 1:1000], samples_mh[2, 1:1000],
-             alpha=0.3, markersize=2, label="MH", title="Sample Trajectories")
-scatter!(p2, samples_hmc[1, 1:1000], samples_hmc[2, 1:1000],
-         alpha=0.3, markersize=2, label="HMC")
-
-plot(p1, p2, layout=(1, 2), size=(1200, 400))
+println!("\n========== 混合速度評価 ==========");
+println!("MH:");
+println!("  Integrated autocorrelation time: {}", tau_mh);
+println!("  Effective sample size: {}", ess_mh);
+println!("HMC:");
+println!("  Integrated autocorrelation time: {}", tau_hmc);
+println!("  Effective sample size: {}", ess_hmc);
+println!("Speedup: {}x", ess_hmc / ess_mh);
 ```
 
 **期待される結果**:
@@ -1110,80 +1213,111 @@ $$
 
 **実装スニペット（概念コード）**:
 
-```julia
-# Kona-style Hybrid Sampler
-struct KonaSampler
-    langevin_steps::Int  # 粗探索ステップ数
-    hmc_steps::Int       # 精密化ステップ数
-    ε_langevin::Float32  # Langevin step size
-    ε_hmc::Float32       # HMC step size
-    L_hmc::Int           # HMC leapfrog steps
-end
+```rust
+use rand::Rng;
+use rand_distr::StandardNormal;
 
-function sample(sampler::KonaSampler, E, ∇E, x_init)
-    x = x_init
+// Kona-style Hybrid Sampler
+struct KonaSampler {
+    langevin_steps: usize,  // 粗探索ステップ数
+    hmc_steps: usize,       // 精密化ステップ数
+    eps_langevin: f64,      // Langevin step size
+    eps_hmc: f64,           // HMC step size
+    l_hmc: usize,           // HMC leapfrog steps
+}
 
-    # Phase 1: Langevin Dynamics で粗探索
-    # dx = -∇E(x) dt + √(2dt) dW
-    for _ in 1:sampler.langevin_steps
-        x .-= sampler.ε_langevin .* ∇E(x)
-        x .+= sqrt(2 * sampler.ε_langevin) .* randn(Float32, size(x))
-    end
+impl KonaSampler {
+    fn sample<E, GE>(&self, energy: &E, grad_e: &GE, x_init: Vec<f64>, rng: &mut impl Rng) -> Vec<f64>
+    where
+        E: Fn(&[f64]) -> f64,
+        GE: Fn(&[f64]) -> Vec<f64>,
+    {
+        let mut x = x_init;
+        let d = x.len();
+        let noise_scale = (2.0 * self.eps_langevin).sqrt();  // √(2ε)
 
-    # Phase 2: HMC で精密化
-    U(x) = E(x)  # Potential = Energy
-    samples = hmc(U, ∇E, x; n_samples=1, L=sampler.L_hmc, ε=sampler.ε_hmc)
-    x = samples[:, end]
+        // Phase 1: Langevin Dynamics で粗探索
+        // dx = -∇E(x)ε + √(2ε)·ξ,  ξ ~ N(0,I)  (discretised Langevin SDE)
+        for _ in 0..self.langevin_steps {
+            let ge = grad_e(&x);
+            x.iter_mut().zip(ge.iter()).for_each(|(xi, gi)| {
+                *xi -= self.eps_langevin * gi;                        // -∇E·ε
+                *xi += noise_scale * rng.sample::<f64, _>(StandardNormal);  // +√(2ε)·ξ
+            });
+        }
 
-    return x
-end
+        // Phase 2: HMC で精密化
+        let samples = hmc(energy, grad_e, &x, 1, self.l_hmc, self.eps_hmc, rng);
+        samples.column(0).to_vec()
+    }
+}
 
-# Persistent CD with Replay Buffer
-struct ReplayBuffer
-    buffer::Vector{Vector{Float32}}
-    capacity::Int
-    ptr::Ref{Int}
-end
+// Persistent CD with Replay Buffer
+struct ReplayBuffer {
+    buffer: Vec<Vec<f64>>,
+    capacity: usize,
+    ptr: usize,
+}
 
-function push_and_sample!(rb::ReplayBuffer, x_new, batch_size)
-    # 新しいサンプルを buffer に追加
-    if length(rb.buffer) < rb.capacity
-        push!(rb.buffer, x_new)
-    else
-        rb.buffer[rb.ptr[]] = x_new
-        rb.ptr[] = mod1(rb.ptr[] + 1, rb.capacity)
-    end
+impl ReplayBuffer {
+    fn new(capacity: usize) -> Self {
+        ReplayBuffer { buffer: Vec::new(), capacity, ptr: 0 }
+    }
 
-    # ランダムサンプリング
-    indices = rand(1:length(rb.buffer), batch_size)
-    return rb.buffer[indices]
-end
+    fn push_and_sample(&mut self, x_new: Vec<f64>, batch_size: usize, rng: &mut impl Rng) -> Vec<Vec<f64>> {
+        // 新しいサンプルを buffer に追加
+        if self.buffer.len() < self.capacity {
+            self.buffer.push(x_new);
+        } else {
+            self.buffer[self.ptr] = x_new;
+            self.ptr = (self.ptr + 1) % self.capacity;
+        }
 
-# Kona-style Training Loop
-function train_kona(model, data; epochs=100)
-    sampler = KonaSampler(10, 5, 0.01f0, 0.001f0, 10)
-    buffer = ReplayBuffer(Vector{Float32}[], 10000, Ref(1))
+        // ランダムサンプリング
+        (0..batch_size)
+            .map(|_| self.buffer[rng.gen_range(0..self.buffer.len())].clone())
+            .collect()
+    }
+}
 
-    for epoch in 1:epochs
-        for batch in data
-            # Positive phase: データから勾配
-            ∇E_pos = gradient(x -> mean(model.E(x)), batch)
+// impl EnergyModel — EBMの共通インターフェース
+// p(x) = exp(-E_θ(x)) / Z   (正規化定数 Z は計算不要)
+trait EnergyModel {
+    fn energy(&self, x: &[f64]) -> f64;                        // E_θ(x)
+    fn energy_grad(&self, x: &[f64]) -> Vec<f64>;              // ∇_x E_θ(x)
+    fn energy_grad_batch(&self, xs: &[Vec<f64>]) -> Vec<f64>;  // batch version
+    fn rand_init(&self, rng: &mut impl Rng) -> Vec<f64>;       // x ~ N(0,I)
+    fn update_params(&mut self, grad_pos: &[f64], grad_neg: &[f64], lr: f64); // ΔW ∝ ⟨grad⟩_data - ⟨grad⟩_model
+}
 
-            # Negative phase: Replay Buffer + 新規サンプリング
-            x_neg_init = push_and_sample!(buffer, rand_init(), 32)
-            x_neg = [sample(sampler, model.E, model.∇E, x) for x in x_neg_init]
-            ∇E_neg = gradient(x -> mean(model.E(x)), x_neg)
+// Kona-style Training Loop
+fn train_kona<M: EnergyModel>(model: &mut M, data: &[Vec<f64>], epochs: usize, lr: f64, rng: &mut impl Rng) {
+    let sampler = KonaSampler { langevin_steps: 10, hmc_steps: 5,
+                                eps_langevin: 0.01, eps_hmc: 0.001, l_hmc: 10 };
+    let mut buffer = ReplayBuffer::new(10000);
 
-            # Update
-            model.θ .-= lr .* (∇E_pos .- ∇E_neg)
+    for _epoch in 0..epochs {
+        for batch in data {
+            // Positive phase: ⟨∇E_θ(x)⟩_data  (データ分布からの勾配)
+            let grad_e_pos = model.energy_grad(batch);
 
-            # Buffer更新
-            for x in x_neg
-                push_and_sample!(buffer, x, 1)
-            end
-        end
-    end
-end
+            // Negative phase: ⟨∇E_θ(x)⟩_model  (モデル分布からの勾配 via MCMC)
+            let x_neg_init = buffer.push_and_sample(model.rand_init(rng), 32, rng);
+            let x_neg: Vec<Vec<f64>> = x_neg_init.into_iter()
+                .map(|x| sampler.sample(&|v| model.energy(v), &|v| model.energy_grad(v), x, rng))
+                .collect();
+            let grad_e_neg = model.energy_grad_batch(&x_neg);
+
+            // ΔW ∝ ⟨∇E_θ⟩_data - ⟨∇E_θ⟩_model  (contrastive divergence gradient)
+            model.update_params(&grad_e_pos, &grad_e_neg, lr);
+
+            // Buffer更新 (Persistent CD: 前のサンプルを再利用)
+            for x in x_neg {
+                buffer.push_and_sample(x, 1, rng);
+            }
+        }
+    }
+}
 ```
 
 **性能比較**:
@@ -1259,7 +1393,7 @@ graph TD
 
 ### 7.2 数式と実装の対応確認
 
-| 数式 | Julia実装 |
+| 数式 | Rust実装 |
 |:-----|:----------|
 | $E(v, h) = -v^\top W h - b^\top v - c^\top h$ | `-(v' * rbm.W * h + rbm.b' * v + rbm.c' * h)` |
 | $p(h_j \| v) = \sigma(c_j + \sum_i W_{ij} v_i)$ | `sigmoid.(rbm.c .+ rbm.W' * v)` |
@@ -1346,7 +1480,7 @@ Energy Matchingは時間依存エネルギー $E(x, t)$ で両者を連続的に
 **推奨学習フロー**:
 1. **Day 1-2**: 理論基礎を固める（数式を手で追う）
 2. **Day 3**: RBM + MCMCの数理を完全理解
-3. **Day 4-5**: コード実装で体験（Juliaで数式→コード1:1対応を確認）
+3. **Day 4-5**: コード実装で体験（Rustで数式→コード1:1対応を確認）
 4. **Day 6**: 実験で理論検証 + 最新研究を追う
 5. **Day 7**: 全体像整理 + 次の講義（L35: Score Matching & Langevin）への準備
 
@@ -1368,9 +1502,9 @@ Energy Matchingは時間依存エネルギー $E(x, t)$ で両者を連続的に
 
 #### 7.5.2 実装リソース
 
-**Julia実装**:
-- [Flux.jl](https://fluxml.ai/): NN framework
-- [Turing.jl](https://turing.ml/): PPL（MCMC/HMCの標準実装）
+**Rust実装**:
+- [Candle](https://fluxml.ai/): NN framework
+- [probabilistic-rs](https://turing.ml/): PPL（MCMC/HMCの標準実装）
 - [Zygote.jl](https://fluxml.ai/Zygote.jl/): 自動微分（HMCで必須）
 
 **Python実装**（参考）:
@@ -1379,8 +1513,8 @@ Energy Matchingは時間依存エネルギー $E(x, t)$ で両者を連続的に
 - [PyMC](https://www.pymc.io/): PPL（NUTS実装）
 
 **可視化**:
-- [Plots.jl](https://docs.juliaplots.org/): Julia標準プロット
-- [Makie.jl](https://makie.juliaplots.org/): 高度な可視化（エネルギーランドスケープ等）
+- [Plots.jl](https://docs.juliaplots.org/): Rust標準プロット
+- [plotters](https://makie.juliaplots.org/): 高度な可視化（エネルギーランドスケープ等）
 
 #### 7.5.3 重要論文リーディングリスト
 
@@ -1411,7 +1545,7 @@ Energy Matchingは時間依存エネルギー $E(x, t)$ で両者を連続的に
 
 **中級プロジェクト**:
 4. **Grokking再現**: Modular arithmetic (97%97) で相転移を観測
-5. **Energy Matching実装**: 簡易版をJuliaで実装（CIFAR-10サブセット）
+5. **Energy Matching実装**: 簡易版をRustで実装（CIFAR-10サブセット）
 6. **Attention ↔ Hopfield等価性実証**: Transformerの1層をHopfieldに置換
 
 **上級プロジェクト**:
@@ -1449,7 +1583,7 @@ Energy Matchingは時間依存エネルギー $E(x, t)$ で両者を連続的に
 **解決**:
 - ε を 1/10 に減らす: `0.1 → 0.01`
 - L を増やして compensate: `L=10 → L=50`
-- 自動調整: NUTSを使う（Turing.jlで利用可能）
+- 自動調整: NUTSを使う（probabilistic-rsで利用可能）
 
 </details>
 
@@ -1466,7 +1600,7 @@ Energy Matchingは時間依存エネルギー $E(x, t)$ で両者を連続的に
 ### 7.7 コミュニティ・質問先
 
 **フォーラム・ディスカッション**:
-- [Julia Discourse - Machine Learning](https://discourse.julialang.org/c/domain/ml/24): Julia ML コミュニティ
+- [Rust Discourse - Machine Learning](https://discourse.julialang.org/c/domain/ml/24): Rust ML コミュニティ
 - [r/MachineLearning](https://www.reddit.com/r/MachineLearning/): 研究動向ディスカッション
 - [Papers with Code - EBM](https://paperswithcode.com/method/energy-based-models): SOTA実装集
 

@@ -7,7 +7,7 @@ published: true
 slug: "ml-lecture-35-part1"
 difficulty: "advanced"
 time_estimate: "90 minutes"
-languages: ["Julia", "Rust"]
+languages: ["Rust"]
 keywords: ["機械学習", "深層学習", "生成モデル"]
 ---
 
@@ -68,51 +68,73 @@ graph LR
 
 ノイズが乗ったデータ $\tilde{x} = x + \sigma \epsilon$ ($\epsilon \sim \mathcal{N}(0, I)$) から、元のデータ $x$ を復元するDenoising Score Matchingを3行で動かす。
 
-```julia
-using LinearAlgebra, Statistics, Random
+```rust
+use rand::Rng;
+use rand_distr::StandardNormal;
 
-# Denoising Score Matching: ノイズ除去 = スコア推定
-# Score function s_θ(x) ≈ ∇_x log p(x) を学習
+// Denoising Score Matching: ノイズ除去 = スコア推定
+// Score function s_θ(x) ≈ ∇_x log p(x) を学習
 
-# True data distribution: 2D Gaussian mixture
-function true_score(x::Vector{Float64})
-    # p(x) = 0.5*N([-2,0], I) + 0.5*N([2,0], I)
-    # Score = ∇_x log p(x) = weighted sum of Gaussian scores
-    μ1, μ2 = [-2.0, 0.0], [2.0, 0.0]
-    w1 = exp(-0.5 * sum((x - μ1).^2))
-    w2 = exp(-0.5 * sum((x - μ2).^2))
-    score1, score2 = -(x - μ1), -(x - μ2)
-    return (w1 * score1 + w2 * score2) / (w1 + w2)
-end
+// True data distribution: 2D Gaussian mixture
+// p(x) = 0.5·N([-2,0], I) + 0.5·N([2,0], I)
+fn true_score(x: &[f64; 2]) -> [f64; 2] {
+    // Score = ∇_x log p(x) = weighted sum of Gaussian scores
+    let mu1 = [-2.0_f64, 0.0];
+    let mu2 = [ 2.0_f64, 0.0];
+    let diff1 = [x[0] - mu1[0], x[1] - mu1[1]];
+    let diff2 = [x[0] - mu2[0], x[1] - mu2[1]];
 
-# Denoising objective: E[||s_θ(x̃) - ∇_x̃ log p(x̃|x)||²]
-# Equivalent to score matching (Vincent 2011)
-function denoise_score_matching(x::Vector{Float64}, σ::Float64=0.5)
-    # Add noise
-    noise = σ .* randn(length(x))
-    x_noisy = x .+ noise
+    let w1 = (-0.5 * (diff1[0].powi(2) + diff1[1].powi(2))).exp();
+    let w2 = (-0.5 * (diff2[0].powi(2) + diff2[1].powi(2))).exp();
+    // Score from each Gaussian: -(x - μ)
+    let s1 = [-diff1[0], -diff1[1]];
+    let s2 = [-diff2[0], -diff2[1]];
+    let norm = w1 + w2;
+    [(w1 * s1[0] + w2 * s2[0]) / norm,
+     (w1 * s1[1] + w2 * s2[1]) / norm]
+}
 
-    # True denoising direction: -noise/σ² = ∇_x̃ log p(x̃|x)
-    true_denoising = -noise ./ σ^2
+// Denoising objective: E[||s_θ(x̃) - ∇_x̃ log p(x̃|x)||²]
+// Equivalent to score matching (Vincent 2011)
+fn denoise_score_matching(x: &[f64; 2], sigma: f64, rng: &mut impl Rng)
+    -> ([f64; 2], [f64; 2], f64)
+{
+    // Add Gaussian noise
+    let noise = [
+        rng.sample::<f64, _>(StandardNormal) * sigma,
+        rng.sample::<f64, _>(StandardNormal) * sigma,
+    ];
+    let x_noisy = [x[0] + noise[0], x[1] + noise[1]];
 
-    # Estimate score (simplified: use true score as proxy)
-    estimated_score = true_score(x_noisy)
+    // True denoising direction: -noise / σ² = ∇_x̃ log p(x̃|x)
+    let sigma2 = sigma * sigma;
+    let true_denoising = [-noise[0] / sigma2, -noise[1] / sigma2];
 
-    # Loss: ||estimated_score - true_denoising||²
-    loss = sum((estimated_score .- true_denoising).^2)
+    // Estimate score (proxy: analytic score of the mixture)
+    let estimated_score = true_score(&x_noisy);
 
-    return estimated_score, true_denoising, loss
-end
+    // Loss: ||estimated_score - true_denoising||²
+    let loss = (estimated_score[0] - true_denoising[0]).powi(2)
+             + (estimated_score[1] - true_denoising[1]).powi(2);
 
-# Test: 100 samples from Gaussian mixture
-Random.seed!(42)
-samples = [rand() < 0.5 ? [-2.0, 0.0] + randn(2) : [2.0, 0.0] + randn(2) for _ in 1:100]
+    (estimated_score, true_denoising, loss)
+}
 
-total_loss = sum(denoise_score_matching(x, 0.5)[3] for x in samples)
+// Test: 100 samples from Gaussian mixture
+let mut rng = rand::thread_rng();
+let samples: Vec<[f64; 2]> = (0..100).map(|_| {
+    let mu = if rng.gen::<f64>() < 0.5 { [-2.0, 0.0] } else { [2.0, 0.0] };
+    [mu[0] + rng.sample::<f64, _>(StandardNormal),
+     mu[1] + rng.sample::<f64, _>(StandardNormal)]
+}).collect();
 
-println("Average Denoising Score Matching Loss: $(total_loss / 100)")
-println("Lower loss → better score estimation")
-println("Key insight: Denoising = Score Matching (Vincent 2011)")
+let total_loss: f64 = samples.iter()
+    .map(|x| denoise_score_matching(x, 0.5, &mut rng).2)
+    .sum();
+
+println!("Average Denoising Score Matching Loss: {:.6}", total_loss / 100.0);
+println!("Lower loss → better score estimation");
+println!("Key insight: Denoising = Score Matching (Vincent 2011)");
 ```
 
 出力:
@@ -357,7 +379,7 @@ $$
 | **Langevin Dynamics** | 触れない | ULA/SGLD/Annealed LD完全版 |
 | **NCSN** | Diffusion文脈で名前のみ | 完全理論 + マルチスケール訓練 |
 | **Fisher Divergence** | 触れない | Hyvärinen定理の完全証明 |
-| **実装** | なし | Julia score estimation + Rust Langevin |
+| **実装** | なし | Rust score estimation + Rust Langevin |
 | **数学的深さ** | スキップ | 部分積分trick/Fokker-Planck/ULA収束性証明 |
 
 松尾研では「Diffusionモデルが動く」ことを学ぶ。本シリーズでは「**なぜ動くのか**」を数学から理解する。
@@ -368,11 +390,11 @@ $$
 
 **Zone 3突破の3ステップ**:
 1. **式変形を手で追う**: 部分積分・連鎖律・期待値の線形性を使って各等式を導出
-2. **数値検証コード**: Julia で各定理を数値的に確認 (例: DSM目的関数 ≈ ESM目的関数)
+2. **数値検証コード**: Rust で各定理を数値的に確認 (例: DSM目的関数 ≈ ESM目的関数)
 3. **コア画像の抽出**: 「スコア = 密度勾配」「ノイズ除去 = スコア推定」「Langevin = スコア駆動SDE」
 
 **Zone 4-5での実装戦略**:
-- Zone 4: Julia で2D Gaussian mixtureのスコア推定 (Lux.jl NN訓練) + 勾配場可視化
+- Zone 4: Rust で2D Gaussian mixtureのスコア推定 (Candle NN訓練) + 勾配場可視化
 - Zone 5: Rust でLangevin Dynamics高速サンプリング + NCSN推論デモ
 
 **進捗チェックポイント**:
@@ -1422,7 +1444,7 @@ DDPM (第36回):
 - Reverse process: $p_\theta(x_{t-1} | x_t)$ → Langevin Dynamics の離散化に対応
 - $\epsilon$-prediction: $\epsilon_\theta(x_t, t) = -\sqrt{1 - \bar{\alpha}_t} s_\theta(x_t, t)$ → スコア関数
 
-> **Note:** **進捗: 50% 完了** Score Matchingの完全理論（ESM/DSM/Sliced/NCSN）とLangevin Dynamicsの数学を修得した。ボス撃破。次はJulia/Rustで実装する。
+> **Note:** **進捗: 50% 完了** Score Matchingの完全理論（ESM/DSM/Sliced/NCSN）とLangevin Dynamicsの数学を修得した。ボス撃破。次はRust/Rustで実装する。
 
 ### 3.11 最新理論 (2025) — Score Matchingの統計的最適性
 

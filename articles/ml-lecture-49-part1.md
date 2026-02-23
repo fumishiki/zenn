@@ -2,12 +2,12 @@
 title: "第49回: マルチモーダル統合 & 推論時スケーリング: 30秒の驚き→数式修行→実装マスター"
 emoji: "🌐"
 type: "tech"
-topics: ["machinelearning", "deeplearning", "multimodal", "julia", "inference"]
+topics: ["machinelearning", "deeplearning", "multimodal", "rust", "inference"]
 published: true
 slug: "ml-lecture-49-part1"
 difficulty: "advanced"
 time_estimate: "90 minutes"
-languages: ["Julia", "Rust"]
+languages: ["Rust"]
 keywords: ["機械学習", "深層学習", "生成モデル"]
 ---
 
@@ -64,76 +64,104 @@ graph TD
 
 従来のモダリティ特化モデル(CLIP=画像理解、DALL-E=画像生成、Whisper=音声認識)は、それぞれ独立していた。**統合マルチモーダルモデル**は、1つのモデルで全モダリティを理解・生成する。
 
-```julia
-using Random, Statistics
+```rust
+use rand::Rng;
+use rand_distr::{Distribution, Normal};
 
-# Unified Multimodal Model のシミュレーション
-# 入力: text/image/audio のいずれか → 出力: text/image/audio のいずれか
+// Unified Multimodal Model のシミュレーション
+// 入力: text/image/audio のいずれか → 出力: text/image/audio のいずれか
 
-# 各モダリティを単純なベクトルで表現
-struct MultimodalInput
-    modality::Symbol  # :text, :image, :audio
-    data::Vector{Float64}
-end
+// 各モダリティを列挙型で表現
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum Modality {
+    Text,
+    Image,
+    Audio,
+}
 
-# 統合モデル: 全モダリティを共通潜在空間へマッピング
-function unified_encoder(input::MultimodalInput, shared_dim=128)
-    # モダリティ特化エンコーダ → 共通潜在空間
-    if input.modality == :text
-        # テキストエンコーダ (単語埋め込み → Transformer)
-        return randn(shared_dim) .+ mean(input.data)
-    elseif input.modality == :image
-        # 画像エンコーダ (ViT → 潜在ベクトル)
-        return randn(shared_dim) .+ std(input.data)
-    elseif input.modality == :audio
-        # 音声エンコーダ (Spectrogram → Audio Transformer)
-        return randn(shared_dim) .+ mean(input.data)
-    else
-        error("Unknown modality: $(input.modality)")
-    end
-end
+#[derive(Debug, Clone)]
+struct MultimodalInput {
+    modality: Modality,
+    data: Vec<f64>,
+}
 
-# 共通潜在空間から各モダリティへデコード
-function unified_decoder(latent::Vector{Float64}, target_modality::Symbol)
-    if target_modality == :text
-        # テキストデコーダ (潜在 → トークン列)
-        return "Generated text: " * string(round(mean(latent), digits=3))
-    elseif target_modality == :image
-        # 画像デコーダ (潜在 → 画像パッチ)
-        return "Generated image with mean: " * string(round(mean(latent), digits=3))
-    elseif target_modality == :audio
-        # 音声デコーダ (潜在 → Waveform)
-        return "Generated audio with RMS: " * string(round(std(latent), digits=3))
-    else
-        error("Unknown modality: $(target_modality)")
-    end
-end
+// 統合モデル: 全モダリティを共通潜在空間へマッピング
+fn unified_encoder(input: &MultimodalInput, shared_dim: usize) -> Vec<f64> {
+    let mut rng = rand::thread_rng();
+    let normal = Normal::new(0.0, 1.0).unwrap();
+    let mean_val = input.data.iter().sum::<f64>() / input.data.len() as f64;
+    let std_val = {
+        let m = mean_val;
+        (input.data.iter().map(|x| (x - m).powi(2)).sum::<f64>() / input.data.len() as f64).sqrt()
+    };
 
-# Any-to-Any 変換の実演
-input_text = MultimodalInput(:text, randn(512))
-input_image = MultimodalInput(:image, randn(256, 256) |> vec)
-input_audio = MultimodalInput(:audio, randn(16000))
+    match input.modality {
+        // テキストエンコーダ (単語埋め込み → Transformer)
+        Modality::Text => (0..shared_dim).map(|_| normal.sample(&mut rng) + mean_val).collect(),
+        // 画像エンコーダ (ViT → 潜在ベクトル)
+        Modality::Image => (0..shared_dim).map(|_| normal.sample(&mut rng) + std_val).collect(),
+        // 音声エンコーダ (Spectrogram → Audio Transformer)
+        Modality::Audio => (0..shared_dim).map(|_| normal.sample(&mut rng) + mean_val).collect(),
+    }
+}
 
-println("=== Unified Multimodal Model: Any-to-Any ===")
-println()
+// 共通潜在空間から各モダリティへデコード
+fn unified_decoder(latent: &[f64], target_modality: Modality) -> String {
+    let mean_val = latent.iter().sum::<f64>() / latent.len() as f64;
+    let std_val = {
+        let m = mean_val;
+        (latent.iter().map(|x| (x - m).powi(2)).sum::<f64>() / latent.len() as f64).sqrt()
+    };
 
-# Text → Image
-latent_text = unified_encoder(input_text)
-output_image = unified_decoder(latent_text, :image)
-println("Text → Image: ", output_image)
+    match target_modality {
+        // テキストデコーダ (潜在 → トークン列)
+        Modality::Text => format!("Generated text: {:.3}", mean_val),
+        // 画像デコーダ (潜在 → 画像パッチ)
+        Modality::Image => format!("Generated image with mean: {:.3}", mean_val),
+        // 音声デコーダ (潜在 → Waveform)
+        Modality::Audio => format!("Generated audio with RMS: {:.3}", std_val),
+    }
+}
 
-# Image → Audio
-latent_image = unified_encoder(input_image)
-output_audio = unified_decoder(latent_image, :audio)
-println("Image → Audio: ", output_audio)
+fn main() {
+    let mut rng = rand::thread_rng();
+    let normal = Normal::new(0.0, 1.0).unwrap();
 
-# Audio → Text
-latent_audio = unified_encoder(input_audio)
-output_text = unified_decoder(latent_audio, :text)
-println("Audio → Text: ", output_text)
+    // Any-to-Any 変換の実演
+    let input_text = MultimodalInput {
+        modality: Modality::Text,
+        data: (0..512).map(|_| normal.sample(&mut rng)).collect(),
+    };
+    let input_image = MultimodalInput {
+        modality: Modality::Image,
+        data: (0..256 * 256).map(|_| normal.sample(&mut rng)).collect(),
+    };
+    let input_audio = MultimodalInput {
+        modality: Modality::Audio,
+        data: (0..16000).map(|_| normal.sample(&mut rng)).collect(),
+    };
 
-println()
-println("全モダリティが共通潜在空間で統合される — これが Unified Multimodal Models")
+    println!("=== Unified Multimodal Model: Any-to-Any ===");
+    println!();
+
+    // Text → Image
+    let latent_text = unified_encoder(&input_text, 128);
+    let output_image = unified_decoder(&latent_text, Modality::Image);
+    println!("Text → Image: {}", output_image);
+
+    // Image → Audio
+    let latent_image = unified_encoder(&input_image, 128);
+    let output_audio = unified_decoder(&latent_image, Modality::Audio);
+    println!("Image → Audio: {}", output_audio);
+
+    // Audio → Text
+    let latent_audio = unified_encoder(&input_audio, 128);
+    let output_text = unified_decoder(&latent_audio, Modality::Text);
+    println!("Audio → Text: {}", output_text);
+
+    println!();
+    println!("全モダリティが共通潜在空間で統合される — これが Unified Multimodal Models");
+}
 ```
 
 出力:
@@ -328,7 +356,7 @@ graph TD
 | **統合モデル** | なし | Show-o/BAGEL/NExT-GPT詳解 |
 | **推論時スケーリング** | なし | Reflect-DiT/Test-time Training |
 | **World Models** | 理論のみ | Genie 3/Runway GWM-1実装 |
-| **実装言語** | Python | Julia + Rust + Elixir |
+| **実装言語** | Python | Rust + Rust + Elixir |
 
 ### 2.4 Modal Aphasia: 統合の代償
 
@@ -1072,7 +1100,7 @@ $$
 - Audio: 5% (AudioSet, MusicCaps)
 - Interleaved web pages: 5% (HTML with images/videos embedded)
 
-**実装概念 (Julia)**:
+**実装概念 (Rust)**:
 
 
 ### 3.7 Inference-Time Scaling Laws (推論時スケーリング則)
@@ -1150,7 +1178,7 @@ $$
 
 **直感**: 長いCoTと多数のサンプルのバランスが重要。極端に偏ると効率が悪化。
 
-**実装 (Julia概念コード)**:
+**実装 (Rust概念コード)**:
 
 
 ### 3.8 o1モデルのTest-Time Scaling
@@ -1489,7 +1517,7 @@ $$
 
 ## 💻 4. 実装ゾーン（45分）— Production-Ready Unified Systems
 
-### 4.1 BAGEL-style Unified Multimodal Model (Lux.jl)
+### 4.1 BAGEL-style Unified Multimodal Model (Candle)
 
 
 ### 4.2 Test-Time Training Implementation

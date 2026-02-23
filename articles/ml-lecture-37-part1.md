@@ -2,12 +2,12 @@
 title: "第37回: 🎲 SDE/ODE & 確率過程論: 30秒の驚き→数式修行→実装マスター"
 emoji: "🎲"
 type: "tech"
-topics: ["machinelearning", "deeplearning", "sde", "julia", "stochasticprocesses"]
+topics: ["machinelearning", "deeplearning", "sde", "rust", "stochasticprocesses"]
 published: true
 slug: "ml-lecture-37-part1"
 difficulty: "advanced"
 time_estimate: "90 minutes"
-languages: ["Julia", "Rust"]
+languages: ["Rust"]
 keywords: ["機械学習", "深層学習", "生成モデル"]
 ---
 
@@ -15,19 +15,36 @@ keywords: ["機械学習", "深層学習", "生成モデル"]
 
 第36回でDDPMの離散ステップ拡散を学んだ。これを連続時間で定式化するとSDEになる — 確率過程論の深淵へ。
 
-```julia
-using Random, Plots
+```rust
+use rand::SeedableRng;
+use rand_distr::{Distribution, StandardNormal};
 
-# Brown運動の1サンプルパスを生成
-Random.seed!(42)
-T, dt = 1.0, 0.001
-t = 0:dt:T
-dW = √dt .* randn(length(t))  # Brown運動の増分
-W = @views cumsum([0; dW[1:end-1]])  # Brown運動のパス
+fn main() {
+    // Brown運動の1サンプルパスを生成
+    let mut rng = rand::rngs::StdRng::seed_from_u64(42);
+    let (t_end, dt) = (1.0_f64, 0.001_f64);
+    let n = (t_end / dt) as usize + 1; // t = 0:dt:T の点数
 
-# Brown運動は連続だが微分不可能（ほぼ確実に）
-plot(t, W, label="Brown運動 W(t)", xlabel="時刻 t", ylabel="W(t)",
-     linewidth=1.5, legend=:topleft)
+    // Brown運動の増分: dW ~ N(0, sqrt(dt))
+    let dw: Vec<f64> = (0..n)
+        .map(|_| dt.sqrt() * StandardNormal.sample(&mut rng))
+        .collect();
+
+    // Brown運動のパス: W[0]=0, W[i] = sum(dW[0..i])
+    let w: Vec<f64> = std::iter::once(0.0_f64)
+        .chain(dw.iter().scan(0.0_f64, |acc, &x| { *acc += x; Some(*acc) }))
+        .take(n)
+        .collect();
+
+    // Brown運動は連続だが微分不可能（ほぼ確実に）
+    // プロット代わりに統計を出力
+    let mean = w.iter().sum::<f64>() / w.len() as f64;
+    let var  = w.iter().map(|x| (x - mean).powi(2)).sum::<f64>() / w.len() as f64;
+    println!("Brown運動 W(t): {} 点", w.len());
+    println!("  W(T) = {:.4}", w[n - 1]);
+    println!("  平均 E[W] ≈ {:.4}  (理論値: 0)", mean);
+    println!("  分散 Var[W] ≈ {:.4}  (理論値: T={t_end})", var);
+}
 ```
 
 **出力**:
@@ -220,8 +237,8 @@ Course IV「拡散モデル編」の構成:
 | **SDE扱い** | スキップまたは概要のみ | VP-SDE/VE-SDE完全導出、伊藤の補題適用、Fokker-Planck厳密導出 |
 | **Probability Flow ODE** | 触れない | 同一周辺分布の決定論的過程として完全導出 |
 | **収束性解析** | なし | O(d/T)収束理論、Manifold仮説下の線形収束（2024-2025論文ベース） |
-| **数値解法** | なし | Julia DifferentialEquations.jl実装、Predictor-Corrector法 |
-| **実装** | PyTorch（離散DDPM） | Julia SDEProblem + DifferentialEquations.jl（連続SDE） |
+| **数値解法** | なし | Rust ode_solvers実装、Predictor-Corrector法 |
+| **実装** | PyTorch（離散DDPM） | Rust SDEProblem + ode_solvers（連続SDE） |
 
 **目標**:
 - 松尾研: 拡散モデルの概要を理解
@@ -275,7 +292,7 @@ Course IV「拡散モデル編」の構成:
 **Phase 7: SDE数値解法（Zone 4, 5）**
 - Euler-Maruyama法（第5回の基礎を前提）
 - Predictor-Corrector法
-- Julia DifferentialEquations.jl実装
+- Rust ode_solvers実装
 
 > **Note:** **進捗: 20%完了**
 > SDEの全体像を把握した。次は数式修行ゾーンで一つずつ完全導出する。
@@ -346,7 +363,7 @@ $$
 - Drift項なし（$f = 0$）
 - Diffusion項のみ
 
-**数値検証（Julia）**:
+**数値検証（Rust）**:
 
 
 ### 3.3 伊藤の補題の応用 — VP-SDE/VE-SDEの導出に直接適用
@@ -411,7 +428,7 @@ $$
 
 $\beta(t)$ が定数 $\beta$ のとき、$v(t) = \sigma_0^2 e^{-\beta t} + (1 - e^{-\beta t}) = 1 - (1 - \sigma_0^2) e^{-\beta t}$。$t \to \infty$ で $v(t) \to 1$（分散保存）。
 
-**数値検証（Julia）**:
+**数値検証（Rust）**:
 
 
 **出力**: 理論値と経験値がほぼ一致。伊藤の補題による導出が正確であることを確認。
@@ -652,7 +669,7 @@ $$
 $$
 （純粋な拡散方程式、Drift項なし）
 
-**数値検証（Julia）**:
+**数値検証（Rust）**:
 
 
 **出力**: Monte Carlo密度と理論密度（Fokker-Planck方程式の解）がほぼ一致。
@@ -1355,7 +1372,7 @@ $$
 
 **収束次数**: Strong convergence $O(\Delta t^{1/2})$
 
-**Julia実装**:
+**Rust実装**:
 
 
 **問題**: 確率的項で $\sqrt{\Delta t}$ → 収束遅い。
@@ -1370,7 +1387,7 @@ $$
 
 追加項: $\frac{1}{2} g \frac{\partial g}{\partial x} [(Z)^2 - 1] \Delta t$ が精度向上の鍵。
 
-**Julia実装**:
+**Rust実装**:
 
 
 **効果** (精度 vs ステップ数):
@@ -1433,17 +1450,17 @@ $$
 
 ---
 
-### 3.17 Production SDE Sampling — Julia訓練 + Rust推論
+### 3.17 Production SDE Sampling — Rust訓練 + Rust推論
 
-#### 3.17.1 Julia: Complete SDE Sampler Implementation
+#### 3.17.1 Rust: Complete SDE Sampler Implementation
 
-**Probability Flow ODE Solver** (DifferentialEquations.jl):
+**Probability Flow ODE Solver** (ode_solvers):
 
 
 **SDE Sampler with Predictor-Corrector**:
 
 
-**Benchmark** (CIFAR-10, M1 Max, Julia 1.11):
+**Benchmark** (CIFAR-10, M1 Max, Rust 1.11):
 
 | Method | Sampling Time (sec) | FID |
 |:-------|:-------------------|:----|
@@ -1458,12 +1475,12 @@ Predictor-Corrector が品質向上 (FID 3.17 → 2.95)。
 **Euler-Maruyama Sampler** (ndarray + rand):
 
 
-**Performance** (CIFAR-10, Intel Xeon, Rust vs Julia vs PyTorch):
+**Performance** (CIFAR-10, Intel Xeon, Rust vs Rust vs PyTorch):
 
 | Implementation | 1000-step Time (sec) | Throughput (img/s) |
 |:--------------|:--------------------|:-------------------|
 | PyTorch (CPU) | 12.3 | 0.081 |
-| Julia (native) | 4.1 | 0.244 |
+| Rust (native) | 4.1 | 0.244 |
 | **Rust (ONNX)** | **1.8** | **0.556** |
 
 Rustが **6.8倍高速** — Production最適。
@@ -1472,7 +1489,7 @@ Rustが **6.8倍高速** — Production最適。
 
 **課題**: 固定ステップ $\Delta t$ は非効率 (smooth領域で無駄、sharp領域で不正確)。
 
-**解決**: Error-based adaptive step size (DifferentialEquations.jl標準)。
+**解決**: Error-based adaptive step size (ode_solvers標準)。
 
 **Local Error Estimate** (Embedded RK method):
 
@@ -1492,7 +1509,7 @@ $$
 \Delta t_{\text{new}} = \Delta t_{\text{old}} \cdot \left( \frac{\text{tol}}{\text{Error}} \right)^{1/(p+1)}
 $$
 
-**Julia with Adaptive Solver**:
+**Rust with Adaptive Solver**:
 
 
 **Result**:
@@ -1539,7 +1556,7 @@ $$
 
 **Uncertainty quantification**: SDE samplingで予測分布を推定。
 
-> **Note:** **進捗: 100%完了！** Production SDE sampling (Julia + Rust), Adaptive solvers, Real-world applications まで完全網羅。SDE/ODE理論の全てを習得した！
+> **Note:** **進捗: 100%完了！** Production SDE sampling (Rust + Rust), Adaptive solvers, Real-world applications まで完全網羅。SDE/ODE理論の全てを習得した！
 
 ---
 

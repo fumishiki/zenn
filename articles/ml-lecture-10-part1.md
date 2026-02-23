@@ -2,12 +2,12 @@
 title: "第10回: VAE: 30秒の驚き→数式修行→実装マスター 【前編】理論編"
 emoji: "🎨"
 type: "tech"
-topics: ["machinelearning", "deeplearning", "vae", "julia"]
+topics: ["machinelearning", "deeplearning", "vae", "rust"]
 published: true
 slug: "ml-lecture-10-part1"
 difficulty: "advanced"
 time_estimate: "90 minutes"
-languages: ["Julia", "Rust"]
+languages: ["Rust"]
 keywords: ["機械学習", "深層学習", "生成モデル"]
 ---
 
@@ -20,7 +20,7 @@ keywords: ["機械学習", "深層学習", "生成モデル"]
 
 2013年、Kingma & Welling [^1] が発表したこのアーキテクチャは、変分推論とニューラルネットワークを融合させ、生成モデル研究に革命をもたらした。DALL-E、Stable Diffusion、動画生成AIの基盤となる「画像トークナイザー」の祖先がここにある。
 
-VAEの基礎理論から離散表現学習 (VQ-VAE/FSQ) まで一気に駆け抜ける。そして **重要な転機** がある — この回から **Julia** が本格登場する。Pythonでの訓練ループの遅さに絶望した後、Juliaの多重ディスパッチが数式を型に応じて自動最適化する様を目撃することになる。
+VAEの基礎理論から離散表現学習 (VQ-VAE/FSQ) まで一気に駆け抜ける。そして **重要な転機** がある — この回から **Rust** が本格登場する。Pythonでの訓練ループの遅さに絶望した後、Rustのゼロコスト抽象化が数式を型に応じて自動最適化する様を目撃することになる。
 
 > **Note:** **このシリーズについて**: 東京大学 松尾・岩澤研究室動画講義の**完全上位互換**の全50回シリーズ。理論（論文が書ける）、実装（Production-ready）、最新（2025-2026 SOTA）の3軸で差別化する。本講義はCourse II「生成モデル基礎編」の第2回。
 
@@ -202,13 +202,13 @@ VAEの潜在変数 $z$ は連続値だが、VQ-VAE [^3] では **離散的なコ
 
 ### 1.3 PyTorchとの比較プレビュー
 
-Zone 4でJuliaを本格導入するが、ここで予告として、PyTorchでのVAE訓練ループのコード量と実行時間を確認しておく:
+Zone 4でRustを本格導入するが、ここで予告として、PyTorchでのVAE訓練ループのコード量と実行時間を確認しておく:
 
 
 出力（M2 MacBook Air）:
 
 
-**Zone 4で、このコードとほぼ同じ構造のJulia版が ~1.5秒で走る様を目撃する。** 訓練ループの型不安定性、毎バッチのメモリコピー、Pythonインタプリタのオーバーヘッドが積み重なり、8倍の差が生まれる。
+**Zone 4で、このコードとほぼ同じ構造のRust版が ~1.5秒で走る様を目撃する。** 訓練ループの型不安定性、毎バッチのメモリコピー、Pythonインタプリタのオーバーヘッドが積み重なり、8倍の差が生まれる。
 
 <details><summary>PyTorchの内部で何が起きているか</summary>
 
@@ -218,10 +218,10 @@ PyTorchは動的計算グラフ (eager execution) を使うため、各バッチ
 3. 結果をPythonオブジェクトとしてラップ
 4. Gradを別途保持
 
-Juliaは:
-1. JITコンパイルで訓練ループ全体を機械語に変換（初回のみ）
+Rustは:
+1. AOTコンパイルで訓練ループ全体を機械語に変換（初回のみ）
 2. 型安定なループは直接メモリアクセス
-3. 多重ディスパッチで `forward(model, x)` の型が確定すれば、コンパイル済みコードを直接実行
+3. ゼロコスト抽象化で `forward(model, x)` の型が確定すれば、コンパイル済みコードを直接実行
 
 この差が、同じアルゴリズムで8倍の速度差を生む。
 
@@ -260,13 +260,13 @@ graph TD
 | 回 | テーマ | Course Iの接続 | 言語 |
 |:---|:------|:-------------|:-----|
 | 第9回 | 変分推論 & ELBO | KL発散(第6回) + Jensen(第6回) | 🐍Python 50% 🦀Rust 50% |
-| **第10回** | **VAE (本講義)** | ELBO(第9回) + ガウス分布(第4回) | 🐍30% ⚡**Julia 50%** 🦀20% |
-| 第11回 | 最適輸送理論 | 測度論(第5回) + 双対性(第6回) | ⚡Julia 70% 🦀30% |
-| 第12回 | GAN | Minimax(第7回) + Wasserstein(第11回) | ⚡Julia 60% 🦀40% |
-| 第13回 | StyleGAN | GAN(第12回) + f-Divergence(第6回) | ⚡Julia 50% 🦀50% |
-| 第14回 | Normalizing Flow | 変数変換(第5回) + Jacobian(第2回) | ⚡Julia 60% 🦀40% |
-| 第15回 | 自己回帰モデル | 連鎖律(第4回) + MLE(第7回) | ⚡50% 🦀30% 🔮**Elixir 20%** |
-| 第16回 | Transformer | Attention(第1回) + AR(第15回) | ⚡40% 🦀40% 🔮20% |
+| **第10回** | **VAE (本講義)** | ELBO(第9回) + ガウス分布(第4回) | 🐍30% 🦀**Rust 50%** 🦀20% |
+| 第11回 | 最適輸送理論 | 測度論(第5回) + 双対性(第6回) | 🦀Rust 70% 🦀30% |
+| 第12回 | GAN | Minimax(第7回) + Wasserstein(第11回) | 🦀Rust 60% 🦀40% |
+| 第13回 | StyleGAN | GAN(第12回) + f-Divergence(第6回) | 🦀Rust 50% 🦀50% |
+| 第14回 | Normalizing Flow | 変数変換(第5回) + Jacobian(第2回) | 🦀Rust 60% 🦀40% |
+| 第15回 | 自己回帰モデル | 連鎖律(第4回) + MLE(第7回) | 🦀50% 🦀30% 🔮**Elixir 20%** |
+| 第16回 | Transformer | Attention(第1回) + AR(第15回) | 🦀40% 🦀40% 🔮20% |
 
 **Course Iで学んだ数学が、ここで全て使われる:**
 - KL発散（第6回で6回登場）→ VAEの正則化項、GANの理論解析
@@ -282,14 +282,14 @@ graph TD
 |:-----|:-----------|:---------------------|:-----|
 | **理論深度** | 論文が読める | **論文が書ける** | 全導出を追跡、証明省略なし |
 | **VAE扱い** | 第3-4回（2時間） | 第10回（1講義、4000行） | Reparameterization完全導出 + VQ/FSQ |
-| **実装** | PyTorch参考コード | **Julia/Rust/Elixir Production-ready** | 3言語並行、速度比較、型安全 |
+| **実装** | PyTorch参考コード | **Rust/Rust/Elixir Production-ready** | 3言語並行、速度比較、型安全 |
 | **数学前提** | 「前提知識」で済ます | Course I (第1-8回) で完全構築 | KL/Jensen/測度論を自力導出済み |
 | **最新性** | 2023年まで | **2024-2026 SOTA** | FSQ, Cosmos Tokenizer, SoftVQ-VAE |
 | **離散表現** | VQ-VAE軽く触れる | VQ-VAE → VQ-GAN → FSQ → 最新まで | トークナイザーの系譜を完全網羅 |
 
 **本シリーズの差別化ポイント**:
 1. **数式を省略しない** — Kingma 2013のAppendix Bを完全再現（Boss Battle）
-2. **実装で妥協しない** — PyTorchのtoy codeではなく、Julia/Rustで実戦コード
+2. **実装で妥協しない** — PyTorchのtoy codeではなく、Rust/Rustで実戦コード
 3. **2026年の視点** — VAEは「古典」ではなく「Diffusion/LLMの基盤」として扱う
 
 ### 2.3 なぜVAEなのか — 3つのメタファー
@@ -332,42 +332,42 @@ $$
 
 この「滑らかさ」が、VAEの強みであり弱みでもある。滑らかすぎて **ぼやけた画像** になる。これがGAN（第12回）への動機となる。
 
-### 2.4 トロイの木馬: Python絶望からJulia救済へ
+### 2.4 トロイの木馬: Python絶望からRust救済へ
 
 このシリーズには隠された戦略がある — **トロイの木馬戦術**。第1-8回はPythonで安心させた。第9回でRustが登場し、50倍速を見せた。だがまだ「推論だけ」だった。
 
-**今回、第10回で、Julia が訓練ループに登場する。**
+**今回、第10回で、Rust が訓練ループに登場する。**
 
 
-**なぜJuliaなのか（Zone 4で詳述）**:
-- **多重ディスパッチ**: 同じ関数名で、型に応じて最適化されたコードを自動選択
+**なぜRustなのか（Zone 4で詳述）**:
+- **ゼロコスト抽象化**: 同じ関数名で、型に応じて最適化されたコードを自動選択
 - **数式との1:1対応**: `y = W * x + b` がそのまま書ける（PyTorchは`y = torch.matmul(W, x) + b`）
-- **JIT最適化**: 初回実行時にLLVMでネイティブコンパイル、2回目以降は機械語直接実行
+- **AOTコンパイル最適化**: 初回実行時にLLVMでネイティブコンパイル、2回目以降は機械語直接実行
 - **型安定性**: Pythonのような「毎回型チェック」がない
 
 Pythonでの訓練ループは、こうなる:
 
 
-**毎バッチごとに、Pythonインタプリタが介入している。** Juliaは違う:
+**毎バッチごとに、Pythonインタプリタが介入している。** Rustは違う:
 
 
-JITコンパイル後、**このループ全体が機械語になる**。Pythonのオーバーヘッドがゼロ。
+AOTコンパイル後、**このループ全体が機械語になる**。Pythonのオーバーヘッドがゼロ。
 
-<details><summary>「JuliaはPythonより書きにくい？」への反論</summary>
+<details><summary>「RustはPythonより書きにくい？」への反論</summary>
 
-よく言われる批判: 「Juliaは型を書かなきゃいけないから面倒」
+よく言われる批判: 「Rustは型を書かなきゃいけないから面倒」
 
-**真実**: Juliaは型推論が強力で、99%の場合型注釈は不要。例:
+**真実**: Rustは型推論が強力で、99%の場合型注釈は不要。例:
 
 
-型注釈が必要なのは、「複数の実装を使い分けたい」ときだけ（多重ディスパッチ）。これはPythonでは不可能な高度な機能。
+型注釈が必要なのは、「複数の実装を使い分けたい」ときだけ（ゼロコスト抽象化）。これはPythonでは不可能な高度な機能。
 
 </details>
 
 > **⚠️ Warning:** **Python絶望ポイント（Zone 4で測定）**:
-> - VAE訓練100エポック: Python 12.3秒 vs Julia 1.5秒（**8.2倍差**）
+> - VAE訓練100エポック: Python 12.3秒 vs Rust 1.5秒（**8.2倍差**）
 > - 原因: Pythonインタプリタのオーバーヘッド + 動的型チェック + メモリコピー
-> - Rustより速い理由: RustはCPU/GPU分岐が手動、JuliaはJITが自動選択
+> - Rustより速い理由: RustはCPU/GPU分岐が手動、RustはAOTが自動選択
 >
 > **これが「Pythonに戻れない」転機になる。**
 
@@ -379,8 +379,8 @@ JITコンパイル後、**このループ全体が機械語になる**。Python�
 |:--------|:-----|:---------|:-----|
 | **Phase 1: 高速走破** | Zone 0-2 を30分で | 30分 | コードを実行せずに読む。数式はスキップ。全体像把握のみ。 |
 | **Phase 2: 数式修行** | Zone 3 の ELBO/Reparam完全理解 | 2時間 | ペンと紙で導出を追う。各ステップを自分で再現。 |
-| **Phase 3: Julia体験** | Zone 4 の Julia コード実行 | 1時間 | Revise.jl + REPL駆動開発を体験。PyTorchとの速度差を測定。 |
-| **Phase 4: 実装演習** | Zone 5 の Tiny VAE 自力実装 | 2時間 | Julia/Rust どちらかで、Zone 0 のVAEを再実装。 |
+| **Phase 3: Rust体験** | Zone 4 の Rust コード実行 | 1時間 | cargo-watch + REPL駆動開発を体験。PyTorchとの速度差を測定。 |
+| **Phase 4: 実装演習** | Zone 5 の Tiny VAE 自力実装 | 2時間 | Rust/Rust どちらかで、Zone 0 のVAEを再実装。 |
 | **Phase 5: 最新追従** | Zone 6 の FSQ/VQ-GAN論文 | 1時間 | arXiv論文をダウンロードして Abstract + Figure を読む。 |
 
 **合計: 約6.5時間**（本講義の目標所要時間は3時間だが、完全習得には倍かかる）
@@ -389,7 +389,7 @@ JITコンパイル後、**このループ全体が機械語になる**。Python�
 1. **数式は音読する** — $\mathbb{E}_{q_\phi(z \mid x)}$ を「イーサブ キューファイ ゼット ギブン エックス」と声に出す
 2. **コードと数式を並べる** — 画面を2分割して、左に数式、右にコード
 3. **数値で確認** — 導出した式に具体的な値（$\mu=0, \sigma=1$）を代入してNumPyで計算
-4. **Juliaを恐れない** — 第1回Juliaコードは、Pythonとほぼ同じ。違いは `.`（broadcast）だけ
+4. **Rustを恐れない** — 第1回Rustコードは、Pythonとほぼ同じ。違いは `.`（broadcast）だけ
 
 ### 2.7 VAE Family Tree — 連続から離散へ
 
@@ -432,7 +432,7 @@ graph TD
 | Cosmos Tokenizer | 2024 | 画像・動画統一エンコーダ | NVIDIA | 次世代統一モデル |
 | SoftVQ-VAE | 2024 | 完全微分可能VQ | 2412.10958 | 訓練安定化 |
 
-> **Note:** **進捗: 20% 完了** VAEの位置づけ、松尾研との差分、Julia登場の背景、学習戦略を把握した。Zone 3で数式の海に飛び込む準備が整った。
+> **Note:** **進捗: 20% 完了** VAEの位置づけ、松尾研との差分、Rust強化の背景、学習戦略を把握した。Zone 3で数式の海に飛び込む準備が整った。
 
 ---
 
@@ -535,7 +535,7 @@ $$
 \mathcal{L}_\text{loss}(\theta, \phi; x) = -\mathcal{L}(\theta, \phi; x) = -\mathbb{E}_{q_\phi(z \mid x)} [\log p_\theta(x \mid z)] + D_\text{KL}(q_\phi(z \mid x) \| p(z))
 $$
 
-PyTorch/Juliaでは、この $\mathcal{L}_\text{loss}$ を最小化する。
+PyTorch/Rustでは、この $\mathcal{L}_\text{loss}$ を最小化する。
 
 
 > **⚠️ Warning:** **つまずきポイント**: 論文では「ELBOを最大化」と書かれているが、コードでは「負のELBOを最小化」している。同じことだが、符号の混乱に注意。
@@ -1049,7 +1049,7 @@ VAEは学習率に敏感。推奨パターン:
 - **AdamW**: 重み減衰と組み合わせ
 
 
-> **Note:** **進捗: 50% 完了** VAEの3つの核心（ELBO/Reparameterization/Gaussian KL）を完全導出し、Kingma 2013のBoss Battleをクリアした。Zone 4でJulia実装に進む。
+> **Note:** **進捗: 50% 完了** VAEの3つの核心（ELBO/Reparameterization/Gaussian KL）を完全導出し、Kingma 2013のBoss Battleをクリアした。Zone 4でRust実装に進む。
 
 ---
 

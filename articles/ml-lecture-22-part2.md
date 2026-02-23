@@ -3,26 +3,26 @@ title: "第22回: ネイティブマルチモーダル完全版: 30秒の驚き�
 slug: "ml-lecture-22-part2"
 emoji: "👁️"
 type: "tech"
-topics: ["machinelearning", "deeplearning", "multimodal", "julia", "rust"]
+topics: ["machinelearning", "deeplearning", "multimodal", "rust", "rust"]
 published: true
 difficulty: "advanced"
 time_estimate: "90 minutes"
-languages: ["Julia", "Rust", "Elixir"]
+languages: ["Rust", "Elixir"]
 keywords: ["機械学習", "深層学習", "生成モデル"]
 ---
 
 > 📌 **前編（理論）**: [第22回 前編](./ml-lecture-22-part1)
 
-## 💻 Z5. 試練（実装）（45分）— Julia CLIP + Rust SmolVLM2
+## 💻 Z5. 試練（実装）（45分）— Rust CLIP + Rust SmolVLM2
 
 理論を理解しただけでは不十分だ。実装してこそ、**真の理解**が得られる。
 
 このZoneでは、3つの実装を完走する:
-1. **⚡Julia CLIP実装** — Dual Encoder訓練パイプライン
-2. **⚡Julia ViT実装** — Vision Transformerの完全実装
+1. **🦀Rust CLIP実装** — Dual Encoder訓練パイプライン
+2. **🦀Rust ViT実装** — Vision Transformerの完全実装
 3. **🦀Rust SmolVLM2推論** — GGUF/Candle統合でマルチモーダル推論
 
-### 4.1 ⚡Julia CLIP実装
+### 4.1 🦀Rust CLIP実装
 
 #### 4.1.1 アーキテクチャ全体像
 
@@ -42,234 +42,280 @@ graph TD
 
 #### 4.1.2 Vision Encoderの実装
 
-```julia
-using Flux, CUDA
+```rust
+use candle_core::{Result, Tensor};
+use candle_nn::{self as nn, LayerNorm, Linear, Module, VarBuilder};
 
-# Vision Transformer for CLIP
-struct VisionTransformer
-    patch_embed::PatchEmbed
-    pos_embed::Param
-    cls_token::Param
-    transformer_blocks::Chain
-    norm::LayerNorm
-    proj::Dense  # 埋め込み次元へのプロジェクション
-end
+// Vision Transformer for CLIP
+pub struct VisionTransformer {
+    patch_embed: PatchEmbed,
+    pos_embed: Tensor,
+    cls_token: Tensor,
+    transformer_blocks: Vec<TransformerBlock>,
+    norm: LayerNorm,
+    proj: Linear,  // 埋め込み次元へのプロジェクション
+}
 
-function VisionTransformer(;
-    img_size=224,
-    patch_size=32,
-    in_channels=3,
-    embed_dim=768,
-    depth=12,
-    num_heads=12,
-    mlp_ratio=4,
-    out_dim=512
-)
-    num_patches = (img_size ÷ patch_size)^2
+impl VisionTransformer {
+    pub fn new(
+        img_size: usize,    // = 224
+        patch_size: usize,  // = 32
+        in_channels: usize, // = 3
+        embed_dim: usize,   // = 768
+        depth: usize,       // = 12
+        num_heads: usize,   // = 12
+        mlp_ratio: usize,   // = 4
+        out_dim: usize,     // = 512
+        vb: VarBuilder,
+    ) -> Result<Self> {
+        let num_patches = (img_size / patch_size).pow(2);
 
-    # Patch Embedding
-    patch_embed = PatchEmbed(img_size, patch_size, embed_dim, in_channels)
+        // Patch Embedding
+        let patch_embed = PatchEmbed::new(img_size, patch_size, embed_dim, in_channels, vb.pp("patch_embed"))?;
 
-    # Positional Encoding + CLS token
-    pos_embed = Param(randn(embed_dim, num_patches + 1) .* 0.02)
-    cls_token = Param(randn(embed_dim, 1) .* 0.02)
+        // Positional Encoding + CLS token
+        let pos_embed = vb.get_with_hints(
+            (1, num_patches + 1, embed_dim), "pos_embed",
+            nn::init::Init::Randn { mean: 0.0, stdev: 0.02 },
+        )?;
+        let cls_token = vb.get_with_hints(
+            (1, 1, embed_dim), "cls_token",
+            nn::init::Init::Randn { mean: 0.0, stdev: 0.02 },
+        )?;
 
-    # Transformer Blocks
-    transformer_blocks = Chain([
-        TransformerBlock(embed_dim, num_heads, mlp_ratio) for _ in 1:depth
-    ]...)
+        // Transformer Blocks
+        let transformer_blocks = (0..depth)
+            .map(|i| TransformerBlock::new(embed_dim, num_heads, mlp_ratio, vb.pp(format!("blocks.{i}"))))
+            .collect::<Result<Vec<_>>>()?;
 
-    # Layer Norm + Projection
-    norm = LayerNorm(embed_dim)
-    proj = Dense(embed_dim, out_dim)
+        // Layer Norm + Projection
+        let norm = nn::layer_norm(embed_dim, 1e-6, vb.pp("norm"))?;
+        let proj = nn::linear(embed_dim, out_dim, vb.pp("proj"))?;
 
-    return VisionTransformer(patch_embed, pos_embed, cls_token, transformer_blocks, norm, proj)
-end
+        Ok(Self { patch_embed, pos_embed, cls_token, transformer_blocks, norm, proj })
+    }
+}
 
-function (vit::VisionTransformer)(x)
-    # x: (H, W, C, B)
-    B = size(x, 4)
+impl Module for VisionTransformer {
+    fn forward(&self, x: &Tensor) -> Result<Tensor> {
+        // x: (B, C, H, W)
+        let b = x.dim(0)?;
 
-    # Patch Embedding: (H, W, C, B) → (d, N, B)
-    patches = vit.patch_embed(x)  # (embed_dim, num_patches, B)
+        // Patch Embedding: (B, C, H, W) → (B, N, embed_dim)
+        let patches = self.patch_embed.forward(x)?;
 
-    # CLS tokenを各バッチに追加し、Positional Encodingを一括加算
-    cls_tokens = repeat(vit.cls_token, 1, B)  # (embed_dim, B)
-    tokens = cat(cls_tokens, patches, dims=2) .+ vit.pos_embed  # (embed_dim, N+1, B)
+        // CLS tokenを各バッチに追加し、Positional Encodingを一括加算
+        let cls_tokens = self.cls_token.expand((b, 1, self.cls_token.dim(2)?))?;
+        let tokens = Tensor::cat(&[&cls_tokens, &patches], 1)?;  // (B, N+1, embed_dim)
+        let mut tokens = tokens.broadcast_add(&self.pos_embed)?;
 
-    # Transformer Blocks
-    for block in vit.transformer_blocks
-        tokens = block(tokens)
-    end
+        // Transformer Blocks
+        for block in &self.transformer_blocks {
+            tokens = block.forward(&tokens)?;
+        }
 
-    # CLS tokenの出力を取得 → Layer Norm → Projection
-    return @views tokens[:, 1, :] |> vit.norm |> vit.proj  # (out_dim, B)
-end
+        // CLS tokenの出力を取得 → Layer Norm → Projection
+        let cls_out = tokens.i((.., 0, ..))?;  // (B, embed_dim)
+        self.proj.forward(&self.norm.forward(&cls_out)?)  // (B, out_dim)
+    }
+}
 
-# Transformer Block
-struct TransformerBlock
-    attn::MultiHeadSelfAttention
-    mlp::Chain
-    norm1::LayerNorm
-    norm2::LayerNorm
-end
+// Transformer Block
+pub struct TransformerBlock {
+    attn: MultiHeadSelfAttention,
+    mlp: nn::Sequential,
+    norm1: LayerNorm,
+    norm2: LayerNorm,
+}
 
-function TransformerBlock(embed_dim, num_heads, mlp_ratio)
-    attn = MultiHeadSelfAttention(embed_dim, num_heads)
-    mlp = Chain(
-        Dense(embed_dim, embed_dim * mlp_ratio, gelu),
-        Dense(embed_dim * mlp_ratio, embed_dim)
-    )
-    norm1 = LayerNorm(embed_dim)
-    norm2 = LayerNorm(embed_dim)
-    return TransformerBlock(attn, mlp, norm1, norm2)
-end
+impl TransformerBlock {
+    pub fn new(embed_dim: usize, num_heads: usize, mlp_ratio: usize, vb: VarBuilder) -> Result<Self> {
+        let attn = MultiHeadSelfAttention::new(embed_dim, num_heads, vb.pp("attn"))?;
+        let mlp = nn::seq()
+            .add(nn::linear(embed_dim, embed_dim * mlp_ratio, vb.pp("mlp.fc1"))?)
+            .add(nn::Activation::Gelu)
+            .add(nn::linear(embed_dim * mlp_ratio, embed_dim, vb.pp("mlp.fc2"))?);
+        let norm1 = nn::layer_norm(embed_dim, 1e-6, vb.pp("norm1"))?;
+        let norm2 = nn::layer_norm(embed_dim, 1e-6, vb.pp("norm2"))?;
+        Ok(Self { attn, mlp, norm1, norm2 })
+    }
+}
 
-function (block::TransformerBlock)(x)
-    # Pre-Norm: Norm → Attention → Residual
-    x = x .+ block.attn(block.norm1(x))
-    # Pre-Norm: Norm → MLP → Residual
-    x = x .+ block.mlp(block.norm2(x))
-    return x
-end
+impl Module for TransformerBlock {
+    fn forward(&self, x: &Tensor) -> Result<Tensor> {
+        // Pre-Norm: Norm → Attention → Residual
+        let x = (x + self.attn.forward(&self.norm1.forward(x)?)?)?;
+        // Pre-Norm: Norm → MLP → Residual
+        let x = (&x + self.mlp.forward(&self.norm2.forward(&x)?)?)?;
+        Ok(x)
+    }
+}
 ```
 
 #### 4.1.3 Text Encoderの実装
 
-```julia
-# Text Transformer for CLIP
-struct TextTransformer
-    token_embed::Embedding
-    pos_embed::Param
-    transformer_blocks::Chain
-    norm::LayerNorm
-    proj::Dense
-end
+```rust
+// Text Transformer for CLIP
+pub struct TextTransformer {
+    token_embed: nn::Embedding,
+    pos_embed: Tensor,
+    transformer_blocks: Vec<TransformerBlock>,
+    norm: LayerNorm,
+    proj: Linear,
+}
 
-function TextTransformer(;
-    vocab_size=49408,  # CLIPのvocabサイズ
-    max_len=77,
-    embed_dim=512,
-    depth=12,
-    num_heads=8,
-    mlp_ratio=4,
-    out_dim=512
-)
-    token_embed = Embedding(vocab_size, embed_dim)
-    pos_embed = Param(randn(embed_dim, max_len) .* 0.02)
+impl TextTransformer {
+    pub fn new(
+        vocab_size: usize,  // = 49408 — CLIPのvocabサイズ
+        max_len: usize,     // = 77
+        embed_dim: usize,   // = 512
+        depth: usize,       // = 12
+        num_heads: usize,   // = 8
+        mlp_ratio: usize,   // = 4
+        out_dim: usize,     // = 512
+        vb: VarBuilder,
+    ) -> Result<Self> {
+        let token_embed = nn::embedding(vocab_size, embed_dim, vb.pp("token_embed"))?;
+        let pos_embed = vb.get_with_hints(
+            (1, max_len, embed_dim), "pos_embed",
+            nn::init::Init::Randn { mean: 0.0, stdev: 0.02 },
+        )?;
+        let transformer_blocks = (0..depth)
+            .map(|i| TransformerBlock::new(embed_dim, num_heads, mlp_ratio, vb.pp(format!("blocks.{i}"))))
+            .collect::<Result<Vec<_>>>()?;
+        let norm = nn::layer_norm(embed_dim, 1e-6, vb.pp("norm"))?;
+        let proj = nn::linear(embed_dim, out_dim, vb.pp("proj"))?;
+        Ok(Self { token_embed, pos_embed, transformer_blocks, norm, proj })
+    }
 
-    transformer_blocks = Chain([
-        TransformerBlock(embed_dim, num_heads, mlp_ratio) for _ in 1:depth
-    ]...)
+    pub fn forward(&self, tokens: &Tensor) -> Result<Tensor> {
+        // tokens: (B, L) — トークンID列
+        let (_b, l) = tokens.dims2()?;
 
-    norm = LayerNorm(embed_dim)
-    proj = Dense(embed_dim, out_dim)
+        // Token Embedding + Positional Encoding（ゼロコピースライス）
+        let mut x = (self.token_embed.forward(tokens)?
+            + self.pos_embed.i((.., ..l, ..))?)?;  // (B, L, embed_dim)
 
-    return TextTransformer(token_embed, pos_embed, transformer_blocks, norm, proj)
-end
+        // Transformer Blocks
+        for block in &self.transformer_blocks {
+            x = block.forward(&x)?;
+        }
 
-function (txt::TextTransformer)(tokens)
-    # tokens: (L, B) — トークンID列
-    L, B = size(tokens)
-
-    # Token Embedding + Positional Encoding（ゼロコピースライス）
-    x = txt.token_embed(tokens) .+ @views txt.pos_embed[:, 1:L, :]  # (embed_dim, L, B)
-
-    # Transformer Blocks
-    for block in txt.transformer_blocks
-        x = block(x)
-    end
-
-    # EOT (End of Text) tokenの出力を取得 → Layer Norm → Projection
-    # 仮定: EOT tokenはシーケンスの最後
-    return @views x[:, end, :] |> txt.norm |> txt.proj  # (out_dim, B)
-end
+        // EOT (End of Text) tokenの出力を取得 → Layer Norm → Projection
+        // 仮定: EOT tokenはシーケンスの最後
+        let eot_out = x.i((.., l - 1, ..))?;  // (B, embed_dim)
+        self.proj.forward(&self.norm.forward(&eot_out)?)  // (B, out_dim)
+    }
+}
 ```
 
 #### 4.1.4 CLIPモデル全体
 
-```julia
-# CLIP: Vision + Text Dual Encoder
-struct CLIP
-    vision::VisionTransformer
-    text::TextTransformer
-    τ::Param  # 温度パラメータ（学習可能）
-end
+```rust
+// CLIP: Vision + Text Dual Encoder
+pub struct Clip {
+    pub vision: VisionTransformer,
+    pub text: TextTransformer,
+    pub temperature: Tensor,  // 温度パラメータ（学習可能）
+}
 
-function CLIP()
-    vision = VisionTransformer(
-        img_size=224, patch_size=32, embed_dim=768, depth=12, num_heads=12, out_dim=512
-    )
-    text = TextTransformer(
-        vocab_size=49408, max_len=77, embed_dim=512, depth=12, num_heads=8, out_dim=512
-    )
-    τ = Param([0.07])  # 初期温度
-    return CLIP(vision, text, τ)
-end
+impl Clip {
+    pub fn new(vb: VarBuilder) -> Result<Self> {
+        let vision = VisionTransformer::new(
+            224, 32, 3, 768, 12, 12, 4, 512, vb.pp("vision"),
+        )?;
+        let text = TextTransformer::new(
+            49408, 77, 512, 12, 8, 4, 512, vb.pp("text"),
+        )?;
+        // 初期温度
+        let temperature = vb.get_with_hints(1, "temperature", nn::init::Init::Const(0.07))?;
+        Ok(Self { vision, text, temperature })
+    }
 
-function (clip::CLIP)(images, tokens)
-    # 画像・テキスト埋め込み
-    v_embeds = clip.vision(images)  # (out_dim, B)
-    t_embeds = clip.text(tokens)    # (out_dim, B)
+    pub fn forward(&self, images: &Tensor, tokens: &Tensor) -> Result<(Tensor, Tensor, Tensor)> {
+        // 画像・テキスト埋め込み
+        let v_embeds = self.vision.forward(images)?;  // (B, out_dim)
+        let t_embeds = self.text.forward(tokens)?;    // (B, out_dim)
 
-    # InfoNCE loss
-    loss = infonce_loss(v_embeds, t_embeds, clip.τ[])
+        // InfoNCE loss
+        let tau = self.temperature.to_scalar::<f64>()?;
+        let loss = info_nce(&v_embeds, &t_embeds, tau)?;
 
-    return loss, v_embeds, t_embeds
-end
+        Ok((loss, v_embeds, t_embeds))
+    }
+}
+
+// InfoNCE loss — zero-copy computation
+fn info_nce(img_emb: &Tensor, txt_emb: &Tensor, temp: f64) -> Result<Tensor> {
+    let logits = img_emb.matmul(&txt_emb.t()?)?.affine(1.0 / temp, 0.0)?;
+    let n = logits.dim(0)?;
+    let labels = Tensor::arange(0u32, n as u32, &Device::Cpu)?;
+    candle_nn::loss::cross_entropy(&logits, &labels)
+}
 ```
 
 #### 4.1.5 訓練ループ
 
-```julia
-using Flux.Optimise: Adam
-using ProgressMeter
+```rust
+use candle_nn::{AdamW, Optimizer, ParamsAdamW};
 
-function train_clip(clip, train_loader, epochs=10, lr=1e-4)
-    # オプティマイザ
-    opt = Adam(lr)
-    ps = Flux.params(clip)
+fn train_clip(
+    clip: &mut Clip,
+    train_loader: &[(Tensor, Tensor)],  // (images, tokens)
+    epochs: usize,                      // = 10
+    lr: f64,                            // = 1e-4
+) -> Result<()> {
+    // オプティマイザ
+    let varmap = nn::VarMap::new();
+    let mut opt = AdamW::new(varmap.all_vars(), ParamsAdamW { lr, ..Default::default() })?;
 
-    for epoch in 1:epochs
-        total_loss = 0.0
-        @showprogress for (images, tokens) in train_loader
-            # 勾配計算
-            loss, back = Flux.pullback(ps) do
-                loss, _, _ = clip(images, tokens)
-                return loss
-            end
+    for epoch in 0..epochs {
+        let mut total_loss = 0.0_f64;
+        for (images, tokens) in train_loader {
+            // 勾配計算 & 更新
+            let (loss, _v, _t) = clip.forward(images, tokens)?;
+            opt.backward_step(&loss)?;
+            total_loss += loss.to_scalar::<f64>()?;
+        }
 
-            # 勾配更新
-            grads = back(1.0f0)
-            Flux.update!(opt, ps, grads)
-
-            total_loss += loss
-        end
-
-        avg_loss = total_loss / length(train_loader)
-        println("Epoch $epoch: Loss = $avg_loss")
-    end
-end
+        let avg_loss = total_loss / train_loader.len() as f64;
+        println!("Epoch {}: Loss = {:.4}", epoch, avg_loss);
+    }
+    Ok(())
+}
 ```
 
 #### 4.1.6 Zero-shot推論
 
-```julia
-function zero_shot_classify(clip, image, text_candidates)
-    # 画像埋め込み（ゼロコピースライス）
-    @views v_embed = clip.vision(unsqueeze(image, 4))[:, 1]  # (out_dim,)
+```rust
+fn zero_shot_classify(
+    clip: &Clip,
+    image: &Tensor,           // (C, H, W)
+    text_candidates: &[&str],
+    tokenize: &impl Fn(&str) -> Result<Tensor>,
+) -> Result<(Tensor, usize)> {
+    // 画像埋め込み（ゼロコピースライス）
+    let v_embed = clip.vision.forward(&image.unsqueeze(0)?)?;  // (1, out_dim)
 
-    # テキスト埋め込み（各候補）
-    t_embeds = [@views clip.text(tokenize(t))[:, 1] for t in text_candidates]
+    // テキスト埋め込み（各候補）
+    let t_embeds: Vec<Tensor> = text_candidates
+        .iter()
+        .map(|t| clip.text.forward(&tokenize(t)?))
+        .collect::<Result<_>>()?;
+    let t_embeds = Tensor::cat(&t_embeds, 0)?;  // (N, out_dim)
 
-    # 類似度計算（正規化ベクトルのdot積でコサイン類似度）
-    similarities = dot.(Ref(normalize(v_embed)), normalize.(t_embeds))
+    // 類似度計算（正規化ベクトルのdot積でコサイン類似度）
+    let v_norm = l2_normalize(&v_embed)?;
+    let t_norm = l2_normalize(&t_embeds)?;
+    let tau = clip.temperature.to_scalar::<f64>()?;
+    let similarities = v_norm.matmul(&t_norm.t()?)?.affine(1.0 / tau, 0.0)?;
 
-    # Softmax確率
-    probs = softmax(similarities ./ clip.τ[])
+    // Softmax確率
+    let probs = candle_nn::ops::softmax(&similarities.squeeze(0)?, 0)?;
+    let best = probs.argmax(0)?.to_scalar::<u32>()? as usize;
 
-    return probs, argmax(probs)
-end
+    Ok((probs, best))
+}
 ```
 
 #### 4.1.7 数式↔コード完全対応表
@@ -285,60 +331,61 @@ end
 
 ---
 
-### 4.2 ⚡Julia ViT実装（完全版）
+### 4.2 🦀Rust ViT実装（完全版）
 
 Zone 3.2でViTの理論を学んだ。ここでは、**訓練可能なViT**を完全実装する。
 
 #### 4.2.1 Multi-Head Self-Attentionの実装
 
-```julia
-# Multi-Head Self-Attention
-struct MultiHeadSelfAttention
-    num_heads::Int
-    head_dim::Int
-    qkv::Dense  # Query, Key, Valueを一度に計算
-    proj::Dense
-end
+```rust
+// Multi-Head Self-Attention
+pub struct MultiHeadSelfAttention {
+    num_heads: usize,
+    head_dim: usize,
+    qkv: Linear,   // Query, Key, Valueを一度に計算
+    proj: Linear,
+}
 
-function MultiHeadSelfAttention(embed_dim, num_heads)
-    @assert embed_dim % num_heads == 0
-    head_dim = embed_dim ÷ num_heads
-    qkv = Dense(embed_dim, 3 * embed_dim)  # Q, K, V
-    proj = Dense(embed_dim, embed_dim)
-    return MultiHeadSelfAttention(num_heads, head_dim, qkv, proj)
-end
+impl MultiHeadSelfAttention {
+    pub fn new(embed_dim: usize, num_heads: usize, vb: VarBuilder) -> Result<Self> {
+        assert_eq!(embed_dim % num_heads, 0);
+        let head_dim = embed_dim / num_heads;
+        let qkv = nn::linear(embed_dim, 3 * embed_dim, vb.pp("qkv"))?;  // Q, K, V
+        let proj = nn::linear(embed_dim, embed_dim, vb.pp("proj"))?;
+        Ok(Self { num_heads, head_dim, qkv, proj })
+    }
+}
 
-function (mha::MultiHeadSelfAttention)(x)
-    # x: (embed_dim, N, B)
-    d, N, B = size(x)
-    h = mha.num_heads
-    d_h = mha.head_dim
+impl Module for MultiHeadSelfAttention {
+    fn forward(&self, x: &Tensor) -> Result<Tensor> {
+        // x: (B, N, embed_dim)
+        let (b, n, d) = x.dims3()?;
+        let h = self.num_heads;
+        let d_h = self.head_dim;
 
-    # Q, K, V計算
-    qkv = mha.qkv(x)  # (3*embed_dim, N, B)
-    q, k, v = chunk(qkv, 3, dims=1)  # それぞれ (embed_dim, N, B)
+        // Q, K, V計算
+        let qkv = self.qkv.forward(x)?;  // (B, N, 3*embed_dim)
+        let q = qkv.i((.., .., ..d))?.reshape((b, n, h, d_h))?.transpose(1, 2)?;        // (B, h, N, d_h)
+        let k = qkv.i((.., .., d..2 * d))?.reshape((b, n, h, d_h))?.transpose(1, 2)?;  // (B, h, N, d_h)
+        let v = qkv.i((.., .., 2 * d..))?.reshape((b, n, h, d_h))?.transpose(1, 2)?;   // (B, h, N, d_h)
 
-    # Multi-head形状に変換: (embed_dim, N, B) → (d_h, N, h, B)
-    q = reshape(q, (d_h, h, N, B))
-    k = reshape(k, (d_h, h, N, B))
-    v = reshape(v, (d_h, h, N, B))
+        // Multi-head形状に変換: (B, h, N, d_h)
+        // Attention計算（各ヘッド独立）
+        // scores: (B, h, N, N)
+        let scale = (d_h as f64).sqrt();
+        let scores = q.matmul(&k.transpose(2, 3)?)?.affine(1.0 / scale, 0.0)?;
+        let attn = candle_nn::ops::softmax(&scores, 3)?;
 
-    # Attention計算（各ヘッド独立）
-    # scores: (N, N, h, B)
-    scores = batched_mul(permutedims(q, (3, 1, 2, 4)), permutedims(k, (1, 3, 2, 4))) ./ sqrt(d_h)
-    attn = softmax(scores, dims=2)
+        // Attention適用: (B, h, N, d_h)
+        let out = attn.matmul(&v)?;
 
-    # Attention適用: (d_h, N, h, B)
-    out = batched_mul(permutedims(v, (1, 3, 2, 4)), attn)  # (d_h, N, h, B)
+        // Multi-headを結合: (B, h, N, d_h) → (B, N, embed_dim)
+        let out = out.transpose(1, 2)?.reshape((b, n, d))?;
 
-    # Multi-headを結合: (d_h, N, h, B) → (embed_dim, N, B)
-    out = reshape(permutedims(out, (1, 3, 2, 4)), (d, N, B))
-
-    # 出力プロジェクション
-    out = mha.proj(out)
-
-    return out
-end
+        // 出力プロジェクション
+        self.proj.forward(&out)
+    }
+}
 ```
 
 **数式↔コード対応**:
@@ -353,58 +400,68 @@ $$
 
 #### 4.2.2 ViT訓練パイプライン
 
-```julia
-using Flux, MLDatasets, Images
+```rust
+use candle_core::{DType, Device, Result, Tensor};
+use candle_nn::{AdamW, Optimizer, ParamsAdamW};
 
-# ImageNetデータローダー（簡易版）
-function imagenet_loader(batch_size=32)
-    # 実際はImageNet-1kを使用
-    # ここでは擬似データ
-    images = [randn(Float32, 224, 224, 3) for _ in 1:1000]
-    labels = rand(1:1000, 1000)
-    return DataLoader((images, labels), batchsize=batch_size, shuffle=true)
-end
+// ImageNetデータローダー（簡易版）
+fn imagenet_loader(batch_size: usize) -> Vec<(Tensor, Tensor)> {
+    // 実際はImageNet-1kを使用
+    // ここでは擬似データ
+    let dev = Device::Cpu;
+    (0..1000 / batch_size)
+        .map(|_| {
+            let images = Tensor::randn(0f32, 1.0, (batch_size, 3, 224, 224), &dev).unwrap();
+            let labels = Tensor::zeros((batch_size,), DType::U32, &dev).unwrap();
+            (images, labels)
+        })
+        .collect()
+}
 
-# ViT訓練
-function train_vit(vit, train_loader, epochs=30, lr=3e-4)
-    opt = Adam(lr)
-    ps = Flux.params(vit)
+// ViT訓練
+fn train_vit(
+    vit: &mut VisionTransformer,
+    train_loader: &[(Tensor, Tensor)],
+    test_loader: &[(Tensor, Tensor)],
+    epochs: usize,  // = 30
+    lr: f64,        // = 3e-4
+) -> Result<()> {
+    let varmap = nn::VarMap::new();
+    let mut opt = AdamW::new(varmap.all_vars(), ParamsAdamW { lr, ..Default::default() })?;
 
-    for epoch in 1:epochs
-        for (images, labels) in train_loader
-            loss, back = Flux.pullback(ps) do
-                logits = vit(images)  # (num_classes, B)
-                return Flux.logitcrossentropy(logits, labels)
-            end
+    for epoch in 0..epochs {
+        for (images, labels) in train_loader {
+            let logits = vit.forward(images)?;  // (B, num_classes)
+            let loss = candle_nn::loss::cross_entropy(&logits, labels)?;
+            opt.backward_step(&loss)?;
+        }
 
-            grads = back(1.0f0)
-            Flux.update!(opt, ps, grads)
-        end
+        // 評価
+        let acc = evaluate_vit(vit, test_loader)?;
+        println!("Epoch {}: Accuracy = {:.4}", epoch, acc);
+    }
+    Ok(())
+}
 
-        # 評価
-        acc = evaluate_vit(vit, test_loader)
-        println("Epoch $epoch: Accuracy = $acc")
-    end
-end
-
-function evaluate_vit(vit, test_loader)
-    correct = 0
-    total = 0
-    for (images, labels) in test_loader
-        logits = vit(images)
-        preds = argmax(logits, dims=1)
-        correct += sum(preds .== labels)
-        total += length(labels)
-    end
-    return correct / total
-end
+fn evaluate_vit(vit: &VisionTransformer, test_loader: &[(Tensor, Tensor)]) -> Result<f64> {
+    let mut correct = 0usize;
+    let mut total = 0usize;
+    for (images, labels) in test_loader {
+        let logits = vit.forward(images)?;
+        let preds = logits.argmax(1)?;
+        let matches = preds.eq(labels)?.to_vec1::<u8>()?;
+        correct += matches.iter().filter(|&&x| x != 0).count();
+        total += labels.dim(0)?;
+    }
+    Ok(correct as f64 / total as f64)
+}
 ```
 
 ---
 
 ### 4.3 🦀Rust SmolVLM2推論
 
-JuliaでCLIPを訓練した。次は、**Rustで推論**を実装する。SmolVLM2-256Mは、Rustの`candle`クレートで推論できる。
+RustでCLIPを訓練した。次は、**Rustで推論**を実装する。SmolVLM2-256Mは、Rustの`candle`クレートで推論できる。
 
 #### 4.3.1 Rustプロジェクトセットアップ
 
@@ -553,7 +610,7 @@ fn main() -> Result<()> {
 回答: A cat sitting on a sofa.
 ```
 
-#### 4.3.5 FFI経由でJuliaから呼び出し
+#### 4.3.5 FFI経由でRustから呼び出し
 
 ```rust
 // FFI用のC-ABI関数
@@ -591,29 +648,29 @@ pub extern "C" fn smolvlm2_infer(
 }
 ```
 
-**Juliaから呼び出し**:
+**Rustから呼び出し**:
 
-```julia
-# Rustライブラリをロード
-const libsmolvlm2 = "target/release/libsmolvlm2_inference.so"
+```rust
+// Rustライブラリを同プロセス内で直接呼び出し
+fn rust_smolvlm2_infer(image_path: &str, text: &str) -> anyhow::Result<String> {
+    let inference = SmolVLM2Inference::load(
+        "models/smolvlm2-256m.pth",
+        "models/tokenizer.json",
+    )?;
+    let image = image::open(image_path)?;
+    let input = MultimodalInput {
+        image,
+        text: text.to_string(),
+    };
+    inference.infer(&input)
+}
 
-function rust_smolvlm2_infer(image_path::String, text::String)
-    output_buf = Vector{UInt8}(undef, 1024)
-    ret = ccall(
-        (:smolvlm2_infer, libsmolvlm2),
-        Cint,
-        (Cstring, Cstring, Ptr{UInt8}, Csize_t),
-        image_path, text, output_buf, length(output_buf)
-    )
-    if ret != 0
-        error("推論失敗")
-    end
-    return unsafe_string(pointer(output_buf))
-end
-
-# 使用例
-result = rust_smolvlm2_infer("cat.jpg", "What is in this image?")
-println("回答: $result")
+fn main() -> anyhow::Result<()> {
+    // 使用例
+    let result = rust_smolvlm2_infer("cat.jpg", "What is in this image?")?;
+    println!("回答: {}", result);
+    Ok(())
+}
 ```
 
 ---
@@ -650,50 +707,70 @@ $$
 
 ここで $a_i$ はモデルの予測回答。3人以上のアノテータが同意すれば、スコアは1。
 
-#### 5.1.2 VQA評価実装（Julia）
+#### 5.1.2 VQA評価実装（Rust）
 
-```julia
-using JSON3, Images
+```rust
+use std::collections::HashMap;
 
-# VQAv2データローダー
-struct VQADataset
-    images::Vector{String}  # 画像パス
-    questions::Vector{String}
-    answers::Vector{Vector{String}}  # 各質問に10個の回答
-end
+// VQAv2データローダー
+pub struct VqaDataset {
+    pub images: Vec<String>,       // 画像パス
+    pub questions: Vec<String>,
+    pub answers: Vec<Vec<String>>, // 各質問に10個の回答
+}
 
-function load_vqav2(json_path::String)
-    data = JSON3.read(read(json_path, String))
-    images = [q["image_id"] for q in data["questions"]]
-    questions = [q["question"] for q in data["questions"]]
-    answers = [a["answers"] for a in data["annotations"]]
-    return VQADataset(images, questions, answers)
-end
+pub fn load_vqav2(json_path: &str) -> anyhow::Result<VqaDataset> {
+    let raw = std::fs::read_to_string(json_path)?;
+    let data: serde_json::Value = serde_json::from_str(&raw)?;
+    let images = data["questions"].as_array().unwrap()
+        .iter().map(|q| q["image_id"].as_str().unwrap().to_string()).collect();
+    let questions = data["questions"].as_array().unwrap()
+        .iter().map(|q| q["question"].as_str().unwrap().to_string()).collect();
+    let answers = data["annotations"].as_array().unwrap()
+        .iter()
+        .map(|a| a["answers"].as_array().unwrap()
+            .iter().map(|ans| ans["answer"].as_str().unwrap().to_string()).collect())
+        .collect();
+    Ok(VqaDataset { images, questions, answers })
+}
 
-# VQA Accuracy計算（broadcast でゼロ割り当て）
-function vqa_accuracy(predictions, ground_truths)
-    scores = [min(1.0, sum(lowercase(pred) .== lowercase.(gts)) / 3)
-              for (pred, gts) in zip(predictions, ground_truths)]
-    return mean(scores)
-end
+// VQA Accuracy計算（イテレータチェーンでゼロ割り当て）
+fn vqa_accuracy(predictions: &[String], ground_truths: &[Vec<String>]) -> f64 {
+    let scores: Vec<f64> = predictions
+        .iter()
+        .zip(ground_truths.iter())
+        .map(|(pred, gts)| {
+            let count = gts.iter()
+                .filter(|gt| gt.to_lowercase() == pred.to_lowercase())
+                .count();
+            1.0f64.min(count as f64 / 3.0)
+        })
+        .collect();
+    scores.iter().sum::<f64>() / scores.len() as f64
+}
 
-# SmolVLM2でVQA評価
-function evaluate_vqa(smolvlm2, dataset::VQADataset)
-    predictions = [smolvlm2.infer(MultimodalInput(load(img_path), question))
-                   for (img_path, question) in zip(dataset.images, dataset.questions)]
-    acc = vqa_accuracy(predictions, dataset.answers)
-    println("VQAv2 Accuracy: $(acc * 100)%")
-    return acc
-end
+// SmolVLM2でVQA評価
+fn evaluate_vqa(smolvlm2: &SmolVLM2Inference, dataset: &VqaDataset) -> anyhow::Result<f64> {
+    let predictions: Vec<String> = dataset.images.iter()
+        .zip(dataset.questions.iter())
+        .map(|(img_path, question)| {
+            let image = image::open(img_path)?;
+            smolvlm2.infer(&MultimodalInput { image, text: question.clone() })
+        })
+        .collect::<anyhow::Result<_>>()?;
+    let acc = vqa_accuracy(&predictions, &dataset.answers);
+    println!("VQAv2 Accuracy: {:.1}%", acc * 100.0);
+    Ok(acc)
+}
 ```
 
 #### 5.1.3 VQA評価結果（例）
 
-```julia
-# 擬似評価結果
-vqa_dataset = load_vqav2("vqav2_val.json")
-smolvlm2 = load_smolvlm2("models/smolvlm2-256m.pth")
-acc = evaluate_vqa(smolvlm2, vqa_dataset)
+```rust
+// 擬似評価結果
+let vqa_dataset = load_vqav2("vqav2_val.json")?;
+let smolvlm2 = SmolVLM2Inference::load("models/smolvlm2-256m.pth", "models/tokenizer.json")?;
+let _acc = evaluate_vqa(&smolvlm2, &vqa_dataset)?;
 ```
 
 **出力例**:
@@ -709,7 +786,7 @@ VQAモデルの**弱点**を理解するため、失敗例を見てみよう。
 
 **例1: 数値カウンティング**
 
-```julia
+```rust
 # 質問: "How many cats are in the image?"
 # 正解: "3"
 # SmolVLM2予測: "several"
@@ -721,7 +798,7 @@ VQAモデルの**弱点**を理解するため、失敗例を見てみよう。
 
 **例2: 細かいテキスト読み取り**
 
-```julia
+```rust
 # 質問: "What does the sign say?"
 # 正解: "Stop"
 # SmolVLM2予測: "traffic sign"
@@ -733,7 +810,7 @@ VQAモデルの**弱点**を理解するため、失敗例を見てみよう。
 
 **例3: 推論が必要な質問**
 
-```julia
+```rust
 # 質問: "Is it likely to rain soon?"
 # 画像: 曇り空
 # 正解: "yes"
@@ -768,61 +845,74 @@ COCO Captions[^15]は、Image Captioningの標準ベンチマーク。
 | **SPICE** | Scene Graph一致 | 意味的正確性を測定（物体・属性・関係） | 0-1 |
 | **ROUGE-L** | 最長共通部分列 | 文構造の類似性 | 0-1 |
 
-#### 5.2.2 CIDEr実装（Julia）
+#### 5.2.2 CIDEr実装（Rust）
 
-```julia
-using StatsBase
+```rust
+use std::collections::HashMap;
 
-# CIDEr: Consensus-based Image Description Evaluation
-function cider_score(candidate::String, references::Vector{String})
-    # n-gramのTF-IDF重みを計算
-    candidate_ngrams = extract_ngrams(candidate, n=4)
-    ref_ngrams = [extract_ngrams(ref, n=4) for ref in references]
+// CIDEr: Consensus-based Image Description Evaluation
+fn cider_score(candidate: &str, references: &[&str]) -> f64 {
+    // n-gramのTF-IDF重みを計算
+    let candidate_ngrams = extract_ngrams(candidate, 4);
+    let ref_ngrams: Vec<_> = references.iter().map(|r| extract_ngrams(r, 4)).collect();
 
-    # TF-IDF計算
-    candidate_tfidf = compute_tfidf(candidate_ngrams)
-    ref_tfidfs = [compute_tfidf(ng) for ng in ref_ngrams]
+    // TF-IDF計算
+    let candidate_tfidf = compute_tfidf(&candidate_ngrams);
+    let ref_tfidfs: Vec<_> = ref_ngrams.iter().map(compute_tfidf).collect();
 
-    # コサイン類似度の平均
-    similarities = [cosine_similarity(candidate_tfidf, ref_tf) for ref_tf in ref_tfidfs]
-    return mean(similarities)
-end
+    // コサイン類似度の平均
+    let similarities: Vec<f64> = ref_tfidfs.iter()
+        .map(|rt| cosine_similarity(&candidate_tfidf, rt))
+        .collect();
+    similarities.iter().sum::<f64>() / similarities.len() as f64
+}
 
-function extract_ngrams(text::String, n::Int=4)
-    tokens = split(lowercase(text))
-    ngrams = Dict{String, Int}()
-    @inbounds for i in 1:(length(tokens) - n + 1)
-        ng = join(@views(tokens[i:i+n-1]), " ")
-        ngrams[ng] = get(ngrams, ng, 0) + 1
-    end
-    return ngrams
-end
+fn extract_ngrams(text: &str, n: usize) -> HashMap<String, usize> {
+    let tokens: Vec<&str> = text.to_lowercase().split_whitespace().collect();
+    let mut ngrams = HashMap::new();
+    for i in 0..tokens.len().saturating_sub(n - 1) {
+        let ng = tokens[i..i + n].join(" ");
+        *ngrams.entry(ng).or_insert(0) += 1;
+    }
+    ngrams
+}
 
-function compute_tfidf(ngrams::Dict{String, Int})
-    # 簡易TF-IDF（実際はコーパス全体のIDFを使用）
-    idf = Dict(k => log(1.0 + 1.0 / v) for (k, v) in ngrams)
-    return Dict(k => ngrams[k] * idf[k] for k in keys(ngrams))
-end
+fn compute_tfidf(ngrams: &HashMap<String, usize>) -> HashMap<String, f64> {
+    // 簡易TF-IDF（実際はコーパス全体のIDFを使用）
+    ngrams.iter()
+        .map(|(k, &v)| {
+            let idf = (1.0 + 1.0 / v as f64).ln();
+            (k.clone(), v as f64 * idf)
+        })
+        .collect()
+}
 
-function cosine_similarity(vec1::Dict, vec2::Dict)
-    dot_prod = sum(get(vec1, k, 0.0) * get(vec2, k, 0.0) for k in union(keys(vec1), keys(vec2)))
-    norm1 = sqrt(sum(v^2 for v in values(vec1)))
-    norm2 = sqrt(sum(v^2 for v in values(vec2)))
-    return dot_prod / (norm1 * norm2 + 1e-8)
-end
+fn cosine_similarity(vec1: &HashMap<String, f64>, vec2: &HashMap<String, f64>) -> f64 {
+    let all_keys: std::collections::HashSet<_> = vec1.keys().chain(vec2.keys()).collect();
+    let dot_prod: f64 = all_keys.iter()
+        .map(|k| vec1.get(*k).unwrap_or(&0.0) * vec2.get(*k).unwrap_or(&0.0))
+        .sum();
+    let norm1: f64 = vec1.values().map(|v| v * v).sum::<f64>().sqrt();
+    let norm2: f64 = vec2.values().map(|v| v * v).sum::<f64>().sqrt();
+    dot_prod / (norm1 * norm2 + 1e-8)
+}
 ```
 
 #### 5.2.3 SPICE実装（外部ツール利用）
 
 SPICEは、**Scene Graphベースの評価**なので、外部ツール（Stanford Scene Graph Parser）を使う。
 
-```julia
-# SPICE評価（Pythonスクリプト経由）
-function spice_score(candidate::String, references::Vector{String})
-    # PythonのSPICE実装を呼び出し
-    result = read(`python spice.py --candidate "$candidate" --references $(join(references, "|"))`, String)
-    return parse(Float64, result)
-end
+```rust
+// SPICE評価（外部スクリプト経由）
+fn spice_score(candidate: &str, references: &[&str]) -> anyhow::Result<f64> {
+    // PythonのSPICE実装を呼び出し
+    let refs_arg = references.join("|");
+    let output = std::process::Command::new("python")
+        .args(["spice.py", "--candidate", candidate, "--references", &refs_arg])
+        .output()?;
+    let result = String::from_utf8(output.stdout)?;
+    Ok(result.trim().parse::<f64>()?)
+}
 ```
 
 ---
@@ -833,19 +923,28 @@ end
 
 CLIPのZero-shot分類精度を、ImageNet-1kで測定する。
 
-```julia
-using MLDatasets
+```rust
+// ImageNet-1k評価
+fn evaluate_zero_shot_imagenet(
+    clip: &Clip,
+    imagenet_val: &[(Tensor, u32)],
+    tokenize: &impl Fn(&str) -> Result<Tensor>,
+) -> Result<f64> {
+    // ImageNetクラス名（1000クラス）
+    let class_names = load_imagenet_class_names();
+    let candidates: Vec<&str> = class_names.iter().map(|s| s.as_str()).collect();
 
-# ImageNet-1k評価
-function evaluate_zero_shot_imagenet(clip, imagenet_val)
-    # ImageNetクラス名（1000クラス）
-    class_names = load_imagenet_class_names()
-
-    acc = mean(zero_shot_classify(clip, img, class_names)[2] == label
-               for (img, label) in imagenet_val)
-    println("ImageNet Zero-shot Accuracy: $(acc * 100)%")
-    return acc
-end
+    let mut correct = 0usize;
+    for (img, label) in imagenet_val {
+        let (_, pred) = zero_shot_classify(clip, img, &candidates, tokenize)?;
+        if pred as u32 == *label {
+            correct += 1;
+        }
+    }
+    let acc = correct as f64 / imagenet_val.len() as f64;
+    println!("ImageNet Zero-shot Accuracy: {:.1}%", acc * 100.0);
+    Ok(acc)
+}
 ```
 
 **CLIP-ViT-L/14の結果** (論文値)[^1]:
@@ -859,27 +958,43 @@ ImageNet Zero-shot Accuracy: 75.5%
 
 #### 5.4.1 Recall@K実装
 
-```julia
-# Image-to-Text Retrieval
-function image_to_text_retrieval(clip, images, texts, K=5)
-    recall_at_k = 0
+```rust
+// Image-to-Text Retrieval
+fn image_to_text_retrieval(
+    clip: &Clip,
+    images: &[Tensor],
+    texts: &[&str],
+    k: usize,  // = 5
+    tokenize: &impl Fn(&str) -> Result<Tensor>,
+) -> Result<f64> {
+    let mut recall_at_k = 0usize;
 
-    for (i, img) in enumerate(images)
-        # 画像埋め込み（ゼロコピースライス）
-        @views img_emb = clip.vision(unsqueeze(img, 4))[:, 1]
+    for (i, img) in images.iter().enumerate() {
+        // 画像埋め込み（ゼロコピースライス）
+        let img_emb = clip.vision.forward(&img.unsqueeze(0)?)?;  // (1, out_dim)
 
-        # 全テキスト埋め込み
-        text_embs = [@views clip.text(tokenize(t))[:, 1] for t in texts]
+        // 全テキスト埋め込み
+        let text_embeds: Vec<Tensor> = texts.iter()
+            .map(|t| clip.text.forward(&tokenize(t)?))
+            .collect::<Result<_>>()?;
+        let text_embeds = Tensor::cat(&text_embeds, 0)?;  // (N, out_dim)
 
-        # 類似度計算（broadcast）
-        similarities = dot.(Ref(normalize(img_emb)), normalize.(text_embs))
+        // 類似度計算（broadcast）
+        let img_norm = l2_normalize(&img_emb)?;
+        let txt_norm = l2_normalize(&text_embeds)?;
+        let similarities = img_norm.matmul(&txt_norm.t()?)?.squeeze(0)?;  // (N,)
 
-        # Top-K取得し正解を含むか判定
-        recall_at_k += i ∈ @views sortperm(similarities, rev=true)[1:K]
-    end
+        // Top-K取得し正解を含むか判定
+        let sims_vec = similarities.to_vec1::<f32>()?;
+        let mut indices: Vec<usize> = (0..sims_vec.len()).collect();
+        indices.sort_by(|&a, &b| sims_vec[b].partial_cmp(&sims_vec[a]).unwrap());
+        if indices[..k].contains(&i) {
+            recall_at_k += 1;
+        }
+    }
 
-    return recall_at_k / length(images)
-end
+    Ok(recall_at_k as f64 / images.len() as f64)
+}
 ```
 
 **COCO Captionsでの結果** (CLIP論文値)[^1]:
@@ -900,7 +1015,7 @@ Text-to-Image Recall@5: 68.7%
 - [ ] VQA Accuracyの計算式が正しい（3人以上の合意で1スコア）
 - [ ] CIDErがn-gramのTF-IDFコサイン類似度を計算している
 - [ ] Image-Text Retrievalで双方向（Image→Text, Text→Image）を評価している
-- [ ] Rust推論がJuliaから正しく呼び出せる（FFI経由）
+- [ ] Rust推論がRustから正しく呼び出せる（FFI経由）
 
 > **Note:** **ここまでで全体の85%完了！** Zone 6では、最新研究と全モデルファミリーを俯瞰する。
 
@@ -1088,55 +1203,68 @@ $$
 2. **ShareGPT4V訓練データ**: より多様で高品質なデータセット
 3. **Multi-turn対話**: 複数ラウンドの対話を学習
 
-#### 6.4.3 LLaVAのProduction実装（Julia）
+#### 6.4.3 LLaVAのProduction実装（Rust）
 
-```julia
-using Transformers, Flux
+```rust
+use candle_core::{Result, Tensor};
+use candle_nn::{self as nn, Module, VarBuilder};
 
-struct LLaVA
-    clip_vit::VisionTransformer  # Frozen
-    projection::Chain  # Trainable MLP
-    llm::Vicuna  # Frozen or LoRA
-end
+// LLaVA: Visual Instruction Tuning
+pub struct LLaVA {
+    clip_vit: VisionTransformer,  // Frozen
+    projection: nn::Sequential,   // Trainable MLP
+    llm: Vicuna,                  // Frozen or LoRA
+}
 
-function LLaVA()
-    clip_vit = load_pretrained("openai/clip-vit-large-patch14")
-    projection = Chain(
-        Dense(1024, 4096, gelu),
-        Dense(4096, 4096)
-    )
-    llm = load_pretrained("lmsys/vicuna-7b-v1.5")
-    return LLaVA(clip_vit, projection, llm)
-end
+impl LLaVA {
+    pub fn new(vb: VarBuilder) -> Result<Self> {
+        let clip_vit = VisionTransformer::load_pretrained(
+            "openai/clip-vit-large-patch14", vb.pp("clip_vit"),
+        )?;
+        let projection = nn::seq()
+            .add(nn::linear(1024, 4096, vb.pp("projection.0"))?)
+            .add(nn::Activation::Gelu)
+            .add(nn::linear(4096, 4096, vb.pp("projection.2"))?);
+        let llm = Vicuna::load_pretrained("lmsys/vicuna-7b-v1.5", vb.pp("llm"))?;
+        Ok(Self { clip_vit, projection, llm })
+    }
 
-function (llava::LLaVA)(image, text_prompt)
-    # 画像特徴抽出（Frozen）→ Projection → テキストと連結 → LLM
-    vis_tokens = llava.clip_vit(image) |> llava.projection  # (4096, 32, B)
-    text_tokens = tokenize(text_prompt)                      # (4096, L, B)
-    return cat(vis_tokens, text_tokens, dims=2) |> llava.llm
-end
+    pub fn forward(&self, image: &Tensor, text_tokens: &Tensor) -> Result<Tensor> {
+        // 画像特徴抽出（Frozen）→ Projection → テキストと連結 → LLM
+        let vis_tokens = self.projection.forward(&self.clip_vit.forward(image)?)?;  // (B, 32, 4096)
+        let combined = Tensor::cat(&[&vis_tokens, text_tokens], 1)?;               // (B, L+32, 4096)
+        self.llm.forward(&combined)
+    }
+}
 
-# 訓練（Stage 2: Instruction Tuning）
-function train_llava_stage2(llava, instruct_data, epochs=3)
-    # LoRAを適用
-    apply_lora!(llava.llm, rank=8)
+// 訓練（Stage 2: Instruction Tuning）
+fn train_llava_stage2(
+    llava: &mut LLaVA,
+    instruct_data: &[(Tensor, Tensor, Tensor)],  // (image, prompt_tokens, answer_tokens)
+    epochs: usize,                               // = 3
+) -> Result<()> {
+    // LoRAを適用
+    apply_lora(&mut llava.llm, 8)?;
 
-    opt = Adam(1e-4)
-    ps = Flux.params(llava.projection, llava.llm)  # CLIP ViTは除外
+    let varmap = nn::VarMap::new();
+    let mut opt = nn::AdamW::new(
+        varmap.all_vars(),  // projection + LLM LoRA params (CLIP ViTは除外)
+        nn::ParamsAdamW { lr: 1e-4, ..Default::default() },
+    )?;
 
-    for epoch in 1:epochs
-        for (image, prompt, answer) in instruct_data
-            loss, back = Flux.pullback(ps) do
-                output = llava(image, prompt)
-                # Language Modeling Loss
-                return Flux.logitcrossentropy(output, answer)
-            end
-
-            grads = back(1.0f0)
-            Flux.update!(opt, ps, grads)
-        end
-    end
-end
+    for _epoch in 0..epochs {
+        for (image, prompt, answer) in instruct_data {
+            let output = llava.forward(image, prompt)?;
+            // Language Modeling Loss
+            let loss = nn::loss::cross_entropy(
+                &output.reshape(((), output.dim(2)?))?,
+                answer,
+            )?;
+            opt.backward_step(&loss)?;
+        }
+    }
+    Ok(())
+}
 ```
 
 ### 6.5 Qwen-VL: Dynamic Resolution
@@ -1191,53 +1319,80 @@ $\odot$ は要素ごとの積（Hadamard積）。
 - 訓練時間: 20%短縮
 - 性能: VQAv2 75.3% → 77.8%（重複除去で精度向上）
 
-#### 6.5.3 Qwen-VLの実装（Julia）
+#### 6.5.3 Qwen-VLの実装（Rust）
 
-```julia
-# 2D RoPEの実装（broadcast で簡潔に）
-function rope_2d(x::Int, y::Int, d::Int)
-    θ = @. 10000.0^(-2(0:d÷4-1) / d)
-    x_emb = vcat(cos.(x .* θ), sin.(x .* θ))  # x方向の回転
-    y_emb = vcat(cos.(y .* θ), sin.(y .* θ))  # y方向の回転
-    return vcat(x_emb, y_emb)  # (d,)
-end
+```rust
+use candle_core::{Device, DType, Result, Tensor};
 
-# Dynamic Resolution対応のPatch Embedding
-function dynamic_patch_embed(img::Array{Float32, 3}, patch_size::Int=14)
-    H, W, C = size(img)
+// 2D RoPEの実装（イテレータチェーンで簡潔に）
+fn rope_2d(x: usize, y: usize, d: usize, device: &Device) -> Result<Tensor> {
+    let half = d / 4;
+    let theta: Vec<f64> = (0..half)
+        .map(|i| 10000_f64.powf(-2.0 * i as f64 / d as f64))
+        .collect();
+    let theta = Tensor::from_vec(theta, (half,), device)?;
+    let x_theta = (Tensor::full(x as f64, (half,), device)? * &theta)?;
+    let y_theta = (Tensor::full(y as f64, (half,), device)? * &theta)?;
 
-    # 画像を可変数のパッチに分割
-    num_patches_h = H ÷ patch_size
-    num_patches_w = W ÷ patch_size
+    let x_emb = Tensor::cat(&[x_theta.cos()?, x_theta.sin()?], 0)?;  // x方向の回転
+    let y_emb = Tensor::cat(&[y_theta.cos()?, y_theta.sin()?], 0)?;  // y方向の回転
+    Tensor::cat(&[x_emb, y_emb], 0)  // (d,)
+}
 
-    patches = Vector{Vector{Float32}}()
-    positions = NTuple{2,Int}[]
+// Dynamic Resolution対応のPatch Embedding
+fn dynamic_patch_embed(img: &Tensor, patch_size: usize) -> Result<(Tensor, Vec<(usize, usize)>)> {
+    // img: (C, H, W)
+    let (_, h, w) = img.dims3()?;
+    let num_patches_h = h / patch_size;
+    let num_patches_w = w / patch_size;
 
-    @inbounds for i in 1:num_patches_h, j in 1:num_patches_w
-        # パッチ切り出し（ゼロコピー）
-        @views patch = img[(i-1)*patch_size+1:i*patch_size,
-                    (j-1)*patch_size+1:j*patch_size, :]
-        push!(patches, vec(patch))
-        push!(positions, (i, j))
-    end
+    let mut patches = Vec::new();
+    let mut positions = Vec::new();
 
-    return hcat(patches...), positions  # (P²C, N), [(1,1), (1,2), ...]
-end
+    for i in 0..num_patches_h {
+        for j in 0..num_patches_w {
+            // パッチ切り出し（ゼロコピー）
+            let patch = img.i((
+                ..,
+                i * patch_size..(i + 1) * patch_size,
+                j * patch_size..(j + 1) * patch_size,
+            ))?;
+            patches.push(patch.flatten_all()?);
+            positions.push((i + 1, j + 1));
+        }
+    }
 
-# Attentionに2D RoPEを適用
-function attention_with_2d_rope(Q, K, V, positions, d_k)
-    Q_rope = copy(Q)
-    K_rope = copy(K)
-    @inbounds for (i, (x, y)) in enumerate(positions)
-        rope_emb = rope_2d(x, y, size(Q, 1))
-        @views Q_rope[:, i] .= Q[:, i] .* rope_emb
-        @views K_rope[:, i] .= K[:, i] .* rope_emb
-    end
+    let patch_tensor = Tensor::stack(&patches, 0)?;  // (N, P²C)
+    Ok((patch_tensor, positions))  // (N, P²C), [(1,1), (1,2), ...]
+}
 
-    # Attention計算
-    attn = softmax(Q_rope' * K_rope ./ sqrt(d_k), dims=2)
-    return V * attn'
-end
+// Attentionに2D RoPEを適用
+fn attention_with_2d_rope(
+    q: &Tensor,  // (d, N)
+    k: &Tensor,  // (d, N)
+    v: &Tensor,  // (d, N)
+    positions: &[(usize, usize)],
+    d_k: usize,
+    device: &Device,
+) -> Result<Tensor> {
+    let d = q.dim(0)?;
+    let rope_embs: Vec<Tensor> = positions.iter()
+        .map(|&(px, py)| rope_2d(px, py, d, device))
+        .collect::<Result<_>>()?;
+    let rope_matrix = Tensor::stack(&rope_embs, 1)?;  // (d, N)
+
+    // Q, K に2D RoPEを掛け合わせる
+    let q_rope = (q * &rope_matrix)?;
+    let k_rope = (k * &rope_matrix)?;
+
+    // Attention計算
+    let scale = (d_k as f64).sqrt();
+    let attn = candle_nn::ops::softmax(
+        &q_rope.t()?.matmul(&k_rope)?.affine(1.0 / scale, 0.0)?,
+        1,
+    )?;
+    v.matmul(&attn.t()?)
+}
 ```
 
 #### 6.5.4 Dynamic Resolutionの効果（実験結果）
@@ -1392,8 +1547,8 @@ graph TD
    - Positional Encoding: 2D位置情報を付与
    - Global Attention: 全パッチ間でAttention（CNNより広い受容野）
 
-4. **実装の現実: ⚡Julia訓練 + 🦀Rust推論**
-   - JuliaでCLIP訓練パイプライン（InfoNCE loss実装）
+4. **実装の現実: 🦀Rust訓練 + 🦀Rust推論**
+   - RustでCLIP訓練パイプライン（InfoNCE loss実装）
    - RustでSmolVLM2推論（GGUF/Candle統合）
    - FFI経由で相互運用（Production-ready）
 
@@ -1454,7 +1609,7 @@ graph TD
 **理由**:
 1. **自動微分ライブラリの未成熟**: PyTorchやJAXに比べ、Rustの自動微分（burn, dfdx）はまだ発展途上。
 2. **エコシステムの欠如**: データローダー、オーグメンテーション、分散訓練ツールが不足。
-3. **開発速度**: Rustは型安全だが、実験の反復速度はJuliaやPythonに劣る。
+3. **開発速度**: Rustは型安全だが、実験の反復速度はRustやPythonに劣る。
 
 **Rustの役割**: 訓練済みモデルの**推論**に特化。GGUF/Candleで高速推論を実現。
 
@@ -1469,7 +1624,7 @@ graph TD
 - QLoRAの量子化: 4-bit量子化でメモリ削減
 - Adapterの挿入位置: どこにAdapter層を入れるか
 
-第23回では、これらを⚡Juliaで実装し、CLIPやLLaVAをFine-tuningする。
+第23回では、これらを🦀Rustで実装し、CLIPやLLaVAをFine-tuningする。
 
 </details>
 
@@ -1480,7 +1635,7 @@ graph TD
 | **Day 1** | Zone 0-2 | 1時間 | Quick Start + 直感ゾーン。マルチモーダルの概要を掴む |
 | **Day 2** | Zone 3.1-3.2 | 2時間 | マルチモーダル基礎 + ViT理論。数式を紙に書きながら理解 |
 | **Day 3** | Zone 3.3-3.4 | 2時間 | Cross-Modal Attention + InfoNCE loss導出（Boss Battle） |
-| **Day 4** | Zone 4.1-4.2 | 2時間 | Julia CLIP実装 + ViT実装。実際にコードを動かす |
+| **Day 4** | Zone 4.1-4.2 | 2時間 | Rust CLIP実装 + ViT実装。実際にコードを動かす |
 | **Day 5** | Zone 4.3 | 1.5時間 | Rust SmolVLM2推論 + FFI統合 |
 | **Day 6** | Zone 5 | 2時間 | 評価実装（VQA/Captioning/Zero-shot/Retrieval） |
 | **Day 7** | Zone 6 | 1.5時間 | 振り返り + 最新研究。全体を俯瞰 |
@@ -1506,62 +1661,69 @@ graph TD
 4. **DreamBooth**
    - 「Sksという猫」を学習させる（Few-shot Personalization）
 
-**実装言語**: ⚡Julia (LoRA/QLoRA訓練) + 🦀Rust (量子化推論)
+**実装言語**: 🦀Rust (LoRA/QLoRA訓練) + 🦀Rust (量子化推論)
 
 準備はいいか？ 次回も楽しみにしていてほしい。
 
-### 6.10 進捗トラッカー（Julia実装）
+### 6.10 進捗トラッカー（Rust実装）
 
-```julia
-# 第22回の進捗を記録
-struct Progress
-    lecture_num::Int
-    zones_completed::Vector{String}
-    implementations::Dict{String, Bool}
-    evaluations::Dict{String, Float64}
-end
+```rust
+use std::collections::HashMap;
 
-function track_progress()
-    progress = Progress(
-        22,
-        ["Zone 0", "Zone 1", "Zone 2", "Zone 3", "Zone 4", "Zone 5", "Zone 6", "Zone 7"],
-        Dict(
-            "CLIP Julia" => true,
-            "ViT Julia" => true,
-            "SmolVLM2 Rust" => true,
-            "InfoNCE Loss" => true,
-            "VQA Eval" => true,
-            "Captioning Eval" => true,
-            "Zero-shot Eval" => true,
-            "Retrieval Eval" => true
-        ),
-        Dict(
-            "InfoNCE Loss理解度" => 0.95,
-            "CLIP実装完成度" => 0.90,
-            "Rust推論成功率" => 0.88,
-            "評価実装完成度" => 0.85
-        )
-    )
+// 第22回の進捗を記録
+pub struct Progress {
+    pub lecture_num: u32,
+    pub zones_completed: Vec<String>,
+    pub implementations: HashMap<String, bool>,
+    pub evaluations: HashMap<String, f64>,
+}
 
-    println("=== 第$(progress.lecture_num)回進捗 ===")
-    println("完了Zone: $(join(progress.zones_completed, ", "))")
-    println("\n実装状況:")
-    for (impl, status) in progress.implementations
-        println("  $impl: $(status ? "✓" : "✗")")
-    end
-    println("\n評価指標:")
-    for (metric, score) in progress.evaluations
-        println("  $metric: $(round(score * 100, digits=1))%")
-    end
+fn track_progress() -> Progress {
+    let progress = Progress {
+        lecture_num: 22,
+        zones_completed: vec![
+            "Zone 0", "Zone 1", "Zone 2", "Zone 3",
+            "Zone 4", "Zone 5", "Zone 6", "Zone 7",
+        ].into_iter().map(String::from).collect(),
+        implementations: [
+            ("CLIP Rust",       true),
+            ("ViT Rust",        true),
+            ("SmolVLM2 Rust",   true),
+            ("InfoNCE Loss",    true),
+            ("VQA Eval",        true),
+            ("Captioning Eval", true),
+            ("Zero-shot Eval",  true),
+            ("Retrieval Eval",  true),
+        ].iter().map(|&(k, v)| (k.to_string(), v)).collect(),
+        evaluations: [
+            ("InfoNCE Loss理解度", 0.95),
+            ("CLIP実装完成度",     0.90),
+            ("Rust推論成功率",     0.88),
+            ("評価実装完成度",     0.85),
+        ].iter().map(|&(k, v)| (k.to_string(), v)).collect(),
+    };
 
-    overall = mean(values(progress.evaluations))
-    println("\n総合理解度: $(round(overall * 100, digits=1))%")
+    println!("=== 第{}回進捗 ===", progress.lecture_num);
+    println!("完了Zone: {}", progress.zones_completed.join(", "));
+    println!("\n実装状況:");
+    for (impl_name, status) in &progress.implementations {
+        println!("  {}: {}", impl_name, if *status { "✓" } else { "✗" });
+    }
+    println!("\n評価指標:");
+    for (metric, score) in &progress.evaluations {
+        println!("  {}: {:.1}%", metric, score * 100.0);
+    }
+    let overall: f64 = progress.evaluations.values().sum::<f64>()
+        / progress.evaluations.len() as f64;
+    println!("\n総合理解度: {:.1}%", overall * 100.0);
 
-    return progress
-end
+    progress
+}
 
-# 実行
-track_progress()
+// 実行
+fn main() {
+    track_progress();
+}
 ```
 
 **出力例**:
@@ -1570,8 +1732,8 @@ track_progress()
 完了Zone: Zone 0, Zone 1, Zone 2, Zone 3, Zone 4, Zone 5, Zone 6, Zone 7
 
 実装状況:
-  CLIP Julia: ✓
-  ViT Julia: ✓
+  CLIP Rust: ✓
+  ViT Rust: ✓
   SmolVLM2 Rust: ✓
   InfoNCE Loss: ✓
   VQA Eval: ✓

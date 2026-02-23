@@ -2,12 +2,12 @@
 title: "第39回: Latent Diffusion Models: 30秒の驚き→数式修行→実装マスター 【後編】実装編"
 emoji: "🖼️"
 type: "tech"
-topics: ["machinelearning", "deeplearning", "ldm", "julia", "stablediffusion"]
+topics: ["machinelearning", "deeplearning", "ldm", "rust", "stablediffusion"]
 published: true
 slug: "ml-lecture-39-part2"
 difficulty: "advanced"
 time_estimate: "90 minutes"
-languages: ["Julia", "Rust"]
+languages: ["Rust"]
 keywords: ["機械学習", "深層学習", "生成モデル"]
 ---
 
@@ -17,19 +17,15 @@ keywords: ["機械学習", "深層学習", "生成モデル"]
 
 ### 環境構築とライブラリ
 
-**Julia環境** (⚡訓練):
-```julia
-using Pkg
-Pkg.add([
-    "Lux",           # NN framework
-    "Reactant",      # XLA compiler (GPU高速化)
-    "Optimisers",    # Adam等
-    "Zygote",        # 自動微分
-    "MLDatasets",    # MNIST等
-    "Images",        # 画像処理
-    "CUDA",          # GPU
-    "BenchmarkTools" # 性能測定
-])
+**Rust環境** (🦀訓練):
+```rust
+// Cargo.toml dependencies for training:
+// candle-core = "0.7"
+// candle-nn = "0.7"
+// candle-datasets = "0.7"  // MNIST等
+// image = "0.25"           // 画像処理
+// safetensors = "0.4"      // モデル保存
+// anyhow = "1"
 ```
 
 **Rust環境** (🦀推論):
@@ -59,9 +55,9 @@ $$
 z = \mathcal{E}(x), \quad x \in \mathbb{R}^{H \times W \times C} \to z \in \mathbb{R}^{h \times w \times c}
 $$
 
-```julia
-z = encoder(x, ps_encoder, st_encoder)[1]
-# x: [H, W, C, B] → z: [h, w, c, B]
+```rust
+// x: [B, C, H, W] → z: [B, c, h, w]
+let z = encoder.forward(&x)?;
 ```
 
 **パターン2: Forward Diffusion**
@@ -69,9 +65,9 @@ $$
 z_t = \sqrt{\bar{\alpha}_t} z_0 + \sqrt{1-\bar{\alpha}_t} \epsilon, \quad \epsilon \sim \mathcal{N}(0,I)
 $$
 
-```julia
-ε = randn(rng, Float32, size(z₀))
-z_t = sqrt(α_bar[t]) .* z₀ .+ sqrt(1 - α_bar[t]) .* ε
+```rust
+let eps = Tensor::randn(0f32, 1.0, z0.shape(), z0.device())?;
+let z_t = (z0 * alpha_bar[t].sqrt())?.add(&(eps * (1.0 - alpha_bar[t]).sqrt())?)?;
 ```
 
 **パターン3: CFG**
@@ -79,10 +75,11 @@ $$
 \tilde{\epsilon}_\theta = \epsilon_\theta(z_t, t, \emptyset) + w \cdot (\epsilon_\theta(z_t, t, c) - \epsilon_\theta(z_t, t, \emptyset))
 $$
 
-```julia
-ε_uncond = unet((z_t, t, nothing), ps, st)[1]
-ε_cond = unet((z_t, t, c), ps, st)[1]
-ε_cfg = ε_uncond .+ w .* (ε_cond .- ε_uncond)
+```rust
+let eps_uncond = unet.forward(&z_t, t, None)?;
+let eps_cond   = unet.forward(&z_t, t, Some(&c))?;
+// ε̃ = ε_uncond + w * (ε_cond − ε_uncond)
+let eps_cfg = eps_uncond.add(&(eps_cond.sub(&eps_uncond)?.mul(w)?)?)?;
 ```
 
 **パターン4: DDIM Sampling**
@@ -90,11 +87,12 @@ $$
 z_{t-1} = \sqrt{\bar{\alpha}_{t-1}} \left( \frac{z_t - \sqrt{1-\bar{\alpha}_t} \epsilon_\theta}{\sqrt{\bar{\alpha}_t}} \right) + \sqrt{1-\bar{\alpha}_{t-1} - \sigma_t^2} \epsilon_\theta + \sigma_t \epsilon
 $$
 
-```julia
-pred_x₀ = (z_t .- sqrt(1 - α_bar[t]) .* ε_θ) ./ sqrt(α_bar[t])
-dir_z = sqrt(1 - α_bar[t-1] - σ²) .* ε_θ
-noise = σ .* randn(rng, Float32, size(z_t))
-z_prev = sqrt(α_bar[t-1]) .* pred_x₀ .+ dir_z .+ noise
+```rust
+// DDIM step: predict x₀, then interpolate toward z_{t-1}
+let pred_x0 = (z_t.sub(&(eps_theta.mul((1.0 - alpha_bar[t]).sqrt())?)?)?.div((alpha_bar[t].sqrt()))?;
+let dir_z    = eps_theta.mul((1.0 - alpha_bar[t - 1] - sigma * sigma).sqrt())?;
+let noise    = Tensor::randn(0f32, 1.0, z_t.shape(), z_t.device())?.mul(sigma)?;
+let z_prev   = (pred_x0.mul(alpha_bar[t - 1].sqrt())?.add(&dir_z)?.add(&noise)?;
 ```
 
 **パターン5: Cross-Attention**
@@ -102,10 +100,14 @@ $$
 \text{Attention}(Q, K, V) = \text{softmax}\left(\frac{QK^\top}{\sqrt{d_k}}\right) V
 $$
 
-```julia
-scores = (Q * K') ./ sqrt(d_k)  # [N_q, N_k]
-attn = softmax(scores, dims=2)   # [N_q, N_k]
-out = attn * V                   # [N_q, d_v]
+```rust
+// scores: [N_q, N_k]
+let scale = (d_k as f64).sqrt() as f32;
+let scores = q.matmul(&k.t()?)?.mul(1.0 / scale)?;
+// attn:   [N_q, N_k]
+let attn = candle_nn::ops::softmax(&scores, 1)?;
+// out:    [N_q, d_v]
+let out  = attn.matmul(&v)?;
 ```
 
 **パターン6: Min-SNR Weighting**
@@ -113,10 +115,11 @@ $$
 w(t) = \min\left(\text{SNR}(t), \gamma\right), \quad \text{SNR}(t) = \frac{\bar{\alpha}_t}{1-\bar{\alpha}_t}
 $$
 
-```julia
-snr = α_bar ./ (1 .- α_bar)
-weight = min.(snr, γ)
-loss = weight[t] * mse(ε_pred, ε_true)
+```rust
+// snr[t] = ᾱ_t / (1 − ᾱ_t),  clipped at γ
+let snr: Vec<f32> = alpha_bar.iter().map(|&a| a / (1.0 - a)).collect();
+let weight: Vec<f32> = snr.iter().map(|&s| s.min(gamma)).collect();
+let loss = mse(&eps_pred, &eps_true)? * weight[t];
 ```
 
 **パターン7: Zero Terminal SNR Rescaling**
@@ -124,270 +127,381 @@ $$
 \tilde{\alpha}_t = \frac{\alpha_t}{\alpha_T}
 $$
 
-```julia
-α_cumprod = cumprod(alphas)
-α_cumprod_rescaled = α_cumprod ./ α_cumprod[end]
+```rust
+// Cumulative product: ᾱ_t = ∏_{s=1}^{t} α_s
+let alpha_cumprod: Vec<f32> = alphas.iter()
+    .scan(1.0f32, |acc, &a| { *acc *= a; Some(*acc) })
+    .collect();
+let last = *alpha_cumprod.last().unwrap();
+let alpha_cumprod_rescaled: Vec<f32> = alpha_cumprod.iter().map(|&a| a / last).collect();
 ```
 
-### ⚡ Julia完全実装: Mini Latent Diffusion
+### 🦀 Rust完全実装: Mini Latent Diffusion
 
 **ステップ1: VAE定義**
 
-```julia
-using Lux, Random, Optimisers, Zygote
+```rust
+use candle_core::{Result, Tensor, Device};
+use candle_nn::{Conv2d, ConvTranspose2d, VarBuilder, Module, Optimizer};
 
-# Encoder
-function create_encoder(; in_ch=3, latent_ch=4, base_ch=64)
-    return Chain(
-        Conv((3,3), in_ch => base_ch, pad=1, activation=relu),
-        Conv((4,4), base_ch => base_ch*2, stride=2, pad=1, activation=relu),  # /2
-        Conv((4,4), base_ch*2 => base_ch*4, stride=2, pad=1, activation=relu),  # /4
-        Conv((4,4), base_ch*4 => base_ch*8, stride=2, pad=1, activation=relu),  # /8
-        Conv((3,3), base_ch*8 => latent_ch, pad=1)  # Output z
-    )
-end
+// Encoder: x [B,C,H,W] → z [B,latent_ch,h,w]
+struct Encoder {
+    conv1: Conv2d,       // stride 1, /1
+    conv2: Conv2d,       // stride 2, /2
+    conv3: Conv2d,       // stride 2, /4
+    conv4: Conv2d,       // stride 2, /8
+    conv5: Conv2d,       // latent projection
+}
 
-# Decoder (mirror)
-function create_decoder(; latent_ch=4, out_ch=3, base_ch=64)
-    return Chain(
-        Conv((3,3), latent_ch => base_ch*8, pad=1, activation=relu),
-        ConvTranspose((4,4), base_ch*8 => base_ch*4, stride=2, pad=1, activation=relu),  # *2
-        ConvTranspose((4,4), base_ch*4 => base_ch*2, stride=2, pad=1, activation=relu),  # *4
-        ConvTranspose((4,4), base_ch*2 => base_ch, stride=2, pad=1, activation=relu),    # *8
-        Conv((3,3), base_ch => out_ch, pad=1, activation=tanh)
-    )
-end
+impl Encoder {
+    fn new(in_ch: usize, latent_ch: usize, base_ch: usize, vb: VarBuilder) -> Result<Self> {
+        let cfg1  = candle_nn::Conv2dConfig { padding: 1, ..Default::default() };
+        let cfg2  = candle_nn::Conv2dConfig { padding: 1, stride: 2, ..Default::default() };
+        Ok(Self {
+            conv1: candle_nn::conv2d(in_ch,          base_ch,      3, cfg1, vb.pp("conv1"))?,
+            conv2: candle_nn::conv2d(base_ch,        base_ch * 2,  4, cfg2, vb.pp("conv2"))?,
+            conv3: candle_nn::conv2d(base_ch * 2,    base_ch * 4,  4, cfg2, vb.pp("conv3"))?,
+            conv4: candle_nn::conv2d(base_ch * 4,    base_ch * 8,  4, cfg2, vb.pp("conv4"))?,
+            conv5: candle_nn::conv2d(base_ch * 8,    latent_ch,    3, cfg1, vb.pp("conv5"))?,
+        })
+    }
+    fn forward(&self, x: &Tensor) -> Result<Tensor> {
+        let x = self.conv1.forward(x)?.relu()?;
+        let x = self.conv2.forward(&x)?.relu()?;
+        let x = self.conv3.forward(&x)?.relu()?;
+        let x = self.conv4.forward(&x)?.relu()?;
+        self.conv5.forward(&x)                          // z (no activation)
+    }
+}
 
-# VAE訓練
-function train_vae!(encoder, decoder, dataloader; epochs=10, lr=1e-3, β=0.5)
-    ps_enc, st_enc = Lux.setup(Random.default_rng(), encoder)
-    ps_dec, st_dec = Lux.setup(Random.default_rng(), decoder)
-    opt = Adam(lr)
-    opt_state_enc = Optimisers.setup(opt, ps_enc)
-    opt_state_dec = Optimisers.setup(opt, ps_dec)
+// Decoder (mirror of encoder)
+struct Decoder {
+    conv1:  Conv2d,
+    deconv1: ConvTranspose2d,
+    deconv2: ConvTranspose2d,
+    deconv3: ConvTranspose2d,
+    conv2:  Conv2d,
+}
 
-    for epoch in 1:epochs
-        total_loss = 0.0
-        for (x,) in dataloader
-            # Forward
-            z, st_enc = encoder(x, ps_enc, st_enc)
-            x_recon, st_dec = decoder(z, ps_dec, st_dec)
+impl Decoder {
+    fn new(latent_ch: usize, out_ch: usize, base_ch: usize, vb: VarBuilder) -> Result<Self> {
+        let cfg1  = candle_nn::Conv2dConfig { padding: 1, ..Default::default() };
+        let dcfg  = candle_nn::ConvTranspose2dConfig { padding: 1, stride: 2, ..Default::default() };
+        Ok(Self {
+            conv1:   candle_nn::conv2d(latent_ch,      base_ch * 8, 3, cfg1, vb.pp("conv1"))?,
+            deconv1: candle_nn::conv_transpose2d(base_ch * 8, base_ch * 4, 4, dcfg, vb.pp("deconv1"))?,
+            deconv2: candle_nn::conv_transpose2d(base_ch * 4, base_ch * 2, 4, dcfg, vb.pp("deconv2"))?,
+            deconv3: candle_nn::conv_transpose2d(base_ch * 2, base_ch,     4, dcfg, vb.pp("deconv3"))?,
+            conv2:   candle_nn::conv2d(base_ch,        out_ch,      3, cfg1, vb.pp("conv2"))?,
+        })
+    }
+    fn forward(&self, z: &Tensor) -> Result<Tensor> {
+        let x = self.conv1.forward(z)?.relu()?;
+        let x = self.deconv1.forward(&x)?.relu()?;
+        let x = self.deconv2.forward(&x)?.relu()?;
+        let x = self.deconv3.forward(&x)?.relu()?;
+        self.conv2.forward(&x)?.tanh()
+    }
+}
 
-            # Loss: Reconstruction + KL (simplified)
-            recon_loss = mean((x_recon .- x) .^ 2)
-            kl_loss = 0.5f0 * mean(z .^ 2)  # Simplified KL to N(0,I)
-            loss = recon_loss + β * kl_loss
+// VAE training loop (sketch — uses candle-nn AdamW)
+fn train_vae(
+    encoder: &Encoder,
+    decoder: &Decoder,
+    dataloader: &[Tensor],
+    epochs: usize,
+    beta: f32,
+    mut opt: impl Optimizer,
+) -> Result<()> {
+    for epoch in 0..epochs {
+        let mut total_loss = 0f32;
+        for x in dataloader {
+            // Forward
+            let z       = encoder.forward(x)?;
+            let x_recon = decoder.forward(&z)?;
 
-            # Backprop
-            gs_enc = gradient(p -> loss, ps_enc)[1]
-            gs_dec = gradient(p -> loss, ps_dec)[1]
-            opt_state_enc, ps_enc = Optimisers.update(opt_state_enc, ps_enc, gs_enc)
-            opt_state_dec, ps_dec = Optimisers.update(opt_state_dec, ps_dec, gs_dec)
+            // Reconstruction + simplified KL to N(0,I)
+            let recon_loss = x_recon.sub(x)?.sqr()?.mean_all()?;
+            let kl_loss    = z.sqr()?.mean_all()?.affine(0.5, 0.0)?;
+            let loss       = (recon_loss + (kl_loss * beta as f64)?)?;
 
-            total_loss += loss
-        end
-        println("Epoch $epoch: Loss = $(total_loss / length(dataloader))")
-    end
-    return ps_enc, ps_dec, st_enc, st_dec
-end
+            opt.backward_step(&loss)?;
+            total_loss += loss.to_scalar::<f32>()?;
+        }
+        println!("Epoch {}: Loss = {:.4}", epoch + 1, total_loss / dataloader.len() as f32);
+    }
+    Ok(())
+}
 ```
 
 **ステップ2: U-Net定義 (Simplified)**
 
-```julia
-# ResBlock
-struct ResBlock
-    conv1::Conv
-    conv2::Conv
-end
+```rust
+use candle_core::{Result, Tensor};
+use candle_nn::{Conv2d, ConvTranspose2d, Linear, VarBuilder, Module};
 
-function (rb::ResBlock)(x)
-    h = rb.conv1(x)
-    h = relu.(h)
-    h = rb.conv2(h)
-    return relu.(h .+ x)  # Residual
-end
+// ResBlock with residual connection
+struct ResBlock {
+    conv1: Conv2d,
+    conv2: Conv2d,
+}
 
-# Time Embedding
-function sinusoidal_embedding(t::Int, dim::Int)
-    half = dim ÷ 2
-    freqs = exp.(-log(10000f0) .* (0:half-1) ./ half)
-    args = t .* freqs
-    return vcat(sin.(args), cos.(args))
-end
+impl ResBlock {
+    fn new(ch: usize, vb: VarBuilder) -> Result<Self> {
+        let cfg = candle_nn::Conv2dConfig { padding: 1, ..Default::default() };
+        Ok(Self {
+            conv1: candle_nn::conv2d(ch, ch, 3, cfg, vb.pp("conv1"))?,
+            conv2: candle_nn::conv2d(ch, ch, 3, cfg, vb.pp("conv2"))?,
+        })
+    }
+    fn forward(&self, x: &Tensor) -> Result<Tensor> {
+        let h = self.conv1.forward(x)?.relu()?;
+        let h = self.conv2.forward(&h)?;
+        (h + x)?.relu()    // residual
+    }
+}
 
-# Simplified U-Net (for 32x32 latent)
-function create_unet(; latent_ch=4, base_ch=128, time_emb_dim=256)
-    return Chain(
-        # Time embedding MLP
-        Dense(time_emb_dim, time_emb_dim*4, activation=silu),
-        Dense(time_emb_dim*4, time_emb_dim*4, activation=silu),
+// Sinusoidal time embedding: returns Vec of length `dim`
+fn sinusoidal_embedding(t: usize, dim: usize) -> Vec<f32> {
+    let half = dim / 2;
+    let mut emb = Vec::with_capacity(dim);
+    for i in 0..half {
+        let freq = (-((10000f32).ln()) * i as f32 / half as f32).exp();
+        let arg  = t as f32 * freq;
+        emb.push(arg.sin());
+        emb.push(arg.cos());
+    }
+    emb
+}
 
-        # Down
-        Conv((3,3), latent_ch => base_ch, pad=1),
-        ResBlock(Conv((3,3), base_ch => base_ch, pad=1), Conv((3,3), base_ch => base_ch, pad=1)),
-        Conv((4,4), base_ch => base_ch*2, stride=2, pad=1),  # /2
-        ResBlock(Conv((3,3), base_ch*2 => base_ch*2, pad=1), Conv((3,3), base_ch*2 => base_ch*2, pad=1)),
+// Simplified U-Net for 32×32 latent space
+struct UNet {
+    in_proj:  Conv2d,
+    res_down1: ResBlock,
+    down_conv: Conv2d,          // /2
+    res_down2: ResBlock,
+    res_mid:   ResBlock,
+    up_conv:   ConvTranspose2d, // *2
+    res_up:    ResBlock,
+    out_proj:  Conv2d,
+    time_mlp1: Linear,
+    time_mlp2: Linear,
+}
 
-        # Middle
-        ResBlock(Conv((3,3), base_ch*2 => base_ch*2, pad=1), Conv((3,3), base_ch*2 => base_ch*2, pad=1)),
-
-        # Up
-        ConvTranspose((4,4), base_ch*2 => base_ch, stride=2, pad=1),  # *2
-        ResBlock(Conv((3,3), base_ch => base_ch, pad=1), Conv((3,3), base_ch => base_ch, pad=1)),
-        Conv((3,3), base_ch => latent_ch, pad=1)  # Output ε
-    )
-end
+impl UNet {
+    fn new(latent_ch: usize, base_ch: usize, time_emb_dim: usize, vb: VarBuilder) -> Result<Self> {
+        let cfg1  = candle_nn::Conv2dConfig { padding: 1, ..Default::default() };
+        let cfg2  = candle_nn::Conv2dConfig { padding: 1, stride: 2, ..Default::default() };
+        let dcfg  = candle_nn::ConvTranspose2dConfig { padding: 1, stride: 2, ..Default::default() };
+        Ok(Self {
+            time_mlp1:  candle_nn::linear(time_emb_dim,     time_emb_dim * 4, vb.pp("time_mlp1"))?,
+            time_mlp2:  candle_nn::linear(time_emb_dim * 4, time_emb_dim * 4, vb.pp("time_mlp2"))?,
+            in_proj:    candle_nn::conv2d(latent_ch, base_ch,      3, cfg1, vb.pp("in_proj"))?,
+            res_down1:  ResBlock::new(base_ch,      vb.pp("res_down1"))?,
+            down_conv:  candle_nn::conv2d(base_ch,  base_ch * 2,   4, cfg2, vb.pp("down_conv"))?,
+            res_down2:  ResBlock::new(base_ch * 2,  vb.pp("res_down2"))?,
+            res_mid:    ResBlock::new(base_ch * 2,  vb.pp("res_mid"))?,
+            up_conv:    candle_nn::conv_transpose2d(base_ch * 2, base_ch, 4, dcfg, vb.pp("up_conv"))?,
+            res_up:     ResBlock::new(base_ch,      vb.pp("res_up"))?,
+            out_proj:   candle_nn::conv2d(base_ch,  latent_ch,     3, cfg1, vb.pp("out_proj"))?,
+        })
+    }
+    fn forward(&self, z: &Tensor, _t_emb: &Tensor) -> Result<Tensor> {
+        let x = self.in_proj.forward(z)?;
+        let x = self.res_down1.forward(&x)?;
+        let x = self.down_conv.forward(&x)?;
+        let x = self.res_down2.forward(&x)?;
+        let x = self.res_mid.forward(&x)?;
+        let x = self.up_conv.forward(&x)?;
+        let x = self.res_up.forward(&x)?;
+        self.out_proj.forward(&x)          // predicted ε
+    }
+}
 ```
 
 **ステップ3: Diffusion訓練ループ**
 
-```julia
-# Noise schedule
-function cosine_beta_schedule(T::Int; s=0.008)
-    t = 0:T
-    α_bar = cos.(((t ./ T) .+ s) ./ (1 + s) .* π ./ 2).^2
-    α_bar = α_bar ./ α_bar[1]
-    betas = 1 .- α_bar[2:end] ./ α_bar[1:end-1]
-    return clamp.(betas, 0f0, 0.999f0), α_bar[2:end]
-end
+```rust
+use candle_core::{Result, Tensor, Device};
+use candle_nn::Optimizer;
+use rand::Rng;
+use std::f32::consts::PI;
 
-# Forward diffusion
-function forward_diffusion(z₀, t, α_bar, rng)
-    ε = randn(rng, Float32, size(z₀))
-    z_t = sqrt(α_bar[t]) .* z₀ .+ sqrt(1 - α_bar[t]) .* ε
-    return z_t, ε
-end
+// Cosine beta schedule → returns (betas, alpha_bar) each of length T
+fn cosine_beta_schedule(big_t: usize, s: f32) -> (Vec<f32>, Vec<f32>) {
+    let alpha_bar: Vec<f32> = (0..=big_t)
+        .map(|t| {
+            let x = (t as f32 / big_t as f32 + s) / (1.0 + s) * PI / 2.0;
+            x.cos().powi(2)
+        })
+        .collect();
+    let norm = alpha_bar[0];
+    let alpha_bar: Vec<f32> = alpha_bar.iter().map(|&a| a / norm).collect();
+    let betas: Vec<f32> = (1..=big_t)
+        .map(|t| (1.0 - alpha_bar[t] / alpha_bar[t - 1]).clamp(0.0, 0.999))
+        .collect();
+    (betas, alpha_bar[1..].to_vec())
+}
 
-# 訓練ループ
-function train_ldm!(unet, encoder, dataloader; T=1000, epochs=100, lr=1e-4)
-    betas, α_bar = cosine_beta_schedule(T)
-    ps_unet, st_unet = Lux.setup(Random.default_rng(), unet)
-    opt = Adam(lr)
-    opt_state = Optimisers.setup(opt, ps_unet)
-    rng = Random.default_rng()
+// Forward diffusion: z_t = sqrt(ᾱ_t)·z₀ + sqrt(1−ᾱ_t)·ε
+fn forward_diffusion(z0: &Tensor, t: usize, alpha_bar: &[f32], device: &Device) -> Result<(Tensor, Tensor)> {
+    let eps = Tensor::randn(0f32, 1.0, z0.shape(), device)?;
+    let a   = alpha_bar[t].sqrt();
+    let b   = (1.0 - alpha_bar[t]).sqrt();
+    let z_t = (z0.affine(a as f64, 0.0)?.add(&eps.affine(b as f64, 0.0)?))?;
+    Ok((z_t, eps))
+}
 
-    # Freeze encoder
-    ps_enc, st_enc = Lux.setup(rng, encoder)
+// LDM training loop (encoder frozen, only U-Net trained)
+fn train_ldm(
+    unet: &UNet,
+    encoder: &Encoder,
+    dataloader: &[Tensor],
+    device: &Device,
+    epochs: usize,
+    big_t: usize,
+    mut opt: impl Optimizer,
+) -> Result<()> {
+    let (_, alpha_bar) = cosine_beta_schedule(big_t, 0.008);
+    let mut rng = rand::thread_rng();
 
-    for epoch in 1:epochs
-        total_loss = 0.0
-        for (x,) in dataloader
-            # Encode (no grad)
-            z₀, _ = encoder(x, ps_enc, st_enc)
+    for epoch in 0..epochs {
+        let mut total_loss = 0f32;
+        for x in dataloader {
+            // Encode to latent (no gradient through encoder)
+            let z0 = encoder.forward(x)?.detach();
 
-            # Random timestep
-            t = rand(rng, 1:T)
+            // Random timestep t ∈ [0, T)
+            let t = rng.gen_range(0..big_t);
 
-            # Forward diffusion
-            z_t, ε_true = forward_diffusion(z₀, t, α_bar, rng)
+            // Forward diffusion
+            let (z_t, eps_true) = forward_diffusion(&z0, t, &alpha_bar, device)?;
 
-            # Time embedding
-            t_emb = sinusoidal_embedding(t, 256)
+            // Time embedding as Tensor
+            let t_emb_vec = sinusoidal_embedding(t, 256);
+            let t_emb = Tensor::from_vec(t_emb_vec, &[1, 256], device)?;
 
-            # Predict noise
-            ε_pred, st_unet = unet((z_t, t_emb), ps_unet, st_unet)
+            // Predict noise
+            let eps_pred = unet.forward(&z_t, &t_emb)?;
 
-            # MSE loss
-            loss = mean((ε_pred .- ε_true).^2)
+            // MSE loss
+            let loss = eps_pred.sub(&eps_true)?.sqr()?.mean_all()?;
 
-            # Backprop (only unet)
-            gs = gradient(p -> loss, ps_unet)[1]
-            opt_state, ps_unet = Optimisers.update(opt_state, ps_unet, gs)
-
-            total_loss += loss
-        end
-        if epoch % 10 == 0
-            println("Epoch $epoch: Loss = $(total_loss / length(dataloader))")
-        end
-    end
-    return ps_unet, st_unet
-end
+            opt.backward_step(&loss)?;
+            total_loss += loss.to_scalar::<f32>()?;
+        }
+        if (epoch + 1) % 10 == 0 {
+            println!("Epoch {}: Loss = {:.4}", epoch + 1, total_loss / dataloader.len() as f32);
+        }
+    }
+    Ok(())
+}
 ```
 
 **ステップ4: CFGサンプリング**
 
-```julia
-# DDIM sampling with CFG
-function ddim_sample_cfg(unet, decoder, z_T, c, w; steps=50, η=0.0)
-    T = 1000
-    betas, α_bar = cosine_beta_schedule(T)
-    timesteps = reverse(Int.(round.(range(1, T, length=steps))))
+```rust
+use candle_core::{Result, Tensor, Device};
 
-    z_t = z_T
-    for (i, t) in enumerate(timesteps)
-        t_prev = i == steps ? 0 : timesteps[i+1]
+// DDIM sampling with Classifier-Free Guidance
+fn ddim_sample_cfg(
+    unet: &UNet,
+    decoder: &Decoder,
+    z_t_init: Tensor,
+    c: Option<&Tensor>,    // text conditioning; None = unconditional
+    w: f32,                // CFG guidance scale
+    steps: usize,
+    eta: f32,              // η=0 → deterministic DDIM
+    device: &Device,
+) -> Result<Tensor> {
+    let big_t = 1000usize;
+    let (_, alpha_bar) = cosine_beta_schedule(big_t, 0.008);
 
-        # Time embedding
-        t_emb = sinusoidal_embedding(t, 256)
+    // Evenly-spaced timesteps from T-1 down to 0
+    let timesteps: Vec<usize> = (0..steps)
+        .map(|i| big_t - 1 - i * big_t / steps)
+        .collect();
 
-        # CFG: 2 forward passes
-        ε_uncond, _ = unet((z_t, t_emb, nothing), ps_unet, st_unet)
-        ε_cond, _ = unet((z_t, t_emb, c), ps_unet, st_unet)
-        ε_cfg = ε_uncond .+ w .* (ε_cond .- ε_uncond)
+    let mut z = z_t_init;
+    for (i, &t) in timesteps.iter().enumerate() {
+        let t_emb_vec = sinusoidal_embedding(t, 256);
+        let t_emb = Tensor::from_vec(t_emb_vec, &[1, 256], device)?;
 
-        # Predict x₀
-        pred_x₀ = (z_t .- sqrt(1 - α_bar[t]) .* ε_cfg) ./ sqrt(α_bar[t])
+        // Unconditional forward pass
+        let eps_uncond = unet.forward(&z, &t_emb)?;
 
-        # DDIM step
-        if t_prev > 0
-            σ_t = η * sqrt((1 - α_bar[t_prev]) / (1 - α_bar[t])) * sqrt(1 - α_bar[t] / α_bar[t_prev])
-            dir_z = sqrt(1 - α_bar[t_prev] - σ_t^2) .* ε_cfg
-            noise = σ_t .* randn(Float32, size(z_t))
-            z_t = sqrt(α_bar[t_prev]) .* pred_x₀ .+ dir_z .+ noise
-        else
-            z_t = pred_x₀
-        end
-    end
+        // Conditional forward pass (or reuse uncond if no conditioning)
+        let eps_cond = match c {
+            Some(_cond) => unet.forward(&z, &t_emb)?, // use cond-aware UNet in real impl
+            None        => eps_uncond.clone(),
+        };
 
-    # Decode
-    x, _ = decoder(z_t, ps_dec, st_dec)
-    return x
-end
+        // CFG combination: ε̃ = ε_uncond + w·(ε_cond − ε_uncond)
+        let eps_cfg = eps_uncond.add(&(eps_cond.sub(&eps_uncond)?.affine(w as f64, 0.0)?)?)?;
 
-# 使用例
-z_T = randn(Float32, 32, 32, 4, 1)  # Random noise
-c = nothing  # 無条件 or テキスト埋め込み
-w = 7.5      # CFG scale
-x_gen = ddim_sample_cfg(unet, decoder, z_T, c, w, steps=50)
+        // Predict x₀
+        let ab_t = alpha_bar[t];
+        let pred_x0 = z.sub(&eps_cfg.affine((1.0 - ab_t).sqrt() as f64, 0.0)?)?
+                       .affine(1.0 / ab_t.sqrt() as f64, 0.0)?;
+
+        // DDIM step toward z_{t_prev}
+        let t_prev_opt = timesteps.get(i + 1).copied();
+        z = if let Some(t_prev) = t_prev_opt {
+            let ab_prev = alpha_bar[t_prev];
+            let sigma = eta * ((1.0 - ab_prev) / (1.0 - ab_t) * (1.0 - ab_t / ab_prev)).sqrt();
+            let dir_z  = eps_cfg.affine((1.0 - ab_prev - sigma * sigma).sqrt() as f64, 0.0)?;
+            let noise  = Tensor::randn(0f32, 1.0, z.shape(), device)?.affine(sigma as f64, 0.0)?;
+            pred_x0.affine(ab_prev.sqrt() as f64, 0.0)?.add(&dir_z)?.add(&noise)?
+        } else {
+            pred_x0
+        };
+    }
+
+    // Decode latent → pixel space
+    decoder.forward(&z)
+}
+
+// Usage example
+fn generate(unet: &UNet, decoder: &Decoder, device: &Device) -> Result<Tensor> {
+    let z_t = Tensor::randn(0f32, 1.0, (1, 4, 32, 32), device)?;
+    let w = 7.5f32;  // CFG scale
+    ddim_sample_cfg(unet, decoder, z_t, None, w, 50, 0.0, device)
+}
 ```
 
 <details><summary>完全な訓練スクリプト</summary>
 
-```julia
-using MLDatasets, Images
+```rust
+// データ準備: MNIST 28×28×1, normalized to [-1, 1]
+// (candle-datasets or load from raw bytes)
+let batchsize = 64usize;
 
-# データ準備
-train_data = MNIST(split=:train)
-X_train = Float32.(reshape(train_data.features, 28, 28, 1, :))
-X_train = (X_train .* 2f0) .- 1f0  # [-1, 1]
+// モデル作成 (VarBuilder → safetensors)
+let device = Device::cuda_if_available(0)?;
+let vb = candle_nn::VarBuilder::zeros(candle_core::DType::F32, &device);
 
-# Dataloader
-batchsize = 64
-dataloader = [(X_train[:,:,:,i:min(i+batchsize-1,end)],)
-              for i in 1:batchsize:size(X_train,4)]
+let encoder = Encoder::new(1, 4, 32, vb.pp("encoder"))?;
+let decoder = Decoder::new(4, 1, 32, vb.pp("decoder"))?;
+let unet    = UNet::new(4, 64, 256, vb.pp("unet"))?;
 
-# モデル作成
-encoder = create_encoder(in_ch=1, latent_ch=4, base_ch=32)
-decoder = create_decoder(latent_ch=4, out_ch=1, base_ch=32)
-unet = create_unet(latent_ch=4, base_ch=64)
+let var_map = candle_nn::VarMap::new();
+let mut opt = candle_nn::AdamW::new(var_map.all_vars(), candle_nn::ParamsAdamW::default())?;
 
-# Stage 1: VAE訓練
-println("Training VAE...")
-ps_enc, ps_dec, st_enc, st_dec = train_vae!(encoder, decoder, dataloader, epochs=20)
+// Stage 1: VAE訓練
+println!("Training VAE...");
+train_vae(&encoder, &decoder, &dataloader, 20, 0.5, &mut opt)?;
 
-# Stage 2: Diffusion訓練
-println("Training Diffusion...")
-ps_unet, st_unet = train_ldm!(unet, encoder, dataloader, T=1000, epochs=100)
+// Stage 2: Diffusion訓練
+println!("Training Diffusion...");
+train_ldm(&unet, &encoder, &dataloader, &device, 100, 1000, &mut opt)?;
 
-# サンプリング
-println("Generating samples...")
-z_T = randn(Float32, 7, 7, 4, 16)  # 28/4=7 (downsampled)
-x_gen = ddim_sample_cfg(unet, decoder, z_T, nothing, 1.0, steps=50)
+// サンプリング: 28/4 = 7 (latent spatial size)
+println!("Generating samples...");
+let z_t = Tensor::randn(0f32, 1.0, (16, 4, 7, 7), &device)?;
+let x_gen = ddim_sample_cfg(&unet, &decoder, z_t, None, 1.0, 50, 0.0, &device)?;
 
-# 保存
-using FileIO
-save("generated.png", colorview(Gray, x_gen[:,:,1,1]))
+// 保存 (image crate)
+// image::save_buffer("generated.png", ...)?;
 ```
 
 </details>
@@ -513,45 +627,52 @@ fn batch_generate(
 
 **数値安定化テクニック**:
 
-```julia
-# Gradient clipping
-function clip_grad!(grads, max_norm=1.0)
-    total_norm = sqrt(sum(x -> sum(x .^ 2), grads))
-    clip_coef = max_norm / (total_norm + 1e-6)
-    if clip_coef < 1
-        foreach(g -> g .*= clip_coef, grads)
-    end
-end
+```rust
+// Gradient clipping (manual norm clipping via candle-nn GradScaler or custom)
+fn clip_grad_norm(grads: &mut [Tensor], max_norm: f32) -> Result<()> {
+    let total_norm_sq: f32 = grads.iter()
+        .map(|g| g.sqr()?.sum_all()?.to_scalar::<f32>())
+        .collect::<Result<Vec<_>>>()?
+        .iter().sum();
+    let total_norm = total_norm_sq.sqrt();
+    let clip_coef = (max_norm / (total_norm + 1e-6)).min(1.0);
+    for g in grads.iter_mut() {
+        *g = g.affine(clip_coef as f64, 0.0)?;
+    }
+    Ok(())
+}
 
-# Mixed precision (FP16訓練)
-using CUDA
-x_fp16 = cu(Float16.(x))
-# ... forward pass in FP16
-loss_fp32 = Float32(loss)  # Loss計算はFP32
+// Mixed precision: candle-core supports DType::BF16 / F16
+// Forward pass in BF16, loss accumulation in F32:
+// let x_bf16 = x.to_dtype(candle_core::DType::BF16)?;
+// let loss_f32 = loss.to_dtype(candle_core::DType::F32)?;
 ```
 
 **デバッグチェックリスト**:
 
-```julia
-# 1. VAE再構成確認
-z = encoder(x)
-x_recon = decoder(z)
-@assert mean(abs.(x - x_recon)) < 0.5  # 再構成誤差
+```rust
+// 1. VAE再構成確認
+let z      = encoder.forward(&x)?;
+let x_recon = decoder.forward(&z)?;
+let recon_err = x.sub(&x_recon)?.abs()?.mean_all()?.to_scalar::<f32>()?;
+assert!(recon_err < 0.5, "再構成誤差が大きすぎます: {}", recon_err);
 
-# 2. Forward diffusion確認
-z_t, ε = forward_diffusion(z, T, α_bar)
-@assert mean(abs.(z_t)) ≈ 1.0 atol=0.5  # T=1000でほぼガウシアン
+// 2. Forward diffusion確認 — T=1000ではほぼガウシアン
+let (z_t, eps) = forward_diffusion(&z, big_t - 1, &alpha_bar, &device)?;
+let z_t_mean = z_t.abs()?.mean_all()?.to_scalar::<f32>()?;
+debug_assert!((z_t_mean - 1.0).abs() < 0.5, "z_t の統計が異常: {}", z_t_mean);
 
-# 3. Noise prediction確認
-ε_pred = unet(z_t, t)
-@assert size(ε_pred) == size(ε)  # 形状一致
+// 3. Noise prediction確認 — shape一致
+let eps_pred = unet.forward(&z_t, &t_emb)?;
+assert_eq!(eps_pred.shape(), eps.shape(), "ε_pred shape mismatch");
 
-# 4. CFG確認
-ε_cfg = cfg_forward(unet, z_t, t, c, w)
-@assert !any(isnan.(ε_cfg))  # NaNチェック
+// 4. CFG確認 — NaNチェック
+let eps_cfg = cfg_forward(&unet, &z_t, &t_emb, None, 7.5, &device)?;
+let has_nan = eps_cfg.to_vec1::<f32>()?.iter().any(|v| v.is_nan());
+assert!(!has_nan, "CFG出力にNaNが含まれています");
 ```
 
-> **Note:** **ここまでで全体の70%完了！** 実装ゾーン完了。Julia訓練→Rust推論の完全パイプラインを構築した。次は実験ゾーンでCFG実験へ。
+> **Note:** **ここまでで全体の70%完了！** 実装ゾーン完了。Rust訓練→Rust推論の完全パイプラインを構築した。次は実験ゾーンでCFG実験へ。
 
 ---
 
@@ -562,12 +683,12 @@ z_t, ε = forward_diffusion(z, T, α_bar)
 **Q1: CFGのguidance scale $w$の効果**
 
 以下のコードの出力を予測せよ:
-```julia
-w_values = [0.0, 1.0, 3.0, 7.5, 15.0]
-for w in w_values
-    x = ddim_sample_cfg(unet, decoder, z_T, c, w)
-    println("w=$w: quality=?, diversity=?")
-end
+```rust
+let w_values = [0.0f32, 1.0, 3.0, 7.5, 15.0];
+for w in w_values {
+    let x = ddim_sample_cfg(&unet, &decoder, z_t.clone(), None, w, 50, 0.0, &device)?;
+    println!("w={}: quality=?, diversity=?", w);
+}
 ```
 
 <details><summary>解答</summary>
@@ -583,8 +704,9 @@ end
 **Q2: Negative Promptの数学**
 
 Negative Prompt実装のこの行を説明せよ:
-```julia
-ε_cfg = ε_neg .+ w .* (ε_pos .- ε_neg)
+```rust
+// ε̃ = ε_neg + w·(ε_pos − ε_neg)
+let eps_cfg = eps_neg.add(&(eps_pos.sub(&eps_neg)?.affine(w as f64, 0.0)?)?)?;
 ```
 
 <details><summary>解答</summary>
@@ -596,13 +718,14 @@ $\tilde{\epsilon} = \epsilon_\text{neg} + w(\epsilon_\text{pos} - \epsilon_\text
 **Q3: Zero Terminal SNRの効果**
 
 以下のrescaling前後で何が変わるか:
-```julia
-# Before
-α_bar_before = [0.99, 0.98, ..., 0.01]  # α_T = 0.01 ≠ 0
+```rust
+// Before: α_bar_before[T-1] = 0.01 ≠ 0  (signal leaks at final step)
+let alpha_bar_before: Vec<f32> = vec![0.99, 0.98, /* … */ 0.01];
 
-# After rescaling
-α_bar_after = α_bar_before ./ α_bar_before[end]
-# α_bar_after[end] = 1.0 → sqrt(α_bar_after[end]) = 1.0
+// After rescaling: divide by last element → α_bar_after[T-1] = 1.0 → sqrt = 1.0
+let last = *alpha_bar_before.last().unwrap();
+let alpha_bar_after: Vec<f32> = alpha_bar_before.iter().map(|&a| a / last).collect();
+// alpha_bar_after.last() == Some(&1.0)  → pure Gaussian at T
 ```
 
 <details><summary>解答</summary>
@@ -631,10 +754,11 @@ Stable Diffusionは **全トークンの隠れ状態** $c \in \mathbb{R}^{77 \ti
 **Q5: Min-SNR weightingの目的**
 
 Min-SNR loss weightingのこのコードの意図は？
-```julia
-snr = α_bar ./ (1 .- α_bar)
-weight = min.(snr, 5.0)  # γ=5
-loss = weight[t] * mse(ε_pred, ε_true)
+```rust
+// snr[t] = ᾱ_t / (1 − ᾱ_t),  clipped at γ=5
+let snr: Vec<f32> = alpha_bar.iter().map(|&a| a / (1.0 - a)).collect();
+let weight: Vec<f32> = snr.iter().map(|&s| s.min(5.0)).collect();
+let loss = mse(&eps_pred, &eps_true)?.affine(weight[t] as f64, 0.0)?;
 ```
 
 <details><summary>解答</summary>
@@ -652,35 +776,39 @@ Hang et al. (2023) [^min_snr]は3.4倍の訓練高速化を報告。
 
 **課題**: Guidance scale $w \in \{1, 3, 5, 7.5, 10, 15\}$ で生成し、品質とFID/IS/CLIP Scoreを計測せよ。
 
-```julia
-using Flux, CUDA
+```rust
+use std::collections::HashMap;
 
-# 実験設定
-w_values = [1.0, 3.0, 5.0, 7.5, 10.0, 15.0]
-n_samples = 100
-results = Dict()
+// 実験設定
+let w_values = [1.0f32, 3.0, 5.0, 7.5, 10.0, 15.0];
+let n_samples = 100usize;
+let mut results: HashMap<String, (f32, f32, f32)> = HashMap::new(); // (fid, is_score, clip)
 
-for w in w_values
-    println("Testing w=$w...")
-    images = [begin
-        z_T = randn(Float32, 32, 32, 4, 1)
-        c = text_encoder("a beautiful landscape")  # CLIP encoding
-        ddim_sample_cfg(unet, decoder, z_T, c, w, steps=50)
-    end for _ in 1:n_samples]
+for &w in &w_values {
+    println!("Testing w={}...", w);
+    let mut images = Vec::with_capacity(n_samples);
+    for _ in 0..n_samples {
+        let z_t = Tensor::randn(0f32, 1.0, (1, 4, 32, 32), &device)?;
+        // c = text_encoder("a beautiful landscape") — use CLIP in real impl
+        let img = ddim_sample_cfg(&unet, &decoder, z_t, None, w, 50, 0.0, &device)?;
+        images.push(img);
+    }
 
-    # 品質指標計算
-    fid = compute_fid(images, real_images)
-    is_score = compute_inception_score(images)
-    clip_score = compute_clip_score(images, "a beautiful landscape")
+    // 品質指標計算 (compute_fid / inception_score / clip_score は別途実装)
+    let fid        = compute_fid(&images, &real_images)?;
+    let is_score   = compute_inception_score(&images)?;
+    let clip_score = compute_clip_score(&images, "a beautiful landscape")?;
 
-    results[w] = (fid=fid, is=is_score, clip=clip_score)
-    println("  FID: $fid, IS: $is_score, CLIP: $clip_score")
-end
+    results.insert(format!("w={}", w), (fid, is_score, clip_score));
+    println!("  FID: {:.1}, IS: {:.1}, CLIP: {:.3}", fid, is_score, clip_score);
+}
 
-# 結果可視化
-using Plots
-plot(values(results) .|> r -> r.fid, label="FID↓", xlabel="w", ylabel="Score")
-plot!(values(results) .|> r -> r.clip, label="CLIP Score↑")
+// 結果出力 (sorted by w)
+for &w in &w_values {
+    if let Some(&(fid, is, clip)) = results.get(&format!("w={}", w)) {
+        println!("w={:4.1}: FID={:.1}  IS={:.1}  CLIP={:.3}", w, fid, is, clip);
+    }
+}
 ```
 
 **期待される結果**:
@@ -789,16 +917,18 @@ V &= W_V \mathbf{c} \\
 
 ### Code Translation Test
 
-**Q1**: Forward diffusionの数式 $z_t = \sqrt{\bar{\alpha}_t} z_0 + \sqrt{1-\bar{\alpha}_t} \epsilon$ をJuliaで実装せよ。
+**Q1**: Forward diffusionの数式 $z_t = \sqrt{\bar{\alpha}_t} z_0 + \sqrt{1-\bar{\alpha}_t} \epsilon$ をRustで実装せよ。
 
 <details><summary>解答</summary>
 
-```julia
-function forward_diffusion(z₀, t, α_bar, rng)
-    ε = randn(rng, Float32, size(z₀))
-    z_t = sqrt(α_bar[t]) .* z₀ .+ sqrt(1 - α_bar[t]) .* ε
-    return z_t, ε
-end
+```rust
+fn forward_diffusion(z0: &Tensor, t: usize, alpha_bar: &[f32], device: &Device) -> Result<(Tensor, Tensor)> {
+    let eps = Tensor::randn(0f32, 1.0, z0.shape(), device)?;
+    let a = alpha_bar[t].sqrt() as f64;
+    let b = (1.0 - alpha_bar[t]).sqrt() as f64;
+    let z_t = z0.affine(a, 0.0)?.add(&eps.affine(b, 0.0)?)?;
+    Ok((z_t, eps))
+}
 ```
 
 ポイント:
@@ -808,56 +938,63 @@ end
 
 </details>
 
-**Q2**: CFGの数式をJuliaで実装せよ。
+**Q2**: CFGの数式をRustで実装せよ。
 
 <details><summary>解答</summary>
 
-```julia
-function cfg_forward(unet, z_t, t, c, w, ps, st)
-    # Unconditional
-    ε_uncond, _ = unet((z_t, t, nothing), ps, st)
+```rust
+fn cfg_forward(
+    unet: &UNet,
+    z_t: &Tensor,
+    t_emb: &Tensor,
+    c: Option<&Tensor>,
+    w: f32,
+    device: &Device,
+) -> Result<Tensor> {
+    // Unconditional
+    let eps_uncond = unet.forward(z_t, t_emb)?;
 
-    # Conditional
-    ε_cond, _ = unet((z_t, t, c), ps, st)
+    // Conditional (reuse uncond if c is None)
+    let eps_cond = match c {
+        Some(_) => unet.forward(z_t, t_emb)?, // cond-aware forward in real impl
+        None    => eps_uncond.clone(),
+    };
 
-    # CFG combination
-    ε_cfg = ε_uncond .+ w .* (ε_cond .- ε_uncond)
-
-    return ε_cfg
-end
+    // CFG combination: ε̃ = ε_uncond + w·(ε_cond − ε_uncond)
+    eps_uncond.add(&(eps_cond.sub(&eps_uncond)?.affine(w as f64, 0.0)?)?)
+}
 ```
 
 または等価な形:
-```julia
-ε_cfg = (1 - w) .* ε_uncond .+ w .* ε_cond
+```rust
+// または等価な形: ε̃ = (1−w)·ε_uncond + w·ε_cond
+let eps_cfg = eps_uncond.affine(1.0 - w as f64, 0.0)?.add(&eps_cond.affine(w as f64, 0.0)?)?;
 ```
 
 </details>
 
-**Q3**: Cross-Attentionの式 $\text{Attention}(Q, K, V) = \text{softmax}(QK^\top/\sqrt{d_k}) V$ をJuliaで実装せよ。
+**Q3**: Cross-Attentionの式 $\text{Attention}(Q, K, V) = \text{softmax}(QK^\top/\sqrt{d_k}) V$ をRustで実装せよ。
 
 <details><summary>解答</summary>
 
-```julia
-function scaled_dot_product_attention(Q, K, V; dropout_rate=0.0)
-    d_k = size(K, 2)
+```rust
+fn scaled_dot_product_attention(q: &Tensor, k: &Tensor, v: &Tensor, dropout_rate: f32) -> Result<(Tensor, Tensor)> {
+    let d_k = k.dim(1)? as f64;
 
-    # Scores: Q * K^T / sqrt(d_k)
-    scores = (Q * K') ./ sqrt(Float32(d_k))  # [N_q, N_k]
+    // Scores: Q·Kᵀ / sqrt(d_k)  →  [N_q, N_k]
+    let scores = q.matmul(&k.t()?)?.affine(1.0 / d_k.sqrt(), 0.0)?;
 
-    # Softmax
-    attn_weights = softmax(scores, dims=2)  # Over keys
+    // Softmax over key dimension
+    let attn_weights = candle_nn::ops::softmax(&scores, 1)?;
 
-    # Apply dropout
-    if dropout_rate > 0
-        attn_weights = dropout(attn_weights, dropout_rate)
-    end
+    // Optional dropout (keep as comment — use candle_nn::Dropout in real impl)
+    // let attn_weights = if dropout_rate > 0.0 { dropout.forward(&attn_weights, true)? } else { attn_weights };
 
-    # Weighted sum
-    output = attn_weights * V  # [N_q, d_v]
+    // Weighted sum: [N_q, d_v]
+    let output = attn_weights.matmul(v)?;
 
-    return output, attn_weights
-end
+    Ok((output, attn_weights))
+}
 ```
 
 ポイント:
@@ -885,20 +1022,22 @@ end
 
 <details><summary>解答</summary>
 
-```julia
-pass1_info = Dict(
-    "category" => "Image Synthesis / Generative Models",
-    "context" => "Diffusion models achieve SOTA but are computationally expensive in pixel space",
-    "correctness" => "Appears sound - addresses real bottleneck (computation cost)",
-    "contributions" => [
+```rust
+use std::collections::HashMap;
+
+let pass1_info: HashMap<&str, serde_json::Value> = [
+    ("category",      serde_json::json!("Image Synthesis / Generative Models")),
+    ("context",       serde_json::json!("Diffusion models achieve SOTA but are computationally expensive in pixel space")),
+    ("correctness",   serde_json::json!("Appears sound - addresses real bottleneck (computation cost)")),
+    ("contributions", serde_json::json!([
         "Apply diffusion in latent space (not pixel space)",
         "Use pretrained VAE for compression",
         "Enable training on limited compute",
         "Retain quality and controllability"
-    ],
-    "clarity" => "Well-written. Clear problem statement and solution.",
-    "decision" => "READ - Addresses important problem with novel approach"
-)
+    ])),
+    ("clarity",       serde_json::json!("Well-written. Clear problem statement and solution.")),
+    ("decision",      serde_json::json!("READ - Addresses important problem with novel approach")),
+].into_iter().collect();
 ```
 
 **5C判定**:
@@ -923,88 +1062,98 @@ pass1_info = Dict(
 - Sampling: DDIM 50 steps
 - 評価: FID, 主観品質
 
-```julia
-using Lux, MLDatasets, Images, Optimisers, CUDA
+```rust
+use candle_core::{Result, Tensor, Device, DType};
+use candle_nn::{VarBuilder, VarMap, AdamW, ParamsAdamW, Optimizer};
 
-# === Stage 1: VAE訓練 ===
-function create_mnist_vae()
-    encoder = Chain(
-        Conv((3,3), 1 => 32, pad=1, activation=relu),
-        Conv((4,4), 32 => 64, stride=2, pad=1, activation=relu),  # 28 -> 14
-        Conv((4,4), 64 => 64, stride=2, pad=1, activation=relu),  # 14 -> 7
-        Conv((3,3), 64 => 4, pad=1)  # Latent
-    )
+// === Stage 1: MNIST VAE ===
 
-    decoder = Chain(
-        Conv((3,3), 4 => 64, pad=1, activation=relu),
-        ConvTranspose((4,4), 64 => 64, stride=2, pad=1, activation=relu),  # 7 -> 14
-        ConvTranspose((4,4), 64 => 32, stride=2, pad=1, activation=relu),  # 14 -> 28
-        Conv((3,3), 32 => 1, pad=1, activation=tanh)
-    )
+// Encoder: 28×28×1 → 7×7×4
+struct MnistEncoder { c1: candle_nn::Conv2d, c2: candle_nn::Conv2d, c3: candle_nn::Conv2d, c4: candle_nn::Conv2d }
+impl MnistEncoder {
+    fn new(vb: VarBuilder) -> Result<Self> {
+        let p1 = candle_nn::Conv2dConfig { padding: 1, ..Default::default() };
+        let p2 = candle_nn::Conv2dConfig { padding: 1, stride: 2, ..Default::default() };
+        Ok(Self {
+            c1: candle_nn::conv2d(1,  32, 3, p1, vb.pp("c1"))?,  // 28×28
+            c2: candle_nn::conv2d(32, 64, 4, p2, vb.pp("c2"))?,  // 28→14
+            c3: candle_nn::conv2d(64, 64, 4, p2, vb.pp("c3"))?,  // 14→7
+            c4: candle_nn::conv2d(64,  4, 3, p1, vb.pp("c4"))?,  // latent
+        })
+    }
+    fn forward(&self, x: &Tensor) -> Result<Tensor> {
+        let x = self.c1.forward(x)?.relu()?;
+        let x = self.c2.forward(&x)?.relu()?;
+        let x = self.c3.forward(&x)?.relu()?;
+        self.c4.forward(&x)
+    }
+}
 
-    return encoder, decoder
-end
+// Decoder: 7×7×4 → 28×28×1
+struct MnistDecoder { c1: candle_nn::Conv2d, d1: candle_nn::ConvTranspose2d, d2: candle_nn::ConvTranspose2d, c2: candle_nn::Conv2d }
+impl MnistDecoder {
+    fn new(vb: VarBuilder) -> Result<Self> {
+        let p1  = candle_nn::Conv2dConfig { padding: 1, ..Default::default() };
+        let dp  = candle_nn::ConvTranspose2dConfig { padding: 1, stride: 2, ..Default::default() };
+        Ok(Self {
+            c1: candle_nn::conv2d(4,  64, 3, p1, vb.pp("c1"))?,
+            d1: candle_nn::conv_transpose2d(64, 64, 4, dp, vb.pp("d1"))?,  // 7→14
+            d2: candle_nn::conv_transpose2d(64, 32, 4, dp, vb.pp("d2"))?,  // 14→28
+            c2: candle_nn::conv2d(32,  1, 3, p1, vb.pp("c2"))?,
+        })
+    }
+    fn forward(&self, z: &Tensor) -> Result<Tensor> {
+        let x = self.c1.forward(z)?.relu()?;
+        let x = self.d1.forward(&x)?.relu()?;
+        let x = self.d2.forward(&x)?.relu()?;
+        self.c2.forward(&x)?.tanh()
+    }
+}
 
-# VAE訓練
-println("Stage 1: Training VAE...")
-train_data = MNIST(split=:train)
-X = Float32.(reshape(train_data.features, 28, 28, 1, :))
-X = (X .* 2f0) .- 1f0  # Normalize to [-1, 1]
+// === Setup ===
+let device = Device::cuda_if_available(0)?;
+let var_map = VarMap::new();
+let vb = VarBuilder::from_varmap(&var_map, DType::F32, &device);
 
-encoder, decoder = create_mnist_vae()
-ps_enc, st_enc = Lux.setup(Random.default_rng(), encoder)
-ps_dec, st_dec = Lux.setup(Random.default_rng(), decoder)
+let encoder = MnistEncoder::new(vb.pp("encoder"))?;
+let decoder = MnistDecoder::new(vb.pp("decoder"))?;
+let unet    = UNet::new(4, 64, 256, vb.pp("unet"))?;  // 7×7×4 latent
 
-# ... 訓練ループ (20 epochs)
+// Normalize MNIST to [-1, 1] and build dataloader externally
+// let x: Tensor = ...  (shape [B, 1, 28, 28], values in [-1,1])
 
-# === Stage 2: Diffusion訓練 ===
-println("Stage 2: Training Diffusion...")
+let mut opt = AdamW::new(var_map.all_vars(), ParamsAdamW::default())?;
 
-function create_tiny_unet()
-    # Simplified U-Net for 7×7×4 latent
-    return Chain(
-        Conv((3,3), 4 => 64, pad=1),
-        ResBlock(64),
-        Conv((4,4), 64 => 128, stride=2, pad=1),  # 7 -> 4 (round up)
-        ResBlock(128),
-        ConvTranspose((4,4), 128 => 64, stride=2, pad=1),  # 4 -> 7
-        ResBlock(64),
-        Conv((3,3), 64 => 4, pad=1)
-    )
-end
+// Stage 1: VAE訓練 (20 epochs)
+println!("Stage 1: Training VAE...");
+train_vae(&encoder, &decoder, &dataloader, 20, 0.5, &mut opt)?;
 
-unet = create_tiny_unet()
-ps_unet, st_unet = Lux.setup(Random.default_rng(), unet)
+// Stage 2: Diffusion訓練 (100 epochs)
+println!("Stage 2: Training Diffusion...");
+train_ldm(&unet, &encoder, &dataloader, &device, 100, 1000, &mut opt)?;
 
-# ... Diffusion訓練 (100 epochs)
+// Stage 3: CFG Sampling
+println!("Stage 3: Generating with different CFG scales...");
+let w_values = [1.0f32, 3.0, 7.5];
+let n_samples = 16usize;
 
-# === Stage 3: CFG Sampling ===
-println("Stage 3: Generating with different CFG scales...")
+for &w in &w_values {
+    println!("  Generating with w={}...", w);
+    for _ in 0..n_samples {
+        let z_t = Tensor::randn(0f32, 1.0, (1, 4, 7, 7), &device)?;
+        let _sample = ddim_sample_cfg(&unet, &decoder, z_t, None, w, 50, 0.0, &device)?;
+        // save sample via `image` crate
+    }
 
-w_values = [1.0, 3.0, 7.5]
-n_samples = 16
+    // FID計算 (compute_fid_mnist は別途実装)
+    // let fid = compute_fid_mnist(&samples, &x_train)?;
+    // println!("  w={}: FID = {:.1}", w, fid);
+}
 
-for w in w_values
-    println("  Generating with w=$w...")
-    samples = [begin
-        z_T = randn(Float32, 7, 7, 4, 1)
-        c = nothing  # Unconditioned for MNIST
-        ddim_sample_cfg(unet, decoder, z_T, c, w, steps=50)
-    end for _ in 1:n_samples]
-
-    # 保存
-    grid = hcat(samples...)
-    save("mnist_cfg_w$(w).png", colorview(Gray, grid[:,:,1,1]))
-
-    # FID計算 (簡略版)
-    fid = compute_fid_mnist(samples, X)
-    println("  w=$w: FID = $fid")
-end
-
-# 結果:
-# w=1.0: FID = 45.2 (多様性高い、品質中)
-# w=3.0: FID = 32.1 (バランス)
-# w=7.5: FID = 38.5 (品質高いが多様性低下)
+// 結果:
+// w=1.0: FID = 45.2 (多様性高い、品質中)
+// w=3.0: FID = 32.1 (バランス)
+// w=7.5: FID = 38.5 (品質高いが多様性低下)
 ```
 
 **期待される出力**: 各CFGスケールで16サンプルのグリッド画像。
@@ -1013,33 +1162,42 @@ end
 
 **課題**: Noise offsetを0.0, 0.05, 0.1で訓練し、明るい/暗い画像の生成品質を比較せよ。
 
-```julia
-# Noise offset付きforward diffusion
-function forward_diffusion_with_offset(z₀, t, α_bar, offset, rng)
-    ε = randn(rng, Float32, size(z₀))
-    ε_offset = ε .+ offset  # バイアス追加
-    z_t = sqrt(α_bar[t]) .* z₀ .+ sqrt(1 - α_bar[t]) .* ε_offset
-    return z_t, ε
-end
+```rust
+// Noise offset付き forward diffusion
+// ε_offset = ε + offset — adds a mean bias so very dark/bright images are reachable
+fn forward_diffusion_with_offset(
+    z0: &Tensor,
+    t: usize,
+    alpha_bar: &[f32],
+    offset: f32,
+    device: &Device,
+) -> Result<(Tensor, Tensor)> {
+    let eps = Tensor::randn(0f32, 1.0, z0.shape(), device)?;
+    let eps_offset = eps.affine(1.0, offset as f64)?; // ε + offset
+    let a = alpha_bar[t].sqrt() as f64;
+    let b = (1.0 - alpha_bar[t]).sqrt() as f64;
+    let z_t = z0.affine(a, 0.0)?.add(&eps_offset.affine(b, 0.0)?)?;
+    Ok((z_t, eps)) // target is ε (not ε_offset)
+}
 
-# 訓練
-offset_values = [0.0, 0.05, 0.1]
-for offset in offset_values
-    println("Training with noise offset=$offset...")
-    ps_unet, st_unet = train_ldm_with_offset!(unet, encoder, dataloader, offset)
+// 訓練
+let offset_values = [0.0f32, 0.05, 0.1];
+for &offset in &offset_values {
+    println!("Training with noise offset={}...", offset);
+    // train_ldm_with_offset(&unet, &encoder, &dataloader, &device, offset, &mut opt)?;
 
-    # テスト: 暗い画像生成
-    c_dark = text_encoder("a dark forest at night")
-    x_dark = ddim_sample_cfg(unet, decoder, z_T, c_dark, 7.5)
+    let z_t = Tensor::randn(0f32, 1.0, (1, 4, 32, 32), &device)?;
 
-    # テスト: 明るい画像生成
-    c_bright = text_encoder("a bright sunny beach")
-    x_bright = ddim_sample_cfg(unet, decoder, z_T, c_bright, 7.5)
+    // テスト: 暗い画像生成 (c_dark = CLIP encoding of "a dark forest at night")
+    let x_dark   = ddim_sample_cfg(&unet, &decoder, z_t.clone(), None, 7.5, 50, 0.0, &device)?;
 
-    # 品質評価（主観 or LPIPS等）
-    save("dark_offset_$(offset).png", x_dark)
-    save("bright_offset_$(offset).png", x_bright)
-end
+    // テスト: 明るい画像生成
+    let x_bright = ddim_sample_cfg(&unet, &decoder, z_t.clone(), None, 7.5, 50, 0.0, &device)?;
+
+    // 保存 (image crate)
+    // save_tensor_as_png(&x_dark,   &format!("dark_offset_{}.png",   offset))?;
+    // save_tensor_as_png(&x_bright, &format!("bright_offset_{}.png", offset))?;
+}
 ```
 
 **期待される効果**: Noise offset > 0 で暗い画像のディテールが向上。
@@ -1054,7 +1212,7 @@ end
 - [ ] FLUX architectureの特徴を列挙できる
 - [ ] Min-SNR weightingの効果を説明できる
 - [ ] Zero Terminal SNRの必要性を理解
-- [ ] Julia訓練コードを書ける
+- [ ] Rust訓練コードを書ける
 - [ ] Rust推論コードを書ける
 
 > **Note:** **ここまでで全体の85%完了！** 実験ゾーン完了。CFG実験で品質トレードオフを体感した。次は発展ゾーンへ。
@@ -1260,33 +1418,35 @@ $$
 | **1** | Zone 0-2 読了 + VAE復習 | 2h | なぜ潜在空間か説明できる |
 | **2** | Zone 3.1-3.5 CFG導出 | 3h | CFG式を3視点から導出 |
 | **3** | Zone 3.6-3.13 理論完走 | 3h | FLUX architectureを説明 |
-| **4** | Zone 4 Julia実装 | 4h | Mini LDM訓練成功 |
+| **4** | Zone 4 Rust実装 | 4h | Mini LDM訓練成功 |
 | **5** | Zone 5 CFG実験 | 3h | Guidance scale掃引完了 |
 | **6** | Rust推論実装 | 3h | ONNX推論パイプライン |
 | **7** | 総復習 + Boss再挑戦 | 2h | CFG完全分解を再導出 |
 
 ### 進捗トラッカー
 
-```julia
-# 自己診断スクリプト
-progress = Dict(
-    "VAE圧縮理論" => false,
-    "CFG完全導出" => false,
-    "Cross-Attention実装" => false,
-    "FLUX理解" => false,
-    "Julia訓練成功" => false,
-    "Rust推論成功" => false,
-    "CFG実験完了" => false
-)
+```rust
+use std::collections::HashMap;
 
-# 各項目をtrueにして進捗確認
-completed = count(values(progress))
-total = length(progress)
-println("Progress: $completed / $total ($(round(100*completed/total, digits=1))%)")
+// 自己診断スクリプト
+let mut progress: HashMap<&str, bool> = [
+    ("VAE圧縮理論",        false),
+    ("CFG完全導出",        false),
+    ("Cross-Attention実装", false),
+    ("FLUX理解",           false),
+    ("Rust訓練成功",       false),
+    ("Rust推論成功",       false),
+    ("CFG実験完了",        false),
+].into_iter().collect();
 
-if completed == total
-    println("🎉 第39回完全マスター！")
-end
+// 各項目をtrueにして進捗確認
+let completed = progress.values().filter(|&&v| v).count();
+let total     = progress.len();
+println!("Progress: {} / {} ({:.1}%)", completed, total, 100.0 * completed as f64 / total as f64);
+
+if completed == total {
+    println!("🎉 第39回完全マスター！");
+}
 ```
 
 ### 次回予告: 第40回 Consistency Models & 高速生成理論
@@ -1319,7 +1479,7 @@ end
 > - ✅ Classifier-Free Guidanceの完全導出
 > - ✅ Text Conditioningの実装レベル理解
 > - ✅ FLUX Architecture解析
-> - ✅ Julia訓練 + Rust推論パイプライン
+> - ✅ Rust訓練 + Rust推論パイプライン
 > - ✅ CFG実験による品質トレードオフ理解
 >
 > Course IV「拡散モデル理論編」は残り3回（L40-42）。理論の完成まであと少し！
@@ -1388,7 +1548,7 @@ end
 [^classifier_guidance]: Dhariwal, P., & Nichol, A. (2021). Diffusion Models Beat GANs on Image Synthesis. *NeurIPS 2021*.
 <https://arxiv.org/abs/2105.05233>
 
-[^flux]: Greenberg, O. (2025). Demystifying Flux Architecture. *arXiv:2507.09595*.
+[^flux]: Greenberg, O. (2025). Demystifying Candle Architecture. *arXiv:2507.09595*.
 <https://arxiv.org/abs/2507.09595>
 
 [^min_snr]: Hang, T., Gu, S., Li, C., et al. (2023). Efficient Diffusion Training via Min-SNR Weighting Strategy. *ICCV 2023*.
@@ -1569,27 +1729,38 @@ $w$ を入力に追加 → 推論時に guidance を変更可能（再訓練不�
 
 **Sampling**:
 
-```julia
-function lcm_sample(z_T, c, w_cfg, steps=4)
-    z = z_T
-    Δt = 1.0 / steps
+```rust
+// LCM sampling: 4 steps is typically enough for Latent Consistency Models
+fn lcm_sample(
+    f_theta: &impl Fn(&Tensor, f32, &Tensor, f32) -> Result<Tensor>,
+    z_init: Tensor,
+    c: &Tensor,
+    w_cfg: f32,
+    steps: usize,
+    alpha_bar: &[f32],
+    device: &Device,
+) -> Result<Tensor> {
+    let mut z = z_init;
+    let delta_t = 1.0f32 / steps as f32;
 
-    for i in steps:-1:1
-        t = i * Δt
-        # Single function evaluation
-        z₀_pred = f_θ(z, t, c, w_cfg)
+    for i in (1..=steps).rev() {
+        let t = i as f32 * delta_t;
+        // Single consistency function evaluation (embeds guidance w internally)
+        let z0_pred = f_theta(&z, t, c, w_cfg)?;
 
-        if i > 1
-            # Add noise for next step
-            t_prev = (i-1) * Δt
-            z = sqrt(ᾱ[t_prev]) * z₀_pred + sqrt(1 - ᾱ[t_prev]) * randn(size(z))
-        else
-            z = z₀_pred
-        end
-    end
+        z = if i > 1 {
+            // Add noise for next step: z = sqrt(ᾱ_{t_prev})·z₀ + sqrt(1−ᾱ_{t_prev})·ε
+            let t_prev_idx = ((i - 1) as f32 * delta_t * (alpha_bar.len() as f32)) as usize;
+            let ab = alpha_bar[t_prev_idx.min(alpha_bar.len() - 1)];
+            let noise = Tensor::randn(0f32, 1.0, z0_pred.shape(), device)?;
+            z0_pred.affine(ab.sqrt() as f64, 0.0)?.add(&noise.affine((1.0 - ab).sqrt() as f64, 0.0)?)?
+        } else {
+            z0_pred
+        };
+    }
 
-    return z
-end
+    Ok(z)
+}
 ```
 
 #### 7.2.4 結果

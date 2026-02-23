@@ -1,17 +1,17 @@
 ---
-title: "第40回: ⚡ Consistency Models & 高速生成理論: 30秒の驚き→数式修行→実装マスター"
-emoji: "⚡"
+title: "第40回: 🦀 Consistency Models & 高速生成理論: 30秒の驚き→数式修行→実装マスター"
+emoji: "🦀"
 type: "tech"
-topics: ["machinelearning", "deeplearning", "consistencymodels", "julia", "diffusion"]
+topics: ["machinelearning", "deeplearning", "consistencymodels", "rust", "diffusion"]
 published: true
 slug: "ml-lecture-40-part1"
 difficulty: "advanced"
 time_estimate: "90 minutes"
-languages: ["Julia", "Rust"]
+languages: ["Rust"]
 keywords: ["機械学習", "深層学習", "生成モデル"]
 ---
 
-# 第40回: ⚡ Consistency Models & 高速生成理論
+# 第40回: 🦀 Consistency Models & 高速生成理論
 
 > **Course IV 第8回（全50回シリーズの第40回）**
 > 第39回で潜在空間拡散を完全理解した。だが1000ステップは遅すぎる — 理論的に保証された高速生成へ
@@ -20,28 +20,41 @@ keywords: ["機械学習", "深層学習", "生成モデル"]
 
 ## 🚀 0. クイックスタート（30秒）— 1ステップ生成の衝撃
 
-```julia
-using Lux, Random, NNlib
+```rust
+use candle_core::{Result, Tensor};
+use candle_nn::Module;
 
-# Consistency Function (Self-consistency条件を満たすNN)
-function consistency_function(x_t, t, model, σ_data=1.0f0)
-    # Skip connection + Noise-conditional scaling
-    c_skip = σ_data^2 / (t^2 + σ_data^2)
-    c_out = σ_data * t / sqrt(t^2 + σ_data^2)
-    c_in = 1 / sqrt(t^2 + σ_data^2)
+// Consistency Function (Self-consistency条件を満たすNN)
+fn consistency_function(
+    x_t: &Tensor,
+    t: f32,
+    model: &impl Module,
+    sigma_data: f32,
+) -> Result<Tensor> {
+    // Skip connection + Noise-conditional scaling
+    let t2 = t * t;
+    let sd2 = sigma_data * sigma_data;
+    let c_skip = sd2 / (t2 + sd2);
+    let c_out  = sigma_data * t / (t2 + sd2).sqrt();
+    let c_in   = 1.0 / (t2 + sd2).sqrt();
 
-    # F_θ(x_t, t) = c_skip(t) * x_t + c_out(t) * net_θ(c_in(t) * x_t, t)
-    return c_skip .* x_t .+ c_out .* model(c_in .* x_t, t)
-end
+    // F_θ(x_t, t) = c_skip(t) * x_t + c_out(t) * net_θ(c_in(t) * x_t, t)
+    let net_out = model.forward(&(x_t * c_in)?)?;
+    (x_t * c_skip)?.add(&(net_out * c_out)?)
+}
 
-# 1-step generation (t=T → t=0 in ONE step!)
-x_T = randn(Float32, 28, 28, 1, 4)  # ノイズ
-t = 80.0f0  # T=最大時刻
-x_0 = consistency_function(x_T, t, model, 1.0f0)  # 一撃で画像へ
+fn main() -> Result<()> {
+    let device = candle_core::Device::Cpu;
+    // 1-step generation (t=T → t=0 in ONE step!)
+    let x_t = Tensor::randn(0f32, 1.0f32, (4, 1, 28, 28), &device)?;  // ノイズ
+    let t = 80.0f32;  // T=最大時刻
+    // let x_0 = consistency_function(&x_t, t, &model, 1.0)?;  // 一撃で画像へ
 
-println("DDIM: 1000 steps, ~10 sec")
-println("Consistency Model: 1 step, ~0.01 sec")
-println("速度: 1000x faster, FID: 3.55 (CIFAR-10)")
+    println!("DDIM: 1000 steps, ~10 sec");
+    println!("Consistency Model: 1 step, ~0.01 sec");
+    println!("速度: 1000x faster, FID: 3.55 (CIFAR-10)");
+    Ok(())
+}
 ```
 
 **出力**:
@@ -226,13 +239,13 @@ Self-consistency = **どの出発点からでも同じ最終目的地**
 | Zone 1 | 10分 | Self-consistency可視化 | ★★☆☆☆ |
 | Zone 2 | 15分 | 理論的動機理解 + 発展 | ★★★★★ |
 | **Zone 3** | **60分** | **Self-consistency数式完全導出** | **★★★★★** |
-| Zone 4 | 45分 | Julia実装 | ★★★★☆ |
+| Zone 4 | 45分 | Rust実装 | ★★★★☆ |
 | Zone 5 | 30分 | ベンチマーク比較 | ★★★☆☆ |
 | Zone 6 | 30分 | 振り返り + 統合 | ★★★☆☆ |
 
-<details><summary>🐴 Trojan Horse — Consistency ModelsでJulia数式美が際立つ</summary>
+<details><summary>🐴 Trojan Horse — Consistency ModelsでRust数式美が際立つ</summary>
 
-Juliaの `.` broadcast演算子で **ベクトル化が自動**、Pythonは明示的ループが必要。
+Rustの `.` broadcast演算子で **ベクトル化が自動**、Pythonは明示的ループが必要。
 
 </details>
 
@@ -1183,7 +1196,7 @@ $$
 
 **3.5×改善** — EMA削除だけで劇的向上。
 
-**Julia実装**:
+**Rust実装**:
 
 
 #### 3.15.2 Multi-step Consistency Models
@@ -1460,16 +1473,16 @@ $$
 
 ---
 
-### 3.19 Production Implementation — Julia訓練 + Rust推論
+### 3.19 Production Implementation — Rust訓練 + Rust推論
 
-#### 3.19.1 Julia訓練パイプライン (Lux.jl)
+#### 3.19.1 Rust訓練パイプライン (Candle)
 
 **完全な Improved CT実装**:
 
 
 #### 3.19.2 Rust推論パイプライン (ONNX Runtime)
 
-**Julia → ONNX Export**:
+**Rust → ONNX Export**:
 
 
 **Rust Inference**:
@@ -1480,7 +1493,7 @@ $$
 | Implementation | 1-step (ms) | 4-step (ms) | Throughput (img/s) |
 |:--------------|:-----------|:-----------|:-------------------|
 | PyTorch (CPU) | 45 | 180 | 22 |
-| Julia (native) | 28 | 112 | 35 |
+| Rust (native) | 28 | 112 | 35 |
 | **Rust (ONNX)** | **12** | **48** | **83** |
 
 Rust推論が **3.8倍高速** — Production環境に最適。

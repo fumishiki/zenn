@@ -2,12 +2,12 @@
 title: "第39回: Latent Diffusion Models: 30秒の驚き→数式修行→実装マスター"
 emoji: "🖼️"
 type: "tech"
-topics: ["machinelearning", "deeplearning", "ldm", "julia", "stablediffusion"]
+topics: ["machinelearning", "deeplearning", "ldm", "rust", "stablediffusion"]
 published: true
 slug: "ml-lecture-39-part1"
 difficulty: "advanced"
 time_estimate: "90 minutes"
-languages: ["Julia", "Rust"]
+languages: ["Rust"]
 keywords: ["機械学習", "深層学習", "生成モデル"]
 ---
 
@@ -17,25 +17,23 @@ keywords: ["機械学習", "深層学習", "生成モデル"]
 
 ## 🚀 0. クイックスタート（30秒）— ピクセル vs 潜在空間の衝撃
 
-```julia
-using Lux, Random
+```rust
+// ピクセル空間拡散: 512x512x3 = 786,432次元
+let pixel_dim: usize = 512 * 512 * 3;
+let pixel_diffusion_params = pixel_dim * 1000;  // 7億パラメータ...
 
-# ピクセル空間拡散: 512x512x3 = 786,432次元
-pixel_dim = 512 * 512 * 3
-pixel_diffusion_params = pixel_dim * 1000  # 7億パラメータ...
+// VAE latent space: 64x64x4 = 16,384次元 (48x圧縮!)
+let latent_dim: usize = 64 * 64 * 4;
+let latent_diffusion_params = latent_dim * 1000;  // 1640万パラメータ
 
-# VAE latent space: 64x64x4 = 16,384次元 (48x圧縮!)
-latent_dim = 64 * 64 * 4
-latent_diffusion_params = latent_dim * 1000  # 1640万パラメータ
+let compression_ratio = pixel_dim as f64 / latent_dim as f64;
+let speedup = compression_ratio.powi(2);  // 計算量はO(N²)
 
-compression_ratio = pixel_dim / latent_dim
-speedup = compression_ratio^2  # 計算量はO(N²)
-
-println("Compression: $(round(compression_ratio, digits=1))x")
-println("Theoretical speedup: $(round(speedup, digits=1))x")
-# Output:
-# Compression: 48.0x
-# Theoretical speedup: 2304.0x
+println!("Compression: {:.1}x", compression_ratio);
+println!("Theoretical speedup: {:.1}x", speedup);
+// Output:
+// Compression: 48.0x
+// Theoretical speedup: 2304.0x
 ```
 
 **数式の正体**:
@@ -222,7 +220,7 @@ graph LR
 | **CFG導出** | スキップ | ε-prediction / score / 温度の **3視点から完全導出** |
 | **Text Conditioning** | CLIP紹介 | Cross-Attention / Self-Attention / Positional Encodingの **実装レベル詳細** |
 | **FLUX解説** | なし | Rectified Flow統合アーキテクチャの **数学的解析** (2025) |
-| **実装** | なし | ⚡Julia訓練 + 🦀Rust推論 + CFG実験 (3,000行超) |
+| **実装** | なし | 🦀Rust訓練 + 🦀Rust推論 + CFG実験 (3,000行超) |
 
 ### LDMの3つのメタファー
 
@@ -262,16 +260,16 @@ graph TD
     D --> E[Lv5: Classifier-Free Guidance<br>CFG完全導出]
     E --> F[Lv6: Text Conditioning<br>Cross-Attention]
     F --> G[Lv7: FLUX Architecture<br>Flow Matching統合]
-    G --> H[Boss: Mini LDM実装<br>Julia訓練+CFG実験]
+    G --> H[Boss: Mini LDM実装<br>Rust訓練+CFG実験]
 ```
 
-### Trojan Horse — 🐍→⚡🦀🔮の必然性
+### Trojan Horse — 🐍→🦀🦀🔮の必然性
 
-**第39回の言語構成**: ⚡Julia 70% / 🦀Rust 20% / 🔮Elixir 10%
+**第39回の言語構成**: 🦀Rust 70% / 🦀Rust 20% / 🔮Elixir 10%
 
-**なぜJulia主役？**
-- VAE訓練: Lux.jl + Reactant → JAX並の速度
-- Diffusion訓練: 多重ディスパッチで損失関数が自動最適化
+**なぜRust主役？**
+- VAE訓練: Candle + Burn → JAX並の速度
+- Diffusion訓練: ゼロコスト抽象化で損失関数が自動最適化
 - CFG実験: Guidance scale掃引が1行
 
 **なぜRust？**

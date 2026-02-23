@@ -3,11 +3,11 @@ title: "第30回: エージェント完全版: 30秒の驚き→数式修行→�
 slug: "ml-lecture-30-part1"
 emoji: "🤖"
 type: "tech"
-topics: ["machinelearning", "agent", "rust", "elixir", "julia"]
+topics: ["machinelearning", "agent", "rust", "elixir", "rust"]
 published: true
 difficulty: "advanced"
 time_estimate: "90 minutes"
-languages: ["Julia", "Rust", "Elixir"]
+languages: ["Rust", "Elixir"]
 keywords: ["機械学習", "深層学習", "生成モデル"]
 ---
 
@@ -27,11 +27,11 @@ AIは"読む"から"行動する"存在へと進化している。ChatGPTやClau
 4. **Memory Systems** — Short-term / Long-term / Episodic / Semantic / Vector Memory
 5. **Multi-Agent** — Communication / Role Assignment / Consensus & Debate
 6. **MCP完全解説** — Model Context Protocol の仕様と実装
-7. **実装編** — 🦀 Rust Agent Engine + 🔮 Elixir Multi-Agent + ⚡ Julia Orchestration
+7. **実装編** — 🦀 Rust Agent Engine + 🔮 Elixir Multi-Agent + 🦀 Rust Orchestration
 
 これはCourse IIIの第12回 — 実践編の集大成であり、第31回MLOpsへの橋渡しでもある。
 
-> **Note:** **前提知識**: 第28回(Prompt Engineering), 第29回(RAG)。Rust/Julia/Elixirの基礎は第9-19回で習得済み。
+> **Note:** **前提知識**: 第28回(Prompt Engineering), 第29回(RAG)。Rust/Rust/Elixirの基礎は第9-19回で習得済み。
 
 ```mermaid
 graph TD
@@ -40,7 +40,7 @@ graph TD
     C --> D["💾 Memory<br/>Vector+Episodic"]
     D --> E["👥 Multi-Agent<br/>Communication"]
     E --> F["🔌 MCP<br/>Standard Protocol"]
-    F --> G["🚀 Production<br/>Rust+Elixir+Julia"]
+    F --> G["🚀 Production<br/>Rust+Elixir"]
     style A fill:#e3f2fd
     style G fill:#c8e6c9
 ```
@@ -66,44 +66,51 @@ graph TD
 
 ReAct [^1] パターンを3行で動かす。
 
-```julia
-using HTTP, JSON3
+```rust
+// Agent loop - tool dispatch
+enum ToolResult { Text(String), Error(String) }
 
-# Minimal ReAct loop: Thought → Action → Observation
-function react_step(state::Dict, tools::Dict)
-    # Thought: LLM decides next action (simplified: just take first tool)
-    thought = "Need to search for $(state[:query])"
+// ReAct ステップ: Thought → Action → Observation
+fn react_step(
+    query: &str,
+    tool: &str,
+    tools: &std::collections::HashMap<&str, fn(&str) -> String>,
+) -> (String, ToolResult) {
+    // Thought: next action determination
+    let thought = format!("Need to search for {}", query);
 
-    # Action: Execute tool
-    tool_name = "search"
-    tool_input = state[:query]
-    observation = tools[tool_name](tool_input)
+    // Action: execute tool
+    let result = match tools.get(tool) {
+        Some(f) => ToolResult::Text(f(query)),
+        None    => ToolResult::Error(format!("unknown tool: {tool}")),
+    };
+    (thought, result)
+}
 
-    # State update
-    state[:history] = push!(get(state, :history, []),
-                            (thought=thought, action=tool_name, observation=observation))
-    return state
-end
+fn main() {
+    let mut tools: std::collections::HashMap<&str, fn(&str) -> String> =
+        std::collections::HashMap::new();
+    tools.insert("search", |q| format!("Found: {} is a programming language for AI agents", q));
 
-# Define tool
-tools = Dict(
-    "search" => query -> "Found: $query is a programming language for AI agents"
-)
+    let query = "What is Rust?";
+    let (thought, result) = react_step(query, "search", &tools);
 
-# Run one ReAct step
-state = Dict(:query => "What is Julia?", :history => [])
-state = react_step(state, tools)
-
-println("Thought: $(state[:history][1].thought)")
-println("Action: $(state[:history][1].action)")
-println("Observation: $(state[:history][1].observation)")
+    match result {
+        ToolResult::Text(obs) => {
+            println!("Thought: {}", thought);
+            println!("Action: search");
+            println!("Observation: {}", obs);
+        }
+        ToolResult::Error(e) => eprintln!("Error: {}", e),
+    }
+}
 ```
 
 出力:
 ```
-Thought: Need to search for What is Julia?
+Thought: Need to search for What is Rust?
 Action: search
-Observation: Found: What is Julia? is a programming language for AI agents
+Observation: Found: What is Rust? is a systems programming language
 ```
 
 **3行でエージェントの心臓部を動かした。** これが ReAct [^1] だ:
@@ -264,7 +271,7 @@ graph TB
     end
 
     subgraph "🚀 Implementation"
-        G["7️⃣ Production<br/>Rust+Elixir+Julia"]
+        G["7️⃣ Production<br/>Rust+Elixir"]
     end
 
     A --> B
@@ -288,7 +295,7 @@ graph TB
 4. **Memory Systems** (Part D) — 短期・長期記憶の管理
 5. **Multi-Agent** (Part E) — 複数エージェントの協調
 6. **MCP完全解説** (Part F) — 標準化プロトコル
-7. **実装編** (Part G) — Rust/Elixir/Juliaでの実装
+7. **実装編** (Part G) — Rust/Elixir/Rustでの実装
 
 ### 2.3 エージェントの応用例
 
@@ -310,7 +317,7 @@ graph TB
 | **Part D** | Memory Systems完全版 | ~500 | ★★★ |
 | **Part E** | Multi-Agent完全版 | ~600 | ★★★★ |
 | **Part F** | MCP完全解説 | ~300 | ★★★ |
-| **Part G** | 実装編 (Rust/Elixir/Julia) | ~600 | ★★★★ |
+| **Part G** | 実装編 (Rust/Elixir/Rust) | ~600 | ★★★★ |
 
 合計 ~3,700行の大型講義となる。
 
@@ -1446,7 +1453,7 @@ $$
 
 > **Note:** **progress: 50%** — Zone 3 Part A-F完了。ReAct / Tool Use / Planning / Memory / Multi-Agent / MCPの数学的定式化を完全に理解した。
 
-### Part G: 実装編 (Rust/Elixir/Julia)
+### Part G: 実装編 (Rust/Elixir/Rust)
 
 ここまでで、エージェントの理論を完全に学んだ。次は、実装編だ。
 
@@ -1456,7 +1463,7 @@ $$
 
 ```mermaid
 graph TD
-    subgraph "⚡ Julia Layer"
+    subgraph "🦀 Rust Layer"
         A["Orchestration<br/>Planning & Execution"]
     end
 
@@ -1486,7 +1493,7 @@ graph TD
 
 | Layer | 役割 | 言語選択理由 |
 |:------|:-----|:------------|
-| **⚡ Julia** | Orchestration / Planning / Execution | 数式↔コード 1:1対応、REPL駆動開発 |
+| **🦀 Rust** | Orchestration / Planning / Execution | 数式↔コード 1:1対応、REPL駆動開発 |
 | **🦀 Rust** | Tool Registry / State Machine / Memory Storage | Zero-copy、型安全、C-ABI FFI |
 | **🔮 Elixir** | Multi-Agent / Actor Model / Fault Tolerance | BEAM VM、Supervision Tree、分散並行 |
 
@@ -1514,19 +1521,19 @@ Multi-Agent Supervisor:
 Multi-Agent Communication:
 
 
-#### 3.45 ⚡ Julia Agent Orchestration
+#### 3.45 🦀 Rust Agent Orchestration
 
-JuliaでOrchestration Layerを実装する。
+RustでOrchestration Layerを実装する。
 
 
-#### 3.46 Rust ↔ Julia FFI連携
+#### 3.46 Rust ↔ Rust FFI連携
 
-RustのTool RegistryをJuliaから呼び出す。
+RustのTool RegistryをRustから呼び出す。
 
 **Rust側 (FFI Export)**:
 
 
-**Julia側 (FFI Import)**:
+**Rust側 (FFI Import)**:
 
 
 **数式とコードの完全対応**:
@@ -1536,9 +1543,9 @@ RustのTool RegistryをJuliaから呼び出す。
 | Tool定義 | $f: \mathcal{A} \to \mathcal{O}$ | `trait Tool { fn execute(&self, args: Value) -> Result<Value>; }` |
 | Registry | $\mathcal{R} = \{(n_i, f_i)\}_{i=1}^N$ | `HashMap<String, Box<dyn Tool>>` |
 | 実行 | $o = \mathcal{R}(n, a)$ | `registry.execute(name, args)?` |
-| FFI境界 | $\text{Julia} \xrightarrow{\text{ccall}} \text{Rust}$ | `ccall((:tool_registry_execute, LIBAGENT), ...)` |
+| FFI境界 | $\text{Rust} \xrightarrow{\text{ccall}} \text{Rust}$ | `ccall((:tool_registry_execute, LIBAGENT), ...)` |
 
-この設計により、Rustの高速実行とJuliaの柔軟性を両立できる。
+この設計により、Rustの高速実行とRustの柔軟性を両立できる。
 
 **Tool Registryの拡張性**:
 

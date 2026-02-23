@@ -2,12 +2,12 @@
 title: "第13回: 自己回帰モデル: 30秒の驚き→数式修行→実装マスター 【前編】理論編"
 emoji: "🔄"
 type: "tech"
-topics: ["machinelearning", "deeplearning", "autoregressive", "julia", "rust"]
+topics: ["machinelearning", "deeplearning", "autoregressive", "rust", "rust"]
 published: true
 slug: "ml-lecture-13-part1"
 difficulty: "advanced"
 time_estimate: "90 minutes"
-languages: ["Julia", "Rust"]
+languages: ["Rust"]
 keywords: ["機械学習", "深層学習", "生成モデル"]
 ---
 
@@ -55,28 +55,49 @@ graph LR
 
 画像を「左上から右下へ、1ピクセルずつ順番に生成」する。それが自己回帰(AR)だ。
 
-```julia
-using Distributions
+```rust
+use rand::Rng;
+use rand_distr::{Normal, Distribution};
 
-# Autoregressive image generation (4x4 grayscale toy example)
-# p(x) = ∏_{i=1}^{16} p(x_i | x_{<i})
+// Autoregressive image generation (4x4 grayscale toy example)
+// p(x) = ∏_{i=1}^{16} p(x_i | x_{<i})
 
-function ar_sample_toy(μ_base=0.5, σ=0.2)
-    img = zeros(4, 4)
-    for i in 1:4, j in 1:4
-        # Condition on all previous pixels (raster scan: left→right, top→bottom)
-        context = (i == 1 && j == 1) ? μ_base : mean(img[1:i, 1:j][img[1:i, 1:j] .> 0])
-        # Sample current pixel: p(x_{i,j} | x_{<(i,j)})
-        img[i, j] = clamp(rand(Normal(context, σ)), 0, 1)
-    end
+fn ar_sample_toy(mu_base: f64, sigma: f64) -> [[f64; 4]; 4] {
+    let mut rng = rand::thread_rng();
+    let mut img = [[0.0f64; 4]; 4];
+    for i in 0..4usize {
+        for j in 0..4usize {
+            // Condition on all previous pixels (raster scan: left→right, top→bottom)
+            let prev: Vec<f64> = (0..=i)
+                .flat_map(|ii| (0..=j).map(move |jj| (ii, jj)))
+                .filter(|&(ii, jj)| ii < i || jj < j)
+                .map(|(ii, jj)| img[ii][jj])
+                .filter(|&v| v > 0.0)
+                .collect();
+            let context = if prev.is_empty() {
+                mu_base
+            } else {
+                prev.iter().sum::<f64>() / prev.len() as f64
+            };
+            // Sample current pixel: p(x_{i,j} | x_{<(i,j)})
+            let dist = Normal::new(context, sigma).unwrap();
+            img[i][j] = dist.sample(&mut rng).clamp(0.0, 1.0);
+        }
+    }
     img
-end
+}
 
-# Generate 3 samples
-samples = [ar_sample_toy() for _ in 1:3]
-for (k, s) in enumerate(samples)
-    println("Sample $k:\n", round.(s; digits=2))
-end
+fn main() {
+    // Generate 3 samples
+    let samples: Vec<_> = (0..3).map(|_| ar_sample_toy(0.5, 0.2)).collect();
+    for (k, s) in samples.iter().enumerate() {
+        println!("Sample {}:", k + 1);
+        for row in s {
+            let rounded: Vec<f64> = row.iter().map(|&x| (x * 100.0).round() / 100.0).collect();
+            println!("  {:?}", rounded);
+        }
+    }
+}
 ```
 
 出力:
@@ -255,7 +276,7 @@ PixelCNNはConvだがAutoregressive — RNNではない。WaveNetも同様。Tra
 | PixelCNN | 触れない | **Masked Conv/Blind Spot/Gated全て導出** |
 | WaveNet | 触れない | **Dilated Convの数学完全版** |
 | VAR/MAR | なし | **2024-2025最新手法を網羅** |
-| 実装 | PyTorch簡易版 | **⚡Julia + 🦀Rust 高速化** |
+| 実装 | PyTorch簡易版 | **🦀Rust + 🦀Rust 高速化** |
 | 数式 | 概念的 | **連鎖律→NLL→Bits-per-dim完全導出** |
 
 松尾研は「ARは存在する」と紹介する。本シリーズは「ARの理論→実装→最新研究」を完全マスターする。
@@ -274,14 +295,14 @@ PixelCNNはConvだがAutoregressive — RNNではない。WaveNetも同様。Tra
 
 **最小コア**: Z0-Z2 + Z3.1-3.3 (55分)で自己回帰の本質は理解できる。PixelCNN/WaveNetは応用として後から戻れる。
 
-<details><summary>🎯 Trojan Horse: Julia登場の伏線</summary>
+<details><summary>🎯 Trojan Horse: Rust強化の伏線</summary>
 
-第9回でRustデビュー(ゼロコピー50x高速)、第10回でJuliaデビュー(多重ディスパッチ+数式1:1対応)を経て、本講義では ⚡Julia と 🦀Rust の **協調** を示す:
+第9回でRustデビュー(ゼロコピー50x高速)、第10回でRustデビュー(ゼロコスト抽象化+数式1:1対応)を経て、本講義では 🦀Rust と 🦀Rust の **協調** を示す:
 
-- Julia: 訓練ループ(Lux.jl + 多重ディスパッチ)
+- Rust: 訓練ループ(Candle + ゼロコスト抽象化)
 - Rust: 推論カーネル(ONNX Runtime + 並列デコード)
 
-PixelCNN訓練をJuliaで書き、推論をRustで高速化 — 「適材適所の多言語戦略」を体感する。Python一本では絶対に到達できない世界だ。
+PixelCNN訓練をRustで書き、推論をRustで高速化 — 「適材適所の多言語戦略」を体感する。Python一本では絶対に到達できない世界だ。
 
 </details>
 

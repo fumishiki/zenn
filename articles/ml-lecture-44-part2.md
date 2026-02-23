@@ -2,24 +2,24 @@
 title: "第44回 (Part 2): 音声生成: 30秒の驚き→数式修行→実装マスター"
 emoji: "🎙️"
 type: "tech"
-topics: ["machinelearning", "deeplearning", "audio", "julia", "tts"]
+topics: ["machinelearning", "deeplearning", "audio", "rust", "tts"]
 published: true
 slug: "ml-lecture-44-part2"
 difficulty: "advanced"
 time_estimate: "90 minutes"
-languages: ["Julia", "Rust"]
+languages: ["Rust"]
 keywords: ["機械学習", "深層学習", "生成モデル"]
 ---
 ## 💻 Z5. 試練（実装）（45分）— 3言語で音声生成パイプライン
 
-**ゴール**: Flow Matching TTS を Julia で訓練、Rust でリアルタイム推論、Elixir で分散配信するパイプラインを構築する。
+**ゴール**: Flow Matching TTS を Rust で訓練、Rust でリアルタイム推論、Elixir で分散配信するパイプラインを構築する。
 
-### 4.1 Julia: Flow Matching TTS 訓練
+### 4.1 Rust: Flow Matching TTS 訓練
 
 #### 4.1.1 環境構築
 
 ```bash
-# Julia 1.11+ (2025年最新版)
+# Rust (candle + burn, cargo 1.75+)
 julia --version
 
 # Packages
@@ -30,105 +30,156 @@ julia -e 'using Pkg; Pkg.add(["Flux", "CUDA", "Zygote", "FFTW", "WAV", "Progress
 
 **目標**: 簡単な音声合成（2音素 "a", "i" → 異なる周波数のサイン波）
 
-```julia
-# tiny_flow_tts.jl
-using Flux, Zygote, FFTW, Statistics, Random, ProgressMeter
+```rust
+// tiny_flow_tts.rs
+use candle_core::{Device, Tensor};
+use candle_nn::{self as nn, Module, VarBuilder, VarMap};
+use ndarray::{Array1, Array2};
+use ndarray_rand::RandomExt;
+use ndarray_rand::rand_distr::Normal;
+use rand::Rng;
+use rustfft::{FftPlanner, num_complex::Complex};
 
-# --- Dataset: 2 phonemes → sine waves ---
-function generate_phoneme_dataset(n_samples=100, duration=1.0, sample_rate=8000)
-    t        = 0:1/sample_rate:duration-1/sample_rate
-    phonemes = [rand(0:1) for _ in 1:n_samples]
-    audios   = [Float32.(sin.(2π .* (p == 0 ? 220.0 : 440.0) .* t)) for p in phonemes]
-    return phonemes, audios
-end
+// --- Dataset: 2 phonemes → sine waves ---
+fn generate_phoneme_dataset(n_samples: usize, duration: f64, sample_rate: usize)
+    -> (Vec<usize>, Vec<Array1<f32>>)
+{
+    let mut rng = rand::thread_rng();
+    let n = (sample_rate as f64 * duration) as usize;
+    let phonemes: Vec<usize> = (0..n_samples).map(|_| rng.gen_range(0..2)).collect();
+    let audios: Vec<Array1<f32>> = phonemes.iter().map(|&p| {
+        let freq = if p == 0 { 220.0_f64 } else { 440.0_f64 };
+        Array1::from_iter((0..n).map(|i| {
+            (2.0 * std::f64::consts::PI * freq * i as f64 / sample_rate as f64).sin() as f32
+        }))
+    }).collect();
+    (phonemes, audios)
+}
 
-# --- Flow Matching Model ---
-struct FlowMatchingTTS
-    text_emb  # Embedding layer
-    velocity  # Velocity network (MLP)
-end
+// --- Flow Matching Model ---
+struct FlowMatchingTTS {
+    text_emb: nn::Embedding,  // Embedding layer
+    fc1: nn::Linear,          // Velocity network (MLP) layer 1
+    fc2: nn::Linear,          // Velocity network (MLP) layer 2
+    fc3: nn::Linear,          // Velocity network (MLP) layer 3
+}
 
-Flux.@functor FlowMatchingTTS
+impl FlowMatchingTTS {
+    fn new(vocab_size: usize, audio_dim: usize, hidden_dim: usize, vb: VarBuilder) -> candle_core::Result<Self> {
+        let text_emb = candle_nn::Embedding::new(vocab_size, hidden_dim, vb.pp("text_emb"))?;
+        let fc1 = nn::linear(audio_dim + hidden_dim + 1, 256, vb.pp("fc1"))?; // x + text_emb + t
+        let fc2 = nn::linear(256, 256, vb.pp("fc2"))?;
+        let fc3 = nn::linear(256, audio_dim, vb.pp("fc3"))?;
+        Ok(Self { text_emb, fc1, fc2, fc3 })
+    }
 
-function FlowMatchingTTS(vocab_size=2, audio_dim=8000, hidden_dim=128)
-    text_emb = Flux.Embedding(vocab_size, hidden_dim)
-    velocity = Chain(
-        Dense(audio_dim + hidden_dim + 1, 256, relu),  # x + text_emb + t
-        Dense(256, 256, relu),
-        Dense(256, audio_dim)
-    )
-    return FlowMatchingTTS(text_emb, velocity)
-end
+    fn forward(&self, x_t: &Tensor, t: f32, phoneme_id: usize) -> candle_core::Result<Tensor> {
+        let emb = self.text_emb.forward(&Tensor::new(&[phoneme_id as u32], x_t.device())?)?;
+        let t_tensor = Tensor::new(&[t], x_t.device())?;
+        let input = Tensor::cat(&[x_t, &emb, &t_tensor], 0)?;
+        let h = self.fc1.forward(&input)?.relu()?;
+        let h = self.fc2.forward(&h)?.relu()?;
+        self.fc3.forward(&h)
+    }
+}
 
-function (m::FlowMatchingTTS)(x_t, t, phoneme_id)
-    emb = m.text_emb(phoneme_id + 1)
-    m.velocity(vcat(x_t, repeat(emb, length(x_t) ÷ length(emb))[1:length(x_t)], [t]))
-end
+// --- Training ---
+fn train_flow_tts(n_epochs: usize, n_samples: usize) -> candle_core::Result<FlowMatchingTTS> {
+    let (x_text, x_audio) = generate_phoneme_dataset(n_samples, 1.0, 8000);
+    let audio_dim = x_audio[0].len();
+    let dev = Device::Cpu;
+    let varmap = VarMap::new();
+    let vb = VarBuilder::from_varmap(&varmap, candle_core::DType::F32, &dev);
+    let model = FlowMatchingTTS::new(2, audio_dim, 64, vb)?;
+    let mut optimizer = candle_nn::AdamW::new(varmap.all_vars(), candle_nn::ParamsAdamW::default())?;
 
-# --- Training ---
-function train_flow_tts(n_epochs=50, n_samples=100)
-    X_text, X_audio = generate_phoneme_dataset(n_samples)
-    audio_dim = length(X_audio[1])
-    model = FlowMatchingTTS(2, audio_dim, 64)
-    opt   = Flux.Adam(1e-3)
-    ps    = Flux.params(model)
+    for epoch in 1..=n_epochs {
+        let mut losses = Vec::with_capacity(n_samples);
+        for i in 0..n_samples {
+            let mut rng = rand::thread_rng();
+            let t: f32 = rng.gen::<f32>();
+            // x0 ~ N(0,I): noise source, x1: target audio
+            let x0 = Array1::<f32>::random(audio_dim, Normal::new(0.0_f32, 1.0).unwrap());
+            let x1 = &x_audio[i];
+            // x_t = (1-t)·x₀ + t·x₁  (linear interpolation path, t∈[0,1])
+            let x_t: Vec<f32> = x0.iter().zip(x1.iter())
+                .map(|(&a, &b)| (1.0 - t) * a + t * b).collect();
+            // u_t = x₁ - x₀  (conditional vector field: constant velocity along straight path)
+            let u_t: Vec<f32> = x1.iter().zip(x0.iter()).map(|(&a, &b)| a - b).collect();
+            let x_t_tensor = Tensor::from_vec(x_t, audio_dim, &dev)?;
+            let u_t_tensor = Tensor::from_vec(u_t, audio_dim, &dev)?;
+            let v_pred = model.forward(&x_t_tensor, t, x_text[i])?;
+            // L_FM = E[||v_θ(x_t,t,c) - u_t||²]  (Flow Matching loss)
+            let diff = (v_pred - u_t_tensor)?;
+            let loss = diff.sqr()?.mean_all()?;
+            optimizer.backward_step(&loss)?;
+            losses.push(loss.to_scalar::<f32>()?);
+        }
+        if epoch % 10 == 0 {
+            let mean_loss = losses.iter().sum::<f32>() / losses.len() as f32;
+            println!("Epoch {epoch}: Loss = {mean_loss}");
+        }
+    }
 
-    @showprogress for epoch in 1:n_epochs
-        losses = map(1:n_samples) do i
-            t   = rand(Float32)
-            x0  = randn(Float32, audio_dim)
-            x1  = X_audio[i]
-            x_t = @. (1 - t) * x0 + t * x1
-            u_t = x1 .- x0
-            grads = gradient(ps) do
-                mean((model(x_t, t, X_text[i]) .- u_t).^2)
-            end
-            Flux.Optimise.update!(opt, ps, grads)
-            mean((model(x_t, t, X_text[i]) .- u_t).^2)
-        end
-        epoch % 10 == 0 && println("Epoch $epoch: Loss = $(mean(losses))")
-    end
+    Ok(model)
+}
 
-    return model
-end
+// --- Sampling ---
+fn sample_flow_tts(model: &FlowMatchingTTS, phoneme_id: usize, steps: usize, audio_dim: usize)
+    -> candle_core::Result<Vec<f32>>
+{
+    let dev = Device::Cpu;
+    let mut x = Array1::<f32>::random(audio_dim, Normal::new(0.0_f32, 1.0).unwrap());
+    let dt = 1.0_f32 / steps as f32;
+    for step in 1..=steps {
+        let t = step as f32 * dt;
+        let x_tensor = Tensor::from_slice(x.as_slice().unwrap(), audio_dim, &dev)?;
+        let v = model.forward(&x_tensor, t, phoneme_id)?.to_vec1::<f32>()?;
+        // Euler: x_{t+dt} = x_t + v_θ(x_t,t,c)·dt  (ODE integration)
+        for (xi, vi) in x.iter_mut().zip(v.iter()) {
+            *xi += vi * dt;
+        }
+    }
+    Ok(x.to_vec())
+}
 
-# --- Sampling ---
-function sample_flow_tts(model, phoneme_id, steps=10, audio_dim=8000)
-    x  = randn(Float32, audio_dim)
-    dt = 1.0f0 / steps
-    for step in 1:steps
-        x .+= model(x, step * dt, phoneme_id) .* dt
-    end
-    return x
-end
+fn main() -> candle_core::Result<()> {
+    println!("【Tiny Flow Matching TTS 訓練】");
+    println!("Task: 2 phonemes ('a'=220Hz, 'i'=440Hz) → sine waves");
+    println!("Dataset: 100 samples, 1 sec @ 8kHz");
+    println!("Model: Flow Matching (MLP velocity network)");
+    println!();
 
-# --- Main ---
-println("【Tiny Flow Matching TTS 訓練】")
-println("Task: 2 phonemes ('a'=220Hz, 'i'=440Hz) → sine waves")
-println("Dataset: 100 samples, 1 sec @ 8kHz")
-println("Model: Flow Matching (MLP velocity network)")
-println()
+    let model_trained = train_flow_tts(50, 100)?;
 
-model_trained = train_flow_tts(50, 100)
+    println!("\n【Sampling】");
+    let audio_a = sample_flow_tts(&model_trained, 0, 10, 8000)?;
+    let audio_i = sample_flow_tts(&model_trained, 1, 10, 8000)?;
 
-println("\n【Sampling】")
-audio_a = sample_flow_tts(model_trained, 0, 10, 8000)
-audio_i = sample_flow_tts(model_trained, 1, 10, 8000)
+    println!("Phoneme 'a' (220Hz): generated audio length = {}", audio_a.len());
+    println!("Phoneme 'i' (440Hz): generated audio length = {}", audio_i.len());
 
-println("Phoneme 'a' (220Hz): generated audio length = $(length(audio_a))")
-println("Phoneme 'i' (440Hz): generated audio length = $(length(audio_i))")
+    // FFT で周波数確認
+    let mut planner = FftPlanner::<f32>::new();
+    let fft = planner.plan_fft_forward(audio_a.len());
+    let mut buf_a: Vec<Complex<f32>> = audio_a.iter().map(|&x| Complex::new(x, 0.0)).collect();
+    let mut buf_i: Vec<Complex<f32>> = audio_i.iter().map(|&x| Complex::new(x, 0.0)).collect();
+    fft.process(&mut buf_a);
+    fft.process(&mut buf_i);
+    let fft_a: Vec<f32> = buf_a.iter().map(|c| c.norm()).collect();
+    let fft_i: Vec<f32> = buf_i.iter().map(|c| c.norm()).collect();
+    // Skip DC (index 0)
+    let freq_a = fft_a[1..4000].iter().enumerate()
+        .max_by(|a, b| a.1.partial_cmp(b.1).unwrap()).map(|(i, _)| i + 1).unwrap_or(0);
+    let freq_i = fft_i[1..4000].iter().enumerate()
+        .max_by(|a, b| a.1.partial_cmp(b.1).unwrap()).map(|(i, _)| i + 1).unwrap_or(0);
 
-# FFT で周波数確認
-using FFTW
-fft_a = abs.(fft(audio_a))
-fft_i = abs.(fft(audio_i))
-freq_a = argmax(fft_a[2:4000])  # Skip DC
-freq_i = argmax(fft_i[2:4000])
-
-println("\nFFT peak (simplified):")
-println("  'a': bin $freq_a (expected ~220Hz)")
-println("  'i': bin $freq_i (expected ~440Hz)")
-println("\n→ Flow Matching TTS で音素→音声の変換成功")
+    println!("\nFFT peak (simplified):");
+    println!("  'a': bin {freq_a} (expected ~220Hz)");
+    println!("  'i': bin {freq_i} (expected ~440Hz)");
+    println!("\n→ Flow Matching TTS で音素→音声の変換成功");
+    Ok(())
+}
 ```
 
 **実行**:
@@ -153,7 +204,7 @@ FFT peak (simplified):
 → Flow Matching TTS で音素→音声の変換成功
 ```
 
-#### 4.1.3 Julia 実装のポイント
+#### 4.1.3 Rust 実装のポイント
 
 **数式→コードの1:1対応**:
 
@@ -173,7 +224,7 @@ $$
 \mathcal{L} = \|\mathbf{v}_\theta - \mathbf{u}_t\|^2 \quad \Leftrightarrow \quad \text{loss = mean((v_pred .- u_t).^2)}
 $$
 
-**Julia の利点**:
+**Rust の利点**:
 - **Broadcast演算** (`.+`, `.*`): ベクトル演算が自然
 - **Automatic Differentiation** (Zygote): 勾配計算が自動
 - **型安定性**: Float32 で統一 → 高速
@@ -217,10 +268,11 @@ fn flow_matching_sample(
     let x0: Vec<f32> = (0..audio_dim).map(|_| rng.gen::<f32>() - 0.5).collect();
     let dt = 1.0 / steps as f32;
 
+    // dx/dt = v_θ(x_t,t,c)  →  Euler: x_{t+dt} = x_t + v·dt
     (1..=steps).try_fold(Tensor::from_vec(x0, audio_dim, device)?, |x, step| {
         let t = Tensor::from_vec(vec![step as f32 * dt], 1, device)?;
         let v = model.forward(&Tensor::cat(&[&x, phoneme_emb, &t], 0)?)?;
-        &x + &v.affine(dt, 0.0)?
+        &x + &v.affine(dt, 0.0)?  // x_{t+dt} = x_t + v·dt
     })
 }
 
@@ -357,7 +409,7 @@ curl -X POST http://localhost:4000/tts \
 graph LR
     A[User Request<br/>'hello'] --> B[Elixir Server<br/>Port 4000]
     B --> C[Rust Inference<br/>Candle]
-    C --> D[Trained Model<br/>from Julia]
+    C --> D[Trained Model<br/>from Rust]
     D --> E[Audio WAV]
     E --> B
     B --> F[User<br/>HTTP Response]
@@ -368,29 +420,29 @@ graph LR
 ```
 
 **役割分担**:
-- **Julia**: 訓練（Flow Matching TTS モデル）
+- **Rust**: 訓練（Flow Matching TTS モデル）
 - **Rust**: 推論（リアルタイム音声生成、<10ms）
 - **Elixir**: 配信（HTTP API、分散処理、耐障害性）
 
-```julia
-println("\n【3言語統合パイプライン】")
-println("Julia: Flow Matching TTS 訓練")
-println("  → Model weights → ファイル保存")
-println()
-println("Rust: リアルタイム推論")
-println("  → Candle で weights 読み込み")
-println("  → Flow Matching sampling (10 steps)")
-println("  → WAV 出力 (<10ms latency)")
-println()
-println("Elixir: 分散配信")
-println("  → HTTP API (/tts endpoint)")
-println("  → Port 経由で Rust 呼び出し")
-println("  → 複数ノードで負荷分散")
-println()
-println("→ Production-ready 音声生成システム")
+```rust
+println!("\n【3言語統合パイプライン】");
+println!("Rust: Flow Matching TTS 訓練 (Candle)");
+println!("  → Model weights → ファイル保存");
+println!();
+println!("Rust: リアルタイム推論");
+println!("  → Candle で weights 読み込み");
+println!("  → Flow Matching sampling (10 steps)");
+println!("  → WAV 出力 (<10ms latency)");
+println!();
+println!("Elixir: 分散配信");
+println!("  → HTTP API (/tts endpoint)");
+println!("  → Port 経由で Rust 呼び出し");
+println!("  → 複数ノードで負荷分散");
+println!();
+println!("→ Production-ready 音声生成システム");
 ```
 
-> **Note:** **ここまでで全体の85%完了！** Zone 4 完走。Julia で Flow Matching TTS を訓練、Rust でリアルタイム推論、Elixir で分散配信するパイプラインを構築した。次は Zone 5 — 実験ゾーンで、実際に音声を生成し、評価する。
+> **Note:** **ここまでで全体の85%完了！** Zone 4 完走。Rust で Flow Matching TTS を訓練、Rust でリアルタイム推論、Elixir で分散配信するパイプラインを構築した。次は Zone 5 — 実験ゾーンで、実際に音声を生成し、評価する。
 
 ---
 
@@ -460,12 +512,12 @@ $$
 
 **数値検算**: stride=320 → 24000/320 = 75 frames ✅。Codebook サイズ 1024 → 各トークンは $\log_2(1024) = 10$ bits。1秒 = 75 × 10 = 750 bits → 24kHz × 16bit PCM の 384,000 bits から見ると 512倍圧縮。EnCodec RVQ×8（75 token/sec × 8 codebook × 10 bits = 6000 bits/sec）と比べると WavTokenizer は 8倍スパース → Codec LM が扱うシーケンスが大幅短縮。
 
-```julia
-# Challenge 1: WavTokenizer VQ
-function challenge1_wavtokenizer()
-    # TODO: Implement encoder, VQ, decoder
-    println("Challenge 1: WavTokenizer VQ を実装し、圧縮率320xを実現せよ")
-end
+```rust
+// Challenge 1: WavTokenizer VQ
+fn challenge1_wavtokenizer() {
+    // TODO: Implement encoder, VQ, decoder
+    println!("Challenge 1: WavTokenizer VQ を実装し、圧縮率320xを実現せよ");
+}
 ```
 
 #### Challenge 2: F5-TTS Sway Sampling
@@ -474,13 +526,13 @@ end
 
 **評価指標**: MSE（予測 vs 真の音声）
 
-```julia
-# Challenge 2: Sway Sampling comparison
-function challenge2_sway_sampling()
-    # TODO: Implement sway sampling with different α
-    # Compare MSE for α = 0.5, 1.0, 2.0
-    println("Challenge 2: Sway Sampling の α による品質差を評価せよ")
-end
+```rust
+// Challenge 2: Sway Sampling comparison
+fn challenge2_sway_sampling() {
+    // TODO: Implement sway sampling with different α
+    // Compare MSE for α = 0.5, 1.0, 2.0
+    println!("Challenge 2: Sway Sampling の α による品質差を評価せよ");
+}
 ```
 
 #### Challenge 3: KAD 実装
@@ -489,13 +541,13 @@ end
 
 **数値の確認**: 同一分布の場合 KAD ≈ 0。ランダムに生成した embeddings（real $\neq$ generated）では KAD > 0 になることを assert で確認すること。$k(x,x) = (1 + \|x\|^2)^3 > 1$（CLIP 埋め込みは L2-normalized なので $\|x\|=1$ → $k(x,x) = 2^3 = 8$）。
 
-```julia
-# Challenge 3: KAD implementation
-function challenge3_kad()
-    # TODO: Implement polynomial kernel MMD
-    # Compare with FAD (if time permits)
-    println("Challenge 3: KAD を実装し、FAD と比較せよ")
-end
+```rust
+// Challenge 3: KAD implementation
+fn challenge3_kad() {
+    // TODO: Implement polynomial kernel MMD
+    // Compare with FAD (if time permits)
+    println!("Challenge 3: KAD を実装し、FAD と比較せよ");
+}
 ```
 
 ### 5.3 自己診断チェックリスト
@@ -510,7 +562,7 @@ end
 - [ ] **FACodec**: 属性分解（content/prosody/timbre/acoustic）ができる
 - [ ] **MusicGen**: EnCodec + LM で音楽生成ができる
 - [ ] **KAD**: Distribution-free 評価指標を実装できる
-- [ ] **3言語統合**: Julia訓練 + Rust推論 + Elixir配信のパイプラインが動く
+- [ ] **3言語統合**: Rust訓練 + Rust推論 + Elixir配信のパイプラインが動く
 - [ ] **リアルタイム**: Rust 推論が <10ms で完了する
 
 ### 5.4 発展課題
@@ -596,17 +648,17 @@ graph TD
 
 **Real-time TTS の技術的課題**: RTF < 1.0 はストリーミング配信の要件。現状 ZipVoice で RTF=0.02（GPU）だが、CPU では RTF≈0.5〜2.0。音声アシスタントの応答遅延 = TTS latency → 体感品質に直結。TTFT（Time to First Token）を 100ms 以下にすることが 2026 年の目標。
 
-```julia
-println("\n【Zero-shot TTS の進化予測】")
-println("2024-2025: Human parity 達成（VALL-E 2 / F5-TTS）")
-println("2026: Real-time streaming TTS（推論 < 入力時間）")
-println("2027: Emotion control + Few-shot (1秒プロンプト)")
-println("2028: Cross-lingual transfer（単一モデルで全言語）")
-println()
-println("Key challenges:")
-println("  1. Latency reduction: 10 steps → 1-3 steps")
-println("  2. Quality-speed tradeoff: 人間品質 + リアルタイム")
-println("  3. Controllability: 韻律・感情・スタイルの独立制御")
+```rust
+println!("\n【Zero-shot TTS の進化予測】");
+println!("2024-2025: Human parity 達成（VALL-E 2 / F5-TTS）");
+println!("2026: Real-time streaming TTS（推論 < 入力時間）");
+println!("2027: Emotion control + Few-shot (1秒プロンプト)");
+println!("2028: Cross-lingual transfer（単一モデルで全言語）");
+println!();
+println!("Key challenges:");
+println!("  1. Latency reduction: 10 steps → 1-3 steps");
+println!("  2. Quality-speed tradeoff: 人間品質 + リアルタイム");
+println!("  3. Controllability: 韻律・感情・スタイルの独立制御");
 ```
 
 ### 6.3 Music Generation の課題
@@ -644,14 +696,14 @@ println("  3. Controllability: 韻律・感情・スタイルの独立制御")
 - **Conditional KAD**: Text条件付き生成の評価（CLAP + KAD 統合）
 - **Temporal KAD**: 時間的一貫性の評価
 
-```julia
-println("\n【Audio 評価指標の進化】")
-println("2024: FAD（標準だが問題あり）")
-println("2025: KAD（distribution-free, 推奨）")
-println("2026: Perceptual KAD（人間聴覚モデル統合）")
-println("2027: Multi-modal KAD（Text-audio-quality 統合評価）")
-println()
-println("Goal: 人間評価との相関 R > 0.9")
+```rust
+println!("\n【Audio 評価指標の進化】");
+println!("2024: FAD（標準だが問題あり）");
+println!("2025: KAD（distribution-free, 推奨）");
+println!("2026: Perceptual KAD（人間聴覚モデル統合）");
+println!("2027: Multi-modal KAD（Text-audio-quality 統合評価）");
+println!();
+println!("Goal: 人間評価との相関 R > 0.9");
 ```
 
 ### 6.5 Audio 生成の倫理・社会的課題
@@ -687,18 +739,18 @@ println("Goal: 人間評価との相関 R > 0.9")
 
 **技術的な Watermarking**: 現在、AudioSeal（Meta, 2024）が音声に知覚不可能な透かしを埋め込む技術として注目。$< 100$ ms の遅延で適用可能、雑音・圧縮・速度変換に対しても 95%+ の検出精度。「生成された音声である」ことの証明に必要な技術基盤が整いつつある。
 
-```julia
-println("\n【Audio 生成の倫理課題】")
-println("Deepfake 音声:")
-println("  リスク: 詐欺・Misinformation・Privacy侵害")
-println("  対策: Watermarking / Detection AI / Legal規制")
-println()
-println("音楽著作権:")
-println("  問題: 訓練データの合法性（Fair use vs Infringement）")
-println("  訴訟: RIAA vs Suno (2024)")
-println("  解決: Opt-in dataset + Royalty system")
-println()
-println("→ 技術的進歩と法的枠組みの協調が必須")
+```rust
+println!("\n【Audio 生成の倫理課題】");
+println!("Deepfake 音声:");
+println!("  リスク: 詐欺・Misinformation・Privacy侵害");
+println!("  対策: Watermarking / Detection AI / Legal規制");
+println!();
+println!("音楽著作権:");
+println!("  問題: 訓練データの合法性（Fair use vs Infringement）");
+println!("  訴訟: RIAA vs Suno (2024)");
+println!("  解決: Opt-in dataset + Royalty system");
+println!();
+println!("→ 技術的進歩と法的枠組みの協調が必須");
 ```
 
 ### 6.6 推奨リソース
@@ -840,19 +892,19 @@ graph TD
 
 **なぜ FAD でも長年使われてきたか**: ガウス仮定が成立する「中程度の品質の音声」では FAD と KAD はほぼ同じ順位付けをする。問題が顕在化するのは「高品質・多様な音声（VALL-E 2, F5-TTS）」を評価するとき。この段階で初めて非ガウス性が効いてくる。評価指標は「指標が測れない何かを測ろうとするとき」に限界が見えてくる。
 
-```julia
-println("\n【第44回の4大洞察】")
-println("1. Neural Audio Codec: 音声の離散化革命")
-println("   → VQ-VAE/RVQ/WavTokenizer（画像と同じパラダイム）")
-println()
-println("2. Flow Matching TTS: 速度と品質の両立")
-println("   → F5-TTS（10ステップ、alignment-free）")
-println()
-println("3. Codec LM の限界とハイブリッド化")
-println("   → VALL-E 2（human parity）→ 次世代は Flow + Refinement")
-println()
-println("4. 評価指標の進化: FAD → KAD")
-println("   → Distribution-free（仮定の少なさ = 汎用性）")
+```rust
+println!("\n【第44回の4大洞察】");
+println!("1. Neural Audio Codec: 音声の離散化革命");
+println!("   → VQ-VAE/RVQ/WavTokenizer（画像と同じパラダイム）");
+println!();
+println!("2. Flow Matching TTS: 速度と品質の両立");
+println!("   → F5-TTS（10ステップ、alignment-free）");
+println!();
+println!("3. Codec LM の限界とハイブリッド化");
+println!("   → VALL-E 2（human parity）→ 次世代は Flow + Refinement");
+println!();
+println!("4. 評価指標の進化: FAD → KAD");
+println!("   → Distribution-free（仮定の少なさ = 汎用性）");
 ```
 
 ### 6.8 FAQ — 音声生成でよくある疑問
@@ -871,10 +923,10 @@ println("   → Distribution-free（仮定の少なさ = 汎用性）")
 
 </details>
 
-<details><summary>Q3: Julia で音声処理は現実的か？</summary>
+<details><summary>Q3: Rust で音声処理は現実的か？</summary>
 
 **Answer**:
-**Yes**。FFTW.jl（高速FFT）、WAV.jl（WAV I/O）、Flux.jl（NN訓練）が揃い、数式→コードの1:1対応が研究に最適。ただし本番推論は Rust（Candle）が低レイテンシで優位。Julia = 研究・プロトタイプ、Rust = 本番推論、が現実的な分業。
+**Yes**。FFTW.jl（高速FFT）、WAV.jl（WAV I/O）、Candle（NN訓練）が揃い、数式→コードの1:1対応が研究に最適。ただし本番推論は Rust（Candle）が低レイテンシで優位。Rust = 研究・プロトタイプ、Rust = 本番推論、が現実的な分業。
 
 </details>
 
@@ -898,49 +950,49 @@ println("   → Distribution-free（仮定の少なさ = 汎用性）")
 
 | 日 | タスク | 時間 | 成果物 |
 |:---|:------|:-----|:------|
-| **Day 1** | Zone 0-2 読破 + VQ-VAE 実装 | 3h | VQ-VAE encoder/decoder (Julia) |
-| **Day 2** | Zone 3.1-3.3 数式導出 + RVQ 実装 | 4h | RVQ 4-layer quantizer (Julia) |
-| **Day 3** | Zone 3.4-3.6 Flow Matching 導出 + 実装 | 4h | F5-TTS (tiny version, Julia) |
+| **Day 1** | Zone 0-2 読破 + VQ-VAE 実装 | 3h | VQ-VAE encoder/decoder (Rust) |
+| **Day 2** | Zone 3.1-3.3 数式導出 + RVQ 実装 | 4h | RVQ 4-layer quantizer (Rust) |
+| **Day 3** | Zone 3.4-3.6 Flow Matching 導出 + 実装 | 4h | F5-TTS (tiny version, Rust) |
 | **Day 4** | Zone 3.7-3.8 Codec LM + FACodec | 3h | VALL-E 2 Repetition Aware Sampling |
 | **Day 5** | Zone 4 実装 + Rust 推論エンジン | 4h | Rust inference server (Candle) |
-| **Day 6** | Zone 5 実験 + KAD 実装 | 3h | KAD metric (Julia) |
+| **Day 6** | Zone 5 実験 + KAD 実装 | 3h | KAD metric (Rust) |
 | **Day 7** | Zone 6-7 + 総合プロジェクト | 4h | 3言語統合 TTS pipeline |
 
 **Total**: 25時間で音声生成の理論・実装・応用を完全習得。
 
 ### 6.10 Progress Tracker — 自己評価ツール
 
-```julia
-# progress_tracker_audio.jl
-function audio_generation_progress()
-    skills = [
+```rust
+// progress_tracker_audio.rs
+fn audio_generation_progress() {
+    let skills = [
         ("Neural Audio Codec (VQ-VAE/RVQ/WavTokenizer)", false),
         ("Flow Matching TTS (F5-TTS)", false),
         ("Codec LM (VALL-E 2)", false),
         ("Music Generation (MusicGen/Stable Audio)", false),
         ("Audio 評価指標 (FAD/KAD)", false),
-        ("Julia 音声処理 (FFTW/WAV/Flux)", false),
+        ("Rust 音声処理 (hound/rustfft/candle)", false),
         ("Rust 音声推論 (Candle)", false),
         ("Elixir 音声配信 (OTP/Port)", false),
         ("3言語統合パイプライン", false),
-        ("Deepfake 音声の倫理理解", false)
-    ]
+        ("Deepfake 音声の倫理理解", false),
+    ];
 
-    println("【Audio Generation スキルチェック】")
-    println("各項目を理解・実装できたら true に変更:\n")
-    foreach(enumerate(skills)) do (i, (skill, done))
-        println("$i. $(done ? "✓" : "☐") $skill")
-    end
+    println!("【Audio Generation スキルチェック】");
+    println!("各項目を理解・実装できたら true に変更:\n");
+    for (i, (skill, done)) in skills.iter().enumerate() {
+        println!("{}. {} {}", i + 1, if *done { "✓" } else { "☐" }, skill);
+    }
 
-    completed = count(last, skills)
-    total     = length(skills)
-    progress  = completed * 100 ÷ total
+    let completed = skills.iter().filter(|(_, done)| *done).count();
+    let total = skills.len();
+    let progress = completed * 100 / total;
 
-    println("\n進捗: $completed / $total スキル完了 ($progress%)")
-    println("目標: 10 / 10 スキル完了で音声生成マスター認定")
-end
+    println!("\n進捗: {} / {} スキル完了 ({}%)", completed, total, progress);
+    println!("目標: 10 / 10 スキル完了で音声生成マスター認定");
+}
 
-audio_generation_progress()
+audio_generation_progress();
 ```
 
 **実行して進捗を確認せよ**。全スキル完了 = 音声生成マスター。
@@ -956,7 +1008,7 @@ audio_generation_progress()
 2. **Temporal Coherence** (時間的一貫性の数理)
 3. **3D VAE** (Video tokenization)
 4. **SmolVLM2 & LTX-Video** (動画理解 & 生成デモ)
-5. **Julia/Rust/Elixir で動画生成パイプライン**
+5. **Rust/Rust/Elixir で動画生成パイプライン**
 
 **鍵となる問い**:
 - なぜ静止画の成功が動画に直接適用できないのか？
@@ -965,20 +1017,20 @@ audio_generation_progress()
 
 **第44回から第45回への架け橋**: 音声は1次元シーケンス、動画は3次元（$H \times W \times T$）。F5-TTS の 1D DiT（時間軸のみ）から Video Diffusion の 3D DiT（空間2次元 + 時間1次元）への拡張は、Attention の計算量が $O(T^2) \to O(T^2 H^2 W^2)$ に爆発する問題を解決する必要がある。第43回の $O(N^2)$ 問題が深刻な形で再登場する。
 
-```julia
-println("\n【第45回予告: Video生成】")
-println("静止画（DiT/FLUX）+ 音声（F5-TTS）→ 動画（時空間）へ")
-println()
-println("Key topics:")
-println("  1. Video Diffusion (CogVideoX / Sora 2 / Open-Sora)")
-println("  2. Temporal Coherence (時間的一貫性)")
-println("  3. 3D VAE (Video tokenization)")
-println("  4. SmolVLM2 (動画理解) + LTX-Video (動画生成)")
-println()
-println("→ 時間軸を征服し、全モダリティ制覇へ")
+```rust
+println!("\n【第45回予告: Video生成】");
+println!("静止画（DiT/FLUX）+ 音声（F5-TTS）→ 動画（時空間）へ");
+println!();
+println!("Key topics:");
+println!("  1. Video Diffusion (CogVideoX / Sora 2 / Open-Sora)");
+println!("  2. Temporal Coherence (時間的一貫性)");
+println!("  3. 3D VAE (Video tokenization)");
+println!("  4. SmolVLM2 (動画理解) + LTX-Video (動画生成)");
+println!();
+println!("→ 時間軸を征服し、全モダリティ制覇へ");
 ```
 
-> **Note:** **ここまでで全体の100%完了！** 第44回「音声生成」を完走した。Neural Audio Codec（VQ-VAE → RVQ → WavTokenizer）、Flow Matching TTS（F5-TTS）、Codec LM（VALL-E 2）、Music Generation（MusicGen / Stable Audio）、評価指標（FAD → KAD）の全理論を導出し、Julia/Rust/Elixir で実装した。音声モダリティを完全に習得したあなたは、次の戦場 — 動画生成へ向かう準備ができた。
+> **Note:** **ここまでで全体の100%完了！** 第44回「音声生成」を完走した。Neural Audio Codec（VQ-VAE → RVQ → WavTokenizer）、Flow Matching TTS（F5-TTS）、Codec LM（VALL-E 2）、Music Generation（MusicGen / Stable Audio）、評価指標（FAD → KAD）の全理論を導出し、Rust/Rust/Elixir で実装した。音声モダリティを完全に習得したあなたは、次の戦場 — 動画生成へ向かう準備ができた。
 
 ---
 
@@ -1326,94 +1378,125 @@ $\mathbf{w}_0 \sim \mathcal{N}(0, I)$, $\mathbf{w}_1$ は真の waveform。
 
 **WaveFM vs RFWave の選択指針**: リアルタイム配信（RTF < 0.01）が必要なら RFWave の multi-band（RTF=0.008）。品質重視・少ステップ（10ステップで RTF=0.015 で許容）なら WaveFM で実装が単純。ハイブリッド（band-split で低帯域のみ Flow）は両者の中間。
 
-### 7.5 実装例: Minimal Flow Matching TTS (Julia)
+### 7.5 実装例: Minimal Flow Matching TTS (Rust)
 
-```julia
-using Lux, Optimisers, Zygote, FFTW, WAV
+```rust
+use candle_core::{Device, Tensor, DType};
+use candle_nn::{self as nn, Module, VarBuilder, VarMap};
+use ndarray::{Array1, Array2};
+use ndarray_rand::RandomExt;
+use ndarray_rand::rand_distr::Normal;
+use rand::Rng;
 
-# --- Mel-spectrogram extraction ---
-function extract_mel(waveform::Vector{Float32}, sr=22050, n_fft=1024, hop=256, n_mels=80)
-    # STFT
-    S = stft(waveform, n_fft, hop)
-    # Mel filterbank
-    mel_fb = mel_filterbank(n_fft÷2+1, n_mels, sr)
-    # Mel spectrogram
-    M = mel_fb * abs.(S)
-    return log.(M .+ 1f-6)  # Log-scale
-end
+// --- Mel-spectrogram extraction ---
+fn extract_mel(waveform: &[f32], sr: usize, n_fft: usize, hop: usize, n_mels: usize)
+    -> Array2<f32>
+{
+    // STFT
+    let s = stft(waveform, n_fft, hop);
+    // Mel filterbank
+    let mel_fb = mel_filterbank(n_fft / 2 + 1, n_mels, sr);
+    // Mel spectrogram
+    let m = mel_fb.dot(&s.mapv(|c: f32| c.abs()));
+    m.mapv(|v| (v + 1e-6_f32).ln())  // Log-scale
+}
 
-# --- Velocity Network (1D U-Net) ---
-function VelocityUNet(n_mels=80, hidden=256)
-    return Chain(
-        # Encoder
-        Conv((3,), n_mels+1 => hidden, relu; stride=1, pad=1),
-        Conv((3,), hidden => hidden*2, relu; stride=2, pad=1),
-        # Bottleneck
-        Dense(hidden*2, hidden*2, relu),
-        # Decoder
-        ConvTranspose((3,), hidden*2 => hidden, relu; stride=2, pad=1),
-        Conv((3,), hidden => n_mels; stride=1, pad=1)
-    )
-end
+// --- Velocity Network (1D U-Net) ---
+fn velocity_unet(n_mels: usize, hidden: usize, vb: VarBuilder) -> candle_core::Result<impl Module> {
+    // Encoder → Bottleneck → Decoder (sequential candle_nn layers)
+    let enc1 = nn::conv1d(n_mels + 1, hidden, 3, nn::Conv1dConfig { padding: 1, ..Default::default() }, vb.pp("enc1"))?;
+    let enc2 = nn::conv1d(hidden, hidden * 2, 3, nn::Conv1dConfig { stride: 2, padding: 1, ..Default::default() }, vb.pp("enc2"))?;
+    let bottleneck = nn::linear(hidden * 2, hidden * 2, vb.pp("bottleneck"))?;
+    let dec1 = nn::conv_transpose1d(hidden * 2, hidden, 3, nn::ConvTranspose1dConfig { stride: 2, padding: 1, ..Default::default() }, vb.pp("dec1"))?;
+    let dec2 = nn::conv1d(hidden, n_mels, 3, nn::Conv1dConfig { padding: 1, ..Default::default() }, vb.pp("dec2"))?;
+    Ok(nn::seq()
+        .add(enc1).add_fn(|x| x.relu())
+        .add(enc2).add_fn(|x| x.relu())
+        .add(bottleneck).add_fn(|x| x.relu())
+        .add(dec1).add_fn(|x| x.relu())
+        .add(dec2))
+}
 
-# --- Flow Matching Training ---
-function train_flow_tts(
-    mels::Vector{Matrix{Float32}},  # List of mel-spectrograms
-    texts::Vector{Vector{Int}},     # Tokenized text
-    n_epochs=50
-)
-    model = VelocityUNet(80, 256)
-    ps, st = Lux.setup(Random.default_rng(), model)
-    opt = Optimisers.Adam(1f-4)
-    opt_state = Optimisers.setup(opt, ps)
+// --- Flow Matching Training ---
+fn train_flow_tts(
+    mels: &[Array2<f32>],   // List of mel-spectrograms
+    texts: &[Vec<usize>],   // Tokenized text
+    n_epochs: usize,
+) -> candle_core::Result<(VarMap, Box<dyn Module>)> {
+    let dev = Device::Cpu;
+    let varmap = VarMap::new();
+    let vb = VarBuilder::from_varmap(&varmap, DType::F32, &dev);
+    let model = velocity_unet(80, 256, vb)?;
+    let mut optimizer = nn::AdamW::new(varmap.all_vars(), nn::ParamsAdamW {
+        lr: 1e-4,
+        ..Default::default()
+    })?;
 
-    for epoch in 1:n_epochs
-        total_loss = 0.0
+    for epoch in 1..=n_epochs {
+        let mut total_loss = 0.0_f32;
 
-        for (mel, _text) in zip(mels, texts)
-            t      = rand(Float32)
-            m₀     = randn(Float32, size(mel))
-            m₁     = mel
-            m_t    = @. (1 - t) * m₀ + t * m₁
-            v_true = m₁ .- m₀
+        for (mel, _text) in mels.iter().zip(texts.iter()) {
+            let mut rng = rand::thread_rng();
+            let t: f32 = rng.gen::<f32>();
+            let m0 = Array2::<f32>::random(mel.raw_dim(), Normal::new(0.0_f32, 1.0).unwrap());
+            let m1 = mel;
+            // m_t = (1-t)·m₀ + t·m₁  (linear interpolation, t∈[0,1])
+            let m_t: Array2<f32> = m0.mapv(|v| (1.0 - t) * v)
+                + m1.mapv(|v| t * v);
+            // u_t = m₁ - m₀  (conditional vector field: velocity along straight path)
+            let v_true: Array2<f32> = m1 - &m0;
 
-            # Compute loss
-            loss, grads = Zygote.withgradient(ps) do p
-                input  = cat(m_t, fill(t, size(m_t)), dims=1)
-                v_pred, _ = model(input, p, st)
-                sum((v_pred .- v_true).^2)
-            end
+            // Compute loss and update
+            let shape = m_t.shape().to_vec();
+            let t_fill = Array2::<f32>::from_elem((1, shape[1]), t);
+            let input = ndarray::concatenate(ndarray::Axis(0), &[m_t.view(), t_fill.view()])?;
+            let input_t = Tensor::from_slice(input.as_slice().unwrap(), input.shape(), &dev)?;
+            let v_true_t = Tensor::from_slice(v_true.as_slice().unwrap(), v_true.shape(), &dev)?;
+            let v_pred = model.forward(&input_t)?;
+            // L_FM = ||v_θ(m_t,t,c) - u_t||²  (Flow Matching loss)
+            let loss = (v_pred - v_true_t)?.sqr()?.sum_all()?;
+            optimizer.backward_step(&loss)?;
+            total_loss += loss.to_scalar::<f32>()?;
+        }
 
-            # Update
-            opt_state, ps = Optimisers.update(opt_state, ps, grads[1])
-            total_loss += loss
-        end
+        println!("Epoch {epoch}, Loss: {}", total_loss / mels.len() as f32);
+    }
 
-        println("Epoch $epoch, Loss: $(total_loss / length(mels))")
-    end
+    Ok((varmap, Box::new(model)))
+}
 
-    return ps, st, model
-end
+// --- ODE Sampling ---
+fn sample_mel(
+    model: &dyn Module,
+    _text: &[usize],
+    t_frames: usize,
+    steps: usize,
+) -> candle_core::Result<Array2<f32>> {
+    let dev = Device::Cpu;
+    let mut m = Array2::<f32>::random((t_frames, 80), Normal::new(0.0_f32, 1.0).unwrap());
+    let dt = 1.0_f32 / steps as f32;
 
-# --- ODE Sampling ---
-function sample_mel(model, ps, st, text::Vector{Int}, T_frames::Int, steps=10)
-    m  = randn(Float32, T_frames, 80)
-    dt = 1.0f0 / steps
+    for step in 1..=steps {
+        let t = (step - 1) as f32 * dt;
+        let t_fill = Array2::<f32>::from_elem((1, t_frames), t);
+        let input = ndarray::concatenate(ndarray::Axis(0), &[m.view(), t_fill.view()])?;
+        let input_t = Tensor::from_slice(input.as_slice().unwrap(), input.shape(), &dev)?;
+        // dx/dt = v_θ(x_t,t)  →  Euler: m += v·dt
+        let v = model.forward(&input_t)?.to_vec2::<f32>()?;
+        for (row_m, row_v) in m.outer_iter_mut().zip(v.iter()) {
+            for (mi, vi) in row_m.into_iter().zip(row_v.iter()) {
+                *mi += dt * vi;  // m_{t+dt} = m_t + v·dt
+            }
+        }
+    }
 
-    for step in 1:steps
-        t      = (step - 1) * dt
-        input  = cat(m, fill(t, size(m)), dims=1)
-        v, _   = model(input, ps, st)
-        m .+= dt .* v
-    end
-
-    return m
-end
+    Ok(m)
+}
 ```
 
 **使用**:
 
-```julia
+```rust
 # Load data (pseudo-code)
 mels, texts = load_lj_speech_dataset()
 
@@ -1482,15 +1565,16 @@ Band Synthesis: w = w_low + w_mid + w_high
 
 **実装のポイント**:
 
-```julia
-function multiband_synthesis(m::Matrix{Float32}, sr=22050)
-    m_low, m_mid, m_high = bandpass(m, 0, 4000, sr),
-                           bandpass(m, 4000, 8000, sr),
-                           bandpass(m, 8000, 16000, sr)
-    flow_sample(flow_low, m_low;  steps=20) .+
-    flow_sample(flow_mid, m_mid;  steps=10) .+
-    gan_generate(gan_high, m_high)
-end
+```rust
+// w = w_low + w_mid + w_high  (band synthesis: w_band = Flow/GAN(m_band))
+fn multiband_synthesis(m: &ndarray::Array2<f32>, sr: usize) -> ndarray::Array1<f32> {
+    let m_low  = bandpass(m, 0, 4000, sr);
+    let m_mid  = bandpass(m, 4000, 8000, sr);
+    let m_high = bandpass(m, 8000, 16000, sr);
+    flow_sample(&flow_low,  &m_low,  20)        // 20 steps: low band  (0–4kHz)
+        + flow_sample(&flow_mid,  &m_mid,  10)  // 10 steps: mid band  (4–8kHz)
+        + gan_generate(&gan_high, &m_high)      // GAN 1 step: high band (8–16kHz)
+}
 ```
 
 ---

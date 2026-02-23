@@ -2,12 +2,12 @@
 title: "第36回: 拡散モデル基礎 / DDPM & サンプリング: 30秒の驚き→数式修行→実装マスター"
 emoji: "🔄"
 type: "tech"
-topics: ["machinelearning", "deeplearning", "ddpm", "julia", "diffusion"]
+topics: ["machinelearning", "deeplearning", "ddpm", "rust", "diffusion"]
 published: true
 slug: "ml-lecture-36-part1"
 difficulty: "advanced"
 time_estimate: "90 minutes"
-languages: ["Julia", "Rust"]
+languages: ["Rust"]
 keywords: ["機械学習", "深層学習", "生成モデル"]
 ---
 
@@ -65,31 +65,43 @@ graph LR
 
 DDPMのForward Processを3行で動かす。画像にガウスノイズを段階的に加える。
 
-```julia
-using LinearAlgebra, Statistics
+```rust
+use rand_distr::{Distribution, Normal};
 
-# Forward Process: x₀ → x₁ → ... → x_T ∼ 𝒩(0, I)
-function forward_process(x₀::Vector{Float64}, T::Int, β::AbstractVector)
-    # α_t = 1 - β_t,  ᾱ_t = ∏ᵢ αᵢ
-    α = @. 1.0 - β
-    ᾱ = cumprod(α)
+/// Forward Process: x₀ → x₁ → ... → x_T ∼ 𝒩(0, I)
+/// Returns (x_t, alpha_bar) where alpha_bar[t] = ∏ᵢ αᵢ
+fn forward_process(x0: &[f64], t: usize, beta: &[f64]) -> (Vec<f64>, Vec<f64>) {
+    // α_t = 1 - β_t,  ᾱ_t = ∏ᵢ αᵢ (cumulative product)
+    let alpha_bar: Vec<f64> = beta
+        .iter()
+        .scan(1.0_f64, |prod, &b| { *prod *= 1.0 - b; Some(*prod) })
+        .collect();
 
-    # Closed-form: q(x_t | x₀) = 𝒩(√ᾱ_T x₀, (1-ᾱ_T)I)
-    ε  = randn(length(x₀))
-    x_t = @. sqrt(ᾱ[T]) * x₀ + sqrt(1 - ᾱ[T]) * ε
+    // Closed-form: q(x_t | x₀) = 𝒩(√ᾱ_T x₀, (1−ᾱ_T)I)
+    let normal = Normal::new(0.0, 1.0).unwrap();
+    let mut rng = rand::thread_rng();
+    let ab_t = alpha_bar[t - 1];
+    let x_t: Vec<f64> = x0
+        .iter()
+        .map(|&v| ab_t.sqrt() * v + (1.0 - ab_t).sqrt() * normal.sample(&mut rng))
+        .collect();
 
-    x_t, ᾱ
-end
+    (x_t, alpha_bar)
+}
 
-# Test: 2D data point, T=1000 steps, linear noise schedule
-x₀ = [1.0, 2.0]
-T  = 1000
-β  = collect(range(1e-4, 0.02; length=T))   # linear schedule
+fn main() {
+    // Test: 2D data point, T=1000 steps, linear noise schedule
+    let x0 = vec![1.0_f64, 2.0];
+    let t = 1000_usize;
+    let beta: Vec<f64> = (0..t)
+        .map(|i| 1e-4 + (0.02 - 1e-4) * i as f64 / (t - 1) as f64) // linear schedule
+        .collect();
 
-x_T, ᾱ = forward_process(x₀, T, β)
-println("Original: $x₀")
-println("After T=$T steps: $x_T")
-println("Final ᾱ_T = $(ᾱ[end]) → x_T ≈ 𝒩(0, I)")
+    let (x_t, alpha_bar) = forward_process(&x0, t, &beta);
+    println!("Original: {:?}", x0);
+    println!("After T={} steps: {:?}", t, x_t);
+    println!("Final ᾱ_T = {:.6} → x_T ≈ 𝒩(0, I)", alpha_bar.last().unwrap());
+}
 ```
 
 出力:
@@ -327,7 +339,7 @@ $$
 | **サンプリング** | DDIM概要 | **DDIM完全版 + DPM-Solver++ / UniPC** |
 | **U-Net** | アーキテクチャ図 | **Time Embedding / GroupNorm / Self-Attention 完全解説** |
 | **Score-based視点** | 触れない | **DDPMとScore Matchingの等価性証明** |
-| **実装** | PyTorchデモ | **⚡ Julia訓練 + 🦀 Rust推論** |
+| **実装** | PyTorchデモ | **🦀 Rust訓練 + 🦀 Rust推論** |
 | **最新性** | 2020-2021 | **2024-2026 SOTA** (Zero Terminal SNR / Improved DDPM) |
 
 **差別化の本質**: 松尾研が「手法の紹介」にとどまるのに対し、本講義は「論文が書ける理論的深さ + Production実装」を貫く。
@@ -364,7 +376,7 @@ graph TD
 **学習のコツ**:
 
 1. **紙とペンを用意する**: 各導出を自分の手で追う。
-2. **数値検証コード**: 各式をJuliaで確認する (Zone 4で完全実装)。
+2. **数値検証コード**: 各式をRustで確認する (Zone 4で完全実装)。
 3. **前提知識の参照**: 第4回 (ガウス分布)、第8回 (ELBO) を手元に置く。
 4. **Boss戦の準備**: 3.4 VLB完全展開、3.9 DDIM完全導出が最難関。
 

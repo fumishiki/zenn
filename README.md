@@ -7,7 +7,7 @@
 本シリーズの到達点:              Flow Matching / DiT / Consistency Models / World Models（2025–2026 SOTA）
 ```
 
-数式を一行一行導出し、Julia + Rust で実装する。全て無料。MacBook M1 16GB で完結する。
+数式を一行一行導出し、Rust で実装する。全て無料。MacBook M1 16GB で完結する。
 
 → **[導入記事: なぜこれを作ったか](https://zenn.dev/fumi_shigi/articles/ml-lecture-00)**
 → **[第1回から読み始める](https://zenn.dev/fumi_shigi/articles/ml-lecture-01-part1)**
@@ -37,7 +37,7 @@
   - 数学的基礎（線形代数・確率論・測度論・情報理論）から、生成モデルの理論（VAE・GAN・Diffusion・Flow Matching）、社会実装（MLOps・RAG・エージェント）、最前線（DiT・Consistency Models・World Models）まで一本で貫く
   - 各回は前編（理論・数式導出）と後編（実装）の2記事構成。合計100記事・約150,000行
   - 数式はすべて仮定から結論まで一行一行導出する。「直感的に理解しましょう」で飛ばさない
-  - 実装はJulia（プロトタイプ）とRust（本番）で書く。Colabに貼り付けて実行するだけのコードではない
+  - 実装はRust（本番・ゼロコピー）で書く。Elixirは分散回のみRust NIF経由で登場。Colabに貼り付けて実行するだけのコードではない
 
 - **スピンオフシリーズ (ml-spinoff-01 ~ 08)**: AI活用講座（非エンジニア向け・全8回）
   - プログラミング不要。ChatGPT/Claude/Gemini を業務で使いこなすための実践講座
@@ -52,13 +52,13 @@
 
 **この問題を無視できない理由**: のべ55,000人がこの講座を受けた。55,000人が、産業の現場で使われていない手法を「最新」として学んだ。受講料¥33,000、抽選制。MITはOpenCourseWareで全講義を無料公開し、StanfordはCS231nをYouTubeで世界に流している。国立大学の研究室が税金で開発した教材を有料かつ限定で配っている。
 
-**解決策**: 個人研究者が完全な代替を構築して無料公開する。より深い理論（全導出過程）、多言語実装（Julia/Rust/Elixir）、2025-2026年のSOTAカバレッジ。GPUクラスタも¥33,000も抽選も要らない。
+**解決策**: 個人研究者が完全な代替を構築して無料公開する。より深い理論（全導出過程）、Rust一択実装（ゼロコピー・短縮記法・抽象化）+ Elixir（分散回のみNIF経由）、2025-2026年のSOTAカバレッジ。GPUクラスタも¥33,000も抽選も要らない。
 
 **規模**:
 - 合計: 約183,000行の技術コンテンツ
 - 200以上のarXiv引用（全件検証済み、捏造なし）
 - 2,000以上の数式（全て導出過程つき）
-- 1,500以上のコードブロック (Julia/Rust/Elixir)
+- 1,500以上のコードブロック (Rust/Elixir)
 
 ---
 
@@ -82,7 +82,7 @@
   - Zone 3: 数式導出ゾーン（仮定→展開→結論を一行ずつ追う）
 
 - **後編（実装編）**
-  - Zone 4: 実装ゾーン（Julia でプロトタイプ → Rust で本番品質へ）
+  - Zone 4: 実装ゾーン（Rust で本番品質実装、数式↔コード1:1対応）
   - Zone 5: 本番コードへの接続（実際のパイプラインとの繋ぎ方）
   - Zone 6: 振り返りと次回への接続
 
@@ -100,7 +100,7 @@
 |:--------|:-------------------|:-----------|
 | 理論深度 | 概念説明・結果のみ提示 | 全導出過程（2,000以上の数式） |
 | 数式 | ほぼなし。「直感的に理解」で飛ばす | 仮定・制約・近似・証明を完全網羅 |
-| 実装 | Python参照実装のみ（またはなし） | Julia（プロトタイプ）+ Rust（本番）+ Elixir（分散） |
+| 実装 | Python参照実装のみ（またはなし） | Rust（本番・ゼロコピー）+ Elixir（分散回のみNIF経由） |
 | 最新手法 | DDPM/2020年が到達点 | 2025-2026 SOTA（Flow Matching, DiT, Consistency Models, Flux, LTX-Video） |
 | 講義規模 | 全8回 | 全50回（+ スピンオフ8回） |
 | 公開形態 | 学内限定 or 有料（¥33,000・抽選制） | 完全無料（CC BY-NC-SA 4.0） |
@@ -121,9 +121,8 @@
 
 「理論を学んだ」と「動くコードが書ける」は別の能力だ。VAEのELBOをNumPyでゼロから再現できるか。逆微分の計算グラフで何が起きているか説明できるか。本シリーズは理論の直後に実装が来る。
 
-- Julia: プロトタイプ・研究（JIT最適化、数式に近い記法、CUDA.jl）
-- Rust: 本番カーネル（ゼロコピー、所有権モデル、C-ABI FFIハブ）
-- Elixir: 分散システム（BEAM VM、OTPスーパービジョン、耐障害性）
+- Rust: 本番カーネル（ゼロコピー・短縮記法・ゼロコスト抽象化、数式↔コード1:1コメント）
+- Elixir: 分散システム（BEAM VM、OTPスーパービジョン、耐障害性）— Rust NIF経由でサブ呼び出し
 
 **③ 最新: 2025-2026年のSOTAカバレッジ**
 
@@ -159,7 +158,7 @@
 **前提知識**（最低限）:
 - 基礎的な線形代数（行列演算、固有値）
 - 微積分（偏微分、連鎖律）
-- Pythonの基本的な読み書き（Julia/Rustは Course I・III 内で習得可能）
+- Rustの基本的な読み書き（Course II 内で習得可能）
 
 **到達点**:
 - arXiv論文を読んで1週間以内に実装・デプロイできる力
@@ -180,16 +179,14 @@
 
 | 言語 | 役割 | 採用理由 |
 |:---------|:-----|:----|
-| Julia | プロトタイプ・研究 | JIT最適化、数式に近い記法（Σ・∇を直接書ける）、CUDA.jl による GPU統合、Zygote.jl による自動微分 |
-| Rust | 本番カーネル | ゼロコピー、所有権モデルによるメモリ安全性、C-ABI FFIハブとして Julia/Elixir と接続、wgpu による GPU抽象化 |
-| Elixir | 分散システム | BEAM VM の軽量プロセスモデル（100万プロセス）、OTPスーパービジョンによる耐障害性、Rustler による Rust FFI、Nx/Bumblebee による ML推論 |
+| Rust 🦀 | **メイン（全実装）** | ゼロコピー、所有権モデルによるメモリ安全性、イテレータ短縮記法、ゼロコスト抽象化（`impl Trait`）、C-ABI FFIハブ、wgpu による GPU抽象化 |
+| Elixir | 分散システム（NIF経由サブ） | BEAM VM の軽量プロセスモデル（100万プロセス）、OTPスーパービジョンによる耐障害性、Rustler による Rust NIF、Nx/Bumblebee による ML推論 |
 
-Pythonは Course I の補助ツールとして使う。Course II 以降は Julia + Rust に移行する。「Pythonでしか書けない」は本番エンジニアとして限界がある。
+Pythonは Course I の補助ツールとして使う。Course II 以降は Rust 一択。「Pythonでしか書けない」は本番エンジニアとして限界がある。
 
 ### 主要ライブラリ
 
-- **Julia**: Flux.jl, CUDA.jl, Zygote.jl, DifferentialEquations.jl, StaticCompiler.jl, Plots.jl
-- **Rust**: burn, candle, ndarray, tokio, wgpu, rayon, serde
+- **Rust**: candle-core, candle-nn, burn, ndarray, rayon, tokio, wgpu, serde, rustler
 - **Elixir**: Nx, Axon, Bumblebee, Rustler, Phoenix（サービング用）
 
 ### ローカルファースト方針
@@ -205,7 +202,7 @@ GPU不要・クラウド課金なしを徹底する。ELBOの導出は30万パ�
 
 - **公開**: Zenn CLI (`npx zenn`) — プレビュー・デプロイ
 - **バージョン管理**: Jujutsu (`jj`) — Git ではない。コミットグラフが直感的で、コンフリクト解消が優れている
-- **ベンチマーク**: Criterion.rs (Rust), BenchmarkTools.jl (Julia)
+- **ベンチマーク**: Criterion.rs (Rust)
 - **数式**: KaTeX（Zennネイティブ）+ ローカルでの LaTeX 確認
 
 ---
@@ -290,10 +287,10 @@ graph TD
 **研究フォーカス**:
 - 深層生成モデル（Diffusion, Flow Matching, Autoregressive, World Models）
 - オンデバイスAI（"ここで動けば、どこでも動く" — iPhone Xをターゲットに設計）
-- 多言語本番アーキテクチャ（Rust / Julia / Elixir）の実用化
+- 多言語本番アーキテクチャ（Rust / Elixir）の実用化
 
 **技術スタック**:
-- 言語: Rust, Julia, Elixir
+- 言語: Rust, Elixir
 - 専門: AIアーキテクチャ設計、ベアメタルCUDAカーネル、ネイティブモバイルUI、エージェンティックワークフロー
 - 現在のプロジェクト: 世界中にオンデバイス・信頼できるAIを届けること
 

@@ -1,13 +1,13 @@
 ---
 title: "第15回: Attention 類似手法 & Sparse Attention: 30秒の驚き→数式修行→実装マスター 【前編】理論編"
-emoji: "⚡"
+emoji: "🦀"
 type: "tech"
-topics: ["machinelearning", "deeplearning", "attention", "julia", "rust"]
+topics: ["machinelearning", "deeplearning", "attention", "rust", "rust"]
 published: true
 slug: "ml-lecture-15-part1"
 difficulty: "advanced"
 time_estimate: "90 minutes"
-languages: ["Julia", "Rust"]
+languages: ["Rust"]
 keywords: ["機械学習", "深層学習", "生成モデル"]
 ---
 
@@ -30,7 +30,7 @@ GPT-4の128Kトークンコンテキスト。Claude 3の200Kトークン。こ�
 5. **Distributed Attention** (Ring Attention) — 超長コンテキストの分散処理
 6. **Mixture of Experts** (MoE) — Sparse Activationで計算とパラメータを分離
 
-⚡ Julia と 🦀 Rust で全て実装する。理論と実装の1対1対応を徹底する。
+🦀 Rust と 🦀 Rust で全て実装する。理論と実装の1対1対応を徹底する。
 
 > **Note:** **このシリーズについて**: 東京大学 松尾・岩澤研究室動画講義の**完全上位互換**の全50回シリーズ。理論（論文が書ける）、実装（Production-ready）、最新（2025-2026 SOTA）の3軸で差別化する。
 
@@ -67,52 +67,65 @@ graph TD
 
 **ゴール**: Standard AttentionのメモリがN²でスケールする現実を30秒で実感する。
 
-```julia
-using LinearAlgebra
+```rust
+use ndarray::{Array2, ArrayView2};
+use rand_distr::{Normal, Distribution};
 
-# Standard Attention: softmax(QK^T/√d) V
-function standard_attention(Q::Matrix{Float32}, K::Matrix{Float32}, V::Matrix{Float32})
-    # Q, K, V: (seq_len, d_model)
-    seq_len, d = size(Q)
+// Standard Attention: softmax(QK^T/√d) V
+fn standard_attention(
+    q: ArrayView2<f32>,
+    k: ArrayView2<f32>,
+    v: ArrayView2<f32>,
+) -> (Array2<f32>, Array2<f32>) {
+    // Q, K, V: (seq_len, d_model)
+    let d = q.shape()[1] as f32;
 
-    # Attention matrix: (seq_len, seq_len)  — THIS IS THE PROBLEM
-    scores = (Q * K') / sqrt(Float32(d))
+    // Attention matrix: (seq_len, seq_len)  — THIS IS THE PROBLEM
+    let mut scores = q.dot(&k.t()) / d.sqrt();
 
-    # Softmax per row
-    attn = softmax(scores, dims=2)
+    // Softmax per row
+    for mut row in scores.rows_mut() {
+        let max = row.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
+        row.mapv_inplace(|x| (x - max).exp());
+        let sum: f32 = row.iter().sum();
+        row.mapv_inplace(|x| x / sum);
+    }
+    let attn = scores;
 
-    # Weighted sum
-    out = attn * V
-    return out, attn
-end
+    // Weighted sum
+    let out = attn.dot(&v);
+    (out, attn)
+}
 
-function softmax(x::Matrix{T}; dims::Int=2) where T
-    exp_x = exp.(x .- maximum(x, dims=dims))
-    return exp_x ./ sum(exp_x, dims=dims)
-end
+fn main() {
+    let mut rng = rand::thread_rng();
+    let dist = Normal::new(0.0f32, 1.0).unwrap();
 
-# Tiny example: seq_len=16, d=64
-seq_len, d = 16, 64
-Q = randn(Float32, seq_len, d)
-K = randn(Float32, seq_len, d)
-V = randn(Float32, seq_len, d)
+    // Tiny example: seq_len=16, d=64
+    let (seq_len, d) = (16usize, 64usize);
+    let q = Array2::from_shape_fn((seq_len, d), |_| dist.sample(&mut rng));
+    let k = Array2::from_shape_fn((seq_len, d), |_| dist.sample(&mut rng));
+    let v = Array2::from_shape_fn((seq_len, d), |_| dist.sample(&mut rng));
 
-out, attn = standard_attention(Q, K, V)
+    let (_out, attn) = standard_attention(q.view(), k.view(), v.view());
 
-println("Attention matrix shape: ", size(attn))  # (16, 16)
-println("Memory for attn: $(sizeof(attn)) bytes = $(sizeof(attn) ÷ 1024) KB")
+    println!("Attention matrix shape: {:?}", attn.shape()); // [16, 16]
+    println!("Memory for attn: {} bytes = {} KB",
+        attn.len() * std::mem::size_of::<f32>(),
+        attn.len() * std::mem::size_of::<f32>() / 1024);
 
-# Now scale up
-seq_len_large = 8192
-mem_large = seq_len_large^2 * sizeof(Float32)
-println("\nFor seq_len=8192 (GPT-3 scale):")
-println("  Attention matrix: $(mem_large ÷ 1024^2) MB")
-println("  For batch_size=16: $(16 * mem_large ÷ 1024^2) MB")
+    // Now scale up — demonstrate the O(N²) memory problem
+    let seq_len_large: usize = 8192;
+    let mem_large = seq_len_large * seq_len_large * std::mem::size_of::<f32>();
+    println!("\nFor seq_len=8192 (GPT-3 scale):");
+    println!("  Attention matrix: {} MB", mem_large / (1024 * 1024));
+    println!("  For batch_size=16: {} MB", 16 * mem_large / (1024 * 1024));
 
-seq_len_huge = 128_000  # GPT-4 context
-mem_huge = seq_len_huge^2 * sizeof(Float32)
-println("\nFor seq_len=128K (GPT-4 scale):")
-println("  Attention matrix: $(mem_huge ÷ 1024^3) GB (!)")
+    let seq_len_huge: usize = 128_000; // GPT-4 context
+    let mem_huge = seq_len_huge * seq_len_huge * std::mem::size_of::<f32>();
+    println!("\nFor seq_len=128K (GPT-4 scale):");
+    println!("  Attention matrix: {} GB (!)", mem_huge / (1024 * 1024 * 1024));
+}
 ```
 
 出力:
@@ -220,7 +233,7 @@ $$
 
 ### 1.4 数式→コード対応表
 
-| 数式 | Julia コード | 意味 |
+| 数式 | Rust コード | 意味 |
 |:-----|:-------------|:-----|
 | $\text{Attention}(Q, K, V) = \text{softmax}\left(\frac{QK^\top}{\sqrt{d_k}}\right) V$ | `attn = softmax(Q * K' / sqrt(d)) * V` | Standard Attention |
 | $\text{head}_i = \text{Attention}(Q W^Q_i, K W^K_i, V W^V_i)$ | MHA: 各ヘッド独立 | Multi-Head Attention |
@@ -390,7 +403,7 @@ graph TD
 | Attention効率化 | 「FlashAttentionがあります」程度 | **完全導出**: Tiling, SRAM最適化, Online Softmax, IO複雑度解析 |
 | Sparse Attention | 言及なし | Longformer, BigBird, NSA の数学的原理とグラフ理論的保証 |
 | Linear Attention | 言及なし | Performer (FAVOR+), GLA, カーネルトリックの数学 |
-| 実装 | PyTorchの既存実装 | **Julia + Rust スクラッチ実装** — 理論と1対1対応 |
+| 実装 | PyTorchの既存実装 | **Rust + Rust スクラッチ実装** — 理論と1対1対応 |
 | MoE | 概念のみ | Switch Transformer, DeepSeek-MoE, ルーティング数理 |
 
 ### 2.5 3つのメタファーで捉える「O(N²)」
@@ -409,20 +422,20 @@ N人が全員と握手すると N(N-1)/2 ≈ O(N²) 回の握手。Attentionは�
 - Sparse Attention: 近くの人と特定の人だけ聞く → 小会議室で済む
 - Linear Attention: 全員の声を「要約」して聞く → 近似
 
-### 2.6 言語設定 — Julia主役、Rust比較
+### 2.6 言語設定 — Rust主役、Rust比較
 
-本講義から **⚡ Julia がメイン実装言語**になる:
+本講義から **🦀 Rust がメイン実装言語**になる:
 
 | 言語 | 役割 | この講義での使用 |
 |:-----|:-----|:---------------|
-| **Julia** | 訓練・プロトタイプ | FlashAttention, Sparse Attention, Linear Attention の完全実装 |
+| **Rust** | 訓練・プロトタイプ | FlashAttention, Sparse Attention, Linear Attention の完全実装 |
 | **Rust** | 推論・本番 | Sparse Attention パターン最適化, SIMD並列化 |
 | Python | 査読用 | 既存実装との比較のみ |
 
-**多重ディスパッチ**が威力を発揮する:
+**ゼロコスト抽象化**が威力を発揮する:
 
 
-型が異なれば、**if文を書かずに**自動で別の実装が呼ばれる。これがJuliaの本質だ。
+型が異なれば、**if文を書かずに**自動で別の実装が呼ばれる。これがRustの本質だ。
 
 > **Zone 2 まとめ**: O(N²)の本質的な問題(計算量・メモリ・ハードウェア限界)を理解した。次はこれを数学的に解決する手法を完全導出する。
 
@@ -714,7 +727,7 @@ FlashAttentionは数学的には単純だが、実装は高度なCUDAプログ�
 - **Numerical stability**: $\exp$ のオーバーフロー対策 (max減算)
 - **Backward pass**: 勾配計算も同様にTiling必要
 
-Julia/Rustで「概念実証」は可能だが、**本番はCUDA必須**。幸い、公式実装が利用可能:
+Rust/Rustで「概念実証」は可能だが、**本番はCUDA必須**。幸い、公式実装が利用可能:
 
 
 PyTorchでの使用:
@@ -867,7 +880,7 @@ BigBird [^9] の理論的保証を理解し、実装しよう。
 2. **Global Tokens**: 最初の $g=2$ トークンは全位置から見え、全位置を見る
 3. **Random Attention**: 各位置はランダムに $r=3$ 個の位置を見る
 
-**完全実装 (Julia)**:
+**完全実装 (Rust)**:
 
 
 **期待される出力**:

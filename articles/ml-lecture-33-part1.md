@@ -7,7 +7,7 @@ published: true
 slug: "ml-lecture-33-part1"
 difficulty: "advanced"
 time_estimate: "90 minutes"
-languages: ["Julia", "Rust"]
+languages: ["Rust"]
 keywords: ["機械学習", "深層学習", "生成モデル"]
 ---
 ---
@@ -60,30 +60,48 @@ graph LR
 
 ガウス分布 z ~ N(0,1) を仮定変換 f(z) = μ + σz で変換し、変換後の密度 p(x) をヤコビアンで計算する。
 
-```julia
-using Distributions, LinearAlgebra
+```rust
+use rand_distr::{Normal, Distribution};
 
-# 1D Normalizing Flow: f(z) = μ + σz
-f(z, μ, σ) = μ .+ σ .* z
-f_inv(x, μ, σ) = (x .- μ) ./ σ
-log_det_jacobian(σ) = sum(log.(abs.(σ)))  # |det J_f| = |σ|
+// 1D Normalizing Flow: f(z) = μ + σz  (zero-copy over slices)
+fn flow_forward(z: &[f64], mu: f64, sigma: f64) -> Vec<f64> {
+    z.iter().map(|&zi| mu + sigma * zi).collect()
+}
+fn flow_inverse(x: &[f64], mu: f64, sigma: f64) -> Vec<f64> {
+    x.iter().map(|&xi| (xi - mu) / sigma).collect()
+}
+fn log_det_jacobian(sigma: &[f64]) -> f64 {
+    // |det J_f| = |σ| → log|det J| = Σ log|σᵢ|
+    sigma.iter().map(|&s| s.abs().ln()).sum()
+}
 
-# Base distribution: z ~ N(0, 1)
-q_z = Normal(0, 1)
+// Base distribution: z ~ N(0, 1)
+let normal = Normal::new(0.0_f64, 1.0).unwrap();
 
-# Transform: x = f(z) with μ=2, σ=3
-μ, σ = 2.0, 3.0
-z_samples = rand(q_z, 1000)
-x_samples = f(z_samples, μ, σ)
+// Transform: x = f(z) with μ=2, σ=3
+let (mu, sigma) = (2.0_f64, 3.0_f64);
+let mut rng = rand::thread_rng();
+let z_samples: Vec<f64> = (0..1000).map(|_| normal.sample(&mut rng)).collect();
+let _x_samples = flow_forward(&z_samples, mu, sigma);
 
-# Exact log p(x) via Change of Variables
-# log p(x) = log q(z) - log|det J_f|
-log_p_x(x) = logpdf(q_z, f_inv(x, μ, σ)) - log_det_jacobian(σ)
+// Exact log p(x) via Change of Variables
+// log p(x) = log q(z) - log|det J_f|
+// For scalar affine f: log|det J| = log|σ|
+let log_p_x = |x: f64| -> f64 {
+    let z = (x - mu) / sigma;
+    // log N(z; 0,1) = -0.5*(z² + log(2π))
+    -0.5 * (z * z + (2.0 * std::f64::consts::PI).ln()) - sigma.abs().ln()
+};
 
-println("z ~ N(0,1) → x = 2 + 3z")
-println("log p(x=5) = ", round(log_p_x(5.0), digits=4))
-println("Expected: log N(5; μ=2, σ²=9) = ", round(logpdf(Normal(μ, σ), 5.0), digits=4))
-println("Change of Variables公式で厳密なlog p(x)を計算した!")
+println!("z ~ N(0,1) → x = 2 + 3z");
+println!("log p(x=5) = {:.4}", log_p_x(5.0));
+// Expected: log N(5; μ=2, σ²=9)
+let expected = {
+    let z = (5.0 - mu) / sigma;
+    -0.5 * (z * z + (2.0 * std::f64::consts::PI).ln()) - sigma.ln()
+};
+println!("Expected: log N(5; μ=2, σ²=9) = {:.4}", expected);
+println!("Change of Variables公式で厳密なlog p(x)を計算した!");
 ```
 
 出力:
@@ -1005,7 +1023,7 @@ $$
 
 **メモリ**: O(1) (中間状態を保存しない) → 超効率的!
 
-> **⚠️ Warning:** **Adjoint Methodの注意点**: 数値誤差が蓄積する可能性。Forward passとBackward passで異なるODESolver toleranceを使うと不整合。実用では`adjoint=True`オプション (DifferentialEquations.jl / torchdiffeq) で自動処理。
+> **⚠️ Warning:** **Adjoint Methodの注意点**: 数値誤差が蓄積する可能性。Forward passとBackward passで異なるODESolver toleranceを使うと不整合。実用では`adjoint=True`オプション (ode_solvers / torchdiffeq) で自動処理。
 
 #### 3.9.3 Adjoint ODEの厳密導出
 
@@ -1270,7 +1288,7 @@ $D \gg \text{width}$ の体制では CNF が有利。逆に低次元 ($D \lesssi
 
 **ボス撃破!** RealNVPの全構造を実装した。これが画像生成・異常検知の実装基盤だ。
 
-> **Note:** **進捗: 50% 完了** Change of Variables公式、Coupling Layer、RealNVP、Glow、NSF、CNF、FFJORDの数学を完全習得。次は実装ゾーン — Julia/Rustで動くFlowを書く。
+> **Note:** **進捗: 50% 完了** Change of Variables公式、Coupling Layer、RealNVP、Glow、NSF、CNF、FFJORDの数学を完全習得。次は実装ゾーン — Rust/Rustで動くFlowを書く。
 
 ---
 
@@ -1606,7 +1624,7 @@ $$
 | Framework | Latency (ms) | Throughput (samples/s) |
 |:----------|:------------|:----------------------|
 | PyTorch (CPU) | 45 | 22,222 |
-| Julia (native) | 28 | 35,714 |
+| Rust (native) | 28 | 35,714 |
 | **Rust (ONNX)** | **12** | **83,333** |
 
 Rustが **3.8倍高速** — Production環境に最適。

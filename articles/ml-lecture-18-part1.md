@@ -2,12 +2,12 @@
 title: "第18回: Attention × Mamba ハイブリッド: 30秒の驚き→数式修行→実装マスター 【前編】理論編"
 emoji: "🔀"
 type: "tech"
-topics: ["machinelearning", "deeplearning", "attention", "mamba", "julia"]
+topics: ["machinelearning", "deeplearning", "attention", "mamba", "rust"]
 published: true
 slug: "ml-lecture-18-part1"
 difficulty: "advanced"
 time_estimate: "90 minutes"
-languages: ["Julia", "Rust"]
+languages: ["Rust"]
 keywords: ["機械学習", "深層学習", "生成モデル"]
 ---
 
@@ -57,33 +57,51 @@ graph LR
 
 Jamba [^1] スタイルのハイブリッドブロックを3行で動かす。
 
-```julia
-using LinearAlgebra, Statistics
+```rust
+use ndarray::{Array2, ArrayView2, Axis};
 
-# Hybrid block: Mamba (SSM) → Attention → MLP
-# Input: sequence x ∈ ℝ^(seq_len × d_model)
-function hybrid_block(x::Matrix{Float64}, W_ssm::Matrix{Float64}, W_attn::Matrix{Float64})
-    # SSM layer: x_ssm = SSM(x) ≈ linear recurrence
-    x_ssm = x * W_ssm  # simplified: full SSM has Δ, B, C params
+// Hybrid block: Mamba (SSM) → Attention → MLP
+// Input: sequence x ∈ ℝ^(seq_len × d_model)
+fn hybrid_block(
+    x: ArrayView2<f64>,
+    w_ssm: ArrayView2<f64>,
+    w_attn: ArrayView2<f64>,
+) -> Array2<f64> {
+    // SSM layer: x_ssm = x · W_ssm (simplified; full SSM has Δ, B, C params)
+    let x_ssm = x.dot(&w_ssm);
 
-    # Attention layer: softmax(QK^T/√d), row-wise
-    attn = softmax(x_ssm * x_ssm' / sqrt(size(x_ssm, 2)), dims=2)  # QK^T/√d
+    // Attention: softmax(QK^T / √d), row-wise
+    let d_k = x_ssm.ncols() as f64;
+    let scores = x_ssm.dot(&x_ssm.t()) / d_k.sqrt(); // QK^T / √d
+    let attn = softmax_rows(&scores);
 
-    # MLP layer: relu dot-broadcast, return last expression
-    relu.(attn * x_ssm * W_attn)
-end
+    // MLP layer: relu(attn · x_ssm · W_attn)
+    relu(&attn.dot(&x_ssm).dot(&w_attn))
+}
 
-softmax(x; dims) = exp.(x .- maximum(x, dims=dims)) ./ sum(exp.(x .- maximum(x, dims=dims)), dims=dims)
-relu(x) = max.(0.0, x)
+fn softmax_rows(x: &Array2<f64>) -> Array2<f64> {
+    // Numerically stable: subtract row-max before exp
+    let max = x.fold_axis(Axis(1), f64::NEG_INFINITY, |&a, &b| a.max(b));
+    let shifted = x - &max.insert_axis(Axis(1));
+    let exp = shifted.mapv(f64::exp);
+    let sum = exp.sum_axis(Axis(1)).insert_axis(Axis(1));
+    exp / sum
+}
 
-# Test: 4 tokens, 8-dim embeddings
-x = randn(4, 8)
-W_ssm = randn(8, 8) / sqrt(8)
-W_attn = randn(8, 8) / sqrt(8)
+fn relu(x: &Array2<f64>) -> Array2<f64> {
+    x.mapv(|v| v.max(0.0))
+}
 
-x_hybrid = hybrid_block(x, W_ssm, W_attn)
-println("Input shape: $(size(x)), Output shape: $(size(x_hybrid))")
-println("Hybrid block combines SSM efficiency + Attention expressivity")
+fn main() {
+    // Test: 4 tokens, 8-dim embeddings (use rand crate for random init in practice)
+    let x    = Array2::<f64>::zeros((4, 8));
+    let w_ssm  = Array2::<f64>::zeros((8, 8));
+    let w_attn = Array2::<f64>::zeros((8, 8));
+
+    let out = hybrid_block(x.view(), w_ssm.view(), w_attn.view());
+    println!("Input shape: {:?}, Output shape: {:?}", x.shape(), out.shape());
+    println!("Hybrid block combines SSM efficiency + Attention expressivity");
+}
 ```
 
 出力:
@@ -357,7 +375,7 @@ graph TD
 
 **Course II到達点**:
 - **理論的統合**: ELBO/OT/Nash均衡/Attention=SSM双対性 — 全てが"同じもの"の異なる視点
-- **実装力**: Julia/Rustで数式→コード1:1対応
+- **実装力**: Rust/Rustで数式→コード1:1対応
 - **最新研究**: 2024-2026のSOTA (R3GAN, VAR, Mamba-2, Jamba) を理解
 
 ### 2.4 松尾・岩澤研究室との比較
@@ -372,7 +390,7 @@ graph TD
 | **Attention** | Transformer概要 | Attention基礎 + 効率化 (Flash/Sparse/Linear/MoE) |
 | **SSM** | 触れない | S4→Mamba→Mamba-2完全版 + HiPPO理論 |
 | **Hybrid** | 触れない | **本講義 (Jamba/Zamba/Griffin/StripedHyena)** |
-| **実装** | PyTorchデモ | Julia訓練 + Rust推論 (Production-ready) |
+| **実装** | PyTorchデモ | Rust訓練 + Rust推論 (Production-ready) |
 | **最新性** | 2023年まで | **2024-2026 SOTA** |
 
 **差別化の本質**: 松尾研が「手法の紹介」にとどまるのに対し、本シリーズは「論文が書ける理論的深さ + Production実装 + 最新研究」の3軸を貫く。
@@ -404,7 +422,7 @@ graph TD
 **学習時間配分** (本講義):
 - Zone 0-2 (導入): 30分 → ハイブリッドの動機理解
 - Zone 3 (数式): 60分 → **踏ん張りどころ** (設計パターン数学)
-- Zone 4-5 (実装): 75分 → Julia/Rustで手を動かす
+- Zone 4-5 (実装): 75分 → Rust/Rustで手を動かす
 - Zone 6-7 (発展): 30分 → Course II振り返り + Course III準備
 
 > **Note:** **進捗: 20% 完了** ハイブリッドの動機、Course II全体像、学習戦略を理解した。次はZone 3の数式修行 — ハイブリッド設計の理論的基盤を構築する。
@@ -798,7 +816,7 @@ Q, K, V &= \mathbf{z} W^Q, \mathbf{z} W^K, \mathbf{z} W^V \\
 \end{aligned}
 $$
 
-#### Step 2: Juliaコード実装
+#### Step 2: Rustコード実装
 
 
 出力:
@@ -1196,7 +1214,7 @@ $r = 1/8$ なら SSMは $N/8$ 長さの記憶を保持すれば十分 — 純粋
 
 **Boss Battle完了** — Jamba-style Hybrid Blockの完全実装・検証を達成した。
 
-> **Note:** **進捗: 50% 完了** ハイブリッドアーキテクチャの数学的定式化、設計パターン分類、計算量解析、Boss Battleを完了した。次はZone 4の実装ゾーン — Julia/Rustで実用的なハイブリッドモデルを構築する。
+> **Note:** **進捗: 50% 完了** ハイブリッドアーキテクチャの数学的定式化、設計パターン分類、計算量解析、Boss Battleを完了した。次はZone 4の実装ゾーン — Rust/Rustで実用的なハイブリッドモデルを構築する。
 
 ---
 

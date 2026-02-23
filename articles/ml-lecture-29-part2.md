@@ -3,17 +3,17 @@ title: "第29回: RAG (検索増強生成): 30秒の驚き→数式修行→実�
 slug: "ml-lecture-29-part2"
 emoji: "🔍"
 type: "tech"
-topics: ["machinelearning", "rag", "vectordatabase", "julia", "rust"]
+topics: ["machinelearning", "rag", "vectordatabase", "rust", "rust"]
 published: true
 difficulty: "advanced"
 time_estimate: "90 minutes"
-languages: ["Julia", "Rust", "Elixir"]
+languages: ["Rust", "Elixir"]
 keywords: ["機械学習", "深層学習", "生成モデル"]
 ---
 > **📖 前編（理論編）**: [第29回前編: RAG理論編](./ml-lecture-29-part1) | **← 理論・数式ゾーンへ**
 
 
-## 💻 Z5. 試練（実装）（45分）— Rust/Julia/ElixirでRAGを完全実装
+## 💻 Z5. 試練（実装）（45分）— Rust/Rust/ElixirでRAGを完全実装
 
 ### 4.1 🦀 Rust: HNSW Vector Database実装
 
@@ -478,283 +478,259 @@ fn sliding_window_chunking(tokens: &[String], window_size: usize, stride: usize)
 | **Semantic** | 意味保持 | 可変長 | 文書・記事 |
 | **Sliding Window** | 文脈保持 | 冗長性高 | コード・対話 |
 
-### 4.2 ⚡ Julia: BM25検索パイプライン実装
+### 4.2 🦀 Rust: BM25検索パイプライン実装
 
 #### 4.2.1 トークナイズとIDF計算
 
-```julia
-using LinearAlgebra, Statistics, Unicode
+```rust
+use std::collections::{HashMap, HashSet};
 
-# Tokenizer: 小文字化 + ストップワード除去
-const STOPWORDS = Set(["the", "is", "at", "which", "on", "a", "an", "and", "or", "of", "to", "in"])
+// Tokenizer: 小文字化 + ストップワード除去
+const STOPWORDS: &[&str] = &[
+    "the", "is", "at", "which", "on", "a", "an", "and", "or", "of", "to", "in",
+];
 
-function tokenize(text::AbstractString)
-    # 小文字化 + 記号除去
-    text = lowercase(text)
-    text = replace(text, r"[^\w\s]" => " ")
+fn tokenize(text: &str) -> Vec<String> {
+    text.to_lowercase()
+        .chars()
+        .map(|c| if c.is_alphanumeric() || c.is_whitespace() { c } else { ' ' })
+        .collect::<String>()
+        .split_whitespace()
+        .filter(|w| !STOPWORDS.contains(w))
+        .map(str::to_owned)
+        .collect()
+}
 
-    # Split + ストップワード除去
-    tokens = filter(w -> !isempty(w) && !(w ∈ STOPWORDS), split(text))
-    return tokens
-end
+// Document corpus
+struct Document {
+    id: usize,
+    text: String,
+    tokens: Vec<String>,
+}
 
-# Document corpus
-struct Document
-    id::Int
-    text::String
-    tokens::Vector{String}
-end
+fn build_corpus(texts: &[&str]) -> Vec<Document> {
+    texts.iter().enumerate()
+        .map(|(i, &text)| Document { id: i + 1, text: text.to_owned(), tokens: tokenize(text) })
+        .collect()
+}
 
-function build_corpus(texts::Vector{String})
-    [Document(i, text, tokenize(text)) for (i, text) in enumerate(texts)]
-end
-
-# IDF calculation
-function compute_idf(corpus::Vector{Document})
-    n_docs = length(corpus)
-    doc_freq = Dict{String, Int}()
-
-    # Count document frequency for each term
-    for doc in corpus
-        unique_tokens = Set(doc.tokens)
-        for token in unique_tokens
-            doc_freq[token] = get(doc_freq, token, 0) + 1
-        end
-    end
-
-    # IDF: log((N - df + 0.5) / (df + 0.5))
-    idf = Dict(term => log((n_docs - df + 0.5) / (df + 0.5)) for (term, df) in doc_freq)
-
-    return idf
-end
+// IDF: log((N - df + 0.5) / (df + 0.5))
+fn compute_idf(corpus: &[Document]) -> HashMap<String, f64> {
+    let n_docs = corpus.len() as f64;
+    let mut doc_freq: HashMap<String, usize> = HashMap::new();
+    for doc in corpus {
+        let unique: HashSet<&str> = doc.tokens.iter().map(String::as_str).collect();
+        for token in &unique {
+            *doc_freq.entry(token.to_string()).or_default() += 1;
+        }
+    }
+    doc_freq.into_iter()
+        .map(|(term, df)| {
+            let idf = ((n_docs - df as f64 + 0.5) / (df as f64 + 0.5)).ln();
+            (term, idf)
+        })
+        .collect()
+}
 ```
 
 #### 4.2.2 BM25スコアリング実装
 
-```julia
-# BM25 parameters
-struct BM25Params
-    k1::Float64
-    b::Float64
-end
+```rust
+// BM25 parameters
+struct BM25Params { k1: f64, b: f64 }
+const DEFAULT_BM25: BM25Params = BM25Params { k1: 1.2, b: 0.75 };
 
-const DEFAULT_BM25 = BM25Params(1.2, 0.75)
+fn bm25_score(
+    query_tokens: &[String],
+    doc: &Document,
+    idf: &HashMap<String, f64>,
+    avg_doc_len: f64,
+    params: &BM25Params,
+) -> f64 {
+    let doc_len = doc.tokens.len() as f64;
+    query_tokens.iter().map(|term| {
+        let tf      = doc.tokens.iter().filter(|t| *t == term).count() as f64;
+        let idf_val = idf.get(term).copied().unwrap_or(0.0);
+        idf_val * (tf * (params.k1 + 1.0))
+            / (tf + params.k1 * (1.0 - params.b + params.b * (doc_len / avg_doc_len)))
+    }).sum()
+}
 
-function bm25_score(
-    query_tokens::Vector{String},
-    doc::Document,
-    idf::Dict{String, Float64},
-    avg_doc_len::Float64,
-    params::BM25Params = DEFAULT_BM25
-)
-    doc_len = length(doc.tokens)
-    sum(query_tokens; init = 0.0) do term
-        tf      = count(==(term), doc.tokens)
-        idf_val = get(idf, term, 0.0)
-        idf_val * (tf * (params.k1 + 1.0)) /
-                  (tf + params.k1 * (1.0 - params.b + params.b * (doc_len / avg_doc_len)))
-    end
-end
-
-# BM25 ranking
-function bm25_search(
-    query::String,
-    corpus::Vector{Document},
-    idf::Dict{String, Float64},
-    top_k::Int = 10,
-    params::BM25Params = DEFAULT_BM25
-)
-    query_tokens = tokenize(query)
-    avg_doc_len = mean(length(doc.tokens) for doc in corpus)
-
-    # Score all documents
-    scores = [(doc.id, bm25_score(query_tokens, doc, idf, avg_doc_len, params))
-              for doc in corpus]
-
-    # Sort by score descending
-    sort!(scores, by = x -> x[2], rev = true)
-
-    return scores[1:min(top_k, length(scores))]
-end
+// BM25 ranking
+fn bm25_search(
+    query: &str,
+    corpus: &[Document],
+    idf: &HashMap<String, f64>,
+    top_k: usize,
+    params: &BM25Params,
+) -> Vec<(usize, f64)> {
+    let query_tokens = tokenize(query);
+    let avg_doc_len = corpus.iter().map(|d| d.tokens.len() as f64).sum::<f64>()
+        / corpus.len() as f64;
+    let mut scores: Vec<(usize, f64)> = corpus.iter()
+        .map(|doc| (doc.id, bm25_score(&query_tokens, doc, idf, avg_doc_len, params)))
+        .collect();
+    scores.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
+    scores.truncate(top_k);
+    scores
+}
 ```
 
 #### 4.2.3 Dense Retrieval with Embeddings
 
-```julia
-# Simplified embedding (in practice, use Sentence-BERT via Python/ONNX)
-function simple_embedding(text::String; dim::Int = 384)
-    tokens = tokenize(text)
+```rust
+// Simplified embedding (実際はSentence-BERT via Python/ONNX)
+fn simple_embedding(text: &str, dim: usize) -> Vec<f32> {
+    let tokens = tokenize(text);
+    let mut embedding = vec![0.0f32; dim];
+    // TF-IDF based embedding (simplified)
+    for token in &tokens {
+        let idx = token.bytes().fold(0usize, |acc, b| acc.wrapping_mul(31).wrapping_add(b as usize)) % dim;
+        embedding[idx] += 1.0;
+    }
+    // L2 normalize
+    let norm: f32 = embedding.iter().map(|x| x * x).sum::<f32>().sqrt();
+    if norm > 1e-8 { embedding.iter_mut().for_each(|x| *x /= norm); }
+    embedding
+}
 
-    # TF-IDF based embedding (simplified)
-    embedding = zeros(Float32, dim)
+// Cosine similarity
+fn cosine_sim(a: &[f32], b: &[f32]) -> f32 {
+    let dot: f32 = a.iter().zip(b).map(|(x, y)| x * y).sum();
+    let na: f32  = a.iter().map(|x| x * x).sum::<f32>().sqrt();
+    let nb: f32  = b.iter().map(|x| x * x).sum::<f32>().sqrt();
+    dot / (na * nb + 1e-8)
+}
 
-    for token in tokens
-        embedding[(hash(token) % dim) + 1] += 1.0f0
-    end
-
-    # L2 normalize
-    norm = sqrt(sum(abs2, embedding))
-    embedding ./= (norm + 1f-8)
-
-    return embedding
-end
-
-# Cosine similarity
-function cosine_sim(a::Vector{Float32}, b::Vector{Float32})
-    dot(a, b) / (norm(a) * norm(b) + 1f-8)
-end
-
-# Dense retrieval
-function dense_search(
-    query::String,
-    corpus::Vector{Document},
-    embeddings::Vector{Vector{Float32}},
-    top_k::Int = 10
-)
-    query_emb = simple_embedding(query)
-
-    # Compute similarity with all documents
-    scores = [(i, cosine_sim(query_emb, emb)) for (i, emb) in enumerate(embeddings)]
-
-    # Sort descending
-    sort!(scores, by = x -> x[2], rev = true)
-
-    return scores[1:min(top_k, length(scores))]
-end
+// Dense retrieval
+fn dense_search(
+    query: &str,
+    corpus: &[Document],
+    embeddings: &[Vec<f32>],
+    top_k: usize,
+) -> Vec<(usize, f32)> {
+    let query_emb = simple_embedding(query, 384);
+    let mut scores: Vec<(usize, f32)> = corpus.iter()
+        .zip(embeddings.iter())
+        .map(|(doc, emb)| (doc.id, cosine_sim(&query_emb, emb)))
+        .collect();
+    scores.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
+    scores.truncate(top_k);
+    scores
+}
 ```
 
 #### 4.2.4 Hybrid Retrieval: BM25 + Dense with RRF
 
-```julia
-# Reciprocal Rank Fusion
-function reciprocal_rank_fusion(
-    rankings::Vector{Vector{Tuple{Int, Float64}}};
-    k::Int = 60
-)
-    rrf_scores = Dict{Int, Float64}()
+```rust
+// Reciprocal Rank Fusion
+fn reciprocal_rank_fusion(rankings: &[Vec<(usize, f64)>], k: usize) -> Vec<(usize, f64)> {
+    let mut rrf_scores: HashMap<usize, f64> = HashMap::new();
+    for ranking in rankings {
+        for (rank, &(doc_id, _)) in ranking.iter().enumerate() {
+            *rrf_scores.entry(doc_id).or_default() += 1.0 / (k + rank + 1) as f64;
+        }
+    }
+    let mut result: Vec<(usize, f64)> = rrf_scores.into_iter().collect();
+    result.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
+    result
+}
 
-    for ranking in rankings
-        for (rank, (doc_id, _)) in enumerate(ranking)
-            current_score = get(rrf_scores, doc_id, 0.0)
-            rrf_scores[doc_id] = current_score + 1.0 / (k + rank)
-        end
-    end
-
-    # Sort by RRF score
-    return sort!(collect(rrf_scores), by = x -> x[2], rev = true)
-end
-
-# Hybrid search pipeline
-function hybrid_search(
-    query::String,
-    corpus::Vector{Document},
-    idf::Dict{String, Float64},
-    embeddings::Vector{Vector{Float32}},
-    top_k::Int = 10
-)
-    # BM25 retrieval
-    bm25_results = bm25_search(query, corpus, idf, top_k * 2)
-
-    # Dense retrieval
-    dense_results = dense_search(query, corpus, embeddings, top_k * 2)
-
-    # RRF fusion
-    fused = reciprocal_rank_fusion([bm25_results, dense_results])
-
-    return fused[1:min(top_k, length(fused))]
-end
+// Hybrid search pipeline
+fn hybrid_search(
+    query: &str,
+    corpus: &[Document],
+    idf: &HashMap<String, f64>,
+    embeddings: &[Vec<f32>],
+    top_k: usize,
+) -> Vec<(usize, f64)> {
+    // BM25 retrieval
+    let bm25_results = bm25_search(query, corpus, idf, top_k * 2, &DEFAULT_BM25);
+    // Dense retrieval
+    let dense_results: Vec<(usize, f64)> = dense_search(query, corpus, embeddings, top_k * 2)
+        .into_iter().map(|(id, s)| (id, s as f64)).collect();
+    // RRF fusion
+    let mut fused = reciprocal_rank_fusion(&[bm25_results, dense_results], 60);
+    fused.truncate(top_k);
+    fused
+}
 ```
 
 #### 4.2.5 Reranking with Cross-Encoder
 
-```julia
-# Simplified cross-encoder scoring (in practice, use BERT-based model)
-function cross_encoder_score(query::String, doc_text::String)
-    query_tokens = Set(tokenize(query))
-    doc_tokens   = tokenize(doc_text)
-    sum(
-        1.0 / (1.0 + 0.1 * i)
-        for (i, token) in enumerate(doc_tokens) if token ∈ query_tokens;
-        init = 0.0
-    )
-end
+```rust
+// Simplified cross-encoder scoring (実際はBERTベースモデルを使用)
+fn cross_encoder_score(query: &str, doc_text: &str) -> f64 {
+    let query_tokens: HashSet<String> = tokenize(query).into_iter().collect();
+    tokenize(doc_text).iter().enumerate()
+        .filter(|(_, token)| query_tokens.contains(*token))
+        .map(|(i, _)| 1.0 / (1.0 + 0.1 * i as f64))
+        .sum()
+}
 
-# Rerank top results
-function rerank(
-    query::String,
-    corpus::Vector{Document},
-    initial_ranking::Vector{Tuple{Int, Float64}},
-    top_k::Int = 10
-)
-    # Score each candidate with cross-encoder
-    reranked = [(doc_id, cross_encoder_score(query, corpus[doc_id].text))
-                for (doc_id, _) in initial_ranking]
-
-    # Sort by cross-encoder score
-    sort!(reranked, by = x -> x[2], rev = true)
-
-    return reranked[1:min(top_k, length(reranked))]
-end
+// Rerank top results
+fn rerank(
+    query: &str,
+    corpus: &[Document],
+    initial_ranking: &[(usize, f64)],
+    top_k: usize,
+) -> Vec<(usize, f64)> {
+    // Score each candidate with cross-encoder
+    let mut reranked: Vec<(usize, f64)> = initial_ranking.iter()
+        .filter_map(|&(doc_id, _)| {
+            corpus.iter().find(|d| d.id == doc_id)
+                .map(|doc| (doc_id, cross_encoder_score(query, &doc.text)))
+        })
+        .collect();
+    reranked.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
+    reranked.truncate(top_k);
+    reranked
+}
 ```
 
-#### 4.2.6 Complete RAG Pipeline in Julia
+#### 4.2.6 Complete RAG Pipeline in Rust
 
-```julia
-# End-to-end RAG pipeline
-struct RAGPipeline
-    corpus::Vector{Document}
-    idf::Dict{String, Float64}
-    embeddings::Vector{Vector{Float32}}
-end
+```rust
+// End-to-end RAG pipeline
+struct RAGPipeline {
+    corpus: Vec<Document>,
+    idf: HashMap<String, f64>,
+    embeddings: Vec<Vec<f32>>,
+}
 
-function RAGPipeline(texts::Vector{String})
-    # Build corpus
-    corpus = build_corpus(texts)
+impl RAGPipeline {
+    fn new(texts: &[&str]) -> Self {
+        let corpus     = build_corpus(texts);
+        let idf        = compute_idf(&corpus);
+        let embeddings = corpus.iter().map(|d| simple_embedding(&d.text, 384)).collect();
+        RAGPipeline { corpus, idf, embeddings }
+    }
 
-    # Compute IDF
-    idf = compute_idf(corpus)
+    fn search(&self, query: &str, top_k: usize, use_rerank: bool) -> Vec<(usize, f64)> {
+        // Stage 1: Hybrid retrieval (BM25 + Dense)
+        let candidates = hybrid_search(query, &self.corpus, &self.idf, &self.embeddings, top_k * 3);
+        // Stage 2: Reranking (optional)
+        if use_rerank { rerank(query, &self.corpus, &candidates, top_k) }
+        else          { candidates.into_iter().take(top_k).collect() }
+    }
+}
 
-    # Generate embeddings
-    embeddings = [simple_embedding(doc.text) for doc in corpus]
+fn main() {
+    let texts = [
+        "Paris is the capital of France. It is known for the Eiffel Tower.",
+        "Tokyo is the capital of Japan. It has a population of 14 million.",
+        "Berlin is the capital of Germany. The Berlin Wall fell in 1989.",
+        "London is the capital of England. Big Ben is a famous landmark.",
+    ];
+    let pipeline = RAGPipeline::new(&texts);
+    let results  = pipeline.search("What is the capital of France?", 3, true);
 
-    return RAGPipeline(corpus, idf, embeddings)
-end
-
-function search(pipeline::RAGPipeline, query::String; top_k::Int = 5, rerank::Bool = true)
-    # Stage 1: Hybrid retrieval (BM25 + Dense)
-    candidates = hybrid_search(
-        query,
-        pipeline.corpus,
-        pipeline.idf,
-        pipeline.embeddings,
-        top_k * 3  # Retrieve more for reranking
-    )
-
-    # Stage 2: Reranking (optional)
-    if rerank
-        final_results = rerank(query, pipeline.corpus, candidates, top_k)
-    else
-        final_results = candidates[1:min(top_k, length(candidates))]
-    end
-
-    return final_results
-end
-
-# Example usage
-texts = [
-    "Paris is the capital of France. It is known for the Eiffel Tower.",
-    "Tokyo is the capital of Japan. It has a population of 14 million.",
-    "Berlin is the capital of Germany. The Berlin Wall fell in 1989.",
-    "London is the capital of England. Big Ben is a famous landmark.",
-]
-
-pipeline = RAGPipeline(texts)
-results = search(pipeline, "What is the capital of France?", top_k = 3)
-
-println("Search Results:")
-for (i, (doc_id, score)) in enumerate(results)
-    println("$i. [Score: $(round(score, digits=3))] $(pipeline.corpus[doc_id].text)")
-end
+    println!("Search Results:");
+    for (i, (doc_id, score)) in results.iter().enumerate() {
+        let doc = pipeline.corpus.iter().find(|d| d.id == *doc_id).unwrap();
+        println!("{}. [Score: {:.3}] {}", i + 1, score, doc.text);
+    }
+}
 ```
 
 ### 4.3 🔮 Elixir: 分散RAGサービング実装
@@ -1087,13 +1063,18 @@ $$
 
 **Context Relevance**: 検索されたコンテキストがクエリに関連しているか
 
-```julia
-# Context Relevance Score
-function context_relevance(query::String, contexts::Vector{String})
-    qt = Set(tokenize(query))
-    mean(length(intersect(qt, Set(tokenize(c)))) / (length(qt) + 1e-8)
-         for c in contexts)
-end
+```rust
+// Context Relevance Score
+fn context_relevance(query: &str, contexts: &[&str]) -> f64 {
+    let qt: HashSet<String> = tokenize(query).into_iter().collect();
+    let sum: f64 = contexts.iter()
+        .map(|ctx| {
+            let ct: HashSet<String> = tokenize(ctx).into_iter().collect();
+            ct.intersection(&qt).count() as f64 / (qt.len() as f64 + 1e-8)
+        })
+        .sum();
+    sum / contexts.len().max(1) as f64
+}
 ```
 
 **Answer Faithfulness**: 生成された回答がコンテキストに忠実か
@@ -1104,11 +1085,11 @@ $$
 
 **Answer Relevance**: 生成された回答がクエリに関連しているか
 
-```julia
-function answer_relevance(query::String, answer::String, query_emb, answer_emb)
-    # Cosine similarity between query and answer embeddings
+```rust
+// Answer Relevancy: cosine similarity between query and answer embeddings
+fn answer_relevance(query_emb: &[f32], answer_emb: &[f32]) -> f32 {
     cosine_sim(query_emb, answer_emb)
-end
+}
 ```
 
 #### 5.1.3 RAGAS Framework
@@ -1132,83 +1113,77 @@ $$
 
 幾何平均で全メトリクスをバランス。
 
-#### 5.1.4 Julia実装: RAGAS評価
+#### 5.1.4 Rust実装: RAGAS評価
 
-```julia
-struct RAGASEvaluator
-    pipeline::RAGPipeline
-end
+```rust
+struct RAGASEvaluator {
+    pipeline: RAGPipeline,
+}
 
-# Evaluate single query
-function evaluate_query(
-    evaluator::RAGASEvaluator,
-    query::String,
-    ground_truth_docs::Set{Int},
-    ground_truth_answer::String
-)
-    # Retrieve documents
-    retrieved = search(evaluator.pipeline, query, top_k=10, rerank=true)
-    retrieved_ids = Set([doc_id for (doc_id, _) in retrieved])
+impl RAGASEvaluator {
+    /// Evaluate single query → (context_precision, context_recall, faithfulness, answer_relevancy, ragas_score, answer)
+    fn evaluate_query(
+        &self,
+        query: &str,
+        ground_truth_docs: &HashSet<usize>,
+    ) -> (f64, f64, f64, f64, f64, String) {
+        let retrieved = self.pipeline.search(query, 10, true);
+        let retrieved_ids: HashSet<usize> = retrieved.iter().map(|&(id, _)| id).collect();
 
-    # Context Precision
-    precision_scores = [begin
-        top_k_ids = Set(retrieved[i][1] for i in 1:k)
-        retrieved[k][1] ∈ ground_truth_docs ?
-            length(intersect(top_k_ids, ground_truth_docs)) / k : 0.0
-    end for k in 1:length(retrieved)]
-    context_precision = mean(precision_scores)
+        // Context Precision
+        let precision_scores: Vec<f64> = (1..=retrieved.len()).map(|k| {
+            let top_k_ids: HashSet<usize> = retrieved[..k].iter().map(|&(id, _)| id).collect();
+            if ground_truth_docs.contains(&retrieved[k - 1].0) {
+                top_k_ids.intersection(ground_truth_docs).count() as f64 / k as f64
+            } else { 0.0 }
+        }).collect();
+        let context_precision = precision_scores.iter().sum::<f64>() / precision_scores.len().max(1) as f64;
 
-    # Context Recall
-    context_recall = length(intersect(retrieved_ids, ground_truth_docs)) /
-                     (length(ground_truth_docs) + 1e-8)
+        // Context Recall
+        let context_recall = retrieved_ids.intersection(ground_truth_docs).count() as f64
+            / (ground_truth_docs.len() as f64 + 1e-8);
 
-    # Faithfulness (simplified: check if answer mentions retrieved docs)
-    retrieved_texts = [evaluator.pipeline.corpus[id].text for (id, _) in retrieved]
-    answer = generate_answer(query, retrieved_texts)  # Simulated LLM generation
-    faithfulness = compute_faithfulness(answer, retrieved_texts)
+        // Faithfulness (simplified)
+        let retrieved_texts: Vec<&str> = retrieved.iter()
+            .filter_map(|&(id, _)| self.pipeline.corpus.iter().find(|d| d.id == id).map(|d| d.text.as_str()))
+            .collect();
+        let answer = generate_answer(query, &retrieved_texts);
+        let faithfulness = compute_faithfulness(&answer, &retrieved_texts);
 
-    # Answer Relevancy (cosine similarity)
-    query_emb = simple_embedding(query)
-    answer_emb = simple_embedding(answer)
-    answer_relevancy = cosine_sim(query_emb, answer_emb)
+        // Answer Relevancy (cosine similarity)
+        let query_emb  = simple_embedding(query, 384);
+        let answer_emb = simple_embedding(&answer, 384);
+        let answer_relevancy = cosine_sim(&query_emb, &answer_emb) as f64;
 
-    # RAGAS Score (geometric mean)
-    ragas_score = (context_precision * context_recall * faithfulness * answer_relevancy)^0.25
+        // RAGAS Score (geometric mean)
+        let ragas_score = (context_precision * context_recall * faithfulness * answer_relevancy).powf(0.25);
 
-    return (
-        context_precision = context_precision,
-        context_recall = context_recall,
-        faithfulness = faithfulness,
-        answer_relevancy = answer_relevancy,
-        ragas_score = ragas_score,
-        answer = answer
-    )
-end
+        (context_precision, context_recall, faithfulness, answer_relevancy, ragas_score, answer)
+    }
+}
 
-function compute_faithfulness(answer::String, contexts::Vector{String})
-    claims = split(answer, ". ")
-    supported = count(claims) do claim
-        any(contexts) do ctx
-            contains(lowercase(ctx), lowercase(claim)) || token_overlap(claim, ctx) > 0.5
-        end
-    end
-    supported / (length(claims) + 1e-8)
-end
+fn compute_faithfulness(answer: &str, contexts: &[&str]) -> f64 {
+    let claims: Vec<&str> = answer.split(". ").collect();
+    let supported = claims.iter().filter(|&&claim| {
+        contexts.iter().any(|ctx| {
+            ctx.to_lowercase().contains(&claim.to_lowercase()) || token_overlap(claim, ctx) > 0.5
+        })
+    }).count();
+    supported as f64 / (claims.len() as f64 + 1e-8)
+}
 
-function token_overlap(text1::String, text2::String)
-    tokens1 = Set(tokenize(text1))
-    tokens2 = Set(tokenize(text2))
+fn token_overlap(text1: &str, text2: &str) -> f64 {
+    let t1: HashSet<String> = tokenize(text1).into_iter().collect();
+    let t2: HashSet<String> = tokenize(text2).into_iter().collect();
+    let overlap = t1.intersection(&t2).count();
+    overlap as f64 / (t1.union(&t2).count() as f64 + 1e-8)
+}
 
-    overlap = length(intersect(tokens1, tokens2))
-    overlap / (length(union(tokens1, tokens2)) + 1e-8)
-end
-
-function generate_answer(query::String, contexts::Vector{String})
-    # Simulated LLM generation (in practice, call actual LLM)
-    combined_context = join(contexts[1:min(3, length(contexts))], " ")
-
-    "Based on the context, $combined_context, the answer to '$query' is found in the documents."
-end
+fn generate_answer(query: &str, contexts: &[&str]) -> String {
+    // Simulated LLM generation (実際はLLM呼び出し)
+    let combined = contexts[..contexts.len().min(3)].join(" ");
+    format!("Based on the context, {}, the answer to '{}' is found in the documents.", combined, query)
+}
 ```
 
 ### 5.2 SmolVLM2-256M + RAG統合演習
@@ -1234,77 +1209,78 @@ graph LR
 2. **Retrieval**: クエリをEmbedding → Top-k画像+テキストを検索
 3. **Generation**: 検索結果をコンテキストとしてSmolVLM2で生成
 
-#### 5.2.2 Julia + Rust統合実装
+#### 5.2.2 Rust + Rust統合実装
 
-```julia
-# Multimodal RAG Pipeline
-using HTTP, JSON3
+```rust
+// Multimodal RAG Pipeline
 
-# SmolVLM2 embedding service (via Rust backend)
-function smolvlm2_embed(text::String; endpoint="http://localhost:8080/embed")
-    response = HTTP.post(
-        endpoint,
-        ["Content-Type" => "application/json"],
-        JSON3.write(Dict("text" => text))
-    )
+// SmolVLM2 embedding service（Rustバックエンド経由）
+fn smolvlm2_embed(text: &str, endpoint: &str) -> Result<Vec<f32>, Box<dyn std::error::Error>> {
+    let client = reqwest::blocking::Client::new();
+    let result: serde_json::Value = client
+        .post(endpoint)
+        .json(&serde_json::json!({ "text": text }))
+        .send()?
+        .json()?;
+    let embedding: Vec<f32> = result["embedding"]
+        .as_array().unwrap_or(&vec![])
+        .iter().map(|v| v.as_f64().unwrap_or(0.0) as f32)
+        .collect();
+    Ok(embedding)
+}
 
-    result = JSON3.read(response.body)
-    return Float32.(result.embedding)
-end
+// Multimodal document
+struct MultimodalDocument {
+    id: usize,
+    text: String,
+    image_path: Option<String>,
+    embedding: Vec<f32>,
+}
 
-# Multimodal document
-struct MultimodalDocument
-    id::Int
-    text::String
-    image_path::Union{String, Nothing}
-    embedding::Vector{Float32}
-end
+// Build multimodal index
+fn build_multimodal_index(docs: &[(&str, Option<&str>)], endpoint: &str) -> Vec<MultimodalDocument> {
+    docs.iter().enumerate().map(|(i, &(text, image_path))| {
+        let embed_input = match image_path {
+            Some(img) => format!("{} [IMG: {}]", text, img),
+            None      => text.to_owned(),
+        };
+        let embedding = smolvlm2_embed(&embed_input, endpoint).unwrap_or_default();
+        MultimodalDocument { id: i + 1, text: text.to_owned(), image_path: image_path.map(str::to_owned), embedding }
+    }).collect()
+}
 
-# Build multimodal index
-function build_multimodal_index(docs::Vector{Tuple{String, Union{String, Nothing}}})
-    [MultimodalDocument(
-        i, text, image_path,
-        isnothing(image_path) ? smolvlm2_embed(text) : smolvlm2_embed("$text [IMG: $image_path]")
-    ) for (i, (text, image_path)) in enumerate(docs)]
-end
+// Multimodal search
+fn multimodal_search<'a>(
+    query: &str,
+    index: &'a [MultimodalDocument],
+    top_k: usize,
+    endpoint: &str,
+) -> Vec<(usize, f32, &'a MultimodalDocument)> {
+    let query_emb = smolvlm2_embed(query, endpoint).unwrap_or_default();
+    let mut scores: Vec<(usize, f32, &MultimodalDocument)> = index.iter()
+        .map(|doc| (doc.id, cosine_sim(&query_emb, &doc.embedding), doc))
+        .collect();
+    scores.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
+    scores.truncate(top_k);
+    scores
+}
 
-# Multimodal search
-function multimodal_search(
-    query::String,
-    index::Vector{MultimodalDocument},
-    top_k::Int = 5
-)
-    query_emb = smolvlm2_embed(query)
+fn main() {
+    let multimodal_docs = [
+        ("The Eiffel Tower in Paris at sunset.",        Some("images/eiffel_tower.jpg")),
+        ("Tokyo Tower with cherry blossoms in spring.", Some("images/tokyo_tower.jpg")),
+        ("Berlin Wall memorial with historical graffiti.", None),
+        ("Big Ben clock tower in London.",               Some("images/big_ben.jpg")),
+    ];
+    let endpoint = "http://localhost:8080/embed";
+    let index    = build_multimodal_index(&multimodal_docs, endpoint);
+    let results  = multimodal_search("Show me towers in European cities", &index, 3, endpoint);
 
-    # Compute similarities
-    scores = [(doc.id, cosine_sim(query_emb, doc.embedding), doc)
-              for doc in index]
-
-    # Sort and return top-k
-    sort!(scores, by = x -> x[2], rev = true)
-
-    return scores[1:min(top_k, length(scores))]
-end
-
-# Example usage
-multimodal_docs = [
-    ("The Eiffel Tower in Paris at sunset.", "images/eiffel_tower.jpg"),
-    ("Tokyo Tower with cherry blossoms in spring.", "images/tokyo_tower.jpg"),
-    ("Berlin Wall memorial with historical graffiti.", nothing),
-    ("Big Ben clock tower in London.", "images/big_ben.jpg"),
-]
-
-index = build_multimodal_index(multimodal_docs)
-
-query = "Show me towers in European cities"
-results = multimodal_search(query, index, top_k=3)
-
-for (i, (doc_id, score, doc)) in enumerate(results)
-    println("$i. [Score: $(round(score, digits=3))] $(doc.text)")
-    if !isnothing(doc.image_path)
-        println("   Image: $(doc.image_path)")
-    end
-end
+    for (i, (doc_id, score, doc)) in results.iter().enumerate() {
+        println!("{}. [Score: {:.3}] {}", i + 1, score, doc.text);
+        if let Some(img) = &doc.image_path { println!("   Image: {}", img); }
+    }
+}
 ```
 
 #### 5.2.3 Rust Embedding Service (ONNX Runtime)
@@ -1580,7 +1556,7 @@ Naive (BM25のみ) → Dense (Embedding) → Hybrid (BM25+Dense) → Agentic (Se
 #### 核心3: 実装は3言語フルスタック
 
 - **🦀 Rust**: Vector DB (HNSW, qdrant) — 高速・安全
-- **⚡ Julia**: 検索パイプライン (BM25, Embedding, RRF) — 表現力・速度
+- **🦀 Rust**: 検索パイプライン (BM25, Embedding, RRF) — 表現力・速度
 - **🔮 Elixir**: 分散サービング (GenServer, Rate Limiting) — 並行性・耐障害性
 
 ### 6.7 FAQ 5問

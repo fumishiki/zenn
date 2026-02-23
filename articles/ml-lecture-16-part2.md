@@ -2,25 +2,25 @@
 title: "第16回: SSM理論 & Mambaの克服: 30秒の驚き→数式修行→実装マスター 【後編】実装編"
 emoji: "🦛"
 type: "tech"
-topics: ["machinelearning", "deeplearning", "ssm", "julia", "rust"]
+topics: ["machinelearning", "deeplearning", "ssm", "rust", "rust"]
 published: true
 slug: "ml-lecture-16-part2"
 difficulty: "advanced"
 time_estimate: "90 minutes"
-languages: ["Julia", "Rust"]
+languages: ["Rust"]
 keywords: ["機械学習", "深層学習", "生成モデル"]
 ---
 
 **← Part1（理論編）**: [第16回 Part1](./ml-lecture-16-part1)
 
-## 💻 Z5. 試練（実装）(45分) — JuliaとRustでSSMを動かす
+## 💻 Z5. 試練（実装）(45分) — RustとRustでSSMを動かす
 
 ### 4.1 環境構築
 
-#### Julia環境
+#### Rust環境
 
 ```bash
-# Julia 1.11+ (2025-2026 latest)
+# Rust (cargo 1.75+, ndarray 0.16)
 curl -fsSL https://install.julialang.org | sh
 
 # Packages
@@ -40,224 +40,317 @@ ndarray-linalg = "0.17"
 rayon = "1.10"
 ```
 
-### 4.2 離散SSMの完全実装(Julia)
+### 4.2 離散SSMの完全実装(Rust)
 
-```julia
-using LinearAlgebra
-using FFTW
+```rust
+use ndarray::{Array1, Array2};
+use num_complex::Complex;
+use rustfft::FftPlanner;
+use rand::prelude::*;
+use rand_distr::StandardNormal;
 
-"""
-Discrete SSM module
-Implements: h_t = A h_{t-1} + B u_t, y_t = C h_t + D u_t
-"""
-struct DiscreteSSM
-    A::Matrix{Float64}
-    B::Vector{Float64}
-    C::Vector{Float64}
-    D::Float64
-end
+/// Trait for discrete state-space model forward passes.
+pub trait StateSpaceModel {
+    /// Recurrent inference: y_t = C h_t,  h_t = A h_{t-1} + B u_t
+    fn forward_recurrent(&self, u: &[f64]) -> Vec<f64>;
+    /// Convolutional training: y = K̄ * u,  K̄_k = C Āᵏ B̄
+    fn forward_conv(&self, u: &[f64], l: usize) -> Vec<f64>;
+}
 
-# Recurrent form (for inference — inherently sequential)
-function forward_recurrent(ssm::DiscreteSSM, u::Vector{Float64})
-    N = length(u)
-    h = zeros(Float64, length(ssm.B))
-    y = zeros(Float64, N)
-    @inbounds for t in 1:N
-        h = ssm.A * h + ssm.B * u[t]
-        y[t] = dot(ssm.C, h) + ssm.D * u[t]
-    end
-    return y
-end
+/// Discrete SSM: h_t = Ā h_{t-1} + B̄ u_t,  y_t = C h_t + D u_t
+struct DiscreteSSM {
+    a: Array2<f64>,
+    b: Array1<f64>,
+    c: Array1<f64>,
+    d: f64,
+}
 
-# Convolutional form (for training)
-function forward_convolution(ssm::DiscreteSSM, u::Vector{Float64}, L::Int)
-    # Precompute kernel K[k] = C * A^k * B (sequential: each Ai depends on prior)
-    d = length(ssm.B)
-    K = zeros(Float64, L)
-    Ai = Matrix{Float64}(I, d, d)  # A^0
-    @inbounds for k in 1:L
-        Ai = ssm.A * Ai  # A^k
-        K[k] = dot(ssm.C, Ai * ssm.B)
-    end
+impl DiscreteSSM {
+    // Recurrent form (for inference — inherently sequential)
+    fn forward_recurrent(&self, u: &[f64]) -> Vec<f64> {
+        let mut h = Array1::<f64>::zeros(self.b.len());
+        u.iter().map(|&u_t| {
+            // h_t = Ā h_{t-1} + B̄ u_t
+            h = self.a.dot(&h) + &self.b * u_t;
+            // y_t = C h_t + D u_t
+            self.c.dot(&h) + self.d * u_t
+        }).collect()
+    }
 
-    # FFT convolution (fused into one expression)
-    K_pad = [K; zeros(length(u))]
-    u_pad = [u; zeros(L)]
-    y = real.(ifft(fft(K_pad) .* fft(u_pad)))[1:length(u)]
+    // Convolutional form (for training)
+    fn forward_convolution(&self, u: &[f64], l: usize) -> (Vec<f64>, Vec<f64>) {
+        // SSM convolution kernel: K̄_k = C Āᵏ B̄,  k = 0..L
+        let state_dim = self.b.len();
+        let mut ai = Array2::<f64>::eye(state_dim); // Ā⁰ = I
+        let kernel: Vec<f64> = (0..l).map(|_| {
+            ai = self.a.dot(&ai); // Āᵏ⁺¹
+            self.c.dot(&ai.dot(&self.b))  // K̄_k = C Āᵏ B̄
+        }).collect();
 
-    return y, K
-end
+        // FFT convolution (zero-padded to avoid circular aliasing)
+        let pad_len = l + u.len();
+        let mut k_pad: Vec<Complex<f64>> = kernel.iter().map(|&x| Complex::new(x, 0.0))
+            .chain(std::iter::repeat(Complex::new(0.0, 0.0)).take(u.len()))
+            .collect();
+        let mut u_pad: Vec<Complex<f64>> = u.iter().map(|&x| Complex::new(x, 0.0))
+            .chain(std::iter::repeat(Complex::new(0.0, 0.0)).take(l))
+            .collect();
+        let mut planner = FftPlanner::new();
+        let fft  = planner.plan_fft_forward(pad_len);
+        let ifft = planner.plan_fft_inverse(pad_len);
+        fft.process(&mut k_pad);
+        fft.process(&mut u_pad);
+        let mut conv: Vec<Complex<f64>> = k_pad.iter().zip(&u_pad).map(|(a, b)| a * b).collect();
+        ifft.process(&mut conv);
+        let scale = 1.0 / pad_len as f64;
+        let y: Vec<f64> = conv[..u.len()].iter().map(|c| c.re * scale).collect();
+        (y, kernel)
+    }
+}
 
-# Example usage
-d = 8
-A = 0.9 * Matrix{Float64}(I, d, d) + 0.05 * randn(d, d)  # stable matrix
-B = randn(Float64, d)
-C = randn(Float64, d)
-D = 0.0
+fn main() {
+    let mut rng = rand::thread_rng();
+    let d = 8_usize;
+    // stable matrix: 0.9 * I + 0.05 * randn
+    let noise: Array2<f64> = Array2::from_shape_fn((d, d), |_| rng.sample::<f64, _>(StandardNormal) * 0.05);
+    let a = Array2::<f64>::eye(d) * 0.9 + noise;
+    let b: Array1<f64> = (0..d).map(|_| rng.sample(StandardNormal)).collect();
+    let c: Array1<f64> = (0..d).map(|_| rng.sample(StandardNormal)).collect();
+    let ssm = DiscreteSSM { a, b, c, d: 0.0 };
 
-ssm = DiscreteSSM(A, B, C, D)
+    let u: Vec<f64> = (0..64).map(|_| rng.sample(StandardNormal)).collect();
+    let y_rec = ssm.forward_recurrent(&u);
+    let (y_conv, _k) = ssm.forward_convolution(&u, 64);
 
-u = randn(Float64, 64)
-y_rec  = forward_recurrent(ssm, u)
-y_conv, K = forward_convolution(ssm, u, 64)
-
-println("Recurrent output (first 5): ", round.(y_rec[1:5], digits=3))
-println("Convolution output (first 5): ", round.(y_conv[1:5], digits=3))
-println("Max difference: ", maximum(abs.(y_rec .- y_conv)))
+    println!("Recurrent output (first 5): {:?}", &y_rec[..5]);
+    println!("Convolution output (first 5): {:?}", &y_conv[..5]);
+    let max_diff = y_rec.iter().zip(&y_conv)
+        .map(|(a, b)| (a - b).abs())
+        .fold(f64::NEG_INFINITY, f64::max);
+    println!("Max difference: {max_diff:.6}");
+}
 ```
 
 ### 4.3 HiPPO-LegS初期化
 
-```julia
-"""
-HiPPO-LegS initialization for A and B
-Returns matrices with optimal long-range memory properties
-"""
-function hippo_legs_init(d::Int)
-    # 2D comprehension: one expression per matrix element
-    A = [n > k ? -(2n+1)^0.5*(2k+1)^0.5 :
-         n == k ? Float64(n+1) : 0.0
-         for n in 0:d-1, k in 0:d-1]
-    B = [(2n+1)^0.5 for n in 0:d-1]
-    C = ones(Float64, d)
-    return A, B, C
-end
+```rust
+use ndarray::{Array1, Array2};
+use ndarray_linalg::Eig;
 
-# Test HiPPO eigenvalues
-d = 16
-A_hippo, B_hippo, C_hippo = hippo_legs_init(d)
+/// HiPPO-LegS initialization for A and B.
+/// Returns matrices with optimal long-range memory properties.
+// HiPPO-LegS: A_{nk} = -√(2n+1)·√(2k+1)  (n>k),  A_{nn} = n+1,  B_n = √(2n+1)
+fn hippo_legs_init(d: usize) -> (Array2<f64>, Array1<f64>, Array1<f64>) {
+    // A_{nk} = -√(2n+1)√(2k+1) for n>k,  A_{nn} = n+1,  0 otherwise
+    let a = Array2::from_shape_fn((d, d), |(n, k)| {
+        if n > k {
+            -((2 * n + 1) as f64).sqrt() * ((2 * k + 1) as f64).sqrt()
+        } else if n == k {
+            (n + 1) as f64
+        } else {
+            0.0
+        }
+    });
+    // B_n = √(2n+1)
+    let b: Array1<f64> = (0..d).map(|n| ((2 * n + 1) as f64).sqrt()).collect();
+    let c = Array1::<f64>::ones(d);
+    (a, b, c)
+}
 
-λ = eigvals(A_hippo)
-println("HiPPO eigenvalues (real parts): ", round.(real.(λ), digits=2))
-println("All negative? ", all(real.(λ) .< 0))  # Should be true
+fn main() {
+    let d = 16;
+    let (a_hippo, _b_hippo, _c_hippo) = hippo_legs_init(d);
+    let (eigs, _) = a_hippo.eig().expect("eigendecomposition failed");
+    let real_parts: Vec<f64> = eigs.iter().map(|c| c.re).collect();
+    println!("HiPPO eigenvalues (real parts): {real_parts:.2?}");
+    println!("All negative? {}", real_parts.iter().all(|&r| r < 0.0));
+}
 ```
 
 ### 4.4 Zero-Order Hold 離散化
 
-```julia
-"""
-Zero-Order Hold discretization: continuous SSM → discrete SSM
-A_bar = exp(A * Δ)
-B_bar = (A^{-1} (exp(A*Δ) - I)) B
-"""
-function discretize_zoh(A::Matrix{Float64}, B::Vector{Float64}, Δ::Float64)
-    A_bar = exp(A * Δ)
-    # if-expression: exact ZOH or numerical-integration fallback
-    B_bar = if det(A) != 0.0
-        (A \ (A_bar - I)) * B               # exact ZOH
-    else
-        dt = Δ / 100
-        sum(exp(A * t) * B * dt for t in 0:dt:Δ)  # numerical integration
-    end
-    return A_bar, B_bar
-end
+```rust
+use ndarray::{array, Array1, Array2};
+use ndarray_linalg::{Eig, Expm, Solve};
 
-# Test: continuous → discrete
-A_cont = [-0.5 0.0; 0.0 -0.3]
-B_cont = [1.0, 0.0]
-Δ = 0.1
+/// Zero-Order Hold (ZOH) discretization: continuous SSM → discrete SSM.
+///   Ā = exp(A·Δ)                        [matrix exponential]
+///   B̄ = A⁻¹·(Ā - I)·B                  [ZOH exact formula]
+// Discretization: Ā = exp(Δ·A),  B̄ = (Ā - I)A⁻¹B  (ZOH)
+fn discretize_zoh(
+    a: &Array2<f64>,
+    b: &Array1<f64>,
+    delta: f64,
+) -> (Array2<f64>, Array1<f64>) {
+    // Ā = exp(A·Δ)
+    let a_bar = (a * delta).expm().expect("matrix exponential failed");
+    let i = Array2::<f64>::eye(a.nrows());
+    // B̄ = A⁻¹·(Ā - I)·B  (exact ZOH; fallback to numerical integration if A singular)
+    let b_bar = a.solve(&(&a_bar - &i))
+        .map(|m| m.dot(b))
+        .unwrap_or_else(|_| {
+            let dt = delta / 100.0;
+            (0..100).map(|k| {
+                let t = k as f64 * dt;
+                (a * t).expm().expect("expm failed").dot(b) * dt
+            }).fold(Array1::<f64>::zeros(b.len()), |acc, x| acc + x)
+        });
+    (a_bar, b_bar)
+}
 
-A_disc, B_disc = discretize_zoh(A_cont, B_cont, Δ)
-println("Continuous A eigenvalues: ", eigvals(A_cont))
-println("Discrete A eigenvalues:   ", eigvals(A_disc))
-println("Expected (exp(λ*Δ)):      ", exp.(eigvals(A_cont) * Δ))
+fn main() {
+    let a_cont = array![[-0.5, 0.0], [0.0, -0.3]];
+    let b_cont = array![1.0, 0.0];
+    let delta = 0.1_f64;
+
+    let (a_disc, _b_disc) = discretize_zoh(&a_cont, &b_cont, delta);
+    let (eig_cont, _) = a_cont.eig().unwrap();
+    let (eig_disc, _) = a_disc.eig().unwrap();
+    println!("Continuous A eigenvalues: {:?}", eig_cont);
+    println!("Discrete A eigenvalues:   {:?}", eig_disc);
+    let expected: Vec<_> = eig_cont.iter().map(|c| (c * delta).exp()).collect();
+    println!("Expected (exp(λ*Δ)):      {:?}", expected);
+}
 ```
 
 ### 4.5 S4 Simplified: 対角SSM + FFT畳み込み
 
-```julia
-using FFTW
+```rust
+use ndarray::Array1;
+use num_complex::Complex;
+use rustfft::FftPlanner;
+use rand::prelude::*;
+use rand_distr::StandardNormal;
 
-"""
-Simplified S4: diagonal A for efficiency
-Assumes A is diagonalizable: A = V Λ V^{-1}
-"""
-struct S4Layer
-    λ::Vector{ComplexF64}   # Diagonal of A (eigenvalues)
-    B::Vector{ComplexF64}
-    C::Vector{ComplexF64}
-    Δ::Float64
-end
+/// Simplified S4: diagonal A for efficiency.
+/// Assumes A is diagonalizable: A = V Λ V^{-1}
+struct S4Layer {
+    lambda: Array1<Complex<f64>>, // diagonal of A (eigenvalues)
+    b: Array1<Complex<f64>>,
+    c: Array1<Complex<f64>>,
+    delta: f64,
+}
 
-function s4_forward(layer::S4Layer, u::Vector{Float64}, L::Int)
-    λ_bar = exp.(layer.λ * layer.Δ)
+impl S4Layer {
+    fn forward(&self, u: &[f64], l: usize) -> Vec<f64> {
+        // λ̄ = exp(λ·Δ)  — discretized diagonal eigenvalues
+        let lambda_bar: Array1<Complex<f64>> = self.lambda.mapv(|lam| (lam * self.delta).exp());
+        // K̄_k = Re(Cᵀ·diag(λ̄ᵏ)·B)  — SSM convolution kernel via diagonal trick
+        let kernel: Vec<f64> = (0..l).map(|k| {
+            let lam_k: Array1<Complex<f64>> = lambda_bar.mapv(|lb| lb.powi(k as i32));  // λ̄ᵏ
+            self.c.iter().zip(&self.b).zip(&lam_k)
+                .map(|((ci, bi), lki)| ci * lki * bi)  // cᵢ·λ̄ᵢᵏ·bᵢ
+                .sum::<Complex<f64>>()
+                .re  // take real part
+        }).collect();
 
-    # Kernel via comprehension: K[k] = C^T * diag(λ_bar^k) * B
-    K = real.([dot(layer.C, λ_bar .^ k .* layer.B) for k in 0:L-1])
+        // FFT convolution (zero-padded)
+        let pad_len = kernel.len() + u.len();
+        let mut k_pad: Vec<Complex<f64>> = kernel.iter().map(|&x| Complex::new(x, 0.0))
+            .chain(std::iter::repeat(Complex::new(0.0, 0.0)).take(u.len()))
+            .collect();
+        let mut u_pad: Vec<Complex<f64>> = u.iter().map(|&x| Complex::new(x, 0.0))
+            .chain(std::iter::repeat(Complex::new(0.0, 0.0)).take(l))
+            .collect();
+        let mut planner = FftPlanner::new();
+        let fft  = planner.plan_fft_forward(pad_len);
+        let ifft = planner.plan_fft_inverse(pad_len);
+        fft.process(&mut k_pad);
+        fft.process(&mut u_pad);
+        let mut conv: Vec<Complex<f64>> = k_pad.iter().zip(&u_pad).map(|(a, b)| a * b).collect();
+        ifft.process(&mut conv);
+        let scale = 1.0 / pad_len as f64;
+        conv[..u.len()].iter().map(|c| c.re * scale).collect()
+    }
+}
 
-    # FFT convolution (fused)
-    K_pad = [K; zeros(length(u))]
-    u_pad = [u; zeros(L)]
-    real.(ifft(fft(K_pad) .* fft(u_pad)))[1:length(u)]
-end
+fn main() {
+    let mut rng = rand::thread_rng();
+    let d = 32_usize;
+    // HiPPO-like eigenvalues: -1, -2, ..., -d
+    let lambda: Array1<Complex<f64>> = (1..=d).map(|i| Complex::new(-(i as f64), 0.0)).collect();
+    let inv_sqrt_d = 1.0 / (d as f64).sqrt();
+    let b = Array1::from_elem(d, Complex::new(inv_sqrt_d, 0.0));
+    let c = Array1::from_elem(d, Complex::new(inv_sqrt_d, 0.0));
+    let s4 = S4Layer { lambda, b, c, delta: 0.01 };
 
-# Example: S4 with HiPPO-like eigenvalues
-d = 32
-λ = ComplexF64.(-(1:d))           # HiPPO-like: -1, -2, ..., -d
-B = ones(ComplexF64, d) ./ sqrt(d)
-C = ones(ComplexF64, d) ./ sqrt(d)
-Δ = 0.01
-
-s4 = S4Layer(λ, B, C, Δ)
-u   = randn(Float64, 256)
-y_s4 = s4_forward(s4, u, 256)
-
-println("S4 output (first 5): ", round.(y_s4[1:5], digits=3))
+    let u: Vec<f64> = (0..256).map(|_| rng.sample(StandardNormal)).collect();
+    let y_s4 = s4.forward(&u, 256);
+    println!("S4 output (first 5): {:?}", &y_s4[..5]);
+}
 ```
 
 ### 4.6 Mambaの簡易実装: Selective SSM
 
 完全なMambaはCUDAカーネルを要するが、教育的な簡易版:
 
-```julia
-"""
-Simplified Mamba: input-dependent Δ, B, C (without hardware-aware scan)
-"""
-struct MambaLayer
-    A::Matrix{Float64}
-    W_Δ::Matrix{Float64}
-    W_B::Matrix{Float64}
-    W_C::Matrix{Float64}
-    d_state::Int
-end
+```rust
+use ndarray::{Array1, Array2};
+use ndarray_linalg::{Expm, Solve};
+use rand::prelude::*;
+use rand_distr::StandardNormal;
 
-# Numerically stable softplus: log1p(exp(x)) ≈ x for x > 20
-softplus(x) = x > 20.0 ? x : log1p(exp(x))
+/// Simplified Mamba: input-dependent Δ, B, C (without hardware-aware scan)
+struct MambaLayer {
+    a: Array2<f64>,
+    w_delta: Array2<f64>,
+    w_b: Array2<f64>,
+    w_c: Array2<f64>,
+    d_state: usize,
+}
 
-function mamba_forward_simple(layer::MambaLayer, u::Matrix{Float64})
-    # u: (seq_len, d_model)
-    L, _ = size(u)
-    d = layer.d_state
+/// Numerically stable softplus: log1p(exp(x)) ≈ x for x > 20
+fn softplus(x: f64) -> f64 {
+    if x > 20.0 { x } else { x.exp().ln_1p() }
+}
 
-    # Input-dependent parameters via broadcast
-    Δ = softplus.(u * layer.W_Δ')  # (L, d_state)
-    B = u * layer.W_B'              # (L, d_state)
-    C = u * layer.W_C'              # (L, d_state)
+impl MambaLayer {
+    // Mamba forward: u: (L, d_model) → y: (L,)
+    // Selective SSM: Δ_t, B_t, C_t are input-dependent (unlike S4)
+    fn forward(&self, u: &Array2<f64>) -> Vec<f64> {
+        let (l, _) = u.dim();
+        let d = self.d_state;
+        // Δ_t = Softplus(W_Δ u_t)  — input-dependent step size (L, d_state)
+        let delta = u.dot(&self.w_delta.t()).mapv(softplus);
+        // B_t = W_B u_t  — input-dependent input projection (L, d_state)
+        let b_mat = u.dot(&self.w_b.t());
+        // C_t = W_C u_t  — input-dependent output projection (L, d_state)
+        let c_mat = u.dot(&self.w_c.t());
 
-    # Sequential scan — inherently sequential (RNN recurrence)
-    h = zeros(Float64, d)
-    y = zeros(Float64, L)
-    @inbounds for t in 1:L
-        A_bar = exp(layer.A * Δ[t, 1])            # scalar Δ per step
-        B_bar = (layer.A \ (A_bar - I)) * B[t, :]
-        h = A_bar * h + B_bar
-        y[t] = dot(C[t, :], h)
-    end
-    return y
-end
+        // Sequential scan: h_t = Ā_t h_{t-1} + B̄_t,  y_t = C_t·h_t
+        let mut h = Array1::<f64>::zeros(d);
+        let i_mat = Array2::<f64>::eye(d);
+        (0..l).map(|t| {
+            let dt = delta[[t, 0]]; // scalar Δ_t per step
+            // Ā_t = exp(Δ_t·A)  — ZOH discretization (input-dependent)
+            let a_bar = (&self.a * dt).expm().expect("expm failed");
+            let a_bar_minus_i = &a_bar - &i_mat;
+            let b_t = b_mat.row(t).to_owned();
+            // B̄_t = A⁻¹·(Ā_t - I)·B_t  — ZOH for input matrix
+            let b_bar = self.a.solve(&a_bar_minus_i)
+                .map(|m| m.dot(&b_t))
+                .unwrap_or_else(|_| a_bar_minus_i.dot(&b_t));
+            // h_t = Ā_t h_{t-1} + B̄_t
+            h = a_bar.dot(&h) + b_bar;
+            // y_t = C_t · h_t
+            c_mat.row(t).dot(&h)
+        }).collect()
+    }
+}
 
-# Example
-d_state, d_model = 4, 8
-A   = -1.0 * Matrix{Float64}(I, d_state, d_state)  # Simple: -I
-W_Δ = randn(Float64, d_model, d_state) * 0.1
-W_B = randn(Float64, d_model, d_state)
-W_C = randn(Float64, d_model, d_state)
+fn main() {
+    let mut rng = rand::thread_rng();
+    let (d_state, d_model) = (4_usize, 8_usize);
+    let a = -Array2::<f64>::eye(d_state); // Simple: -I
+    let w_delta = Array2::from_shape_fn((d_model, d_state), |_| rng.sample::<f64, _>(StandardNormal) * 0.1);
+    let w_b     = Array2::from_shape_fn((d_model, d_state), |_| rng.sample(StandardNormal));
+    let w_c     = Array2::from_shape_fn((d_model, d_state), |_| rng.sample(StandardNormal));
+    let mamba = MambaLayer { a, w_delta, w_b, w_c, d_state };
 
-mamba  = MambaLayer(A, W_Δ, W_B, W_C, d_state)
-u      = randn(Float64, 16, d_model)  # (seq_len=16, d_model=8)
-y_mamba = mamba_forward_simple(mamba, u)
-
-println("Mamba output (first 5): ", round.(y_mamba[1:5], digits=3))
+    let u: Array2<f64> = Array2::from_shape_fn((16, d_model), |_| rng.sample(StandardNormal));
+    let y_mamba = mamba.forward(&u);
+    println!("Mamba output (first 5): {:?}", &y_mamba[..5]);
+}
 ```
 
 > **Note:** **注意**: 上記はMambaの原理を示す教育的実装。実際のMambaは:
@@ -277,12 +370,13 @@ println("Mamba output (first 5): ", round.(y_mamba[1:5], digits=3))
 use ndarray::{Array1, Array2};
 use rayon::prelude::*;
 
-/// Sequential scan for SSM: h[t] = A[t] * h[t-1] + B[t]
+/// Sequential scan for SSM: h_t = A_t·h_{t-1} + B_t
 /// Returns all hidden states h[1..=L]
+// SSM scan: h_t = A_t h_{t-1} + B_t  (associative → parallelizable with Blelloch scan)
 fn parallel_scan(a_mats: &[Array2<f64>], b_vecs: &[Array1<f64>]) -> Vec<Array1<f64>> {
     let d = b_vecs[0].len();
     let mut h = Array1::zeros(d);
-    // iterator chain: zip matrices with bias vectors, fold state through scan
+    // zip (A_t, B_t) pairs, map h_t = A_t h_{t-1} + B_t via iterator
     a_mats.iter().zip(b_vecs.iter()).map(|(a, b)| {
         h = a.dot(&h) + b;
         h.clone()
@@ -353,6 +447,7 @@ use rayon::prelude::*;
 /// Associative operation for SSM scan: (A_r, B_r) ∘ (A_l, B_l) = (A_r A_l, A_r B_l + B_r)
 type ScanOp = (Array2<f64>, Array1<f64>);
 
+// (A_r, B_r) ∘ (A_l, B_l) = (A_r A_l,  A_r B_l + B_r)   [associative SSM composition]
 fn combine(left: &ScanOp, right: &ScanOp) -> ScanOp {
     let (a_l, b_l) = left;
     let (a_r, b_r) = right;
@@ -360,12 +455,13 @@ fn combine(left: &ScanOp, right: &ScanOp) -> ScanOp {
 }
 
 /// Sequential CPU scan expressed as iterator map over owned ops
+/// (True Blelloch parallel scan requires GPU/CUDA; this is the sequential reference)
 fn parallel_scan_associative(ops: Vec<ScanOp>) -> Vec<Array1<f64>> {
-    // For true parallelism, use tree-based reduction (CUDA/GPU required)
     let d = ops[0].1.len();
     let mut h = Array1::zeros(d);
+    // h_t = A_t h_{t-1} + B_t  via iterator (equivalent to fold)
     ops.into_iter().map(|(a, b)| {
-        h = a.dot(&h) + &b;
+        h = a.dot(&h) + &b;  // h_t = A_t h_{t-1} + B_t
         h.clone()
     }).collect()
 }
@@ -424,7 +520,7 @@ cargo bench
 
 ### 4.8 Math↔Code対応表: SSMの完全マッピング
 
-| 数式 | Julia | Rust | 説明 |
+| 数式 | Rust | Rust | 説明 |
 |:-----|:------|:-----|:-----|
 | $h_t = \bar{A}h_{t-1} + \bar{B}u_t$ | `h = A * h + B * u[t]` | `h = A.dot(&h) + &B * u[t]` | 再帰更新 |
 | $y_t = Ch_t$ | `y[t] = dot(C, h)` | `y[t] = C.dot(&h)` | 出力投影 |
@@ -445,53 +541,83 @@ cargo bench
 
 **対策**: Padé近似やSciPyの`expm`を使う。
 
-```julia
-using LinearAlgebra
+```rust
+use ndarray::Array2;
+use ndarray_linalg::Expm;
 
-# Safe matrix exponential — short-circuit warn
-function safe_exp(A::Matrix{Float64}, Δ::Float64)
-    cond(A) > 1e10 && @warn "Matrix A is ill-conditioned, exp(A*Δ) may be inaccurate"
-    exp(A * Δ)
-end
+/// Safe matrix exponential — warns if A is ill-conditioned.
+fn safe_exp(a: &Array2<f64>, delta: f64) -> Array2<f64> {
+    // rough ill-conditioning check via norm ratio
+    let norm = a.iter().map(|x| x * x).sum::<f64>().sqrt();
+    if norm > 1e10 {
+        eprintln!("Warning: Matrix A is ill-conditioned, exp(A*Δ) may be inaccurate");
+    }
+    (a * delta).expm().expect("matrix exponential failed")
+}
 ```
 
 #### Tip 2: 固有値の確認
 
 訓練前に$A$の固有値を確認し、実部が正のものがあれば警告。
 
-```julia
-function check_stability(A::Matrix{Float64})
-    unstable = filter(x -> real(x) > 0, eigvals(A))
-    isempty(unstable) || @warn "Unstable eigenvalues detected: $(unstable)"
-    isempty(unstable)
-end
+```rust
+use ndarray::Array2;
+use ndarray_linalg::Eig;
+use num_complex::Complex;
+
+/// Returns true if all eigenvalues of A have strictly negative real parts.
+fn check_stability(a: &Array2<f64>) -> bool {
+    let (eigs, _) = a.eig().expect("eigendecomposition failed");
+    let unstable: Vec<Complex<f64>> = eigs.into_iter().filter(|c| c.re > 0.0).collect();
+    if !unstable.is_empty() {
+        eprintln!("Warning: Unstable eigenvalues detected: {:?}", unstable);
+    }
+    unstable.is_empty()
+}
 ```
 
 #### Tip 3: Softplusの数値安定版
 
 $\text{Softplus}(x) = \log(1 + e^x)$は$x$が大きいとオーバーフロー。
 
-```julia
-# Numerically stable softplus: one-liner ternary + log1p
-softplus_stable(x::Float64) = x > 20.0 ? x : log1p(exp(x))
+```rust
+/// Numerically stable softplus: avoids overflow for large x.
+#[inline]
+fn softplus_stable(x: f64) -> f64 {
+    if x > 20.0 { x } else { x.exp().ln_1p() }
+}
 ```
 
 #### Tip 4: FFTのzero-padding
 
 畳み込みでFFTを使う際、circular convolutionを避けるため、ゼロパディング必須。
 
-```julia
-# Correct FFT convolution (fused: no intermediate y_fft variable)
-function fft_conv_correct(K::Vector{Float64}, u::Vector{Float64})
-    L_K, L_u = length(K), length(u)
-    L_pad = L_K + L_u - 1
-    K_pad = [K; zeros(L_pad - L_K)]
-    u_pad = [u; zeros(L_pad - L_u)]
-    real.(ifft(fft(K_pad) .* fft(u_pad)))[1:L_u]
-end
+```rust
+use num_complex::Complex;
+use rustfft::FftPlanner;
+
+/// Correct FFT convolution with zero-padding to avoid circular aliasing.
+fn fft_conv_correct(kernel: &[f64], u: &[f64]) -> Vec<f64> {
+    let l_pad = kernel.len() + u.len() - 1;
+    let mut k_pad: Vec<Complex<f64>> = kernel.iter().map(|&x| Complex::new(x, 0.0))
+        .chain(std::iter::repeat(Complex::new(0.0, 0.0)).take(l_pad - kernel.len()))
+        .collect();
+    let mut u_pad: Vec<Complex<f64>> = u.iter().map(|&x| Complex::new(x, 0.0))
+        .chain(std::iter::repeat(Complex::new(0.0, 0.0)).take(l_pad - u.len()))
+        .collect();
+    let mut planner = FftPlanner::new();
+    let fft  = planner.plan_fft_forward(l_pad);
+    let ifft = planner.plan_fft_inverse(l_pad);
+    fft.process(&mut k_pad);
+    fft.process(&mut u_pad);
+    let mut conv: Vec<Complex<f64>> = k_pad.iter().zip(&u_pad).map(|(a, b)| a * b).collect();
+    ifft.process(&mut conv);
+    let scale = 1.0 / l_pad as f64;
+    conv[..u.len()].iter().map(|c| c.re * scale).collect()
+}
 ```
 
-> **Note:** **進捗: 70% 完了** SSM/S4/Mambaの実装を完了。Julia数式美とRust並列化、そしてMath↔Code完全対応を体験した。次は実験で性能を確認。
+> **Note:** **進捗: 70% 完了** SSM/S4/Mambaの実装を完了。Rust数式美とRust並列化、そしてMath↔Code完全対応を体験した。次は実験で性能を確認。
 
 ---
 
@@ -542,108 +668,130 @@ end
 
 HiPPO初期化とランダム初期化でSSMを訓練し、Long Range依存タスクでの性能を比較せよ。
 
-```julia
-using Random, Statistics
-using Flux  # For training (optional, can use manual gradient descent)
+```rust
+use ndarray::{Array1, Array2};
+use rand::prelude::*;
+use rand_distr::{StandardNormal, Uniform};
 
-# Synthetic Long Range task: copy task
-# Input: [1, 3, 2, 0, 0, ..., 0] (signal at start, then zeros)
-# Output: should copy signal after T steps
-function generate_copy_task(T::Int, n_samples::Int, vocab_size::Int=10)
-    X = zeros(Float32, n_samples, T)
-    Y = zeros(Int, n_samples)
-    for i in 1:n_samples
-        signal, delay = rand(1:vocab_size), rand(5:10)
-        X[i, delay] = Float32(signal)
-        Y[i] = signal
-    end
-    return X, Y
-end
+/// Generate synthetic copy task: signal placed at a random delay, then zeros.
+/// Returns (X, Y) where X is (n_samples × T) and Y holds the target label.
+fn generate_copy_task(
+    t: usize,
+    n_samples: usize,
+    vocab_size: usize,
+) -> (Array2<f32>, Vec<usize>) {
+    let mut rng = rand::thread_rng();
+    let mut x = Array2::<f32>::zeros((n_samples, t));
+    let mut y = vec![0usize; n_samples];
+    for i in 0..n_samples {
+        let signal: usize = rng.sample(Uniform::new(1, vocab_size + 1));
+        let delay: usize  = rng.sample(Uniform::new(5, 11));
+        x[[i, delay]] = signal as f32;
+        y[i] = signal;
+    }
+    (x, y)
+}
 
-# Simple SSM classifier
-struct SSMClassifier
-    ssm::DiscreteSSM
-    W_out::Matrix{Float32}  # (num_classes, d_state)
-end
+/// Minimal SSM classifier: fixed A/B/C weights, linear output head.
+struct SsmClassifier {
+    a: Array2<f64>,
+    b: Array1<f64>,
+    c: Array1<f64>,
+    w_out: Array2<f32>, // (num_classes, d_state)
+}
 
-function (model::SSMClassifier)(x::Matrix{Float32})
-    # x: (batch, seq_len); RNN recurrence is inherently sequential
-    batch_size, seq_len = size(x)
-    d = length(model.ssm.B)
-    logits = zeros(Float32, batch_size, size(model.W_out, 1))
-    @inbounds for b in 1:batch_size
-        h = zeros(Float32, d)
-        @inbounds for t in 1:seq_len
-            h = model.ssm.A * h + model.ssm.B * x[b, t]
-        end
-        logits[b, :] = model.W_out * h  # final hidden state → logits
-    end
-    return logits
-end
+impl SsmClassifier {
+    /// Run recurrent SSM on one sample row, return logits over vocab.
+    fn predict_one(&self, x_row: &[f32]) -> Vec<f32> {
+        let mut h = Array1::<f64>::zeros(self.b.len());
+        for &u_t in x_row {
+            h = self.a.dot(&h) + &self.b * u_t as f64;
+        }
+        let h_f32: Array1<f32> = h.mapv(|v| v as f32);
+        self.w_out.dot(&h_f32).to_vec()
+    }
+}
 
-# Train function (simplified SGD)
-function train_ssm_copy(model, X_train, Y_train, epochs::Int=50, lr::Float32=0.01f0)
-    losses = Float32[]
-    for epoch in 1:epochs
-        n = size(X_train, 1)
-        # 0-1 loss per sample (for demo)
-        total_loss = sum(1:n) do i
-            argmax(model(X_train[i:i, :])[1, :]) == Y_train[i] ? 0.0f0 : 1.0f0
-        end
-        avg_loss = total_loss / n
-        push!(losses, avg_loss)
-        epoch % 10 == 0 && println("Epoch $epoch: Loss = $(round(avg_loss, digits=3)), Acc = $(round((1-avg_loss)*100, digits=1))%")
-    end
-    return losses
-end
+fn argmax(v: &[f32]) -> usize {
+    v.iter().enumerate()
+        .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap())
+        .map(|(i, _)| i)
+        .unwrap_or(0)
+}
 
-# Experiment: HiPPO vs Random
-function experiment_hippo_vs_random()
-    T, n_train, n_test, d, vocab_size = 500, 1000, 200, 32, 10
-    Δ = 0.01
+/// Simplified 0-1 loss evaluation (no gradient updates — demo only).
+fn train_ssm_copy(
+    model: &SsmClassifier,
+    x_train: &Array2<f32>,
+    y_train: &[usize],
+    epochs: usize,
+) -> Vec<f32> {
+    let n = x_train.nrows();
+    (0..epochs).map(|epoch| {
+        let total_loss: f32 = (0..n).map(|i| {
+            let logits = model.predict_one(x_train.row(i).as_slice().unwrap());
+            if argmax(&logits) == y_train[i] { 0.0 } else { 1.0 }
+        }).sum::<f32>();
+        let avg_loss = total_loss / n as f32;
+        if (epoch + 1) % 10 == 0 {
+            println!("Epoch {}: Loss = {:.3}, Acc = {:.1}%",
+                epoch + 1, avg_loss, (1.0 - avg_loss) * 100.0);
+        }
+        avg_loss
+    }).collect()
+}
 
-    X_train, Y_train = generate_copy_task(T, n_train, vocab_size)
-    X_test,  Y_test  = generate_copy_task(T, n_test,  vocab_size)
+fn test_accuracy(model: &SsmClassifier, x: &Array2<f32>, y: &[usize]) -> f64 {
+    let n = x.nrows();
+    let correct = (0..n).filter(|&i| {
+        let logits = model.predict_one(x.row(i).as_slice().unwrap());
+        argmax(&logits) == y[i]
+    }).count();
+    correct as f64 / n as f64
+}
 
-    # Model 1: HiPPO init
-    A_hippo, B_hippo, C_hippo = hippo_legs_init(d)
-    A_bar_h, B_bar_h = discretize_zoh(A_hippo, B_hippo, Δ)
-    model_hippo  = SSMClassifier(DiscreteSSM(A_bar_h, B_bar_h, C_hippo, 0.0),
-                                 randn(Float32, vocab_size, d) * 0.01f0)
+fn experiment_hippo_vs_random() -> (Vec<f32>, Vec<f32>) {
+    let (t, n_train, n_test, d, vocab_size) = (500, 1000, 200, 32, 10);
+    let delta = 0.01_f64;
+    let mut rng = rand::thread_rng();
 
-    # Model 2: Random init
-    A_rand, B_rand, C_rand = randn(Float64, d, d)*0.01, randn(Float64, d)*0.1, randn(Float64, d)*0.1
-    A_bar_r, B_bar_r = discretize_zoh(A_rand, B_rand, Δ)
-    model_random = SSMClassifier(DiscreteSSM(A_bar_r, B_bar_r, C_rand, 0.0),
-                                 randn(Float32, vocab_size, d) * 0.01f0)
+    let (x_train, y_train) = generate_copy_task(t, n_train, vocab_size);
+    let (x_test,  y_test)  = generate_copy_task(t, n_test,  vocab_size);
 
-    println("Training HiPPO-initialized SSM...")
-    losses_hippo  = train_ssm_copy(model_hippo,  X_train, Y_train, 50)
-    println("\nTraining Random-initialized SSM...")
-    losses_random = train_ssm_copy(model_random, X_train, Y_train, 50)
+    // Model 1: HiPPO init
+    let (a_hippo, b_hippo, c_hippo) = hippo_legs_init(d);
+    let (a_bar_h, b_bar_h) = discretize_zoh(&a_hippo, &b_hippo, delta);
+    let w_out_h: Array2<f32> = Array2::from_shape_fn((vocab_size, d), |_|
+        rng.sample::<f32, _>(StandardNormal) * 0.01);
+    let model_hippo = SsmClassifier { a: a_bar_h, b: b_bar_h, c: c_hippo, w_out: w_out_h };
 
-    # Test accuracy using count + do-block
-    test_accuracy(model, X, Y) = count(i -> argmax(model(X[i:i, :])[1, :]) == Y[i], 1:size(X,1)) / size(X,1)
+    // Model 2: Random init
+    let a_rand: Array2<f64> = Array2::from_shape_fn((d, d), |_| rng.sample::<f64, _>(StandardNormal) * 0.01);
+    let b_rand: Array1<f64> = (0..d).map(|_| rng.sample::<f64, _>(StandardNormal) * 0.1).collect();
+    let c_rand: Array1<f64> = (0..d).map(|_| rng.sample::<f64, _>(StandardNormal) * 0.1).collect();
+    let (a_bar_r, b_bar_r) = discretize_zoh(&a_rand, &b_rand, delta);
+    let w_out_r: Array2<f32> = Array2::from_shape_fn((vocab_size, d), |_|
+        rng.sample::<f32, _>(StandardNormal) * 0.01);
+    let model_random = SsmClassifier { a: a_bar_r, b: b_bar_r, c: c_rand, w_out: w_out_r };
 
-    acc_hippo  = test_accuracy(model_hippo,  X_test, Y_test)
-    acc_random = test_accuracy(model_random, X_test, Y_test)
+    println!("Training HiPPO-initialized SSM...");
+    let losses_hippo  = train_ssm_copy(&model_hippo,  &x_train, &y_train, 50);
+    println!("\nTraining Random-initialized SSM...");
+    let losses_random = train_ssm_copy(&model_random, &x_train, &y_train, 50);
 
-    println("\n=== Results ===")
-    println("HiPPO init: Test Acc = $(round(acc_hippo*100,  digits=1))%")
-    println("Random init: Test Acc = $(round(acc_random*100, digits=1))%")
-    println("Improvement: $(round((acc_hippo - acc_random)*100, digits=1))%")
+    let acc_hippo  = test_accuracy(&model_hippo,  &x_test, &y_test);
+    let acc_random = test_accuracy(&model_random, &x_test, &y_test);
 
-    return losses_hippo, losses_random
-end
+    println!("\n=== Results ===");
+    println!("HiPPO init: Test Acc = {:.1}%",  acc_hippo  * 100.0);
+    println!("Random init: Test Acc = {:.1}%", acc_random * 100.0);
+    println!("Improvement: {:.1}%", (acc_hippo - acc_random) * 100.0);
+    (losses_hippo, losses_random)
+}
 
-# Run experiment
-losses_h, losses_r = experiment_hippo_vs_random()
-
-using Plots
-plot([losses_h, losses_r], label=["HiPPO" "Random"],
-     xlabel="Epoch", ylabel="Loss",
-     title="HiPPO vs Random Initialization (T=500)",
-     linewidth=2, legend=:topright)
+fn main() {
+    let (_losses_h, _losses_r) = experiment_hippo_vs_random();
+}
 ```
 
 **Expected**: HiPPO >> Random at large T. HiPPOは固有値構造により長距離依存を保持しやすい。
@@ -660,86 +808,123 @@ plot([losses_h, losses_r], label=["HiPPO" "Random"],
 
 画像(32×32×3=3072)をフラット化し、1Dシーケンスとして分類。
 
-```julia
-using MLDatasets
-function load_cifar10_sequential()
-    train_x, train_y = CIFAR10.traindata(Float32)
-    test_x,  test_y  = CIFAR10.testdata(Float32)
-    reshape(train_x, :, size(train_x, 4))', train_y,
-    reshape(test_x,  :, size(test_x,  4))', test_y
-end
+```rust
+use ndarray::{Array1, Array2, Axis};
 
-struct S4Classifier
-    layers::Vector{S4Layer}
-    W_out::Matrix{Float32}
-end
+/// Load CIFAR-10 and flatten each image to a 1-D sequence (3072 pixels).
+/// Returns (X_train, y_train, X_test, y_test) where X is (n_samples × 3072).
+fn load_cifar10_sequential() -> (Array2<f32>, Vec<usize>, Array2<f32>, Vec<usize>) {
+    // In a real project use the `cifar` crate or load from raw binary files.
+    // Here we return random tensors to keep the example self-contained.
+    use rand::prelude::*; use rand_distr::StandardNormal; let mut rng = rand::thread_rng();
+    let (n_train, n_test, seq_len) = (50_000, 10_000, 3072);
+    let x_train = Array2::from_shape_fn((n_train, seq_len), |_| rng.sample::<f32, _>(StandardNormal));
+    let y_train = (0..n_train).map(|_| rng.gen_range(0..10)).collect();
+    let x_test  = Array2::from_shape_fn((n_test, seq_len), |_| rng.sample::<f32, _>(StandardNormal));
+    let y_test  = (0..n_test).map(|_| rng.gen_range(0..10)).collect();
+    (x_train, y_train, x_test, y_test)
+}
 
-function (model::S4Classifier)(x::Matrix{Float32})
-    h = x
-    # apply s4_forward to each row (batch dimension) via mapslices
-    for layer in model.layers
-        h = Float32.(mapslices(v -> s4_forward(layer, Float64.(v), length(v)), h; dims=2))
-    end
-    model.W_out * vec(mean(h; dims=2))'
-end
+struct S4Classifier {
+    layers: Vec<S4Layer>,
+    w_out: Array2<f32>,
+}
+
+impl S4Classifier {
+    // x: (batch, seq_len)
+    fn forward(&self, x: &Array2<f32>) -> Array2<f32> {
+        // apply each S4 layer row-wise (one row = one sample)
+        let mut h: Array2<f64> = x.mapv(|v| v as f64);
+        for layer in &self.layers {
+            let rows: Vec<Vec<f64>> = (0..h.nrows())
+                .map(|i| { let row: Vec<f64> = h.row(i).to_vec(); let l = row.len(); layer.forward(&row, l) })
+                .collect();
+            h = Array2::from_shape_fn((x.nrows(), rows[0].len()), |(i, j)| rows[i][j]);
+        }
+        // mean over seq dimension → (batch,) → project to (num_classes, batch)
+        let mean_h: Array1<f32> = h.mean_axis(Axis(1)).unwrap().mapv(|v| v as f32);
+        self.w_out.dot(&mean_h).insert_axis(Axis(0))
+    }
+}
 ```
 
 **Expected**: Mamba ≥ S4 (~91% vs ~88%[^3])。Mambaの選択性(重要ピクセル記憶、背景忘却)が有利。
 
 #### Challenge 3: Parallel Scan速度比較
 
-```julia
-using BenchmarkTools
-function sequential_scan(A::Vector{Matrix{Float64}}, B::Vector{Vector{Float64}})
-    d = length(B[1])
-    h = zeros(d)
-    states = similar(B)  # preallocate output
-    @inbounds for t in eachindex(A)
-        h = A[t] * h + B[t]
-        states[t] = copy(h)
-    end
-    states
-end
+```rust
+use ndarray::{Array1, Array2};
+use rand::prelude::*;
+use rand_distr::StandardNormal;
+use std::time::Instant;
 
-function benchmark_scans()
-    d = 8
-    for L in [100, 500, 1000, 5000, 10000]
-        A = [Matrix{Float64}(I, d, d) * 0.9 for _ in 1:L]
-        B = [randn(Float64, d) for _ in 1:L]
-        t_seq = @belapsed sequential_scan($A, $B)
-        println("L=$L: $(round(t_seq*1000, digits=2))ms")
-    end
-end
+fn sequential_scan(a_mats: &[Array2<f64>], b_vecs: &[Array1<f64>]) -> Vec<Array1<f64>> {
+    let d = b_vecs[0].len();
+    let mut h = Array1::<f64>::zeros(d);
+    // iterator chain: zip matrices with bias vectors, fold state through scan
+    a_mats.iter().zip(b_vecs.iter()).map(|(a, b)| {
+        h = a.dot(&h) + b;
+        h.clone()
+    }).collect()
+}
+
+fn benchmark_scans() {
+    let mut rng = rand::thread_rng();
+    let d = 8_usize;
+    for &l in &[100_usize, 500, 1000, 5000, 10000] {
+        let a_mats: Vec<Array2<f64>> = (0..l).map(|_| Array2::eye(d) * 0.9).collect();
+        let b_vecs: Vec<Array1<f64>> = (0..l)
+            .map(|_| (0..d).map(|_| rng.sample(StandardNormal)).collect())
+            .collect();
+        let start = Instant::now();
+        let _ = sequential_scan(&a_mats, &b_vecs);
+        let elapsed_ms = start.elapsed().as_secs_f64() * 1000.0;
+        println!("L={l}: {elapsed_ms:.2}ms");
+    }
+}
 ```
 
 **Expected**: Sequential $O(L)$ 線形、Parallel $O(\log L)$ 対数。GPU 100K系列で24倍高速化。
 
 #### Challenge 4: SSM固有値と減衰率の関係
 
-```julia
-function visualize_eigenvalue_decay()
-    d, T, Δ = 4, 100, 0.1
-    λ_slow = [-0.1, -0.2, -0.3, -0.4]
-    λ_fast = [-1.0, -2.0, -3.0, -4.0]
+```rust
+use ndarray::Array1;
 
-    function decay_curve(λ::Vector{Float64})
-        A_bar = exp(diagm(λ) * Δ)
-        h = fill(1.0/d, d)  # fill is cleaner than ones ./ d
-        [begin h = A_bar * h; norm(h) end for _ in 1:T]
-    end
+/// Compute ||h_t|| over time for a diagonal SSM with given eigenvalues.
+fn decay_curve(eigenvalues: &[f64], delta: f64, t_steps: usize) -> Vec<f64> {
+    let d = eigenvalues.len();
+    // diagonal A_bar = diag(exp(λ * Δ))
+    let a_diag: Vec<f64> = eigenvalues.iter().map(|&lam| (lam * delta).exp()).collect();
+    let mut h: Array1<f64> = Array1::from_elem(d, 1.0 / d as f64);
+    (0..t_steps).map(|_| {
+        h = Array1::from_shape_fn(d, |i| a_diag[i] * h[i]);
+        h.iter().map(|&v| v * v).sum::<f64>().sqrt()
+    }).collect()
+}
 
-    norms_slow  = decay_curve(λ_slow)
-    norms_fast  = decay_curve(λ_fast)
-    norms_hippo = decay_curve(λ_hippo)
+fn visualize_eigenvalue_decay() {
+    let (d, t, delta) = (4, 100, 0.1_f64);
+    let _ = d; // d is encoded in the eigenvalue slices below
+    let lambda_slow  = [-0.1, -0.2, -0.3, -0.4];
+    let lambda_fast  = [-1.0, -2.0, -3.0, -4.0];
+    let lambda_hippo = [-1.0, -2.0, -3.0, -4.0]; // placeholder; substitute real HiPPO eigs
 
-    plot([norms_slow, norms_fast, norms_hippo],
-         label=["λ≈-0.2 (slow)" "λ≈-2 (fast)" "HiPPO (-1..-4)"],
-         xlabel="Time step", ylabel="||h_t||",
-         title="Memory Decay vs Eigenvalue",
-         yscale=:log10, linewidth=2, legend=:topright)
-end
+    let norms_slow  = decay_curve(&lambda_slow,  delta, t);
+    let norms_fast  = decay_curve(&lambda_fast,  delta, t);
+    let norms_hippo = decay_curve(&lambda_hippo, delta, t);
 
-visualize_eigenvalue_decay()
+    // Print first 10 steps as tabular proxy for visualization
+    println!("{:>6} {:>12} {:>12} {:>12}", "step", "slow", "fast", "hippo");
+    for i in 0..10 {
+        println!("{:>6} {:>12.6} {:>12.6} {:>12.6}",
+            i + 1, norms_slow[i], norms_fast[i], norms_hippo[i]);
+    }
+}
+
+fn main() {
+    visualize_eigenvalue_decay();
+}
 ```
 
 **Insight**: HiPPOは複数の時間スケール($\lambda = -1, -2, -3, -4$)を持つ → 短期・中期・長期記憶を同時に保持。
@@ -748,22 +933,30 @@ visualize_eigenvalue_decay()
 
 入力依存の$\Delta_t$がどう変化するかを可視化。
 
-```julia
-function visualize_mamba_selectivity()
-    # Synthetic input: important tokens at positions 10, 50, 90
-    L = 100
-    u = zeros(Float32, L)
-    u[[10, 50, 90]] .= [5.0, 3.0, 4.0]  # multi-index broadcast assign
+```rust
+/// Visualize how input-dependent Δ_t adapts to signal strength.
+fn visualize_mamba_selectivity() {
+    let l = 100_usize;
+    let mut u = vec![0.0f32; l];
+    // important tokens at positions 10, 50, 90
+    u[10] = 5.0; u[50] = 3.0; u[90] = 4.0;
 
-    W_Δ, b_Δ = 0.5f0, -1.0f0
-    Δ = @. softplus(W_Δ * u + b_Δ)  # @. broadcasts entire expression
+    let (w_delta, b_delta) = (0.5f32, -1.0f32);
+    // softplus broadcasts over u element-wise
+    let delta: Vec<f32> = u.iter()
+        .map(|&x| softplus_stable((w_delta * x + b_delta) as f64) as f32)
+        .collect();
 
-    plot(u, label="Input u_t", xlabel="Time step", ylabel="Value",
-         title="Mamba Selective SSM: Δ_t adapts to input", linewidth=2)
-    plot!(Δ, label="Time step Δ_t", linewidth=2, linestyle=:dash)
-end
+    // Print every 10th step as proxy for visualization
+    println!("{:>6} {:>12} {:>12}", "step", "u_t", "Δ_t");
+    for i in (0..l).step_by(10) {
+        println!("{:>6} {:>12.4} {:>12.4}", i, u[i], delta[i]);
+    }
+}
 
-visualize_mamba_selectivity()
+fn main() {
+    visualize_mamba_selectivity();
+}
 ```
 
 **解釈**: 重要な入力(u[10], u[50], u[90])で$\Delta_t$が大きくなる → その瞬間の情報を強く書き込む。ゼロ部分では$\Delta_t$が小さい → 過去を保持。
@@ -779,7 +972,7 @@ visualize_mamba_selectivity()
 - [ ] S4のDPLR分解とFFT高速化の仕組みを理解している
 - [ ] MambaのSelective SSM($\Delta_t, B_t, C_t$が入力依存)を実装できる
 - [ ] Parallel Scanの結合律を証明できる
-- [ ] Julia/RustでSSMを実装し、動かせる
+- [ ] Rust/RustでSSMを実装し、動かせる
 
 全てチェックできたら、SSM理論をマスターしている。
 
@@ -787,7 +980,7 @@ visualize_mamba_selectivity()
 
 > Progress: 85%
 > **理解度チェック**
-> 1. Julia実装でHiPPO-LeGS行列を生成する際、$A_{nk} = -(2n+1)^{1/2}(2k+1)^{1/2}$ $(n>k)$ の計算で数値的に気をつける点は何か？
+> 1. Rust実装でHiPPO-LeGS行列を生成する際、$A_{nk} = -(2n+1)^{1/2}(2k+1)^{1/2}$ $(n>k)$ の計算で数値的に気をつける点は何か？
 > 2. MambaのSelective SSMで、入力$u_t$からゲート$\Delta_t$を生成するLinear層の役割を述べよ。
 
 ---
@@ -952,22 +1145,29 @@ Hilbert順でSSMを適用すると、2D局所性がある程度保たれる。
 
 **実装**:
 
-```julia
-# Hilbert curve indexing (simplified)
-function hilbert_index(i::Int, j::Int, order::Int)
-    # Recursive Hilbert curve mapping
-    # Returns 1D index for 2D coordinate (i, j)
-    # Implementation omitted (see Wikipedia)
-    return idx
-end
+```rust
+use ndarray::{prelude::*, stack, Axis};
 
-function scan_hilbert(image::Array{Float32, 3})
-    H, W, _ = size(image)
-    order   = Int(log2(max(H, W)))
-    indices = vec([(i, j) for i in 1:H, j in 1:W])  # vec flattens 2D array
-    sort!(indices; by=((i, j),) -> hilbert_index(i, j, order))
-    hcat([image[i, j, :] for (i, j) in indices]...)'  # (H*W, C)
-end
+// Hilbert curve indexing (simplified)
+fn hilbert_index(i: usize, j: usize, order: usize) -> u64 {
+    // Recursive Hilbert curve mapping
+    // Returns 1D index for 2D coordinate (i, j)
+    // Implementation omitted (see Wikipedia)
+    idx
+}
+
+fn scan_hilbert(image: &Array3<f32>) -> Array2<f32> {
+    let (h, w, _c) = image.dim();
+    let order = (h.max(w) as f64).log2() as usize;
+    let mut indices: Vec<(usize, usize)> =
+        (0..h).flat_map(|i| (0..w).map(move |j| (i, j))).collect();
+    indices.sort_by_key(|&(i, j)| hilbert_index(i, j, order));
+    // Stack pixel channels into (H*W, C)
+    let rows: Vec<Array1<f32>> = indices.iter()
+        .map(|&(i, j)| image.slice(s![i, j, ..]).to_owned())
+        .collect();
+    stack(Axis(0), &rows.iter().map(|r| r.view()).collect::<Vec<_>>()).unwrap()
+}
 ```
 
 **課題**: Hilbert曲線は$2^n \times 2^n$画像でのみ定義可能。任意サイズには近似が必要。
@@ -1208,35 +1408,47 @@ SSMは元々信号処理・制御理論から来ているため、**時系列デ
 
 **実装例(気温予測)**:
 
-```julia
-using CSV, DataFrames, Dates
+```rust
+use csv::Reader;
+use ndarray::prelude::*;
 
-# Load weather data
-weather = CSV.read("temperature_timeseries.csv", DataFrame)
-temps = Float32.(weather.temperature)  # (N,)
+// Load weather data
+let temps: Vec<f32> = Reader::from_path("temperature_timeseries.csv")?
+    .records()
+    .map(|r| r.unwrap()[0].parse::<f32>().unwrap())
+    .collect();
 
-# Prepare sequences (sliding window)
-window_size = 365  # 1 year
-X = hcat([temps[i:i+window_size-1] for i in 1:(length(temps)-window_size)]...)'
-Y = hcat([temps[i+window_size]      for i in 1:(length(temps)-window_size)]...)'
+// Prepare sequences (sliding window)
+let window_size = 365usize; // 1 year
+let n = temps.len() - window_size;
+let x_seqs: Vec<&[f32]> = (0..n).map(|i| &temps[i..i + window_size]).collect();
+let y_vals: Vec<f32>    = (0..n).map(|i| temps[i + window_size]).collect();
 
-# Train SSM
-d_state = 64
-A_hippo, B_hippo, C_hippo = hippo_legs_init(d_state)
-Δ = 0.01
-A_bar, B_bar = discretize_zoh(A_hippo, B_hippo, Δ)
+// Train SSM
+let d_state = 64usize;
+let (a_hippo, b_hippo, c_hippo) = hippo_legs_init(d_state);
+let delta = 0.01f64;
+let (a_bar, b_bar) = discretize_zoh(&a_hippo.view(), &b_hippo.view(), delta);
 
-ssm = DiscreteSSM(A_bar, B_bar, C_hippo, 0.0)
+let ssm = DiscreteSSM { a: a_bar, b: b_bar, c: c_hippo };
 
-# foldl one-liner: run the recurrence, then project
-ssm_forecast(ssm, x::AbstractVector{Float32}) =
-    dot(ssm.C, foldl((h, uₜ) -> ssm.A * h + ssm.B * uₜ, x;
-                     init=zeros(Float64, length(ssm.B))))
+// foldl one-liner: run the recurrence, then project
+let ssm_forecast = |x: &[f32]| -> f64 {
+    let h = x.iter().fold(vec![0f64; ssm.b.len()], |h, &ut| {
+        ssm.a.dot(&Array1::from(h)).iter()
+            .zip(&ssm.b)
+            .map(|(&ah, &bi)| ah + bi * ut as f64)
+            .collect()
+    });
+    ssm.c.iter().zip(&h).map(|(&ci, &hi)| ci * hi).sum()
+};
 
-# Evaluate
-predictions = [ssm_forecast(ssm, X[i, :]) for i in axes(X, 1)]
-mse = mean((predictions .- Y) .^ 2)
-println("MSE: $mse")
+// Evaluate
+let predictions: Vec<f64> = x_seqs.iter().map(|x| ssm_forecast(x)).collect();
+let mse: f64 = predictions.iter().zip(&y_vals)
+    .map(|(&p, &y)| (p - y as f64).powi(2))
+    .sum::<f64>() / n as f64;
+println!("MSE: {mse}");
 ```
 
 **SSMの優位性**: 長期依存(季節性、年次トレンド)を少ないパラメータで保持。RNNより訓練安定、Transformerよりメモリ効率。
@@ -1364,14 +1576,14 @@ A: $h_t = \bar{A}^t h_0$で、$\bar{A} = e^{A\Delta}$。$A$の固有値$\lambda 
 
 **数値例**:
 
-```julia
-λ = -2.0
-Δ = 0.1
-A_bar = exp(λ * Δ)  # exp(-0.2) ≈ 0.8187
+```rust
+let lambda = -2.0f64;
+let delta  =  0.1f64;
+let a_bar  = (lambda * delta).exp(); // exp(-0.2) ≈ 0.8187
 
-# After t steps: h_t = (0.8187)^t h_0
-# t=10: h_10 ≈ 0.145 h_0 (減衰)
-# t=50: h_50 ≈ 1.7e-5 h_0 (ほぼ消失)
+// After t steps: h_t = (0.8187)^t h_0
+// t=10: h_10 ≈ 0.145 h_0 (減衰)
+// t=50: h_50 ≈ 1.7e-5 h_0 (ほぼ消失)
 ```
 
 HiPPOの固有値$-1, -2, -3, \ldots$は、異なる減衰率 → 多様な時間スケール。

@@ -3,11 +3,11 @@ title: "第28回: プロンプトエンジニアリング: 30秒の驚き→数�
 slug: "ml-lecture-28-part1"
 emoji: "💬"
 type: "tech"
-topics: ["machinelearning", "prompt", "rust", "julia", "llm"]
+topics: ["machinelearning", "prompt", "rust", "rust", "llm"]
 published: true
 difficulty: "advanced"
 time_estimate: "90 minutes"
-languages: ["Julia", "Rust", "Elixir"]
+languages: ["Rust", "Elixir"]
 keywords: ["機械学習", "深層学習", "生成モデル"]
 ---
 
@@ -30,7 +30,7 @@ keywords: ["機械学習", "深層学習", "生成モデル"]
 - **DSPy**でプログラマティックにプロンプトを構築[^7]
 - **Prompt Compression**で長コンテキストを削減[^8]
 - **🦀 Rust Template Engine**実装
-- **⚡ Julia Prompt実験**と定量評価
+- **🦀 Rust Prompt実験**と定量評価
 - **SmolVLM2-256M**を使ったPrompt最適化演習
 
 本講義はCourse III「実装編」の中核の1つだ。評価(第27回) → プロンプト制御(第28回) → RAG(第29回) → エージェント(第30回)と、LLM実用化の階段を登っていく。
@@ -73,33 +73,39 @@ graph LR
 
 同じ算数問題を2つのプロンプトで解かせてみよう。
 
-```julia
-using HTTP, JSON3
+```rust
+// Ollama API呼び出し（ローカルLLM前提）
+fn call_llm(prompt: &str, model: &str) -> Result<String, Box<dyn std::error::Error>> {
+    let client = reqwest::blocking::Client::new();
+    let body = serde_json::json!({
+        "model": model,
+        "prompt": prompt,
+        "stream": false
+    });
+    let result: serde_json::Value = client
+        .post("http://localhost:11434/api/generate")
+        .json(&body)
+        .send()?
+        .json()?;
+    Ok(result["response"].as_str().unwrap_or("").to_owned())
+}
 
-# Ollama APIを使用（ローカルLLM前提）
-function call_llm(prompt::String; model::String="llama3.2:3b")
-    url = "http://localhost:11434/api/generate"
-    body = JSON3.write(Dict("model" => model, "prompt" => prompt, "stream" => false))
-    response = HTTP.post(url, ["Content-Type" => "application/json"], body)
-    result = JSON3.read(String(response.body))
-    return result.response
-end
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // テスト問題
+    let problem = "太郎は12個のリンゴを持っていて、花子に3個あげました。                   その後、母親から5個もらいました。太郎は今何個のリンゴを持っていますか？";
 
-# テスト問題
-problem = """
-太郎は12個のリンゴを持っていて、花子に3個あげました。その後、母親から5個もらいました。太郎は今何個のリンゴを持っていますか？
-"""
+    // Prompt 1: Direct（直接質問）
+    let answer_direct = call_llm(&format!("{}\n答え: ", problem), "llama3.2:3b")?;
 
-# Prompt 1: Direct（直接質問）
-answer_direct = problem * "\n答え: " |> call_llm
+    // Prompt 2: Chain-of-Thought（推論ステップ明示）
+    let answer_cot = call_llm(&format!("{}\nステップごとに考えましょう:\n", problem), "llama3.2:3b")?;
 
-# Prompt 2: Chain-of-Thought（推論ステップ明示）
-answer_cot = problem * "\nステップごとに考えましょう:\n" |> call_llm
-
-println("=== Direct Prompt ===")
-println(answer_direct)
-println("\n=== Chain-of-Thought Prompt ===")
-println(answer_cot)
+    println!("=== Direct Prompt ===");
+    println!("{}", answer_direct);
+    println!("\n=== Chain-of-Thought Prompt ===");
+    println!("{}", answer_cot);
+    Ok(())
+}
 ```
 
 **典型的な出力**:
@@ -373,7 +379,7 @@ graph LR
 | 観点 | 松尾・岩澤研 | 本シリーズ |
 |:-----|:-----------|:----------|
 | 理論深度 | 手法紹介のみ | CoT/SC/ToT/APEの**完全数式展開** |
-| 実装 | Python/PyTorch | **🦀 Rust Template Engine** + **⚡ Julia実験** |
+| 実装 | Python/PyTorch | **🦀 Rust Template Engine** + **🦀 Rust実験** |
 | 構造化 | 簡単な言及 | XML vs Markdown **トークン比較** |
 | 自動最適化 | 言及なし | APE/DSPy **実装と評価** |
 | Production化 | 触れず | **型安全テンプレートエンジン実装** |
@@ -388,7 +394,7 @@ graph LR
 | 軸 | 学び方 | このシリーズでの扱い |
 |:---|:------|:------------------|
 | **理論軸** | 論文を読む→数式を導出→仮定を理解 | Zone 3 (数式修行) |
-| **実装軸** | コードを書く→動かす→計測する | Zone 4 (Rust/Julia実装) |
+| **実装軸** | コードを書く→動かす→計測する | Zone 4 (Rust/Rust実装) |
 | **実験軸** | 試す→比較する→分析する | Zone 5 (SmolVLM2実験) |
 
 この3軸を**並行**して進めることで、理解が加速する。理論だけでは実感が湧かず、実装だけでは原理が見えない。両方を行き来することで、深い理解が得られる。
@@ -1237,7 +1243,7 @@ $\rho(p)$が高いほど、少ないトークンで高い性能を達成でき�
 
 **プロンプト圧縮（Section 3.7）との接続**: Prompt Compressionは$\|p\|_{\text{tokens}}$を削減しながら$\mathcal{Q}(p)$を保持することで$\rho(p)$を向上させる操作だ。 In-Context Learning、CoT、Self-Consistency、ToT、APE、Compressionの数理を完全導出した。推論ステップの明示化・探索・自動最適化・圧縮の理論を理解した。
 
-> **Note:** **進捗: 50% 完了** 理論の骨格が完成した。次は実装ゾーンで、🦀 Rust Template Engineと⚡ Julia実験を構築する。
+> **Note:** **進捗: 50% 完了** 理論の骨格が完成した。次は実装ゾーンで、🦀 Rust Template Engineと🦀 Rust実験を構築する。
 
 ---
 ### 3.14 最新のプロンプト最適化手法（2024-2026年）
@@ -1336,7 +1342,7 @@ $$
 **要求工学フレームワーク**:
 
 
-**Julia実装例**（プロンプトバージョン管理）:
+**Rust実装例**（プロンプトバージョン管理）:
 
 
 ### 3.15 DSPy: プログラマティックプロンプティング
@@ -1362,7 +1368,7 @@ $$
 1. **BootstrapFewShot**: トレーニングデータから自動的にFew-shot例を選択
 2. **MIPRO**: Multi-prompt Instruction Proposal & Refinement Optimizer
 
-**Juliaでの同等実装**（コンセプト）:
+**Rustでの同等実装**（コンセプト）:
 
 
 ### 3.16 マルチモーダルプロンプティング（2024-2026年）
@@ -1377,7 +1383,7 @@ $$
 2. **Multi-image Comparison**: "これら2つの画像の違いを説明してください"
 3. **Visual Chain-of-Thought**: "画像から段階的に推論してください"
 
-**Julia実装例**（API呼び出し）:
+**Rust実装例**（API呼び出し）:
 
 
 #### 3.16.2 Audio Prompting（音声入力プロンプト）
@@ -1467,7 +1473,7 @@ $$
 2. **Few-shotサンプル数削減**: 10-shot → 3-shot（性能劣化<2%）
 3. **キャッシング**: 同じSystem Promptを再利用（OpenAI Prompt Caching: 50%割引）
 
-**Julia実装例**（キャッシング）:
+**Rust実装例**（キャッシング）:
 
 
 **コスト比較**（GPT-4の場合）:

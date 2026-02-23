@@ -1,19 +1,19 @@
 ---
 title: "第19回: 環境構築 & FFI & 分散基盤: 30秒の驚き→数式修行→実装マスター"
-emoji: "⚡"
+emoji: "🦀"
 type: "tech"
-topics: ["machinelearning", "julia", "rust", "elixir", "ffi"]
+topics: ["machinelearning", "rust", "rust", "elixir", "ffi"]
 published: true
 slug: "ml-lecture-19-part1"
 difficulty: "advanced"
 time_estimate: "90 minutes"
-languages: ["Julia", "Rust", "Elixir"]
+languages: ["Rust", "Elixir"]
 keywords: ["機械学習", "深層学習", "生成モデル"]
 ---
 
 # 第19回: 環境構築 & FFI & 分散基盤 — 理論から実装へ、3言語フルスタックの旅が始まる
 
-> **Course IIで学んだ理論を、手を動かして定着させる。Course IIIの14回は全て実装。Julia訓練・Rust推論・Elixir配信の完全パイプラインを構築する。**
+> **Course IIで学んだ理論を、手を動かして定着させる。Course IIIの14回は全て実装。Rust訓練・Rust推論・Elixir配信の完全パイプラインを構築する。**
 
 Course II（第9-18回）で変分推論・VAE・OT・GAN・自己回帰・Attention・SSM・ハイブリッドアーキテクチャの理論を学んだ。数式を追い、導出し、証明した。しかし理論だけでは不十分だ。
 
@@ -21,8 +21,8 @@ Course II（第9-18回）で変分推論・VAE・OT・GAN・自己回帰・Atten
 
 Course III（第19-32回）は実装編だ。第19回の今回は、以降13回の全実装の**基盤**を構築する:
 
-- **⚡ Julia**: 訓練用言語。数式がほぼそのままコードになる。多重ディスパッチで型に応じて自動最適化。
-- **🦀 Rust**: 推論用言語。ゼロコピー・所有権・借用でメモリ安全と速度を両立。FFIハブとしてJuliaとElixirを接続。
+- **🦀 Rust**: 訓練用言語。数式がほぼそのままコードになる。ゼロコスト抽象化で型に応じて自動最適化。
+- **🦀 Rust**: 推論用言語。ゼロコピー・所有権・借用でメモリ安全と速度を両立。FFIハブとしてRustとElixirを接続。
 - **🔮 Elixir**: 配信用言語。BEAM VMの軽量プロセス・耐障害性・分散システム設計でProduction品質サービングを実現。
 
 この3言語を**C-ABI FFI**で繋ぎ、E2E機械学習パイプライン（Train → Evaluate → Deploy → Feedback → Improve）を回す。
@@ -31,7 +31,7 @@ Course III（第19-32回）は実装編だ。第19回の今回は、以降13回�
 
 ```mermaid
 graph LR
-    A["⚡ Julia<br/>Training<br/>Lux.jl + Reactant"] --> B["🦀 Rust<br/>Inference<br/>Candle + jlrs"]
+    A["🦀 Rust<br/>Training<br/>Candle + Burn"] --> B["🦀 Rust<br/>Inference<br/>Candle + ort"]
     B --> C["🔮 Elixir<br/>Serving<br/>GenStage + rustler"]
     C --> D["💬 Feedback"]
     D --> A
@@ -57,22 +57,27 @@ graph LR
 
 ## 🚀 0. クイックスタート（30秒）— 3言語FFI連携を動かす
 
-**ゴール**: Julia→Rust→Elixir FFI連携を30秒で体感する。
+**ゴール**: Rust→Rust→Elixir FFI連携を30秒で体感する。
 
-行列演算をJuliaで定義 → Rustで高速実行 → Elixirプロセスで分散処理する最小例。
+行列演算をRustで定義 → Rustで高速実行 → Elixirプロセスで分散処理する最小例。
 
-```julia
-# Julia側: 行列積カーネルを定義
-using LinearAlgebra
+```rust
+// Zero-copy Rust matmul kernel exposed via rustler NIF (Elixir interop)
+use ndarray::{ArrayView2, Array2};
 
-matmul_kernel(A::Matrix{Float64}, B::Matrix{Float64}) = A * B  # BLAS経由
+#[rustler::nif]
+fn matmul_nif(a: Vec<f64>, b: Vec<f64>, n: usize) -> Vec<f64> {
+    // ArrayView2::from_shape は所有権なしでスライスをビューに変換（ゼロコピー）
+    let a_view = ArrayView2::from_shape((n, n), &a).unwrap();
+    let b_view = ArrayView2::from_shape((n, n), &b).unwrap();
+    a_view.dot(&b_view).into_raw_vec() // BLAS dot → Vec<f64>（所有権移動のみ）
+}
 
-# Rust FFI経由で呼び出し（後述のjlrs使用）
-# RustからJulia関数を呼び出し、結果をゼロコピーで取得
+rustler::init!("Elixir.MatrixFFI", [matmul_nif]);
 ```
 
 ```rust
-// Rust側: Juliaカーネルを呼び出し、Elixirに返す
+// Rust側: Elixir NIF経由で配信
 use jlrs::prelude::*;
 
 #[repr(C)]
@@ -84,7 +89,7 @@ pub struct MatrixResult {
 
 pub fn call_julia_matmul(a_ptr: *const f64, a_rows: usize, a_cols: usize,
                          b_ptr: *const f64, b_rows: usize, b_cols: usize) -> MatrixResult {
-    // Julia配列をゼロコピーで受け取り、計算、ゼロコピーで返す
+    // Rust: ゼロコピーで計算し、Elixir NIF経由で返す
     // 詳細はZone 3で導出
     unimplemented!("Full implementation in Zone 4")
 }
@@ -111,21 +116,21 @@ end
 
 **3言語連携の流れ**:
 
-1. **Julia**: 数式 $C = AB$ をそのまま `A * B` と書く。JITコンパイルで最適化。
-2. **Rust**: jlrsでJulia配列をゼロコピー借用 → `*const f64` ポインタで受け取り → 計算結果を `repr(C)` 構造体で返す。
+1. **Rust**: 数式 $C = AB$ をそのまま `A * B` と書く。AOTコンパイルで最適化。
+2. **Rust**: rustlerでRust配列をゼロコピー借用 → `*const f64` ポインタで受け取り → 計算結果を `repr(C)` 構造体で返す。
 3. **Elixir**: rustlerでRust NIFをロード → BEAM軽量プロセスで並列実行 → 障害時は自動再起動。
 
 この背後にある数式:
 
 $$
 \begin{aligned}
-\text{Julia:} \quad & C_{ij} = \sum_k A_{ik} B_{kj} \quad \text{(数式そのまま)} \\
+\text{Rust:} \quad & C_{ij} = \sum_k A_{ik} B_{kj} \quad \text{(数式そのまま)} \\
 \text{Rust:} \quad & \texttt{ptr::add}(a, i \times \text{cols} + k) \quad \text{(ゼロコピーアクセス)} \\
 \text{Elixir:} \quad & \text{Process}_i \parallel \text{Process}_j \quad \text{(分散実行)}
 \end{aligned}
 $$
 
-Julia数式 → Rustゼロコピー → Elixir分散の3段階。この統合こそがCourse IIIの全14回を貫く設計思想だ。
+Rust数式 → Rustゼロコピー → Elixir分散の3段階。この統合こそがCourse IIIの全14回を貫く設計思想だ。
 
 > **Note:** **進捗: 3% 完了** 3言語FFI連携の全体像を体感した。ここから各言語の環境構築 → FFI詳細設計 → 実装へ。
 
@@ -145,10 +150,10 @@ Julia数式 → Rustゼロコピー → Elixir分散の3段階。この統合こ
 
 A: Pythonは**遅い**。NumPy/PyTorchはC/C++/CUDAで書かれたライブラリを呼び出しているだけ。Pythonループは致命的に遅く、訓練ループのカスタマイズやゼロコピー最適化が困難。
 
-**Q: Juliaで全部やればいいのでは？**
+**Q: Rustで全部やればいいのでは？**
 
-A: Juliaは訓練には最適だが、**推論配信**には不向き:
-- 起動時間（JIT warmup）が秒単位 → APIサーバーには使えない
+A: Rustは訓練には最適だが、**推論配信**には不向き:
+- 起動時間（AOT warmup）が秒単位 → APIサーバーには使えない
 - GC（ガベージコレクション）のポーズ → レイテンシ要件に合わない
 - 分散システム設計・耐障害性の抽象化が弱い
 
@@ -170,7 +175,7 @@ A: Elixirは配信には最適だが、**数値計算**には不向き:
 
 | 言語 | 強み | 弱み | 担当 |
 |:-----|:-----|:-----|:-----|
-| ⚡ **Julia** | 数式→コード1:1、多重ディスパッチ、JIT最適化 | 起動遅い、GC、配信抽象化弱い | **Training** |
+| 🦀 **Rust** | 数式→コード1:1、ゼロコスト抽象化、AOTコンパイル最適化 | 起動遅い、GC、配信抽象化弱い | **Training** |
 | 🦀 **Rust** | ゼロコピー、メモリ安全、高速、AOTコンパイル | 型パズル、訓練実装が煩雑 | **Inference** |
 | 🔮 **Elixir** | 軽量プロセス、耐障害性、分散、OTP抽象化 | 数値計算遅い、ML訓練不向き | **Serving** |
 
@@ -206,17 +211,17 @@ $$
 
 各ステージを最適な言語で担当することで、それぞれの $T_i$ を独立に最大化できる。1言語で全部やれば、最も得意でないステージがシステム全体のボトルネックになる。
 
-**Julia JITのウォームアップコスト**: Julia は JIT コンパイルにより高速な定常状態 $T_{\text{steady}}$ を達成するが、初回実行にコスト $T_{\text{warmup}}$ がかかる。$N$ 回実行したときの平均コスト:
+**Rust AOTのウォームアップコスト**: Rust は AOT コンパイルにより高速な定常状態 $T_{\text{steady}}$ を達成するが、初回実行にコスト $T_{\text{warmup}}$ がかかる。$N$ 回実行したときの平均コスト:
 
 $$
 \bar{T}(N) = \frac{T_{\text{warmup}} + (N-1) T_{\text{steady}}}{N} \xrightarrow{N \to \infty} T_{\text{steady}}
 $$
 
-推論サービングでは $N$ が大きい（リクエストが大量に来る）ので $\bar{T} \approx T_{\text{steady}}$ となりJuliaが有利に見える。しかし**コールドスタート問題**（サーバー再起動後の最初の数リクエスト）では $T_{\text{warmup}}$ が数秒に及ぶため、Rust（AOTコンパイル、ウォームアップなし）の方が適切だ。
+推論サービングでは $N$ が大きい（リクエストが大量に来る）ので $\bar{T} \approx T_{\text{steady}}$ となりRustが有利に見える。しかし**コールドスタート問題**（サーバー再起動後の最初の数リクエスト）では $T_{\text{warmup}}$ が数秒に及ぶため、Rust（AOTコンパイル、ウォームアップなし）の方が適切だ。
 
 ### 1.2 各言語の"Hello World"を触る
 
-#### Julia: 数式がそのままコード
+#### Rust: 数式がそのままコード
 
 
 **数式との対応**:
@@ -255,15 +260,15 @@ $$
 
 | フェーズ | 言語 | 処理 | なぜその言語？ |
 |:--------|:-----|:-----|:-------------|
-| **Training** | ⚡ Julia | Lux.jlでVAEモデル定義・訓練・チェックポイント保存 | 数式 $\mathcal{L}_{\text{ELBO}}$ がほぼそのままコード。自動微分・GPU最適化が自動。 |
-| **Export** | 🦀 Rust | JuliaモデルをONNX/safetensors形式でエクスポート → Candle推論エンジンにロード | ゼロコピーでGPUメモリ管理。メモリリークなし。 |
+| **Training** | 🦀 Rust | CandleでVAEモデル定義・訓練・チェックポイント保存 | 数式 $\mathcal{L}_{\text{ELBO}}$ がほぼそのままコード。自動微分・GPU最適化が自動。 |
+| **Export** | 🦀 Rust | RustモデルをONNX/safetensors形式でエクスポート → Candle推論エンジンにロード | ゼロコピーでGPUメモリ管理。メモリリークなし。 |
 | **Inference** | 🦀 Rust | Candleで推論（`model.forward(input)`） → 結果をJSON/MessagePackで返す | レイテンシ <10ms。GCポーズなし。 |
 | **Serving** | 🔮 Elixir | GenStageでリクエストをバッチング → Rustler NIF経由でRust推論呼び出し → レスポンス返却 | バックプレッシャー制御。1プロセスクラッシュ→Supervisor自動再起動。 |
 | **Monitoring** | 🔮 Elixir | Telemetryでレイテンシ・エラー率収集 → PrometheusにExport | 分散システム監視・可視化が簡単。 |
 
 この連携で:
 
-- **開発速度**: Julia REPL駆動開発で訓練ループを高速試行錯誤
+- **開発速度**: Rust REPL駆動開発で訓練ループを高速試行錯誤
 - **実行速度**: Rustゼロコピー推論で <10ms レイテンシ
 - **運用品質**: Elixir耐障害性でダウンタイムなし
 
@@ -302,20 +307,20 @@ graph TD
 
 | 回 | テーマ | 言語構成 | Course II対応 | MLサイクル |
 |:---|:-------|:---------|:-------------|:-----------|
-| **19** | 環境構築 & FFI | ⚡🦀🔮 全導入 | 基盤 | Setup |
-| **20** | VAE/GAN/Trans実装 | ⚡訓練 🦀推論 🔮配信 | 第10-18回 | Train → Deploy |
-| **21** | データサイエンス基礎 | ⚡分析 🦀ETL | 第4回統計 | Data → Train |
-| **22** | マルチモーダル基礎 | ⚡CLIP/DALL-E | 第16回Trans | Train |
-| **23** | Fine-tuning全技法 | ⚡LoRA/QLoRA | 第10回VAE, 第16回 | Train |
-| **24** | 統計学実践 | ⚡仮説検定 | 第4回 | Evaluate |
-| **25** | 因果推論実践 | ⚡因果グラフ | 第4回 | Evaluate |
+| **19** | 環境構築 & FFI | 🦀🦀🔮 全導入 | 基盤 | Setup |
+| **20** | VAE/GAN/Trans実装 | 🦀訓練 🦀推論 🔮配信 | 第10-18回 | Train → Deploy |
+| **21** | データサイエンス基礎 | 🦀分析 🦀ETL | 第4回統計 | Data → Train |
+| **22** | マルチモーダル基礎 | 🦀CLIP/DALL-E | 第16回Trans | Train |
+| **23** | Fine-tuning全技法 | 🦀LoRA/QLoRA | 第10回VAE, 第16回 | Train |
+| **24** | 統計学実践 | 🦀仮説検定 | 第4回 | Evaluate |
+| **25** | 因果推論実践 | 🦀因果グラフ | 第4回 | Evaluate |
 | **26** | 推論最適化 | 🦀量子化/KVキャッシュ | 第16-18回 | Deploy |
-| **27** | 評価手法完全版 | ⚡⚔️比較 | 第7回MLE, 第12回GAN | Evaluate |
-| **28** | プロンプト工学 | ⚡🔮実験 | 第16回 | Feedback |
-| **29** | RAG完全版 | ⚡🦀🔮パイプライン | 第16回 | Improve |
+| **27** | 評価手法完全版 | 🦀⚔️比較 | 第7回MLE, 第12回GAN | Evaluate |
+| **28** | プロンプト工学 | 🦀🔮実験 | 第16回 | Feedback |
+| **29** | RAG完全版 | 🦀🦀🔮パイプライン | 第16回 | Improve |
 | **30** | エージェント実装 | 🔮OTP設計 | 第15-16回 | Improve |
-| **31** | MLOps完全版 | ⚡🦀🔮統合 | 全体 | 全サイクル |
-| **32** | 統合プロジェクト | ⚡🦀🔮フル | 全体 | 全サイクル |
+| **31** | MLOps完全版 | 🦀🦀🔮統合 | 全体 | 全サイクル |
+| **32** | 統合プロジェクト | 🦀🦀🔮フル | 全体 | 全サイクル |
 
 ### 2.2 MLサイクル: Train → Evaluate → Deploy → Feedback → Improve
 
@@ -342,16 +347,16 @@ graph LR
 
 | フェーズ | 処理 | 言語 | 第N回 |
 |:--------|:-----|:-----|:------|
-| **Data** | 収集・クリーニング・EDA | ⚡ Julia (DataFrames.jl) | 21 |
-| **Train** | モデル定義・訓練ループ | ⚡ Julia (Lux.jl + Reactant) | 20, 22, 23 |
-| **Evaluate** | 統計検定・因果推論・評価指標 | ⚡ Julia (HypothesisTests.jl, CausalInference.jl) | 24, 25, 27 |
+| **Data** | 収集・クリーニング・EDA | 🦀 Rust (polars) | 21 |
+| **Train** | モデル定義・訓練ループ | 🦀 Rust (Candle + Burn) | 20, 22, 23 |
+| **Evaluate** | 統計検定・因果推論・評価指標 | 🦀 Rust (statrs, ndarray) | 24, 25, 27 |
 | **Deploy** | 推論最適化・量子化・サービング | 🦀 Rust (Candle) + 🔮 Elixir (GenStage) | 20, 26, 31 |
 | **Feedback** | プロンプト実験・A/Bテスト | 🔮 Elixir (ユーザー接点) | 28 |
-| **Improve** | RAG統合・エージェント設計 | ⚡🦀🔮 連携 | 29, 30 |
+| **Improve** | RAG統合・エージェント設計 | 🦀🦀🔮 連携 | 29, 30 |
 
 **Course IIIのゴール**:
 
-> 第32回修了時、あなたは「Julia訓練→Rust推論→Elixir配信のE2Eパイプライン」を自力で構築でき、MLサイクル全体を回せる。
+> 第32回修了時、あなたは「Rust訓練→Rust推論→Elixir配信のE2Eパイプライン」を自力で構築でき、MLサイクル全体を回せる。
 
 ### 2.3 なぜ"環境構築"が第19回の全時間を使うのか？
 
@@ -363,7 +368,7 @@ graph LR
 - ❌ "動けばいい" → 後で型エラー・FFIクラッシュ・メモリリークで地獄
 
 正しい環境構築:
-- ✅ 各言語の**公式ツールチェーン**を理解（Juliaup / rustup / asdf）
+- ✅ 各言語の**公式ツールチェーン**を理解（rustup / rustup / asdf）
 - ✅ **プロジェクト隔離**（Project.toml / Cargo.toml / mix.exs）
 - ✅ **開発サイクル高速化**（REPL / cargo-watch / IEx）
 - ✅ **FFI境界設計**（repr(C) / ccall / rustler の安全性保証）
@@ -396,7 +401,7 @@ $$
 \phi(\texttt{f64}) = \texttt{Float64}, \quad \phi(\texttt{i32}) = \texttt{Int32}, \quad \phi(\texttt{*const f64}) = \texttt{Ptr\{Float64\}}
 $$
 
-一方、Rustの `String`、Juliaの `Any`、Elixirの `term()` は直接渡せない — これらは言語固有のヒープ管理を前提とするためだ。
+一方、Rustの `String`、Rustの `Any`、Elixirの `term()` は直接渡せない — これらは言語固有のヒープ管理を前提とするためだ。
 
 **FFIコストの分解**: FFI呼び出しは「ただの関数呼び出し」より高コストだ。コスト $C_{\text{FFI}}$ を分解すると:
 
@@ -404,10 +409,10 @@ $$
 C_{\text{FFI}} = C_{\text{marshal}} + C_{\text{call}} + C_{\text{unmarshal}} + C_{\text{GC}}
 $$
 
-- $C_{\text{marshal}}$: Juliaの型 → C-ABI 型への変換コスト（通常ゼロコピーで小さい）
+- $C_{\text{marshal}}$: Rustの型 → C-ABI 型への変換コスト（通常ゼロコピーで小さい）
 - $C_{\text{call}}$: 関数呼び出し自体（CPU命令数 $\approx 10\text{–}50$ サイクル）
 - $C_{\text{unmarshal}}$: 返り値の変換コスト
-- $C_{\text{GC}}$: GC停止のリスク（JuliaのGC, JavaのGC など — Rustはゼロ）
+- $C_{\text{GC}}$: GC停止のリスク（RustのGC, JavaのGC など — Rustはゼロ）
 
 **バッチ処理による償却**: $N$ 要素のベクトルを1要素ずつ渡すより、まとめて渡す方が効率的:
 
@@ -456,27 +461,27 @@ $$
 
 つまり、言語Aで計算してから変換するのと、変換してから言語Bで計算するのが**同じ結果**を返す。
 
-**なぜ構造保存が必要か。** $\phi$ が単なる「ビット列のコピー」だとする。整数同士なら問題ない。しかし Julia の `ComplexF64`（実部64ビット + 虚部64ビット = 128ビット）を Rust の `f64`（64ビット）として渡したとき、実部と虚部が混在したビット列を浮動小数点として解釈してしまう — $\phi(f_A(x_A)) \neq f_B(\phi(x_A))$ が成立せず、計算が静かに壊れる。C-ABI が「型の構造を保存する標準」として機能する理由がここにある。
+**なぜ構造保存が必要か。** $\phi$ が単なる「ビット列のコピー」だとする。整数同士なら問題ない。しかし Rust の `ComplexF64`（実部64ビット + 虚部64ビット = 128ビット）を Rust の `f64`（64ビット）として渡したとき、実部と虚部が混在したビット列を浮動小数点として解釈してしまう — $\phi(f_A(x_A)) \neq f_B(\phi(x_A))$ が成立せず、計算が静かに壊れる。C-ABI が「型の構造を保存する標準」として機能する理由がここにある。
 
-> **⚠️ Warning:** 「同じ名前の型」が FFI 境界を越えると値が変わることがある。Julia の `Int64` と Rust の `i64` は一見同じだが、エンディアン（バイト順）がプラットフォームによって異なる。x86_64 は little-endian なので通常問題ないが、ネットワーク越しの型共有では big-endian を疑え。
+> **⚠️ Warning:** 「同じ名前の型」が FFI 境界を越えると値が変わることがある。Rust の `Int64` と Rust の `i64` は一見同じだが、エンディアン（バイト順）がプラットフォームによって異なる。x86_64 は little-endian なので通常問題ないが、ネットワーク越しの型共有では big-endian を疑え。
 
 **圏論的視点**: 射の合成可能性から、3言語パイプラインは以下の交換図式で表せる:
 
 $$
 \begin{array}{ccccc}
-\mathcal{L}_{\text{Julia}} & \xrightarrow{\phi_{JR}} & \mathcal{L}_{\text{Rust}} & \xrightarrow{\phi_{RE}} & \mathcal{L}_{\text{Elixir}} \\
+\mathcal{L}_{\text{Rust}} & \xrightarrow{\phi_{JR}} & \mathcal{L}_{\text{Rust}} & \xrightarrow{\phi_{RE}} & \mathcal{L}_{\text{Elixir}} \\
 & \searrow & & \swarrow & \\
 & & \mathcal{L}_{\text{C-ABI}} & &
 \end{array}
 $$
 
-全ての言語が C-ABI という**共通対象（terminal object）**へと射を持つ。これにより Julia↔Rust↔Elixir の任意の組み合わせが可能になる — C-ABI が「普遍的なアダプター」として機能している。
+全ての言語が C-ABI という**共通対象（terminal object）**へと射を持つ。これにより Rust↔Rust↔Elixir の任意の組み合わせが可能になる — C-ABI が「普遍的なアダプター」として機能している。
 
 #### 3.1.2 なぜC-ABIがFFIの共通基盤か
 
 C言語のABI (Application Binary Interface) が**事実上の標準**である理由:
 
-1. **最小公倍数性**: ほぼ全言語がC-ABIをサポート（C++, Rust, Julia, Python, Elixir, Go, ...）
+1. **最小公倍数性**: ほぼ全言語がC-ABIをサポート（C++, Rust, Rust, Python, Elixir, Go, ...）
 2. **機械語に近い**: C-ABIはCPU・OS・リンカの規約に直接対応（calling convention, struct layout, symbol mangling）
 3. **安定性**: C ABIは過去50年間、後方互換を保っている
 
@@ -490,11 +495,11 @@ $$
 - **CallingConv**: 関数呼び出し規約（引数をレジスタ/スタックのどこに渡すか）
 - **Linkage**: シンボル解決規則（関数名のマングリング・動的リンク）
 
-Rustの `#[repr(C)]` は「この型をC-ABI準拠レイアウトにせよ」という指示。Juliaの `ccall` は「この関数をC calling conventionで呼べ」という指示。
+Rustの `#[repr(C)]` は「この型をC-ABI準拠レイアウトにせよ」という指示。Rustの `ccall` は「この関数をC calling conventionで呼べ」という指示。
 
 ```mermaid
 graph TD
-    A["⚡ Julia"] -->|ccall| C["C-ABI<br/>#[repr(C)]<br/>extern C"]
+    A["🦀 Rust"] -->|rustler NIF| C["BEAM<br/>Elixir NIF<br/>rustler"]
     B["🦀 Rust"] -->|extern C| C
     D["🔮 Elixir"] -->|rustler NIF| B
     B -->|jlrs| A
@@ -516,12 +521,12 @@ FFIは**型安全性の境界**を超える:
 
 $$
 \begin{aligned}
-\text{Julia:} \quad & \texttt{Vector\{Float64\}} \quad \xrightarrow{\text{FFI}} \quad \texttt{Ptr\{Float64\}} \\
+\text{Rust:} \quad & \texttt{Vector\{Float64\}} \quad \xrightarrow{\text{FFI}} \quad \texttt{Ptr\{Float64\}} \\
 \text{Rust:} \quad & \texttt{\&[f64]} \quad \xrightarrow{\text{FFI}} \quad \texttt{*const f64}
 \end{aligned}
 $$
 
-**型安全性の喪失がなぜ危険か — 情報理論的説明**: Julia の `Vector{Float64}` は次の情報を持つ:
+**型安全性の喪失がなぜ危険か — 情報理論的説明**: Rust の `Vector{Float64}` は次の情報を持つ:
 
 $$
 \text{Vector\{Float64\}} = (\text{ptr}: *\text{Float64},\; \text{len}: \text{Int},\; \text{cap}: \text{Int},\; \text{align}: 8)
@@ -545,7 +550,7 @@ $$
 - ❌ ライフタイムが不明 → use-after-freeの危険
 - ❌ 所有権が不明 → double freeの危険
 
-→ だからRustでは `unsafe` ブロック必須。Juliaでは `ccall` が暗黙的にunsafe。
+→ だからRustでは `unsafe` ブロック必須。Rustでは `ccall` が暗黙的にunsafe。
 
 **Rustの安全性保証**:
 
@@ -575,7 +580,7 @@ $$
 
 **配列のメモリレイアウト** (row-major):
 
-Julia配列 `A::Matrix{Float64}` (m × n) は連続メモリ領域に格納:
+Rust配列 `A::Matrix{Float64}` (m × n) は連続メモリ領域に格納:
 
 $$
 \text{A}[i, j] \quad \Leftrightarrow \quad \texttt{base\_ptr} + (i \times n + j) \times \texttt{sizeof(Float64)}
@@ -606,7 +611,7 @@ $$
 
 配列全体は `0x1000` から `0x1048`（非包含）まで $3 \times 3 \times 8 = 72$ バイトを占有する。最終要素 $A[2,2]$ のオフセット: $(2 \times 3 + 2) \times 8 = 64$ → アドレス `0x1040` ✓
 
-> **⚠️ Warning:** Julia のメモリレイアウトは **column-major**（列優先）だ。上の式 $(i \times n + j)$ は C/Rust の **row-major** に対応する。Julia の実際のフラット配列インデックスは $(j \times m + i)$ になる（1-indexed では $(j-1) \times m + (i-1)$）。Julia ↔ Rust FFI で行列を渡すとき、この違いを無視するとインデックス解釈がずれる — §3.3.2 で詳述。
+> **⚠️ Warning:** Rust のメモリレイアウトは **column-major**（列優先）だ。上の式 $(i \times n + j)$ は C/Rust の **row-major** に対応する。Rust の実際のフラット配列インデックスは $(j \times m + i)$ になる（1-indexed では $(j-1) \times m + (i-1)$）。Rust ↔ Rust FFI で行列を渡すとき、この違いを無視するとインデックス解釈がずれる — §3.3.2 で詳述。
 
 $A[i, j]$ へのアクセス:
 
@@ -733,7 +738,7 @@ $$
 
 **原則2: ライフタイム境界**
 
-Julia/Rust配列をFFI経由で渡す際、**元の配列がスコープ内にある間だけ有効**:
+Rust/Rust配列をFFI経由で渡す際、**元の配列がスコープ内にある間だけ有効**:
 
 $$
 \forall p \in \text{Ptr}, \quad \text{valid}(p, t) \Rightarrow \exists x \in \text{owner}, \quad \text{lifetime}(x) \supseteq [0, t]
@@ -741,7 +746,7 @@ $$
 
 **違反例**:
 
-スコープ $\mathcal{S}$ の外では Julia オブジェクト $x$ のライフタイムが終了する:
+スコープ $\mathcal{S}$ の外では Rust オブジェクト $x$ のライフタイムが終了する:
 
 $$
 \text{lifetime}(x) = [t_{\text{alloc}},\; t_{\text{scope\_end}}]
@@ -755,7 +760,7 @@ $$
 
 GC はこのタイミングで $x$ を回収し、$p$ は**ダングリングポインタ**となる。アクセスすると未定義動作（UB）: ゼロが返るかもしれないし、別の値が入っているかもしれないし、SIGSEGV でクラッシュするかもしれない。「かもしれない」が最悪だ — テスト環境では動くのに本番でのみ壊れる。
 
-> **⚠️ Warning:** jlrs の `GcFrame` スコープを配列の利用より短く設定してはいけない。FFI コールバック内でポインタをキャプチャし、コールバック終了後に使い続けるパターンは use-after-free の典型例だ。
+> **⚠️ Warning:** rustler の `GcFrame` スコープを配列の利用より短く設定してはいけない。FFI コールバック内でポインタをキャプチャし、コールバック終了後に使い続けるパターンは use-after-free の典型例だ。
 
 **原則3: 可変性の排他性**
 
@@ -770,7 +775,7 @@ $$
 
 FFI境界では**この保証が失われる**:
 
-**エイリアシング違反の例**: Julia の配列 $V$ を Rust（書き込み可能）と C ライブラリ（読み取り専用）に同時に渡す。
+**エイリアシング違反の例**: Rust の配列 $V$ を Rust（書き込み可能）と C ライブラリ（読み取り専用）に同時に渡す。
 
 $$
 p_{\text{mut}} = \text{ptr}(V) \quad (\text{mutable}), \quad p_{\text{const}} = \text{ptr}(V) \quad (\text{immutable})
@@ -812,43 +817,43 @@ $$
 
 従来の `&x as *const T` は未定義動作の温床だったが、`addr_of!(x)` マクロおよび `&raw const x` でこれが解決された。FFI コードを書くときは必ずこの新構文を使うべきだ。
 
-#### 3.3.1 jlrsの役割
+#### 3.3.1 rustlerの役割
 
-[jlrs](https://github.com/Taaitaaiger/jlrs) は、RustからJuliaコードを呼び出すためのライブラリ。
+[rustler](https://github.com/Taaitaaiger/rustler) は、RustからRustコードを呼び出すためのライブラリ。
 
 **基本アーキテクチャ**:
 
 ```mermaid
 graph LR
-    A["Rust Process"] -->|jlrs init| B["Julia Runtime<br/>(embedded)"]
-    B -->|ccall| C["Julia Function"]
+    A["🦀 Rust Process"] -->|rustler NIF| B["Elixir BEAM<br/>(NIF host)"]
+    B -->|NIF call| C["Rust Function"]
     C -->|return| B
     B -->|Array borrow| A
 
     style B fill:#e1f5fe
 ```
 
-**jlrsが解決する問題**:
+**rustlerが解決する問題**:
 
-1. **Julia埋め込み**: Rust実行可能ファイル内にJuliaランタイムを起動
-2. **配列ゼロコピー**: Julia配列をRustスライス `&[T]` として借用
-3. **GC連携**: Juliaオブジェクトの生存期間をRustのライフタイムで管理
+1. **Rust埋め込み**: Rust実行可能ファイル内にRustランタイムを起動
+2. **配列ゼロコピー**: Rust配列をRustスライス `&[T]` として借用
+3. **GC連携**: Rustオブジェクトの生存期間をRustのライフタイムで管理
 
-**Julia ランタイム埋め込みのコスト**: jlrs を使って Rust プロセス内に Julia を埋め込む場合、初期化コストが発生する:
-
-$$
-C_{\text{init}} = C_{\text{libjulia.so}} + C_{\text{JIT}} \approx 0.5\text{–}2\,\text{秒}
-$$
-
-これは1回だけ払えばよく、その後の Julia 関数呼び出しは:
+**Rust ランタイム埋め込みのコスト**: rustler を使って Rust プロセス内に Rust を埋め込む場合、初期化コストが発生する:
 
 $$
-C_{\text{call}} = C_{\text{FFI}} + C_{\text{Julia}} \approx \text{数}\ \mu\text{s}
+C_{\text{init}} = C_{\text{libjulia.so}} + C_{\text{AOT}} \approx 0.5\text{–}2\,\text{秒}
 $$
 
-**型の対応表**: jlrs が定義する Julia 型と Rust 型の対応:
+これは1回だけ払えばよく、その後の Rust 関数呼び出しは:
 
-| Julia 型 | Rust 型 | サイズ | アラインメント |
+$$
+C_{\text{call}} = C_{\text{FFI}} + C_{\text{Rust}} \approx \text{数}\ \mu\text{s}
+$$
+
+**型の対応表**: rustler が定義する Rust 型と Rust 型の対応:
+
+| Rust 型 | Rust 型 | サイズ | アラインメント |
 |:---------|:--------|:-------|:--------------|
 | `Float64` | `f64` | 8 bytes | 8 bytes |
 | `Float32` | `f32` | 4 bytes | 4 bytes |
@@ -856,15 +861,15 @@ $$
 | `Bool` | `bool` | 1 byte | 1 byte |
 | `Vector{Float64}` | `&[f64]` | (ptr, len) | — |
 
-この対応が $\phi: \mathcal{T}_{\text{Julia}} \to \mathcal{T}_{\text{Rust}}$ の具体的実現だ。
+この対応が $\phi: \mathcal{T}_{\text{Rust}} \to \mathcal{T}_{\text{Rust}}$ の具体的実現だ。
 
 #### 3.3.2 配列受け渡しの数学的モデル
 
-**Julia → Rust の配列共有**:
+**Rust → Rust の配列共有**:
 
 $$
 \begin{aligned}
-\text{Julia:} \quad & V = [v_1, v_2, \ldots, v_n] \quad (V \in \mathbb{R}^n) \\
+\text{Rust:} \quad & V = [v_1, v_2, \ldots, v_n] \quad (V \in \mathbb{R}^n) \\
 \text{Rust:} \quad & \texttt{slice} = \&[v_1, v_2, \ldots, v_n] \quad (\texttt{slice}: \&[f64])
 \end{aligned}
 $$
@@ -875,11 +880,11 @@ $$
 \texttt{slice.as\_ptr}() = \texttt{pointer}(V)
 $$
 
-つまり、Rustスライスの先頭ポインタとJulia配列の先頭ポインタが**同一アドレス**を指す。
+つまり、Rustスライスの先頭ポインタとRust配列の先頭ポインタが**同一アドレス**を指す。
 
 **実装例**:
 
-ゼロコピーの数学的検証: $n$ 要素の `f64` 配列 $V$ を Julia と Rust が共有するとき、Rust スライスの先頭アドレスが Julia 配列の先頭アドレスと一致することを確認する。
+ゼロコピーの数学的検証: $n$ 要素の `f64` 配列 $V$ を Rust と Rust が共有するとき、Rust スライスの先頭アドレスが Rust 配列の先頭アドレスと一致することを確認する。
 
 $$
 \texttt{slice.as\_ptr()} = p_{\text{base}}, \quad \texttt{pointer}(V) = p_{\text{base}} \quad \Rightarrow \quad \text{アドレス差 } = 0
@@ -891,41 +896,41 @@ Shape tracking:
 
 **数学的保証**:
 
-- **immutable borrow**: Julia側でも変更不可（`const` 保証）
+- **immutable borrow**: Rust側でも変更不可（`const` 保証）
 - **lifetime 制約**: `'scope` ライフタイムが `array` の生存期間と一致
-- **alignment**: Julia配列は常に適切にアラインされている（jlrs検証済み）
+- **alignment**: Rust配列は常に適切にアラインされている（rustler検証済み）
 
-**多次元配列の転置問題**: Julia は **column-major**（列優先）、Rust/C は **row-major**（行優先）でメモリを並べる。$m \times n$ 行列 $A$ を転置なしで共有するとき、インデックス解釈がずれる:
+**多次元配列の転置問題**: Rust は **column-major**（列優先）、Rust/C は **row-major**（行優先）でメモリを並べる。$m \times n$ 行列 $A$ を転置なしで共有するとき、インデックス解釈がずれる:
 
 $$
-A_{\text{Julia}}[i, j] = A_{\text{flat}}[(j-1) \cdot m + (i-1)] \quad \text{(column-major)}
+A_{\text{Rust}}[i, j] = A_{\text{flat}}[(j-1) \cdot m + (i-1)] \quad \text{(column-major)}
 $$
 
 $$
 A_{\text{Rust}}[i][j] = A_{\text{flat}}[i \cdot n + j] \quad \text{(row-major)}
 $$
 
-同じフラットメモリを異なる解釈で読むと、Julia の「$i$ 行 $j$ 列」が Rust の「$j$ 行 $i$ 列」に対応する。FFI 境界では**明示的にレイアウトを合わせる**か、一方の言語でインデックス順序を反転させる必要がある。
+同じフラットメモリを異なる解釈で読むと、Rust の「$i$ 行 $j$ 列」が Rust の「$j$ 行 $i$ 列」に対応する。FFI 境界では**明示的にレイアウトを合わせる**か、一方の言語でインデックス順序を反転させる必要がある。
 
-行列積 $C = AB$ を jlrs 経由で実装するとき、Julia 側 (column-major) の $A \in \mathbb{R}^{m \times n}$ は Rust 側 (row-major) では $A^T \in \mathbb{R}^{n \times m}$ に見える。BLAS ライブラリはこの問題を `TRANSA`/`TRANSB` フラグで解決している:
+行列積 $C = AB$ を rustler 経由で実装するとき、Rust 側 (column-major) の $A \in \mathbb{R}^{m \times n}$ は Rust 側 (row-major) では $A^T \in \mathbb{R}^{n \times m}$ に見える。BLAS ライブラリはこの問題を `TRANSA`/`TRANSB` フラグで解決している:
 
 $$
 \text{dgemm}(\texttt{TRANS}, \texttt{TRANS}, \ldots) \equiv C = A^T B^T = (BA)^T
 $$
 
-**具体例で追う**: $A \in \mathbb{R}^{3 \times 4}$（$m=3, n=4$）を Julia から Rust に渡す。
+**具体例で追う**: $A \in \mathbb{R}^{3 \times 4}$（$m=3, n=4$）を Rust から Rust に渡す。
 
 $$
 A = \begin{pmatrix} 1 & 2 & 3 & 4 \\ 5 & 6 & 7 & 8 \\ 9 & 10 & 11 & 12 \end{pmatrix}
 $$
 
-**Julia (column-major) のフラット配列**（列を先に詰める）:
+**Rust (column-major) のフラット配列**（列を先に詰める）:
 
 $$
 A_{\text{flat}}^{\text{col}} = [\underbrace{1, 5, 9}_{\text{列0}},\; \underbrace{2, 6, 10}_{\text{列1}},\; \underbrace{3, 7, 11}_{\text{列2}},\; \underbrace{4, 8, 12}_{\text{列3}}]
 $$
 
-検証: $A_{\text{Julia}}[2,\, 3]$（3行4列、1-indexed）= $A_{\text{flat}}^{\text{col}}[(3-1) \times 3 + (2-1)] = A_{\text{flat}}^{\text{col}}[7] = 7$ ✓
+検証: $A_{\text{Rust}}[2,\, 3]$（3行4列、1-indexed）= $A_{\text{flat}}^{\text{col}}[(3-1) \times 3 + (2-1)] = A_{\text{flat}}^{\text{col}}[7] = 7$ ✓
 
 **Rust が同じメモリを row-major として解釈**（0-indexed）:
 
@@ -937,15 +942,15 @@ Rust が $A[0][1]$ として読む値: $A_{\text{flat}}^{\text{col}}[0 \times 4 
 
 しかし、人間が「0行1列」として期待するのは $A[0][1] = 2$。**$5 \neq 2$**。
 
-> **⚠️ Warning:** これはコンパイラもランタイムも**エラーを出さない**。型は合っている、アドレスは有効、値は `f64` — ただし意味が間違っている。行列計算の結果が静かに誤る最悪のバグだ。Julia ↔ Rust FFI で行列を渡すときは、必ず転置またはインデックス規約を明示的に合わせること。
+> **⚠️ Warning:** これはコンパイラもランタイムも**エラーを出さない**。型は合っている、アドレスは有効、値は `f64` — ただし意味が間違っている。行列計算の結果が静かに誤る最悪のバグだ。Rust ↔ Rust FFI で行列を渡すときは、必ず転置またはインデックス規約を明示的に合わせること。
 
-**整合させる方法**: (a) Julia 側で転置 `collect(A')` を渡す（コピーあり）、(b) Rust 側で列方向ループに変える、(c) BLAS の `TRANS` フラグを使う。どれが正解かはゼロコピー優先か否かで決まる。
+**整合させる方法**: (a) Rust 側で転置 `collect(A')` を渡す（コピーあり）、(b) Rust 側で列方向ループに変える、(c) BLAS の `TRANS` フラグを使う。どれが正解かはゼロコピー優先か否かで決まる。
 
-jlrsは**unsafe Rustの上に安全な抽象化**を構築:
+rustlerは**unsafe Rustの上に安全な抽象化**を構築:
 
-1. **GC frame**: Juliaオブジェクトの生存を保証するスコープ
-2. **型検証**: Julia型とRust型の対応を実行時チェック
-3. **パニック境界**: RustパニックをJulia例外に変換
+1. **GC frame**: Rustオブジェクトの生存を保証するスコープ
+2. **型検証**: Rust型とRust型の対応を実行時チェック
+3. **パニック境界**: RustパニックをRust例外に変換
 
 **GC frameの数学的モデル**:
 
@@ -960,7 +965,7 @@ $$
 
 GC rootにプッシュされたオブジェクトは、frameが生きている間GCから保護される。
 
-**Julia GCの三色マーキングアルゴリズム**: Julia の GC は三色（白・灰・黒）マーキング方式を使う。各オブジェクトは以下の状態を持つ:
+**Rust GCの三色マーキングアルゴリズム**: Rust の GC は三色（白・灰・黒）マーキング方式を使う。各オブジェクトは以下の状態を持つ:
 
 $$
 \text{color}(o) \in \{\text{white}, \text{gray}, \text{black}\}
@@ -976,7 +981,7 @@ $$
 \text{live}(o) \iff \exists \text{root} \in \mathcal{R}, \;\text{reachable}(\text{root}, o)
 $$
 
-FFI 経由で Rust に渡した Julia 配列は、GC root $\mathcal{R}$ に登録しなければ**白**のまま回収される — これが jlrs の `GcFrame` が必要な理由だ。
+FFI 経由で Rust に渡した Rust 配列は、GC root $\mathcal{R}$ に登録しなければ**白**のまま回収される — これが rustler の `GcFrame` が必要な理由だ。
 
 $$
 \text{GcFrame}: \quad \mathcal{R} \leftarrow \mathcal{R} \cup \{o\} \quad \text{(push root)}
@@ -1391,9 +1396,9 @@ Consumer の処理時間 $L = 10\,\text{ms}$, $\lambda = 100\,\text{req/s}$ な�
 
 #### 目標
 
-**Julia行列積カーネル → Rustゼロコピー実行 → Elixirプロセス分散**の完全パイプラインを設計する。
+**Rust行列積カーネル → Rustゼロコピー実行 → Elixirプロセス分散**の完全パイプラインを設計する。
 
-#### ステップ1: Julia側の定義
+#### ステップ1: Rust側の定義
 
 行列積カーネル $C = A \cdot B$（$A \in \mathbb{R}^{m \times n}$, $B \in \mathbb{R}^{n \times p}$, $C \in \mathbb{R}^{m \times p}$）の C-ABI インターフェース契約を数学的に定義する。
 
@@ -1403,7 +1408,7 @@ $$
 f: \underbrace{(*\text{f64},\; *\text{f64},\; *\text{mut f64})}_{A,\, B,\, C},\; \underbrace{\text{usize},\; \text{usize},\; \text{usize}}_{m,\; n,\; p} \;\to\; ()
 $$
 
-Julia 側の型写像: $\texttt{Ptr\{Float64\}} \leftrightarrow *\text{const f64}$, $\texttt{Csize\_t} \leftrightarrow \texttt{usize}$ (64-bit)。
+Rust 側の型写像: $\texttt{Ptr\{Float64\}} \leftrightarrow *\text{const f64}$, $\texttt{Csize\_t} \leftrightarrow \texttt{usize}$ (64-bit)。
 
 **事前条件** (Hoare triple の $P$):
 
@@ -1445,7 +1450,7 @@ $$
 
 $$
 \begin{aligned}
-\text{Julia:} \quad & C = A \times B \\
+\text{Rust:} \quad & C = A \times B \\
 \text{Rust:} \quad & \texttt{c[i * p + j]} = \sum_{k=0}^{n-1} \texttt{a[i * n + k]} \times \texttt{b[k * p + j]}
 \end{aligned}
 $$
@@ -1534,11 +1539,11 @@ $$
 \| C - C_{\text{FFI}} \|_\infty < \epsilon, \quad \epsilon = 10^{-10} \quad \text{(f64 精度で十分)}
 $$
 
-転置バグの検出: `TRANS` フラグなしで Julia の column-major 行列を row-major として解釈すると $C[0][0] = 1 \times 5 + 3 \times 7 = 26 \neq 19$ となる — この不一致が転置バグのシグナルだ。
+転置バグの検出: `TRANS` フラグなしで Rust の column-major 行列を row-major として解釈すると $C[0][0] = 1 \times 5 + 3 \times 7 = 26 \neq 19$ となる — この不一致が転置バグのシグナルだ。
 
 3言語FFI連携の完全設計を導出した:
 
-1. **Julia**: 数式定義（高レベル抽象化）
+1. **Rust**: 数式定義（高レベル抽象化）
 2. **Rust**: ゼロコピー実装（メモリ安全）
 3. **Elixir**: プロセス分散（耐障害性）
 
@@ -1621,7 +1626,7 @@ $$
 
 FFI境界での**所有権管理**パターン [^ffi_ownership]:
 
-**所有権管理パターン**: (1) **Rust allocates, Rust frees** — Rust がバッファを確保・解放し、Julia はポインタのみ受け取る。(2) **Caller allocates, Rust fills** — Julia GC が自動的にメモリ管理するため Rust 側での解放が不要。
+**所有権管理パターン**: (1) **Rust allocates, Rust frees** — Rust がバッファを確保・解放し、Rust はポインタのみ受け取る。(2) **Caller allocates, Rust fills** — Rust GC が自動的にメモリ管理するため Rust 側での解放が不要。
 
 ### 3.7 FFIコスト分析と最適化理論
 
@@ -1643,10 +1648,10 @@ $$
 
 `f64` 配列を stride=8 でアクセスすると、8要素ごとに1ミス → `1/1 = 100%` ミス率（全てキャッシュミス）。stride=1（シーケンシャル）では `1/8 = 12.5%` ミス率。
 
-**列指向 vs 行指向**: $m \times n$ 行列 $A$ を Julia（column-major）と Rust（row-major）で相互運用するとき、インデックス変換が必要:
+**列指向 vs 行指向**: $m \times n$ 行列 $A$ を Rust（column-major）と Rust（row-major）で相互運用するとき、インデックス変換が必要:
 
 $$
-A_{\text{Julia}}[i, j] = A_{\text{flat}}[(j-1) \times m + (i-1)] \quad \text{(column-major, 1-indexed)}
+A_{\text{Rust}}[i, j] = A_{\text{flat}}[(j-1) \times m + (i-1)] \quad \text{(column-major, 1-indexed)}
 $$
 
 $$
@@ -1663,13 +1668,13 @@ $$
 \text{ZeroCopy}(\text{src}, \text{dst}) \iff \text{addr}(\text{src}) = \text{addr}(\text{dst}) \land \text{lifetime}(\text{src}) \supseteq \text{lifetime}(\text{dst})
 $$
 
-jlrs がこの保証を Rust の型システムで実現する:
+rustler がこの保証を Rust の型システムで実現する:
 
 $$
-\texttt{\&'scope [f64]} \quad \Rightarrow \quad \text{addr は Julia 配列と同一} \land \text{lifetime は 'scope 以内}
+\texttt{\&'scope [f64]} \quad \Rightarrow \quad \text{addr は Rust 配列と同一} \land \text{lifetime は 'scope 以内}
 $$
 
-**コピーコストの定量比較**: $n = 10^6$ 個の `f64`（8 MB）を Julia から Rust に渡す2通りのアプローチ。
+**コピーコストの定量比較**: $n = 10^6$ 個の `f64`（8 MB）を Rust から Rust に渡す2通りのアプローチ。
 
 **コピーあり (value semantics)**:
 1. Rust 側で 8 MB の新バッファを確保: $\approx 1\,\mu\text{s}$
@@ -1693,7 +1698,7 @@ $$
 \frac{T_{\text{copy}}}{T_{\text{zero-copy}}} = \frac{162 \times 10^3\,\text{ns}}{1\,\text{ns}} = 1.62 \times 10^5 \approx 10^5 \text{倍}
 $$
 
-> **⚠️ Warning:** ゼロコピーが成立するのは「Julia 配列が GC に回収されない間だけ」だ。jlrs の `GcFrame` なしにポインタを長期保持すると、Julia GC が配列を移動または回収し、Rust 側はダングリングポインタを参照する。**GcFrame のスコープを配列の利用範囲より絶対に短くしてはいけない**。
+> **⚠️ Warning:** ゼロコピーが成立するのは「Rust 配列が GC に回収されない間だけ」だ。rustler の `GcFrame` なしにポインタを長期保持すると、Rust GC が配列を移動または回収し、Rust 側はダングリングポインタを参照する。**GcFrame のスコープを配列の利用範囲より絶対に短くしてはいけない**。
 
 #### 3.7.3 Separation Logic によるFFI正確性の保証
 
@@ -1718,7 +1723,7 @@ FFI 境界でこのフレーム規則が**検証不能**になる — だから 
 **開放型ジャクソンネットワーク** (Open Jackson Network) として3ステージを定式化:
 
 $$
-\lambda_1 \xrightarrow{\text{Julia訓練}} \lambda_2 \xrightarrow{\text{Rust推論}} \lambda_3 \xrightarrow{\text{Elixir配信}} \text{クライアント}
+\lambda_1 \xrightarrow{\text{Rust訓練}} \lambda_2 \xrightarrow{\text{Rust推論}} \lambda_3 \xrightarrow{\text{Elixir配信}} \text{クライアント}
 $$
 
 各ステージが独立した M/M/1 キュー（ポアソン到着、指数サービス時間）として振る舞う場合、定常状態での平均レイテンシ:

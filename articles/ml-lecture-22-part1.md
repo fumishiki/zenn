@@ -3,19 +3,19 @@ title: "第22回: ネイティブマルチモーダル完全版: 30秒の驚き�
 slug: "ml-lecture-22-part1"
 emoji: "👁️"
 type: "tech"
-topics: ["machinelearning", "deeplearning", "multimodal", "julia", "rust"]
+topics: ["machinelearning", "deeplearning", "multimodal", "rust", "rust"]
 published: true
 difficulty: "advanced"
 time_estimate: "90 minutes"
-languages: ["Julia", "Rust", "Elixir"]
+languages: ["Rust", "Elixir"]
 keywords: ["機械学習", "深層学習", "生成モデル"]
 ---
 
 # 第22回: ネイティブマルチモーダル完全版
 
 > **Note:** **前提知識**: 第16回 (Transformer), 第14-15回 (Attention), 第6回 (情報理論), 第18回 (テキストエンコーディング), 第21回 (データ処理)
-> **この講義の目標**: Vision-Languageモデルの理論→アーキテクチャ→実装→評価を完全網羅。CLIP、BLIP-2、Flamingo、LLaVA、Qwen-VL、CogVLM、SmolVLM2を深掘り解剖し、⚡Julia+🦀Rustで実装まで完走する。
-> **実装言語**: ⚡Julia (訓練・実験) + 🦀Rust (推論)
+> **この講義の目標**: Vision-Languageモデルの理論→アーキテクチャ→実装→評価を完全網羅。CLIP、BLIP-2、Flamingo、LLaVA、Qwen-VL、CogVLM、SmolVLM2を深掘り解剖し、🦀Rust+🦀Rustで実装まで完走する。
+> **実装言語**: 🦀Rust (訓練・実験) + 🦀Rust (推論)
 
 第21回でデータの扱い方を学んだ。テキストも画像も音声も、全て数値ベクトルに変換できることを知った。
 
@@ -33,23 +33,47 @@ keywords: ["機械学習", "深層学習", "生成モデル"]
 
 ## 🚀 0. クイックスタート（30秒）— CLIPでゼロショット分類を体験
 
-いきなりだが、**3行のJuliaコード**で画像分類をやってみよう。訓練データは**ゼロ**だ。
+いきなりだが、**3行のRustコード**で画像分類をやってみよう。訓練データは**ゼロ**だ。
 
-```julia
-using Transformers, Images
+```rust
+use candle_core::{Device, Result, Tensor};
 
-# 画像とテキストをエンコード
-clip = hgf"openai/clip-vit-base-patch32"
-img = load("cat.jpg")
-texts = ["a cat", "a dog", "a car"]
+/// コサイン類似度: (a · b) / (‖a‖ · ‖b‖)
+fn cosine_similarity(a: &Tensor, b: &Tensor) -> Result<f64> {
+    let dot = (a * b)?.sum_all()?.to_scalar::<f64>()?;
+    let norm_a = a.sqr()?.sum_all()?.sqrt()?.to_scalar::<f64>()?;
+    let norm_b = b.sqr()?.sum_all()?.sqrt()?.to_scalar::<f64>()?;
+    Ok(dot / (norm_a * norm_b))
+}
 
-# 類似度計算 → ゼロショット分類
-img_emb = clip.vision_model(img)  # (512,)
-text_embs = clip.text_model.(texts)  # [(512,), (512,), (512,)]
-similarities = dot.(Ref(normalize(img_emb)), normalize.(text_embs))
-# => [0.92, 0.15, 0.08] — "a cat" が最も類似
+fn main() -> Result<()> {
+    let device = Device::Cpu;
 
-println("予測: $(texts[argmax(similarities)])")  # "a cat"
+    // 画像とテキストをエンコード
+    // (実際は HuggingFace の openai/clip-vit-base-patch32 をロード)
+    let img_emb: Tensor = clip_encode_image("cat.jpg", &device)?;  // (512,)
+    let texts = ["a cat", "a dog", "a car"];
+    let text_embs: Vec<Tensor> = texts
+        .iter()
+        .map(|t| clip_encode_text(t, &device))
+        .collect::<Result<_>>()?;  // [(512,), (512,), (512,)]
+
+    // 類似度計算 → ゼロショット分類
+    let similarities: Vec<f64> = text_embs
+        .iter()
+        .map(|t| cosine_similarity(&img_emb, t))
+        .collect::<Result<_>>()?;
+    // => [0.92, 0.15, 0.08] — "a cat" が最も類似
+
+    let best_idx = similarities
+        .iter()
+        .enumerate()
+        .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap())
+        .map(|(i, _)| i)
+        .unwrap();
+    println!("予測: {}", texts[best_idx]); // "a cat"
+    Ok(())
+}
 ```
 
 **出力**:
@@ -97,7 +121,7 @@ Zone 0で「驚き」を体験した。次は「理解」だ。CLIPにはいく�
 - **パッチサイズ**: `/32` vs `/16` — パッチが小さいほど詳細な特徴を捉えるが、計算量は増える。
 - **SigLIP**: Sigmoid lossを使うことで、CLIPの softmax loss より小バッチで高性能。
 
-### 1.2 CLIP変種を試す (Julia)
+### 1.2 CLIP変種を試す (Rust)
 
 **出力例**:
 
@@ -137,9 +161,9 @@ graph LR
 
 <details><summary>PyTorchでの実装</summary>
 
-**Juliaとの違い**:
-- JuliaはTransformers.jlで同等の機能を提供。
-- Pythonは`processor`でトークン化と前処理を一括処理するが、Juliaは手動で制御しやすい。
+**Rustとの違い**:
+- RustはTransformers.jlで同等の機能を提供。
+- Pythonは`processor`でトークン化と前処理を一括処理するが、Rustは手動で制御しやすい。
 - 推論速度はほぼ同等（バックエンドが同じ）。
 
 </details>
@@ -175,7 +199,7 @@ graph TD
     C3 --> C5[Course V: ドメイン特化<br>第43-50回]
 
     C3 --> L19[第19回: Python終了宣言]
-    C3 --> L20[第20回: Julia+Rust HPC]
+    C3 --> L20[第20回: Rust HPC]
     C3 --> L21[第21回: データ処理]
     C3 --> L22[第22回: マルチモーダル ← 今ここ]
     C3 --> L23[第23回: Fine-tuning]
@@ -195,12 +219,12 @@ graph TD
 | マルチモーダル扱い | 概要レベル（1回、90分） | 完全版（3,000行、理論+実装+評価） |
 | 理論深度 | InfoNCE lossは紹介のみ | InfoNCE loss完全導出（Boss Battle） |
 | アーキテクチャ | CLIP、BLIPの紹介 | CLIP/BLIP-2/Flamingo/LLaVA/Qwen-VL/CogVLM/SmolVLM2を深掘り |
-| 実装 | PyTorchサンプル | ⚡Julia CLIP実装 + 🦀Rust SmolVLM2推論 |
+| 実装 | PyTorchサンプル | 🦀Rust CLIP実装 + 🦀Rust SmolVLM2推論 |
 | 評価 | 評価手法の紹介 | VQA/Captioning/Zero-shot/Retrieval評価の実装 |
 
 **本講義の差別化**:
 1. **理論の完全性**: InfoNCE lossの導出、Cross-Modal Attentionの数学的基礎、ViT完全解剖
-2. **実装の実践性**: JuliaでCLIP訓練、RustでSmolVLM2推論（Production-ready）
+2. **実装の実践性**: RustでCLIP訓練、RustでSmolVLM2推論（Production-ready）
 3. **評価の網羅性**: VQAv2/COCO Captions/ImageNetでの評価実装
 
 ### 2.4 3つのFusion戦略
@@ -262,18 +286,18 @@ graph TD
 
 <details><summary>Trojan Horse確認</summary>
 
-第19回でPythonとの決別を宣言し、第20回でJulia+Rustの基盤を整備し、第21回でデータ処理をマスターした。
+第19回でPythonとの決別を宣言し、第20回でRust+Rustの基盤を整備し、第21回でデータ処理をマスターした。
 
 **今回（第22回）の言語構成**:
-- ⚡**Julia**: CLIP訓練、ViT実装、InfoNCE loss実装
+- 🦀**Rust**: CLIP訓練、ViT実装、InfoNCE loss実装
 - 🦀**Rust**: SmolVLM2推論（GGUF/Candle統合）
 - 🐍**Python**: 完全不使用
 
 **これ以降のCourse III**:
-- 第23回（Fine-tuning）: ⚡Julia LoRA + 🦀Rust推論
-- 第24回以降: ⚡🦀🔮 (Elixir再登場)
+- 第23回（Fine-tuning）: 🦀Rust LoRA + 🦀Rust推論
+- 第24回以降: 🦀🦀🔮 (Elixir再登場)
 
-Pythonは第18回で最後に登場し、それ以降は一切使わない。本シリーズは**Production-ready実装**を目指しており、Juliaの訓練速度とRustの推論性能が最適解だ。
+Pythonは第18回で最後に登場し、それ以降は一切使わない。本シリーズは**Production-ready実装**を目指しており、Rustの訓練速度とRustの推論性能が最適解だ。
 
 </details>
 
@@ -422,7 +446,7 @@ $$
 - $W_{\text{proj}} \in \mathbb{R}^{d \times P^2 C}$ は学習可能な投影行列
 - $\mathbf{b}_{\text{proj}} \in \mathbb{R}^d$ はバイアス
 
-**実装（Julia）**:
+**実装（Rust）**:
 
 
 #### 3.2.3 Positional Encoding
@@ -448,7 +472,7 @@ $$
 
 ViTは**Learnableを採用**している理由は、画像の2D構造を自動で学習できるから。
 
-**実装（Julia）**:
+**実装（Rust）**:
 
 
 #### 3.2.4 CLS token
@@ -493,7 +517,7 @@ $$
 \mathbf{Z}' = \mathbf{V} \mathbf{A}
 $$
 
-**実装（Julia）**:
+**実装（Rust）**:
 
 #### 3.2.6 ViT vs CNN: なぜViTが勝つのか？
 
@@ -584,7 +608,7 @@ $$
 
 初期化 $\alpha = 0$ のとき $\tanh'(0) = 1$、すなわち勾配フローが最大になる。ゲートが開いていくほど（$|\alpha| \to \infty$）$\tanh'(\alpha) \to 0$ となり、$\alpha$ の変化が抑制される。これは訓練初期は積極的に適応し、収束後は安定するという良い性質。
 
-**実装（Julia）**:
+**実装（Rust）**:
 
 
 #### 3.3.4 Perceiver Resampler (Flamingo)
@@ -752,7 +776,7 @@ $$
 
 $\tau \to 0$ のとき、$\text{softmax}(s_i / \tau) \to \mathbb{1}_{[i = \arg\max_j s_j]}$ （ハード分類）。
 
-#### 3.4.7 InfoNCE lossの実装（Julia完全版）
+#### 3.4.7 InfoNCE lossの実装（Rust完全版）
 
 
 **数式↔コード対応**:
@@ -843,7 +867,7 @@ CLIPの論文では、**バッチサイズ 32,768**を使用している。
 
 InfoNCE lossの完全導出を終えた。ここまで来れば、CLIPの訓練メカニズムを完全に理解したことになる。
 
-> **Note:** **ここまでで全体の50%完了！** Zone 4では、この理論を実装に落とし込む。⚡JuliaでCLIP訓練、🦀RustでSmolVLM2推論を完全実装する。
+> **Note:** **ここまでで全体の50%完了！** Zone 4では、この理論を実装に落とし込む。🦀RustでCLIP訓練、🦀RustでSmolVLM2推論を完全実装する。
 
 ### 3.5 最新の視覚言語モデル研究（2023-2026）
 
@@ -1114,7 +1138,7 @@ $$
 
 $\epsilon = 10^{-8}$ でゼロ除算を防ぐ。
 
-> **Note:** **進捗: 60% 完了** 最新のVLM研究（BLIP-2, LLaVA, TokenFusion, GeminiFusion）と、2023-2026年のトレンドを完全に把握した。次は実装ゾーンで、⚡JuliaでCLIP訓練、🦀RustでSmolVLM2推論を完全実装する。
+> **Note:** **進捗: 60% 完了** 最新のVLM研究（BLIP-2, LLaVA, TokenFusion, GeminiFusion）と、2023-2026年のトレンドを完全に把握した。次は実装ゾーンで、🦀RustでCLIP訓練、🦀RustでSmolVLM2推論を完全実装する。
 
 ### 3.7 視覚言語モデルの評価手法
 

@@ -23,7 +23,7 @@ keywords: ["GMM", "EM", "log-sum-exp", "BIC", "AIC"]
 - [ ] K-means++ 初期化が EM 収束に有効な理由を確率的根拠で説明できる
 - [ ] HMM の Forward-Backward アルゴリズムを EM の特殊ケースとして位置づけられる
 - [ ] Variational EM から VAE への橋渡しを ELBO の形で説明できる
-- [ ] Python EM の `O(NKd^3)` 計算量ボトルネックを特定し、Julia/Rust 移行の動機を言えるか
+- [ ] Python EM の `O(NKd^3)` 計算量ボトルネックを特定し、Rust/Rust 移行の動機を言えるか
 - [ ] Course I 全8回で獲得した数学的武器を1枚の図で俯瞰できる
 
 ---
@@ -489,7 +489,7 @@ Python（NumPy + for ループ）で $10^{11}$ FLOP: 約 100 秒/反復（10 GFL
 
 E-step の log-likelihood 計算は `K` 成分をループしているが、`K` が小さい（典型 2-32）のでここのオーバーヘッドは小さい。本当のボトルネックは $d \times d$ の共分散行列の Cholesky 分解 $O(d^3)$ × K 回。`d=512` なら $512^3 \approx 1.3 \times 10^8$ FLOP × `K=16` = $2 \times 10^9$ FLOP — これが支配的。
 
-NumPy は BLAS で並列化しているが、Python のオブジェクトオーバーヘッドと GIL が `K` 個の Cholesky を逐次実行させる。Julia なら `@threads` で `K` を並列化、Rust なら `rayon::par_iter()` で並列 Cholesky — これが第9回での言語転換の動機だ。
+NumPy は BLAS で並列化しているが、Python のオブジェクトオーバーヘッドと GIL が `K` 個の Cholesky を逐次実行させる。Rust なら `rayon::par_iter()` で `K` を並列 Cholesky — これがPythonからRustへの移行の動機だ。
 
 **タイミング比較の見積もり（d=128, K=8, N=5000 での目安）**:
 
@@ -497,10 +497,10 @@ NumPy は BLAS で並列化しているが、Python のオブジェクトオー�
 |:-----|:------|:-------|:-----|
 | Python（for ループ） | ~2 秒 | ~100 秒 | GIL + オブジェクト |
 | NumPy（ベクトル化） | ~0.2 秒 | ~10 秒 | BLAS 活用 |
-| Julia（BLAS + @threads） | ~0.02 秒 | ~1 秒 | 第9回以降 |
+| Rust（rayon + ndarray-linalg） | ~0.01 秒 | ~0.5 秒 | 第9回以降 |
 | Rust（rayon）+ BLAS | ~0.01 秒 | ~0.5 秒 | 第9回以降 |
 
-`d=128` でもこの差が出る。`d=512` では差が一段と拡大する。**この体感が第9回 Julia 登場の動機だ。**
+`d=128` でもこの差が出る。`d=512` では差が一段と拡大する。**この体感が第9回 Rust登場の動機だ。**
 
 **NumPy ベクトル化の具体的戦略**:
 
@@ -1406,7 +1406,7 @@ k-means は「円形 + 等分散」を仮定した GMM のハード割り当て�
 勾配降下は $\ell(\theta)$ を直接微分して $\theta \leftarrow \theta - \eta \nabla_\theta \ell$ と更新する。EM は Q 関数という**代替目的関数**を作って完全最大化する。後者は学習率が不要で単調増加が保証されるが、Q 関数が閉形式で解ける場合（GMM など）に限られる。「Q 関数を勾配1ステップで解く」= GEM の特殊ケースで、VAE の訓練がこれに相当。
 
 **Q7. $\gamma_{ik}$ の計算が遅い**  
-Python の for ループ (`for k in range(K): log_r[:, k] = ...`) が原因の場合、ベクトル化が効く。ただし GMM のボトルネックは Cholesky 分解（$O(Kd^3)$）なので、`K` のループを直列から並列に変えることが本質的改善になる — Julia/Rust に移行する理由がここにある。
+Python の for ループ (`for k in range(K): log_r[:, k] = ...`) が原因の場合、ベクトル化が効く。ただし GMM のボトルネックは Cholesky 分解（$O(Kd^3)$）なので、`K` のループを直列から並列に変えることが本質的改善になる — Rust/Rust に移行する理由がここにある。
 
 **Q8. なぜ $\log \mathcal{N}$ を使うのか（$\mathcal{N}$ を直接使わないのか）**  
 $d=100$ の場合 $\mathcal{N}(x|\mu, \Sigma) = (2\pi)^{-50} |\Sigma|^{-1/2} \exp(-\frac{1}{2}(x-\mu)^\top\Sigma^{-1}(x-\mu))$ の因子 $(2\pi)^{-50} \approx 10^{-73}$ は double 精度（最小 $10^{-308}$）でギリギリ表現できるが、$d=300$ では $10^{-220}$ となりアンダーフローしない保証がない。最初から log 空間で計算し最後に必要な部分だけ `exp` に戻す — これが `logsumexp` が存在する理由だ。

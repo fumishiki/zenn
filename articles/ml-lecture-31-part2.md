@@ -1,137 +1,136 @@
 ---
-title: "第31回: MLOps完全版【後編】実装編: Julia/Rust/Elixir実装→マスター"
+title: "第31回: MLOps完全版【後編】実装編: Rust/Rust/Elixir実装→マスター"
 emoji: "🔄"
 type: "tech"
-topics: ["machinelearning", "mlops", "rust", "julia", "elixir"]
+topics: ["machinelearning", "mlops", "rust", "rust", "elixir"]
 published: true
 slug: "ml-lecture-31-part2"
 difficulty: "advanced"
 time_estimate: "90 minutes"
-languages: ["Julia", "Rust", "Elixir"]
+languages: ["Rust", "Elixir"]
 keywords: ["機械学習", "深層学習", "生成モデル"]
 ---
 > **📖 前編（理論編）**: [第31回前編: MLOps理論編](./ml-lecture-31-part1) | **← 理論・数式ゾーンへ**
 
-## 💻 Z5. 試練（実装）（60分）— ⚡Julia実験管理 + 🦀Rust MLOpsツール + 🔮Elixir監視
+## 💻 Z5. 試練（実装）（60分）— 🦀Rust実験管理 + 🦀Rust MLOpsツール + 🔮Elixir監視
 
-### 4.1 ⚡ Julia実験管理 — MLflow統合
+### 4.1 🦀 Rust実験管理 — MLflow統合
 
-Juliaで実験トラッキングを実装する。`MLFlowClient.jl`を使ってMLflow APIと通信。
+Rustで実験トラッキングを実装する。`MLFlowClient.jl`を使ってMLflow APIと通信。
 
-```julia
-using HTTP, JSON3, Dates
+```rust
+use reqwest::blocking::Client;
+use serde_json::json;
+use std::collections::HashMap;
+use std::time::{SystemTime, UNIX_EPOCH};
 
-# MLflow tracking server URL
-const MLFLOW_URI = "http://localhost:5000"
+// MLflow tracking server URL
+const MLFLOW_URI: &str = "http://localhost:5000";
 
-"""
-Log parameters to MLflow
-"""
-function log_params(run_id::String, params::Dict{String, Any})
-    url = "$MLFLOW_URI/api/2.0/mlflow/runs/log-parameter"
+/// 現在時刻をミリ秒UNIXタイムスタンプとして返す
+fn now_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as u64
+}
 
-    for (key, value) in params
-        body = JSON3.write(Dict(
-            "run_id" => run_id,
-            "key" => key,
-            "value" => string(value)
-        ))
+/// MLflowにパラメータを記録する
+fn log_params(client: &Client, run_id: &str, params: &HashMap<&str, String>) -> reqwest::Result<()> {
+    let url = format!("{}/api/2.0/mlflow/runs/log-parameter", MLFLOW_URI);
+    for (key, value) in params {
+        let body = json!({
+            "run_id": run_id,
+            "key": key,
+            "value": value
+        });
+        client.post(&url).json(&body).send()?;
+    }
+    Ok(())
+}
 
-        HTTP.post(url, ["Content-Type" => "application/json"], body)
-    end
-end
+/// MLflowにメトリクスをステップ付きで記録する
+fn log_metrics(client: &Client, run_id: &str, metrics: &HashMap<&str, f64>, step: i64) -> reqwest::Result<()> {
+    let url = format!("{}/api/2.0/mlflow/runs/log-metric", MLFLOW_URI);
+    for (key, &value) in metrics {
+        let body = json!({
+            "run_id": run_id,
+            "key": key,
+            "value": value,
+            "timestamp": now_ms(),
+            "step": step
+        });
+        client.post(&url).json(&body).send()?;
+    }
+    Ok(())
+}
 
-"""
-Log metrics to MLflow with step
-"""
-function log_metrics(run_id::String, metrics::Dict{String, Float64}, step::Int)
-    url = "$MLFLOW_URI/api/2.0/mlflow/runs/log-metric"
+/// MLflow実験runを作成し、run_idを返す
+fn create_run(client: &Client, experiment_id: &str, run_name: &str) -> reqwest::Result<String> {
+    let url = format!("{}/api/2.0/mlflow/runs/create", MLFLOW_URI);
+    let body = json!({
+        "experiment_id": experiment_id,
+        "run_name": run_name,
+        "start_time": now_ms()
+    });
+    let resp: serde_json::Value = client.post(&url).json(&body).send()?.json()?;
+    Ok(resp["run"]["info"]["run_id"].as_str().unwrap().to_string())
+}
 
-    for (key, value) in metrics
-        body = JSON3.write(Dict(
-            "run_id" => run_id,
-            "key" => key,
-            "value" => value,
-            "timestamp" => round(Int, datetime2unix(now()) * 1000),
-            "step" => step
-        ))
+/// MLflow runを完了状態に更新する
+fn end_run(client: &Client, run_id: &str, status: &str) -> reqwest::Result<()> {
+    let url = format!("{}/api/2.0/mlflow/runs/update", MLFLOW_URI);
+    let body = json!({
+        "run_id": run_id,
+        "status": status,
+        "end_time": now_ms()
+    });
+    client.post(&url).json(&body).send()?;
+    Ok(())
+}
 
-        HTTP.post(url, ["Content-Type" => "application/json"], body)
-    end
-end
+/// 訓練ループを実行しMLflowに記録するサンプル
+fn train_and_log(client: &Client) -> reqwest::Result<String> {
+    // runを作成
+    let run_id = create_run(client, "0", "rust-training-run")?;
 
-"""
-Create MLflow run
-"""
-function create_run(experiment_id::String, run_name::String)
-    url = "$MLFLOW_URI/api/2.0/mlflow/runs/create"
+    // ハイパーパラメータを記録
+    let params: HashMap<&str, String> = HashMap::from([
+        ("learning_rate", "0.001".to_string()),
+        ("batch_size",    "32".to_string()),
+        ("epochs",        "10".to_string()),
+        ("optimizer",     "Adam".to_string()),
+    ]);
+    log_params(client, &run_id, &params)?;
 
-    body = JSON3.write(Dict(
-        "experiment_id" => experiment_id,
-        "run_name" => run_name,
-        "start_time" => round(Int, datetime2unix(now()) * 1000)
-    ))
+    // 訓練ループをシミュレーション
+    for epoch in 0..10 {
+        let train_loss = 1.0 / (1.0 + epoch as f64 * 0.1); // 減少するloss
+        let val_acc    = 0.8 + epoch as f64 * 0.02;          // 増加するaccuracy
 
-    response = HTTP.post(url, ["Content-Type" => "application/json"], body)
-    result = JSON3.read(String(response.body))
+        // メトリクスをステップ付きで記録
+        let metrics: HashMap<&str, f64> = HashMap::from([
+            ("train_loss", train_loss),
+            ("val_acc",    val_acc),
+        ]);
+        log_metrics(client, &run_id, &metrics, epoch as i64)?;
 
-    return result["run"]["info"]["run_id"]
-end
+        println!("Epoch {}: loss={:.4}, acc={:.4}", epoch + 1, train_loss, val_acc);
+    }
 
-"""
-Complete MLflow run
-"""
-function end_run(run_id::String, status::String="FINISHED")
-    url = "$MLFLOW_URI/api/2.0/mlflow/runs/update"
+    // runを終了
+    end_run(client, &run_id, "FINISHED")?;
+    println!("✅ Run completed: {}", run_id);
 
-    body = JSON3.write(Dict(
-        "run_id" => run_id,
-        "status" => status,
-        "end_time" => round(Int, datetime2unix(now()) * 1000)
-    ))
+    Ok(run_id)
+}
 
-    HTTP.post(url, ["Content-Type" => "application/json"], body)
-end
-
-# Example: Track a training run
-function train_and_log()
-    # Create run
-    experiment_id = "0"  # Default experiment
-    run_id = create_run(experiment_id, "julia-training-run")
-
-    # Log hyperparameters
-    params = Dict(
-        "learning_rate" => 0.001,
-        "batch_size" => 32,
-        "epochs" => 10,
-        "optimizer" => "Adam"
-    )
-    log_params(run_id, params)
-
-    # Simulate training loop
-    for epoch in 1:10
-        train_loss = 1.0 / (1 + epoch * 0.1)  # Decreasing loss
-        val_acc = 0.8 + epoch * 0.02  # Increasing accuracy
-
-        # Log metrics with step
-        metrics = Dict(
-            "train_loss" => train_loss,
-            "val_acc" => val_acc
-        )
-        log_metrics(run_id, metrics, epoch)
-
-        println("Epoch $epoch: loss=$train_loss, acc=$val_acc")
-    end
-
-    # End run
-    end_run(run_id)
-    println("✅ Run completed: $run_id")
-
-    return run_id
-end
-
-# Run experiment
-run_id = train_and_log()
+fn main() -> reqwest::Result<()> {
+    let client = Client::new();
+    let run_id = train_and_log(&client)?;
+    println!("実験ID: {}", run_id);
+    Ok(())
+}
 ```
 
 出力:
@@ -149,11 +148,11 @@ Epoch 10: loss=0.5, acc=1.0
 - メトリクス時系列グラフ
 - Run間の比較
 
-**Juliaの利点**:
+**Rustの利点**:
 
 - 訓練ループが高速 (C/Fortranレベル)
 - MLflow APIは単なるHTTP POST (言語非依存)
-- 多重ディスパッチで型に応じた最適化
+- ゼロコスト抽象化で型に応じた最適化
 
 ### 4.2 🦀 Rust MLOpsツール — Prometheus Exporter & Graceful Shutdown
 
@@ -656,56 +655,83 @@ Span: model.predict [12.5ms]
 
 **分散システムでリクエストがどこで遅延しているかを可視化できる。**
 
-### 4.4 データドリフト検出 — KS検定・PSI・JSD実装（Julia）
+### 4.4 データドリフト検出 — KS検定・PSI・JSD実装（Rust）
 
 本番モデルで**データドリフト**を自動検出する。学習時分布と推論時分布の乖離を統計的に検定し、必要に応じて再訓練トリガーを発火させる。
 
 #### 4.4.1 KS検定（Kolmogorov-Smirnov Test）
 
-```julia
-using HypothesisTests
-using Distributions
-using Statistics
+```rust
+use std::collections::HashMap;
 
-"""
-KS検定でデータドリフトを検出
-H0: p_ref と p_curr は同一分布
-p < 0.05 なら有意なドリフトあり
-"""
-function detect_drift_ks(p_ref::Vector{Float64}, p_curr::Vector{Float64};
-                          α::Float64=0.05)
-    test = ApproximateTwoSampleKSTest(p_ref, p_curr)
-    p_value = pvalue(test)
-    ks_stat = test.δ  # KS統計量 D
+/// KS検定でデータドリフトを検出
+/// H0: p_ref と p_curr は同一分布
+/// p < 0.05 なら有意なドリフトあり
+fn detect_drift_ks(p_ref: &[f64], p_curr: &[f64], alpha: f64) -> HashMap<&'static str, String> {
+    let n1 = p_ref.len() as f64;
+    let n2 = p_curr.len() as f64;
 
-    result = Dict(
-        "test"      => "KS",
-        "statistic" => round(ks_stat, digits=4),
-        "p_value"   => round(p_value, digits=4),
-        "drifted"   => p_value < α,
-        "threshold" => α,
-    )
-    return result
-end
+    let mut sorted1 = p_ref.to_vec();
+    let mut sorted2 = p_curr.to_vec();
+    sorted1.sort_unstable_by(f64::total_cmp);
+    sorted2.sort_unstable_by(f64::total_cmp);
 
-# --- シミュレーション ---
-# 学習時分布: N(0, 1)
-p_ref  = randn(10_000)
+    // 全点で経験CDF差の最大値を計算（KS統計量 D）
+    let mut all_vals: Vec<f64> = sorted1.iter().chain(sorted2.iter()).copied().collect();
+    all_vals.sort_unstable_by(f64::total_cmp);
+    all_vals.dedup();
 
-# ケース1: ドリフトなし
-p_stable = randn(1_000)
-r1 = detect_drift_ks(p_ref, p_stable)
-println("ドリフトなし: ", r1)
+    let ks_stat = all_vals.iter().map(|&v| {
+        let cdf1 = sorted1.iter().filter(|&&x| x <= v).count() as f64 / n1;
+        let cdf2 = sorted2.iter().filter(|&&x| x <= v).count() as f64 / n2;
+        (cdf1 - cdf2).abs()
+    }).fold(0.0_f64, f64::max);
 
-# ケース2: 平均シフト (+1.0)
-p_shifted = randn(1_000) .+ 1.0
-r2 = detect_drift_ks(p_ref, p_shifted)
-println("平均シフト:   ", r2)
+    // p値の近似計算（コルモゴロフ分布）
+    let n_eff = (n1 * n2) / (n1 + n2);
+    let lambda = (n_eff.sqrt() + 0.12 + 0.11 / n_eff.sqrt()) * ks_stat;
+    let p_value = (2.0 * (-2.0 * lambda * lambda).exp()).min(1.0).max(0.0);
 
-# ケース3: 分散拡大 (×2)
-p_wider = randn(1_000) .* 2.0
-r3 = detect_drift_ks(p_ref, p_wider)
-println("分散拡大:     ", r3)
+    HashMap::from([
+        ("test",      "KS".to_string()),
+        ("statistic", format!("{:.4}", ks_stat)),
+        ("p_value",   format!("{:.4}", p_value)),
+        ("drifted",   (p_value < alpha).to_string()),
+        ("threshold", format!("{}", alpha)),
+    ])
+}
+
+fn main() {
+    use rand::distributions::{Distribution, StandardNormal};
+    let mut rng = rand::thread_rng();
+
+    // --- シミュレーション ---
+    // 学習時分布: N(0, 1)
+    let p_ref: Vec<f64> = (0..10_000)
+        .map(|_| StandardNormal.sample(&mut rng))
+        .collect();
+
+    // ケース1: ドリフトなし
+    let p_stable: Vec<f64> = (0..1_000)
+        .map(|_| StandardNormal.sample(&mut rng))
+        .collect();
+    let r1 = detect_drift_ks(&p_ref, &p_stable, 0.05);
+    println!("ドリフトなし: {:?}", r1);
+
+    // ケース2: 平均シフト (+1.0)
+    let p_shifted: Vec<f64> = (0..1_000)
+        .map(|_| StandardNormal.sample::<f64, _>(&mut rng) + 1.0)
+        .collect();
+    let r2 = detect_drift_ks(&p_ref, &p_shifted, 0.05);
+    println!("平均シフト:   {:?}", r2);
+
+    // ケース3: 分散拡大 (×2)
+    let p_wider: Vec<f64> = (0..1_000)
+        .map(|_| StandardNormal.sample::<f64, _>(&mut rng) * 2.0)
+        .collect();
+    let r3 = detect_drift_ks(&p_ref, &p_wider, 0.05);
+    println!("分散拡大:     {:?}", r3);
+}
 ```
 
 出力:
@@ -725,42 +751,66 @@ PSI はスコア分布の安定性を定量化する業界標準指標。
 | 0.10–0.20 | 軽度シフト（モニタリング強化）|
 | > 0.20    | 重大シフト（即時再訓練）      |
 
-```julia
-"""
-PSI (Population Stability Index) を計算
-PSI = Σ (p_curr - p_ref) × ln(p_curr / p_ref)
-"""
-function calc_psi(p_ref::Vector{Float64}, p_curr::Vector{Float64};
-                  n_bins::Int=10, ε::Float64=1e-6)
-    # ビン境界を学習時分布のパーセンタイルで決定
-    edges = quantile(p_ref, range(0, 1, length=n_bins+1))
-    edges[1]   -= ε   # 左端を少し広げて全サンプルを含める
-    edges[end] += ε
+```rust
+use std::collections::HashMap;
 
-    # 各ビンの割合を計算
-    ref_counts  = fit(Histogram, p_ref,  edges).weights
-    curr_counts = fit(Histogram, p_curr, edges).weights
+/// PSI (Population Stability Index) を計算
+/// PSI = Σ (p_curr - p_ref) × ln(p_curr / p_ref)
+fn calc_psi(p_ref: &[f64], p_curr: &[f64], n_bins: usize, eps: f64) -> HashMap<&'static str, String> {
+    // ビン境界を学習時分布のパーセンタイルで決定
+    let mut sorted_ref = p_ref.to_vec();
+    sorted_ref.sort_unstable_by(f64::total_cmp);
 
-    ref_pct  = (ref_counts  .+ ε) ./ sum(ref_counts)
-    curr_pct = (curr_counts .+ ε) ./ sum(curr_counts)
+    let edges: Vec<f64> = (0..=n_bins).map(|i| {
+        let idx = ((i as f64 / n_bins as f64) * (sorted_ref.len() - 1) as f64) as usize;
+        sorted_ref[idx]
+    }).collect();
 
-    # PSI 計算
-    psi_bins = (curr_pct .- ref_pct) .* log.(curr_pct ./ ref_pct)
-    psi_total = sum(psi_bins)
+    let edge_min = edges[0] - eps;
+    let edge_max = edges[n_bins] + eps;
 
-    return Dict(
-        "psi"        => round(psi_total, digits=4),
-        "psi_bins"   => round.(psi_bins, digits=4),
-        "drifted"    => psi_total > 0.20,
-        "warning"    => psi_total > 0.10,
-        "bin_edges"  => round.(edges, digits=2),
-    )
-end
+    // 各ビンにサンプルを振り分けてカウント
+    let bin_for = |x: f64| -> usize {
+        let x = x.max(edge_min).min(edge_max);
+        edges[1..].iter().position(|&e| x <= e).unwrap_or(n_bins - 1)
+    };
 
-println("=== PSI分析 ===")
-println("ドリフトなし: PSI = ", calc_psi(p_ref, p_stable)["psi"])
-println("平均シフト:   PSI = ", calc_psi(p_ref, p_shifted)["psi"])
-println("分散拡大:     PSI = ", calc_psi(p_ref, p_wider)["psi"])
+    let mut ref_counts  = vec![0usize; n_bins];
+    let mut curr_counts = vec![0usize; n_bins];
+    for &x in p_ref  { ref_counts[bin_for(x)]  += 1; }
+    for &x in p_curr { curr_counts[bin_for(x)] += 1; }
+
+    let ref_sum  = p_ref.len()  as f64;
+    let curr_sum = p_curr.len() as f64;
+
+    // PSI 計算
+    let psi_total: f64 = ref_counts.iter().zip(curr_counts.iter()).map(|(&r, &c)| {
+        let ref_pct  = (r as f64 + eps) / ref_sum;
+        let curr_pct = (c as f64 + eps) / curr_sum;
+        (curr_pct - ref_pct) * (curr_pct / ref_pct).ln()
+    }).sum();
+
+    HashMap::from([
+        ("psi",     format!("{:.4}", psi_total)),
+        ("drifted", (psi_total > 0.20).to_string()),
+        ("warning", (psi_total > 0.10).to_string()),
+    ])
+}
+
+fn main() {
+    use rand::distributions::{Distribution, StandardNormal};
+    let mut rng = rand::thread_rng();
+
+    let p_ref: Vec<f64>     = (0..10_000).map(|_| StandardNormal.sample(&mut rng)).collect();
+    let p_stable: Vec<f64>  = (0..1_000).map(|_| StandardNormal.sample(&mut rng)).collect();
+    let p_shifted: Vec<f64> = (0..1_000).map(|_| StandardNormal.sample::<f64, _>(&mut rng) + 1.0).collect();
+    let p_wider: Vec<f64>   = (0..1_000).map(|_| StandardNormal.sample::<f64, _>(&mut rng) * 2.0).collect();
+
+    println!("=== PSI分析 ===");
+    println!("ドリフトなし: PSI = {}", calc_psi(&p_ref, &p_stable,  10, 1e-6)["psi"]);
+    println!("平均シフト:   PSI = {}", calc_psi(&p_ref, &p_shifted, 10, 1e-6)["psi"]);
+    println!("分散拡大:     PSI = {}", calc_psi(&p_ref, &p_wider,   10, 1e-6)["psi"]);
+}
 ```
 
 出力:
@@ -773,66 +823,93 @@ println("分散拡大:     PSI = ", calc_psi(p_ref, p_wider)["psi"])
 
 #### 4.4.3 JSD（Jensen-Shannon Divergence）& 自動再訓練トリガー
 
-```julia
-using StatsBase
+```rust
+use std::collections::HashMap;
+use chrono::Local;
 
-"""
-Jensen-Shannon Divergence（対称KLダイバージェンス）
-JSD ∈ [0, 1]、値が大きいほど分布の乖離が大
-"""
-function calc_jsd(p_ref::Vector{Float64}, p_curr::Vector{Float64};
-                  n_bins::Int=10, ε::Float64=1e-6)
-    edges = quantile(p_ref, range(0, 1, length=n_bins+1))
-    edges[1] -= ε; edges[end] += ε
+/// Jensen-Shannon Divergence（対称KLダイバージェンス）
+/// JSD ∈ [0, 1]、値が大きいほど分布の乖離が大
+fn calc_jsd(p_ref: &[f64], p_curr: &[f64], n_bins: usize, eps: f64) -> f64 {
+    let mut sorted_ref = p_ref.to_vec();
+    sorted_ref.sort_unstable_by(f64::total_cmp);
 
-    P = normalize(fit(Histogram, p_ref,  edges).weights .+ ε, 1)
-    Q = normalize(fit(Histogram, p_curr, edges).weights .+ ε, 1)
-    M = (P .+ Q) ./ 2
+    let edges: Vec<f64> = (0..=n_bins).map(|i| {
+        let idx = ((i as f64 / n_bins as f64) * (sorted_ref.len() - 1) as f64) as usize;
+        sorted_ref[idx]
+    }).collect();
+    let edge_min = edges[0] - eps;
+    let edge_max = edges[n_bins] + eps;
 
-    kl_pm = sum(P .* log.(P ./ M))
-    kl_qm = sum(Q .* log.(Q ./ M))
-    jsd   = (kl_pm + kl_qm) / 2
+    let bin_for = |x: f64| -> usize {
+        let x = x.max(edge_min).min(edge_max);
+        edges[1..].iter().position(|&e| x <= e).unwrap_or(n_bins - 1)
+    };
 
-    return round(jsd, digits=4)
-end
+    let mut ref_counts  = vec![0usize; n_bins];
+    let mut curr_counts = vec![0usize; n_bins];
+    for &x in p_ref  { ref_counts[bin_for(x)]  += 1; }
+    for &x in p_curr { curr_counts[bin_for(x)] += 1; }
 
-"""
-統合ドリフト検出パイプライン — 全指標を統合してアラート
-"""
-function drift_pipeline(p_ref::Vector{Float64}, p_curr::Vector{Float64})
-    ks  = detect_drift_ks(p_ref, p_curr)
-    psi = calc_psi(p_ref, p_curr)
-    jsd = calc_jsd(p_ref, p_curr)
+    // 正規化して確率分布に変換
+    let ref_sum  = p_ref.len()  as f64;
+    let curr_sum = p_curr.len() as f64;
+    let p: Vec<f64> = ref_counts.iter().map(|&c|  (c as f64 + eps) / ref_sum).collect();
+    let q: Vec<f64> = curr_counts.iter().map(|&c| (c as f64 + eps) / curr_sum).collect();
+    let m: Vec<f64> = p.iter().zip(q.iter()).map(|(pi, qi)| (pi + qi) / 2.0).collect();
 
-    # アラートレベルの判定
-    alert = if psi["psi"] > 0.20 || ks["drifted"]
+    let kl_pm: f64 = p.iter().zip(m.iter()).map(|(pi, mi)| pi * (pi / mi).ln()).sum();
+    let kl_qm: f64 = q.iter().zip(m.iter()).map(|(qi, mi)| qi * (qi / mi).ln()).sum();
+    let jsd = (kl_pm + kl_qm) / 2.0;
+
+    (jsd * 10000.0).round() / 10000.0
+}
+
+/// 統合ドリフト検出パイプライン — 全指標を統合してアラート
+fn drift_pipeline(p_ref: &[f64], p_curr: &[f64]) {
+    let ks  = detect_drift_ks(p_ref, p_curr, 0.05);
+    let psi = calc_psi(p_ref, p_curr, 10, 1e-6);
+    let jsd = calc_jsd(p_ref, p_curr, 10, 1e-6);
+
+    let psi_val: f64 = psi["psi"].parse().unwrap_or(0.0);
+    let drifted: bool = ks["drifted"].parse().unwrap_or(false);
+    let warning: bool = psi["warning"].parse().unwrap_or(false);
+
+    // アラートレベルの判定
+    let alert = if psi_val > 0.20 || drifted {
         "🚨 CRITICAL — 即時再訓練トリガー"
-    elseif psi["warning"]
+    } else if warning {
         "⚠️  WARNING  — モニタリング強化"
-    else
+    } else {
         "✅ STABLE   — 正常運用継続"
-    end
+    };
 
-    println("""
-    ┌─────────────────────────────────────────┐
-    │ データドリフトレポート                    │
-    ├─────────────────────────────────────────┤
-    │ KS統計量  : $(lpad(ks["statistic"], 8))  (p=$(ks["p_value"])) │
-    │ PSI       : $(lpad(psi["psi"], 8))                       │
-    │ JSD       : $(lpad(jsd, 8))                              │
-    │ 判定      : $alert
-    └─────────────────────────────────────────┘
-    """)
+    println!("┌─────────────────────────────────────────┐");
+    println!("│ データドリフトレポート                    │");
+    println!("├─────────────────────────────────────────┤");
+    println!("│ KS統計量  : {:>8}  (p={})          │", ks["statistic"], ks["p_value"]);
+    println!("│ PSI       : {:>8}                   │", psi["psi"]);
+    println!("│ JSD       : {:>8}                   │", jsd);
+    println!("│ 判定      : {}", alert);
+    println!("└─────────────────────────────────────────┘");
 
-    # 自動再訓練トリガー
-    if psi["psi"] > 0.20
-        println("🔄 再訓練ジョブをキュー投入: $(Dates.now())")
-        # trigger_retrain_job("model-v1")  # 実装例
-    end
-end
+    // 自動再訓練トリガー
+    if psi_val > 0.20 {
+        println!("🔄 再訓練ジョブをキュー投入: {}", Local::now().format("%Y-%m-%dT%H:%M:%S"));
+        // trigger_retrain_job("model-v1");  // 実装例
+    }
+}
 
-drift_pipeline(p_ref, p_stable)
-drift_pipeline(p_ref, p_shifted)
+fn main() {
+    use rand::distributions::{Distribution, StandardNormal};
+    let mut rng = rand::thread_rng();
+
+    let p_ref: Vec<f64>     = (0..10_000).map(|_| StandardNormal.sample(&mut rng)).collect();
+    let p_stable: Vec<f64>  = (0..1_000).map(|_| StandardNormal.sample(&mut rng)).collect();
+    let p_shifted: Vec<f64> = (0..1_000).map(|_| StandardNormal.sample::<f64, _>(&mut rng) + 1.0).collect();
+
+    drift_pipeline(&p_ref, &p_stable);
+    drift_pipeline(&p_ref, &p_shifted);
+}
 ```
 
 **KS検定 vs PSI の使い分け**:
@@ -847,232 +924,314 @@ drift_pipeline(p_ref, p_shifted)
 
 実装したコンポーネントを統合し、**モデルカード作成・SHAP可視化・監査ログ・MLflow+Prometheus監視パイプライン**を構築する。
 
-#### 4.5.1 モデルカード自動生成（Julia）
+#### 4.5.1 モデルカード自動生成（Rust）
 
-```julia
-using Dates, JSON3
+```rust
+use std::collections::HashMap;
+use chrono::{DateTime, Local};
+use std::fs::OpenOptions;
+use std::io::Write;
 
-"""
-モデルカード: 公平性・性能・制約を文書化する標準フォーマット
-"""
-struct ModelCard
-    model_name::String
-    version::String
-    trained_at::DateTime
-    author::String
-    description::String
-    metrics::Dict{String, Float64}
-    fairness::Dict{String, Any}
-    limitations::Vector{String}
-    intended_use::String
-    mlflow_run_id::String
-end
+/// モデルカード: 公平性・性能・制約を文書化する標準フォーマット
+struct ModelCard {
+    model_name:    String,
+    version:       String,
+    trained_at:    DateTime<Local>,
+    author:        String,
+    description:   String,
+    metrics:       HashMap<String, f64>,
+    fairness:      HashMap<String, f64>,
+    limitations:   Vec<String>,
+    intended_use:  String,
+    mlflow_run_id: String,
+}
 
-function generate_model_card(card::ModelCard)
-    doc = """
-    # Model Card: $(card.model_name) v$(card.version)
+fn generate_model_card(card: &ModelCard) -> String {
+    let metrics_md: String = card.metrics.iter()
+        .map(|(k, v)| format!("- **{}**: {:.4}", k, v))
+        .collect::<Vec<_>>()
+        .join("\n");
 
-    **作成日**: $(Dates.format(card.trained_at, "yyyy-mm-dd"))
-    **作者**: $(card.author)
-    **MLflow Run**: `$(card.mlflow_run_id)`
+    let fairness_md: String = card.fairness.iter()
+        .map(|(k, v)| format!("- **{}**: {:.4}", k, v))
+        .collect::<Vec<_>>()
+        .join("\n");
 
-    ## 概要
-    $(card.description)
+    let limitations_md: String = card.limitations.iter()
+        .map(|l| format!("- {}", l))
+        .collect::<Vec<_>>()
+        .join("\n");
 
-    ## 意図された用途
-    $(card.intended_use)
+    format!(
+        "# Model Card: {} v{}\n\n\
+         **作成日**: {}\n\
+         **作者**: {}\n\
+         **MLflow Run**: `{}`\n\n\
+         ## 概要\n{}\n\n\
+         ## 意図された用途\n{}\n\n\
+         ## 性能指標\n{}\n\n\
+         ## 公平性評価\n{}\n\n\
+         ## 既知の制限事項\n{}\n",
+        card.model_name,
+        card.version,
+        card.trained_at.format("%Y-%m-%d"),
+        card.author,
+        card.mlflow_run_id,
+        card.description,
+        card.intended_use,
+        metrics_md,
+        fairness_md,
+        limitations_md,
+    )
+}
 
-    ## 性能指標
-    $(join(["- **$k**: $(round(v, digits=4))" for (k,v) in card.metrics], "\n"))
+fn main() -> std::io::Result<()> {
+    // 実際の使用例
+    let card = ModelCard {
+        model_name:    "fraud-detection-xgb".to_string(),
+        version:       "2.1.0".to_string(),
+        trained_at:    Local::now(),
+        author:        "MLOps Team".to_string(),
+        description:   "XGBoostベースの不正取引検出モデル。特徴量50個を使用。".to_string(),
+        metrics:       HashMap::from([
+            ("accuracy".to_string(), 0.9823),
+            ("f1".to_string(),       0.8741),
+            ("auc_roc".to_string(),  0.9912),
+        ]),
+        fairness:      HashMap::from([
+            ("male_fpr".to_string(),        0.012),
+            ("female_fpr".to_string(),      0.011),
+            ("disparity_ratio".to_string(), 1.09),
+        ]),
+        limitations:   vec![
+            "6ヶ月以上前のデータパターンには対応していない".to_string(),
+            "極端に高額な取引（>$1M）は学習データ不足".to_string(),
+        ],
+        intended_use:  "リアルタイム決済システムでの不正検出（B2C）".to_string(),
+        mlflow_run_id: "a3f9c2e1b4d87f3a".to_string(),
+    };
 
-    ## 公平性評価
-    $(join(["- **$k**: $v" for (k,v) in card.fairness], "\n"))
-
-    ## 既知の制限事項
-    $(join(["- $l" for l in card.limitations], "\n"))
-    """
-    return doc
-end
-
-# 実際の使用例
-card = ModelCard(
-    "fraud-detection-xgb",
-    "2.1.0",
-    now(),
-    "MLOps Team",
-    "XGBoostベースの不正取引検出モデル。特徴量50個を使用。",
-    Dict("accuracy"=>0.9823, "f1"=>0.8741, "auc_roc"=>0.9912),
-    Dict("male_fpr"=>0.012, "female_fpr"=>0.011, "disparity_ratio"=>1.09),
-    ["6ヶ月以上前のデータパターンには対応していない",
-     "極端に高額な取引（>$1M）は学習データ不足"],
-    "リアルタイム決済システムでの不正検出（B2C）",
-    "a3f9c2e1b4d87f3a"
-)
-
-md_output = generate_model_card(card)
-write("model_card_v2.1.0.md", md_output)
-println("✅ モデルカード生成完了")
+    let md_output = generate_model_card(&card);
+    let mut file = OpenOptions::new().write(true).create(true).truncate(true)
+        .open("model_card_v2.1.0.md")?;
+    file.write_all(md_output.as_bytes())?;
+    println!("✅ モデルカード生成完了");
+    Ok(())
+}
 ```
 
-#### 4.5.2 監査ログ実装（Julia + JSON Lines）
+#### 4.5.2 監査ログ実装（Rust + JSON Lines）
 
-```julia
-using Dates, JSON3, UUIDs
+```rust
+use std::collections::HashMap;
+use std::fs::OpenOptions;
+use std::io::Write;
+use std::time::Instant;
+use chrono::{DateTime, Local};
+use serde_json::json;
+use uuid::Uuid;
 
-"""
-監査ログ: 誰が・いつ・何を・どんな入出力で推論したかを記録
-GDPR/金融規制対応に必須
-"""
-struct AuditEntry
-    request_id::String
-    timestamp::DateTime
-    user_id::String
-    model_name::String
-    model_version::String
-    input_hash::String    # プライバシー保護: 生データではなくハッシュ
-    output::Any
-    latency_ms::Float64
-    decision::String
-    explanation::Dict{String, Any}
-end
+/// 監査ログ: 誰が・いつ・何を・どんな入出力で推論したかを記録
+/// GDPR/金融規制対応に必須
+struct AuditEntry {
+    request_id:    String,
+    timestamp:     DateTime<Local>,
+    user_id:       String,
+    model_name:    String,
+    model_version: String,
+    input_hash:    String,   // プライバシー保護: 生データではなくハッシュ
+    output:        f64,
+    latency_ms:    f64,
+    decision:      String,
+    explanation:   HashMap<&'static str, f64>,
+}
 
-function log_audit(entry::AuditEntry; log_file::String="audit.jsonl")
-    record = Dict(
-        "request_id"    => entry.request_id,
-        "timestamp"     => Dates.format(entry.timestamp, "yyyy-mm-ddTHH:MM:SS.sss"),
-        "user_id"       => entry.user_id,
-        "model"         => "$(entry.model_name)@$(entry.model_version)",
-        "input_hash"    => entry.input_hash,
-        "output"        => entry.output,
-        "latency_ms"    => entry.latency_ms,
-        "decision"      => entry.decision,
-        "explanation"   => entry.explanation,
-    )
+fn log_audit(entry: &AuditEntry, log_file: &str) -> std::io::Result<()> {
+    let record = json!({
+        "request_id":  entry.request_id,
+        "timestamp":   entry.timestamp.format("%Y-%m-%dT%H:%M:%S%.3f").to_string(),
+        "user_id":     entry.user_id,
+        "model":       format!("{}@{}", entry.model_name, entry.model_version),
+        "input_hash":  entry.input_hash,
+        "output":      entry.output,
+        "latency_ms":  entry.latency_ms,
+        "decision":    entry.decision,
+        "explanation": entry.explanation,
+    });
+    let mut file = OpenOptions::new().append(true).create(true).open(log_file)?;
+    writeln!(file, "{}", record)?;
+    Ok(())
+}
 
-    open(log_file, "a") do f
-        println(f, JSON3.write(record))
-    end
-end
+fn sigmoid(x: f64) -> f64 { 1.0 / (1.0 + (-x).exp()) }
 
-# 推論パイプラインに組み込む例
-function predict_with_audit(input_features::Vector{Float64};
-                             user_id::String="anon", model_version::String="2.1.0")
-    request_id = string(uuid4())
-    t_start = time()
+/// 推論パイプラインに組み込む例
+fn predict_with_audit(
+    input_features: &[f64],
+    user_id: &str,
+    model_version: &str,
+) -> (String, f64, String) {
+    let request_id = Uuid::new_v4().to_string();
+    let t_start = Instant::now();
 
-    # 推論 (疑似実装)
-    score = sum(input_features .* randn(length(input_features))) |> sigmoid
-    decision = score > 0.5 ? "FRAUD" : "LEGITIMATE"
+    // 推論 (疑似実装)
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+    let dot: f64 = input_features.iter().enumerate()
+        .map(|(i, &x)| x * ((i as f64 * 1.1).sin())) // 疑似重み
+        .sum();
+    let score = sigmoid(dot);
+    let decision = if score > 0.5 { "FRAUD" } else { "LEGITIMATE" };
 
-    # SHAP値による説明 (疑似実装)
-    shap_values = Dict(
-        "amount_usd"     => 0.32,
-        "merchant_risk"  => 0.28,
-        "user_history"   => -0.15,
-        "device_age"     => -0.08,
-    )
+    // SHAP値による説明 (疑似実装)
+    let shap_values: HashMap<&'static str, f64> = HashMap::from([
+        ("amount_usd",    0.32),
+        ("merchant_risk", 0.28),
+        ("user_history", -0.15),
+        ("device_age",   -0.08),
+    ]);
 
-    latency_ms = (time() - t_start) * 1000
-    input_hash = string(hash(input_features), base=16)
+    let latency_ms = t_start.elapsed().as_secs_f64() * 1000.0;
 
-    log_audit(AuditEntry(
-        request_id, now(), user_id,
-        "fraud-detection-xgb", model_version,
-        input_hash, score, latency_ms, decision, shap_values
-    ))
+    // プライバシー保護: 入力をハッシュ化
+    let mut hasher = DefaultHasher::new();
+    for &x in input_features { x.to_bits().hash(&mut hasher); }
+    let input_hash = format!("{:016x}", hasher.finish());
 
-    return (decision=decision, score=score, request_id=request_id)
-end
+    let entry = AuditEntry {
+        request_id: request_id.clone(),
+        timestamp: Local::now(),
+        user_id: user_id.to_string(),
+        model_name: "fraud-detection-xgb".to_string(),
+        model_version: model_version.to_string(),
+        input_hash,
+        output: score,
+        latency_ms,
+        decision: decision.to_string(),
+        explanation: shap_values,
+    };
+    let _ = log_audit(&entry, "audit.jsonl");
 
-sigmoid(x) = 1 / (1 + exp(-x))
+    (decision.to_string(), score, request_id)
+}
 
-# テスト実行
-for i in 1:5
-    result = predict_with_audit(randn(10), user_id="user_$i")
-    println("Request $(result.request_id[1:8])…: $(result.decision) (score=$(round(result.score, digits=3)))")
-end
-println("✅ 監査ログ記録完了 → audit.jsonl")
+fn main() {
+    use rand::Rng;
+    let mut rng = rand::thread_rng();
+
+    // テスト実行
+    for i in 1..=5 {
+        let features: Vec<f64> = (0..10).map(|_| rng.gen::<f64>() * 2.0 - 1.0).collect();
+        let (decision, score, request_id) = predict_with_audit(&features, &format!("user_{}", i), "2.1.0");
+        println!("Request {}…: {} (score={:.3})", &request_id[..8], decision, score);
+    }
+    println!("✅ 監査ログ記録完了 → audit.jsonl");
+}
 ```
 
 #### 4.5.3 MLflow + Prometheus 監視パイプライン統合
 
-```julia
-using HTTP, JSON3, Dates
+```rust
+use reqwest::blocking::Client;
+use serde_json::json;
+use std::collections::HashMap;
+use chrono::Local;
 
-"""
-完全MLOpsパイプライン:
-訓練 → MLflow記録 → ドリフト監視 → Prometheus通知 → 自動再訓練
-"""
-function full_mlops_pipeline(;
-        experiment_name::String="production-monitoring",
-        retrain_threshold_psi::Float64=0.20)
+/// 完全MLOpsパイプライン:
+/// 訓練 → MLflow記録 → ドリフト監視 → Prometheus通知 → 自動再訓練
+fn full_mlops_pipeline(
+    client: &Client,
+    experiment_name: &str,
+    retrain_threshold_psi: f64,
+) -> Result<&'static str, Box<dyn std::error::Error>> {
+    println!("{}", "=".repeat(50));
+    println!("🚀 MLOps統合パイプライン 開始: {}", Local::now().format("%Y-%m-%dT%H:%M:%S"));
+    println!("{}", "=".repeat(50));
 
-    println("=" ^ 50)
-    println("🚀 MLOps統合パイプライン 開始: $(now())")
-    println("=" ^ 50)
+    // Step 1: MLflow実験を開始
+    let run_name = format!("monitoring-run-{}", Local::now().format("%Y%m%d-%H%M%S"));
+    let run_id = create_run(client, "0", &run_name)?;
+    println!("📊 MLflow Run: {}", run_id);
 
-    # Step 1: MLflow実験を開始
-    run_id = create_run("0", "monitoring-run-$(Dates.format(now(), "yyyymmdd-HHMMSS"))")
-    println("📊 MLflow Run: $run_id")
+    // Step 2: 参照データをロード（学習時分布）
+    use rand::distributions::{Distribution, StandardNormal};
+    let mut rng = rand::thread_rng();
+    let p_ref:  Vec<f64> = (0..10_000).map(|_| StandardNormal.sample(&mut rng)).collect();
+    let p_curr: Vec<f64> = (0..1_000)
+        .map(|_| StandardNormal.sample::<f64, _>(&mut rng) + 0.3) // 軽度シフト
+        .collect();
 
-    # Step 2: 参照データをロード（学習時分布）
-    p_ref   = randn(10_000)
-    p_curr  = randn(1_000) .+ 0.3  # 軽度シフト
+    // Step 3: ドリフト検出
+    let psi_result = calc_psi(&p_ref, &p_curr, 10, 1e-6);
+    let ks_result  = detect_drift_ks(&p_ref, &p_curr, 0.05);
+    let jsd_val    = calc_jsd(&p_ref, &p_curr, 10, 1e-6);
 
-    # Step 3: ドリフト検出
-    psi_result = calc_psi(p_ref, p_curr)
-    ks_result  = detect_drift_ks(p_ref, p_curr)
-    jsd_val    = calc_jsd(p_ref, p_curr)
+    let psi_val: f64 = psi_result["psi"].parse().unwrap_or(0.0);
+    let ks_stat: f64 = ks_result["statistic"].parse().unwrap_or(0.0);
 
-    # Step 4: メトリクスをMLflowに記録
-    log_metrics(run_id, Dict(
-        "psi"            => psi_result["psi"],
-        "ks_statistic"   => ks_result["statistic"],
-        "jsd"            => Float64(jsd_val),
-    ), 1)
-    log_params(run_id, Dict("reference_n"=>10000, "current_n"=>1000))
+    // Step 4: メトリクスをMLflowに記録
+    let metrics: HashMap<&str, f64> = HashMap::from([
+        ("psi",          psi_val),
+        ("ks_statistic", ks_stat),
+        ("jsd",          jsd_val),
+    ]);
+    log_metrics(client, &run_id, &metrics, 1)?;
+    let params: HashMap<&str, String> = HashMap::from([
+        ("reference_n", "10000".to_string()),
+        ("current_n",   "1000".to_string()),
+    ]);
+    log_params(client, &run_id, &params)?;
 
-    # Step 5: Prometheusゲージを更新 (pushgateway経由)
-    push_to_prometheus(Dict(
-        "model_psi"          => psi_result["psi"],
-        "model_ks_statistic" => ks_result["statistic"],
-        "model_jsd"          => Float64(jsd_val),
-    ))
+    // Step 5: Prometheusゲージを更新 (pushgateway経由)
+    push_to_prometheus(client, &HashMap::from([
+        ("model_psi",          psi_val),
+        ("model_ks_statistic", ks_stat),
+        ("model_jsd",          jsd_val),
+    ]));
 
-    # Step 6: 自動再訓練トリガー判定
-    if psi_result["psi"] > retrain_threshold_psi
-        println("🚨 PSI=$(psi_result["psi"]) > $retrain_threshold_psi — 再訓練トリガー発火！")
-        log_params(run_id, Dict("retrain_triggered"=>"true", "trigger_reason"=>"PSI"))
-        end_run(run_id, "FINISHED")
-        return :retrain_triggered
-    end
+    // Step 6: 自動再訓練トリガー判定
+    if psi_val > retrain_threshold_psi {
+        println!("🚨 PSI={:.4} > {} — 再訓練トリガー発火！", psi_val, retrain_threshold_psi);
+        let trigger_params: HashMap<&str, String> = HashMap::from([
+            ("retrain_triggered", "true".to_string()),
+            ("trigger_reason",    "PSI".to_string()),
+        ]);
+        log_params(client, &run_id, &trigger_params)?;
+        end_run(client, &run_id, "FINISHED")?;
+        return Ok("retrain_triggered");
+    }
 
-    end_run(run_id, "FINISHED")
-    println("✅ パイプライン完了 — ドリフトなし")
-    return :stable
-end
+    end_run(client, &run_id, "FINISHED")?;
+    println!("✅ パイプライン完了 — ドリフトなし");
+    Ok("stable")
+}
 
-function push_to_prometheus(metrics::Dict)
-    # Pushgateway への POST (実際の運用では使用)
-    url = "http://localhost:9091/metrics/job/mlops_drift_monitor"
-    body = join(["$(k) $(v)" for (k,v) in metrics], "\n") * "\n"
-    try
-        HTTP.post(url, ["Content-Type"=>"text/plain"], body)
-        println("📡 Prometheus Pushgateway 更新完了")
-    catch e
-        @warn "Pushgateway 未起動（ローカルテスト時は無視可）: $e"
-    end
-end
+fn push_to_prometheus(client: &Client, metrics: &HashMap<&str, f64>) {
+    // Pushgateway への POST (実際の運用では使用)
+    let url = "http://localhost:9091/metrics/job/mlops_drift_monitor";
+    let body: String = metrics.iter()
+        .map(|(k, v)| format!("{} {}", k, v))
+        .collect::<Vec<_>>()
+        .join("\n") + "\n";
+    match client.post(url).body(body).send() {
+        Ok(_)  => println!("📡 Prometheus Pushgateway 更新完了"),
+        Err(e) => eprintln!("Pushgateway 未起動（ローカルテスト時は無視可）: {}", e),
+    }
+}
 
-# パイプライン実行
-status = full_mlops_pipeline()
-println("最終ステータス: $status")
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let client = Client::new();
+    // パイプライン実行
+    let status = full_mlops_pipeline(&client, "production-monitoring", 0.20)?;
+    println!("最終ステータス: {}", status);
+    Ok(())
+}
 ```
 
 **統合アーキテクチャ**:
 
 ```
-[Julia 訓練ループ]
+[Rust 訓練ループ (Candle)]
       │ MLflow.log_metric()
       ▼
 [MLflow Tracking Server] ──────► [MLflow Model Registry]
@@ -1099,7 +1258,7 @@ println("最終ステータス: $status")
 
 > Progress: 90%
 > **理解度チェック**
-> 1. Julia + MLflowによる実験管理で、`log_metric` と `log_param` を使い分ける設計原則と、Artifact管理による再現性保証を説明せよ。
+> 1. Rust + MLflowによる実験管理で、`log_metric` と `log_param` を使い分ける設計原則と、Artifact管理による再現性保証を説明せよ。
 > 2. PSI（Population Stability Index）によるデータドリフト検出において、閾値（PSI > 0.2 = Significant Shift）の統計的根拠と、KS検定との使い分けを説明せよ。
 
 ### 🔬 実験・検証（30分）— 自己診断 & ミニPJ
@@ -1253,41 +1412,54 @@ Git LFSとDVCの主な違いは？
 
 ### 5.2 ミニプロジェクト1: メトリクス記録システム
 
-**目標**: ⚡Juliaで訓練ループのメトリクスをMLflowに記録。
+**目標**: 🦀Rustで訓練ループのメトリクスをMLflowに記録。
 
-```julia
-using HTTP, JSON3
+```rust
+use reqwest::blocking::Client;
+use std::collections::HashMap;
 
-# (4.1のMLflow関数を使用)
+// (4.1のMLflow関数を使用)
 
-function train_tiny_model(lr::Float64, epochs::Int)
-    experiment_id = "0"
-    run_id = create_run(experiment_id, "tiny-model-lr-$lr")
+fn train_tiny_model(client: &Client, lr: f64, epochs: usize)
+    -> Result<String, Box<dyn std::error::Error>>
+{
+    let run_id = create_run(client, "0", &format!("tiny-model-lr-{}", lr))?;
 
-    # Log hyperparameters
-    params = Dict("lr" => lr, "epochs" => epochs)
-    log_params(run_id, params)
+    // ハイパーパラメータを記録
+    let params: HashMap<&str, String> = HashMap::from([
+        ("lr",     lr.to_string()),
+        ("epochs", epochs.to_string()),
+    ]);
+    log_params(client, &run_id, &params)?;
 
-    # Training loop
-    for epoch in 1:epochs
-        # Simulate training
-        train_loss = 1.0 / (1 + epoch * lr)
-        val_acc = 0.7 + epoch * 0.03
+    // 訓練ループ
+    for epoch in 0..epochs {
+        // 疑似訓練
+        let train_loss = 1.0 / (1.0 + (epoch + 1) as f64 * lr);
+        let val_acc    = 0.7 + (epoch + 1) as f64 * 0.03;
 
-        # Log metrics
-        metrics = Dict("train_loss" => train_loss, "val_acc" => val_acc)
-        log_metrics(run_id, metrics, epoch)
-    end
+        // メトリクスを記録
+        let metrics: HashMap<&str, f64> = HashMap::from([
+            ("train_loss", train_loss),
+            ("val_acc",    val_acc),
+        ]);
+        log_metrics(client, &run_id, &metrics, epoch as i64)?;
+    }
 
-    end_run(run_id)
-    return run_id
-end
+    end_run(client, &run_id, "FINISHED")?;
+    Ok(run_id)
+}
 
-# Run hyperparameter sweep
-for lr in [0.001, 0.01, 0.1]
-    run_id = train_tiny_model(lr, 10)
-    println("Completed run: $run_id with lr=$lr")
-end
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let client = Client::new();
+
+    // ハイパーパラメータスイープを実行
+    for &lr in &[0.001_f64, 0.01, 0.1] {
+        let run_id = train_tiny_model(&client, lr, 10)?;
+        println!("Completed run: {} with lr={}", run_id, lr);
+    }
+    Ok(())
+}
 ```
 
 **MLflow UI** で3つのrunを比較:
@@ -1376,57 +1548,100 @@ p-value: 3.42e-12
 
 ### 5.4 ミニプロジェクト3: A/Bテスト統計的検出力計算
 
-**目標**: ⚡Juliaでサンプルサイズ計算 + シミュレーション。
+**目標**: 🦀Rustでサンプルサイズ計算 + シミュレーション。
 
-```julia
-using Distributions, Statistics
+```rust
+/// A/Bテストに必要なサンプルサイズを計算する
+/// p_baseline: ベースラインのコンバージョン率
+/// mde: 最小検出効果量（Minimum Detectable Effect）
+/// alpha: 第一種過誤の許容水準
+/// power: 検定力（1 - 第二種過誤）
+fn calculate_sample_size(p_baseline: f64, mde: f64, alpha: f64, power: f64) -> usize {
+    // 標準正規分布の分位点（近似式）
+    let z_alpha = normal_ppf(1.0 - alpha / 2.0); // α=0.05 → 1.96
+    let z_beta  = normal_ppf(power);              // power=0.8 → 0.84
 
-"""
-Calculate required sample size for A/B test
-"""
-function calculate_sample_size(p_baseline::Float64, mde::Float64;
-                                α::Float64=0.05, power::Float64=0.8)
-    z_α = quantile(Normal(), 1 - α/2)  # 1.96 for α=0.05
-    z_β = quantile(Normal(), power)    # 0.84 for power=0.8
+    let p_bar = p_baseline;
+    let n = ((z_alpha + z_beta).powi(2) * 2.0 * p_bar * (1.0 - p_bar)) / mde.powi(2);
+    n.ceil() as usize
+}
 
-    p̄ = p_baseline
-    n = ((z_α + z_β)^2 * 2p̄ * (1 - p̄)) / mde^2
+/// A/Bテストをシミュレーションして有意差が出るか判定
+fn simulate_ab_test(p_a: f64, p_b: f64, n: usize, alpha: f64) -> bool {
+    use rand::distributions::{Binomial, Distribution};
+    let mut rng = rand::thread_rng();
 
-    return ceil(Int, n)
-end
+    let a_successes = Binomial::new(n as u64, p_a).unwrap().sample(&mut rng) as f64;
+    let b_successes = Binomial::new(n as u64, p_b).unwrap().sample(&mut rng) as f64;
 
-"""
-Simulate A/B test
-"""
-function simulate_ab_test(p_a::Float64, p_b::Float64, n::Int; α::Float64=0.05)
-    a_successes = rand(Binomial(n, p_a))
-    b_successes = rand(Binomial(n, p_b))
+    let p_hat_a = a_successes / n as f64;
+    let p_hat_b = b_successes / n as f64;
+    let p_pool  = (a_successes + b_successes) / (2.0 * n as f64);
 
-    p̂_a = a_successes / n
-    p̂_b = b_successes / n
+    let se    = (2.0 * p_pool * (1.0 - p_pool) / n as f64).sqrt();
+    let z     = (p_hat_b - p_hat_a) / se;
+    let p_val = 2.0 * (1.0 - normal_cdf(z.abs()));
 
-    p_pool = (a_successes + b_successes) / (2n)
+    p_val < alpha
+}
 
-    se  = sqrt(2p_pool * (1 - p_pool) / n)
-    z   = (p̂_b - p̂_a) / se
-    p_val = 2(1 - cdf(Normal(), abs(z)))
+/// 標準正規分布のCDF（Abramowitz & Stegun近似）
+fn normal_cdf(x: f64) -> f64 {
+    0.5 * (1.0 + erf(x / std::f64::consts::SQRT_2))
+}
 
-    return p_val < α
-end
+/// 正規分布の分位点（逆CDF、Beasley-Springer-Moro近似）
+fn normal_ppf(p: f64) -> f64 {
+    // Rational approximation for central region
+    let a = [0.0, -3.969683028665376e+01,  2.209460984245205e+02,
+             -2.759285104469687e+02,  1.383577518672690e+02,
+             -3.066479806614716e+01,  2.506628277459239e+00];
+    let b = [0.0, -5.447609879822406e+01,  1.615858368580409e+02,
+             -1.556989798598866e+02,  6.680131188771972e+01, -1.328068155288572e+01];
+    let q = p - 0.5;
+    if q.abs() < 0.425 {
+        let r = 0.180625 - q * q;
+        q * (((((((a[7-1]*r+a[6-1])*r+a[5-1])*r+a[4-1])*r+a[3-1])*r+a[2-1])*r+a[1])
+           / (((((((b[7-1]*r+b[6-1])*r+b[5-1])*r+b[4-1])*r+b[3-1])*r+b[2-1])*r+1.0)))
+    } else {
+        let r = if q < 0.0 { p } else { 1.0 - p };
+        let r = (-r.ln()).sqrt();
+        let c = [0.0, -7.784894002430293e-03, -3.223964580411365e-01,
+                 -2.400758277161838e+00, -2.549732539343734e+00,
+                  4.374664141464968e+00,  2.938163982698783e+00];
+        let d = [0.0,  7.784695709041462e-03,  3.224671290700398e-01,
+                  2.445134137142996e+00,  3.754408661907416e+00];
+        let x = (((((c[6-1]*r+c[5-1])*r+c[4-1])*r+c[3-1])*r+c[2-1])*r+c[1])
+              / ((((d[5-1]*r+d[4-1])*r+d[3-1])*r+d[2-1])*r+1.0);
+        if q < 0.0 { -x } else { x }
+    }
+}
 
-# Example
-p_baseline = 0.10
-mde = 0.02  # Want to detect 2% improvement
-n = calculate_sample_size(p_baseline, mde)
-println("Required sample size per group: $n")
+fn erf(x: f64) -> f64 {
+    // Horner法による近似
+    let t = 1.0 / (1.0 + 0.3275911 * x.abs());
+    let poly = t * (0.254829592 + t * (-0.284496736 + t * (1.421413741 + t * (-1.453152027 + t * 1.061405429))));
+    let sign = if x >= 0.0 { 1.0 } else { -1.0 };
+    sign * (1.0 - poly * (-x * x).exp())
+}
 
-# Run 1000 simulations
-p_a = 0.10
-p_b = 0.12  # True improvement = 2%
-n_sims = 1000
-wins = sum(simulate_ab_test(p_a, p_b, n) for _ in 1:n_sims)
+fn main() {
+    // サンプルサイズ計算
+    let p_baseline = 0.10;
+    let mde        = 0.02; // 2%改善を検出したい
+    let n = calculate_sample_size(p_baseline, mde, 0.05, 0.8);
+    println!("Required sample size per group: {}", n);
 
-println("Power (empirical): $(wins / n_sims)")  # Should be ~0.8
+    // 1000回シミュレーション
+    let p_a    = 0.10;
+    let p_b    = 0.12; // 真の改善 = 2%
+    let n_sims = 1000;
+    let wins: usize = (0..n_sims)
+        .filter(|_| simulate_ab_test(p_a, p_b, n, 0.05))
+        .count();
+
+    println!("Power (empirical): {:.3}", wins as f64 / n_sims as f64); // ~0.8が期待値
+}
 ```
 
 出力:
@@ -1448,7 +1663,7 @@ Power (empirical): 0.812
 - [ ] Prometheusでメトリクスを収集できる
 - [ ] SLI/SLOを設計し、Error Budgetを計算できる
 - [ ] DPO lossを導出できる
-- [ ] ⚡Julia + 🦀Rust + 🔮Elixir で MLOps ツールを実装できる
+- [ ] 🦀Rust + 🦀Rust + 🔮Elixir で MLOps ツールを実装できる
 
 **10個チェックできたらMLOps完全版クリア。**
 
@@ -1511,7 +1726,7 @@ SLO = 99.9% は「頑張る」では達成できない。
 - [ ] SLI/SLOを設計し、Error Budgetを計算できる
 - [ ] KS検定/PSIでデータドリフトを検出できる
 - [ ] DPO lossを導出し、RLHFとの違いを説明できる
-- [ ] ⚡Julia + 🦀Rust + 🔮Elixir でMLOpsツールを実装できる
+- [ ] 🦀Rust + 🦀Rust + 🔮Elixir でMLOpsツールを実装できる
 
 **全てチェックできたら、あなたはMLOps完全版をマスターした。**
 
@@ -1595,7 +1810,7 @@ SLO = 99.9% は「頑張る」では達成できない。
 | 2日目 | Part A-B (バージョニング・CI/CD) | 2時間 | 数式追う |
 | 3日目 | Part C-D (A/B・監視) | 2時間 | サンプルサイズ計算 |
 | 4日目 | Part E (DPO/RLHF) | 1.5時間 | DPO loss導出 |
-| 5日目 | Part F (実装編) | 2時間 | ⚡🦀🔮実装 |
+| 5日目 | Part F (実装編) | 2時間 | 🦀🦀🔮実装 |
 | 6日目 | Zone 5 (実験) | 2時間 | ミニPJ 3つ |
 | 7日目 | 復習・Boss Battle | 2時間 | 完全サイクル数式 |
 
@@ -1725,37 +1940,95 @@ Course IIIのゴールまであと1回。
 
 **Feast Architecture**:
 
-```julia
-# Feature definition (feast.yaml)
-"""
-features:
-  - name: user_avg_purchase_7d
-    entity: user_id
-    type: float
-    source: data_warehouse
-    freshness: 1 hour
-"""
+```rust
+// Feature definition (feast.yaml に相当するRust構造体)
+// features:
+//   - name: user_avg_purchase_7d
+//     entity: user_id
+//     type: float
+//     source: data_warehouse
+//     freshness: 1 hour
 
-# Offline retrieval (training)
-using PyCall
-feast = pyimport("feast")
-store = feast.FeatureStore(".")
+use reqwest::blocking::Client;
+use serde_json::{json, Value};
+use std::collections::HashMap;
 
-entity_df = DataFrame(
-    user_id = [1001, 1002, 1003],
-    event_timestamp = [now(), now(), now()]
-)
+/// Feature Storeクライアント（Feast REST API互換）
+struct FeatureStoreClient {
+    client:   Client,
+    base_url: String,
+}
 
-training_df = store.get_historical_features(
-    entity_df = entity_df,
-    features = ["user_features:avg_purchase_7d", "user_features:total_sessions"]
-).to_df()
+impl FeatureStoreClient {
+    fn new(base_url: &str) -> Self {
+        Self { client: Client::new(), base_url: base_url.to_string() }
+    }
 
-# Online retrieval (inference, <10ms latency)
-features = store.get_online_features(
-    features = ["user_features:avg_purchase_7d"],
-    entity_rows = [Dict("user_id" => 1001)]
-).to_dict()
+    /// オフライン取得: バッチ訓練用の過去特徴量を取得（Point-in-time correct）
+    fn get_historical_features(
+        &self,
+        entity_ids: &[u64],
+        features: &[&str],
+    ) -> reqwest::Result<Vec<HashMap<String, Value>>> {
+        let body = json!({
+            "features": features,
+            "entities": { "user_id": entity_ids }
+        });
+        let resp: Value = self.client
+            .post(format!("{}/get-historical-features", self.base_url))
+            .json(&body)
+            .send()?
+            .json()?;
+        // 結果を Vec<HashMap> に変換（疑似実装）
+        Ok(resp["results"].as_array().unwrap_or(&vec![])
+            .iter()
+            .map(|r| r.as_object().unwrap().iter()
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect())
+            .collect())
+    }
+
+    /// オンライン取得: 低レイテンシ推論用の最新特徴量を取得 (<10ms)
+    fn get_online_features(
+        &self,
+        entity_id: u64,
+        features: &[&str],
+    ) -> reqwest::Result<HashMap<String, Value>> {
+        let body = json!({
+            "features": features,
+            "entities": [{ "user_id": entity_id }]
+        });
+        let resp: Value = self.client
+            .post(format!("{}/get-online-features", self.base_url))
+            .json(&body)
+            .send()?
+            .json()?;
+        Ok(resp["results"][0].as_object()
+            .map(|o| o.iter().map(|(k, v)| (k.clone(), v.clone())).collect())
+            .unwrap_or_default())
+    }
+}
+
+fn main() -> reqwest::Result<()> {
+    let store = FeatureStoreClient::new("http://localhost:6566");
+
+    // オフライン取得（訓練時）
+    let entity_ids = [1001u64, 1002, 1003];
+    let training_features = store.get_historical_features(
+        &entity_ids,
+        &["user_features:avg_purchase_7d", "user_features:total_sessions"],
+    )?;
+    println!("Training records: {}", training_features.len());
+
+    // オンライン取得（推論時、<10ms レイテンシ）
+    let online_features = store.get_online_features(
+        1001,
+        &["user_features:avg_purchase_7d"],
+    )?;
+    println!("Online features for user 1001: {:?}", online_features);
+
+    Ok(())
+}
 ```
 
 **利点**:
@@ -1775,27 +2048,68 @@ None → Staging → Production → Archived
 
 **バージョン管理 + メタデータ**:
 
-```julia
-using PyCall
-mlflow = pyimport("mlflow")
+```rust
+use reqwest::blocking::Client;
+use serde_json::json;
 
-# Register model
-mlflow.register_model(
-    model_uri = "runs:/abc123/model",
-    name = "fraud_detector_v2"
-)
+// MLflow Model Registry — REST API経由でモデルのライフサイクルを管理
+const MLFLOW_URI: &str = "http://localhost:5000";
 
-# Transition to production
-client = mlflow.tracking.MlflowClient()
-client.transition_model_version_stage(
-    name = "fraud_detector_v2",
-    version = 3,
-    stage = "Production"
-)
+struct MlflowRegistryClient {
+    client: Client,
+}
 
-# Load production model
-model_uri = "models:/fraud_detector_v2/Production"
-model = mlflow.pyfunc.load_model(model_uri)
+impl MlflowRegistryClient {
+    fn new() -> Self { Self { client: Client::new() } }
+
+    /// モデルをModel Registryに登録する
+    fn register_model(&self, run_id: &str, model_name: &str) -> reqwest::Result<()> {
+        let url = format!("{}/api/2.0/mlflow/registered-models/create", MLFLOW_URI);
+        self.client.post(&url).json(&json!({ "name": model_name })).send()?;
+
+        let url = format!("{}/api/2.0/mlflow/model-versions/create", MLFLOW_URI);
+        self.client.post(&url).json(&json!({
+            "name":    model_name,
+            "source":  format!("runs:/{}/model", run_id),
+            "run_id":  run_id
+        })).send()?;
+        Ok(())
+    }
+
+    /// モデルバージョンをステージに遷移させる (None → Staging → Production → Archived)
+    fn transition_model_version_stage(
+        &self,
+        name: &str,
+        version: u32,
+        stage: &str,
+    ) -> reqwest::Result<()> {
+        let url = format!("{}/api/2.0/mlflow/model-versions/transition-stage", MLFLOW_URI);
+        self.client.post(&url).json(&json!({
+            "name":    name,
+            "version": version.to_string(),
+            "stage":   stage
+        })).send()?;
+        Ok(())
+    }
+}
+
+fn main() -> reqwest::Result<()> {
+    let client = MlflowRegistryClient::new();
+
+    // モデルを登録
+    client.register_model("abc123", "fraud_detector_v2")?;
+
+    // Productionに昇格
+    client.transition_model_version_stage("fraud_detector_v2", 3, "Production")?;
+    println!("✅ fraud_detector_v2 v3 → Production");
+
+    // Production モデルのURIで推論クライアントを初期化
+    let model_uri = "models:/fraud_detector_v2/Production";
+    println!("推論用モデルURI: {}", model_uri);
+    // 実際の推論は ONNX Runtime (ort crate) 等でモデルをロードして実行
+
+    Ok(())
+}
 ```
 
 **Governance機能**:
@@ -1817,37 +2131,72 @@ model = mlflow.pyfunc.load_model(model_uri)
 
 **W&B Sweep (Bayesian Optimization)**:
 
-```julia
-using PyCall
-wandb = pyimport("wandb")
+```rust
+use serde_json::{json, Value};
+use std::collections::HashMap;
 
-# Sweep configuration
-sweep_config = Dict(
-    "method" => "bayes",
-    "metric" => Dict("name" => "val_loss", "goal" => "minimize"),
-    "parameters" => Dict(
-        "learning_rate" => Dict("min" => 1e-5, "max" => 1e-2),
-        "batch_size" => Dict("values" => [16, 32, 64, 128]),
-        "dropout" => Dict("min" => 0.1, "max" => 0.5)
-    )
-)
+// W&B Sweep — Bayesian Optimizationによるハイパーパラメータ自動探索
+// RustではW&B REST APIを直接呼び出すか、wandb CLIをサブプロセスで起動する
 
-sweep_id = wandb.sweep(sweep_config, project="my_project")
+/// Sweep設定: 探索空間と最適化目標を定義
+fn build_sweep_config() -> Value {
+    json!({
+        "method": "bayes",  // "grid" / "random" / "bayes"
+        "metric": { "name": "val_loss", "goal": "minimize" },
+        "parameters": {
+            "learning_rate": { "min": 1e-5_f64, "max": 1e-2_f64 },
+            "batch_size":    { "values": [16, 32, 64, 128] },
+            "dropout":       { "min": 0.1_f64, "max": 0.5_f64 }
+        }
+    })
+}
 
-# Training function
-function train()
-    wandb.init()
-    config = wandb.config
+/// 1試行の訓練ループ（実際は `config` に応じてモデルを構築・訓練する）
+fn train_one_trial(config: &HashMap<&str, f64>) -> Vec<f64> {
+    let lr      = config["learning_rate"];
+    let dropout = config["dropout"];
 
-    # Train with config.learning_rate, config.batch_size, etc.
-    for epoch in 1:10
-        loss = train_one_epoch(config)
-        wandb.log(Dict("loss" => loss, "epoch" => epoch))
-    end
-end
+    // 疑似訓練ループ (10エポック)
+    (0..10).map(|epoch| {
+        let loss = 1.0 / (1.0 + (epoch + 1) as f64 * lr) + dropout * 0.1
+            + rand::random::<f64>() * 0.05; // ノイズ
+        loss
+    }).collect()
+}
 
-# Run sweep
-wandb.agent(sweep_id, function=train, count=50)  # 50 trials
+fn main() {
+    let sweep_config = build_sweep_config();
+    println!("Sweep Config:\n{}", serde_json::to_string_pretty(&sweep_config).unwrap());
+
+    // 50試行をシミュレーション（実運用ではW&B APIにsweep_idを登録してagentを起動）
+    let mut best_loss = f64::INFINITY;
+    let mut best_config: Option<HashMap<&str, f64>> = None;
+
+    for trial in 0..50_usize {
+        // Bayesian OptはW&B Sweepサーバが提案; ここでは疑似ランダムサンプリング
+        let lr = 10_f64.powf(-5.0 + rand::random::<f64>() * 3.0); // [1e-5, 1e-2]
+        let dropout = 0.1 + rand::random::<f64>() * 0.4;           // [0.1, 0.5]
+        let config: HashMap<&str, f64> = HashMap::from([
+            ("learning_rate", lr),
+            ("dropout",       dropout),
+        ]);
+
+        let losses = train_one_trial(&config);
+        let final_loss = *losses.last().unwrap();
+
+        if final_loss < best_loss {
+            best_loss = final_loss;
+            best_config = Some(config.clone());
+            println!("Trial {:>2}: lr={:.2e}, dropout={:.3} → val_loss={:.4} ✨ Best",
+                     trial + 1, lr, dropout, final_loss);
+        }
+    }
+
+    if let Some(cfg) = best_config {
+        println!("\n🏆 Best config: lr={:.2e}, dropout={:.3}, val_loss={:.4}",
+                 cfg["learning_rate"], cfg["dropout"], best_loss);
+    }
+}
 ```
 
 **効果**: Manual grid search → Bayesian optimization で探索効率**10倍向上**
@@ -1858,51 +2207,148 @@ wandb.agent(sweep_id, function=train, count=50)  # 50 trials
 
 **Expectation Suite**:
 
-```julia
-using PyCall
-ge = pyimport("great_expectations")
+```rust
+use std::collections::HashMap;
+use regex::Regex;
 
-# Create expectation suite
-context = ge.data_context.DataContext()
-suite = context.create_expectation_suite("transaction_data_suite")
+// Great Expectations に相当するデータ品質検証フレームワーク (Rust実装)
+// データパイプラインに組み込み、スキーマ・値域・NULL制約を自動検査する
 
-# Define expectations
-validator = context.get_validator(
-    batch_request = batch_request,
-    expectation_suite_name = "transaction_data_suite"
-)
+/// 検証結果
+struct ValidationResult {
+    column:  String,
+    rule:    String,
+    passed:  bool,
+    message: String,
+}
 
-# Expectations (assertions on data)
-validator.expect_column_values_to_be_between("amount", min_value=0, max_value=1e6)
-validator.expect_column_values_to_not_be_null("user_id")
-validator.expect_column_values_to_be_in_set("status", ["pending", "completed", "failed"])
-validator.expect_column_values_to_match_regex("email", r"^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$")
+/// データ品質チェッカー（Expectation Suite）
+struct DataValidator {
+    suite_name: String,
+    results:    Vec<ValidationResult>,
+}
 
-# Save suite
-validator.save_expectation_suite(discard_failed_expectations=false)
+impl DataValidator {
+    fn new(suite_name: &str) -> Self {
+        Self { suite_name: suite_name.to_string(), results: vec![] }
+    }
+
+    /// 数値が範囲内に収まることを期待する
+    fn expect_between(&mut self, column: &str, values: &[f64], min: f64, max: f64) {
+        let all_ok = values.iter().all(|&v| v >= min && v <= max);
+        self.results.push(ValidationResult {
+            column:  column.to_string(),
+            rule:    format!("between({}, {})", min, max),
+            passed:  all_ok,
+            message: if all_ok { "OK".to_string() }
+                     else { format!("値が [{}, {}] の範囲外", min, max) },
+        });
+    }
+
+    /// NULL (NaN) がないことを期待する
+    fn expect_not_null(&mut self, column: &str, values: &[Option<f64>]) {
+        let nulls = values.iter().filter(|v| v.is_none()).count();
+        self.results.push(ValidationResult {
+            column:  column.to_string(),
+            rule:    "not_null".to_string(),
+            passed:  nulls == 0,
+            message: if nulls == 0 { "OK".to_string() }
+                     else { format!("{} 件のNULLを検出", nulls) },
+        });
+    }
+
+    /// 値が許可セットに含まれることを期待する
+    fn expect_in_set<'a>(&mut self, column: &str, values: &[&'a str], allowed: &[&str]) {
+        let invalid: Vec<&&str> = values.iter()
+            .filter(|v| !allowed.contains(v))
+            .collect();
+        self.results.push(ValidationResult {
+            column:  column.to_string(),
+            rule:    format!("in_set({:?})", allowed),
+            passed:  invalid.is_empty(),
+            message: if invalid.is_empty() { "OK".to_string() }
+                     else { format!("不正な値: {:?}", invalid) },
+        });
+    }
+
+    /// 値が正規表現にマッチすることを期待する
+    fn expect_match_regex(&mut self, column: &str, values: &[&str], pattern: &str) {
+        let re = Regex::new(pattern).unwrap();
+        let invalid: Vec<&&str> = values.iter().filter(|v| !re.is_match(v)).collect();
+        self.results.push(ValidationResult {
+            column:  column.to_string(),
+            rule:    format!("match_regex({})", pattern),
+            passed:  invalid.is_empty(),
+            message: if invalid.is_empty() { "OK".to_string() }
+                     else { format!("パターン不一致: {:?}", invalid) },
+        });
+    }
+
+    /// 全検証結果をサマリーとして返す
+    fn validate(&self) -> (bool, usize, usize) {
+        let total  = self.results.len();
+        let passed = self.results.iter().filter(|r| r.passed).count();
+        (passed == total, passed, total)
+    }
+}
+
+fn main() {
+    let mut validator = DataValidator::new("transaction_data_suite");
+
+    // Expectation定義（テストデータで検証）
+    validator.expect_between("amount",
+        &[100.0, 50.0, 999_999.0, 0.01], 0.0, 1_000_000.0);
+    validator.expect_not_null("user_id",
+        &[Some(1.0), Some(2.0), None, Some(4.0)]);
+    validator.expect_in_set("status",
+        &["pending", "completed", "failed", "unknown"],
+        &["pending", "completed", "failed"]);
+    validator.expect_match_regex("email",
+        &["user@example.com", "bad-email", "admin@co.jp"],
+        r"^[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}$");
+
+    // 結果を表示
+    for r in &validator.results {
+        let mark = if r.passed { "✅" } else { "❌" };
+        println!("{} {} [{}]: {}", mark, r.column, r.rule, r.message);
+    }
+
+    let (success, passed, total) = validator.validate();
+    println!("\nSuite: {} — {}/{} rules passed", validator.suite_name, passed, total);
+    assert!(success, "データ検証失敗！パイプラインを停止します。");
+}
 ```
 
 **Validation in Pipeline**:
 
-```julia
-# Run validation
-checkpoint_config = Dict(
-    "name" => "daily_data_checkpoint",
-    "config_version" => 1,
-    "class_name" => "SimpleCheckpoint",
-    "validations" => [
-        Dict(
-            "batch_request" => batch_request,
-            "expectation_suite_name" => "transaction_data_suite"
-        )
-    ]
-)
+```rust
+use serde_json::json;
 
-results = context.run_checkpoint(checkpoint_config)
+fn main() {
+    // Checkpoint設定をRustの構造化データとして定義
+    let checkpoint_config = json!({
+        "name":           "daily_data_checkpoint",
+        "config_version": 1,
+        "class_name":     "SimpleCheckpoint",
+        "validations": [
+            {
+                "batch_request":          "/* バッチリクエスト設定 */",
+                "expectation_suite_name": "transaction_data_suite"
+            }
+        ]
+    });
 
-if !results["success"]
-    error("Data validation failed! $(results["statistics"])")
-end
+    // 検証実行（DataValidatorの結果を使用）
+    let success = true; // 実際はvalidator.validate()の結果を使う
+    let statistics = json!({ "evaluated_expectations": 4, "successful_expectations": 4 });
+
+    if !success {
+        panic!("Data validation failed! {:?}", statistics);
+    }
+
+    println!("✅ Checkpoint '{}' passed: {:?}",
+             checkpoint_config["name"], statistics);
+}
 ```
 
 **Production Integration** (Airflow DAG):
@@ -2006,34 +2452,75 @@ jobs:
 
 **Ray Train** (分散訓練フレームワーク):
 
-```julia
-using PyCall
-ray = pyimport("ray")
-train = pyimport("ray.train")
+```rust
+use std::sync::{Arc, Mutex};
+use std::thread;
+use std::collections::HashMap;
 
-# Define training function
-function train_func(config)
-    model = create_model(config["lr"])
+// Ray Trainに相当するRust分散訓練フレームワーク
+// 実際のGPU分散訓練にはtorch-sys / candle / burn crateを使用する
 
-    # Distributed data loading
-    train_dataset = train.get_dataset_shard("train")
+/// 訓練設定
+struct TrainingConfig {
+    lr:     f64,
+    epochs: usize,
+}
 
-    for epoch in 1:config["epochs"]
-        for batch in train_dataset.iter_batches(batch_size=32)
-            loss = train_step(model, batch)
-            train.report(Dict("loss" => loss))
-        end
-    end
-end
+/// 単一ワーカーの訓練ループ（実際はGPUデバイスごとに1スレッド）
+fn train_worker(worker_id: usize, config: Arc<TrainingConfig>,
+                results: Arc<Mutex<Vec<(usize, f64)>>>) {
+    println!("Worker {} 開始 (lr={}, epochs={})", worker_id, config.lr, config.epochs);
 
-# Scale to 4 GPUs
-trainer = train.TorchTrainer(
-    train_func,
-    scaling_config = train.ScalingConfig(num_workers=4, use_gpu=true),
-    datasets = Dict("train" => ray.data.read_parquet("s3://data/train/"))
-)
+    // 分散データシャード（各ワーカーがデータの1/N を担当）
+    // 実際は s3://data/train/ からParquet読み込み
+    let shard_size = 1000;
 
-result = trainer.fit()
+    for epoch in 0..config.epochs {
+        let mut epoch_loss = 0.0_f64;
+
+        for batch_idx in 0..(shard_size / 32) {
+            // 疑似訓練ステップ
+            let batch_loss = 1.0 / (1.0 + (epoch * shard_size / 32 + batch_idx) as f64 * config.lr)
+                + (worker_id as f64 * 0.001); // ワーカー間のばらつき
+            epoch_loss += batch_loss;
+        }
+
+        let avg_loss = epoch_loss / (shard_size / 32) as f64;
+        results.lock().unwrap().push((epoch, avg_loss));
+    }
+    println!("Worker {} 完了", worker_id);
+}
+
+fn main() {
+    let config = Arc::new(TrainingConfig { lr: 1e-3, epochs: 5 });
+    let results = Arc::new(Mutex::new(Vec::new()));
+
+    // 4ワーカー（GPU4台相当）で並列訓練
+    let num_workers = 4;
+    let handles: Vec<_> = (0..num_workers).map(|id| {
+        let cfg = Arc::clone(&config);
+        let res = Arc::clone(&results);
+        thread::spawn(move || train_worker(id, cfg, res))
+    }).collect();
+
+    for h in handles { h.join().unwrap(); }
+
+    // 全ワーカーの結果を集約（AllReduce相当）
+    let all_results = results.lock().unwrap();
+    let mut epoch_losses: HashMap<usize, Vec<f64>> = HashMap::new();
+    for &(epoch, loss) in all_results.iter() {
+        epoch_losses.entry(epoch).or_default().push(loss);
+    }
+
+    println!("\n=== 分散訓練結果 ({}ワーカー) ===", num_workers);
+    let mut epochs: Vec<usize> = epoch_losses.keys().copied().collect();
+    epochs.sort();
+    for epoch in epochs {
+        let losses = &epoch_losses[&epoch];
+        let mean = losses.iter().sum::<f64>() / losses.len() as f64;
+        println!("Epoch {}: avg_loss={:.4}", epoch + 1, mean);
+    }
+}
 ```
 
 **DeepSpeed ZeRO-3** (メモリ効率化):
@@ -2093,21 +2580,72 @@ async fn main() -> Result<(), Error> {
 
 **SageMaker Serverless Inference** (> 15MB model):
 
-```julia
-using PyCall
-sagemaker = pyimport("sagemaker")
+```rust
+use reqwest::blocking::Client;
+use serde_json::json;
 
-# Deploy model as serverless endpoint
-predictor = model.deploy(
-    endpoint_type = "serverless",
-    serverless_inference_config = sagemaker.serverless.ServerlessInferenceConfig(
-        memory_size_in_mb = 2048,
-        max_concurrency = 20
-    )
-)
+// SageMaker Serverless Inference — AWS SDK for Rust (aws-sdk-sagemakerruntime) を使用
+// ここではREST APIの構造をRustで表現する
 
-# Inference
-result = predictor.predict(data)
+/// SageMakerサーバーレスエンドポイントの設定
+struct ServerlessInferenceConfig {
+    memory_size_in_mb: u32, // 1024, 2048, 3072, 4096, 6144
+    max_concurrency:   u32, // 最大同時実行数
+}
+
+/// SageMakerクライアント（aws-sdk-sagemakerruntime の薄いラッパー）
+struct SageMakerClient {
+    client:        Client,
+    endpoint_name: String,
+    region:        String,
+}
+
+impl SageMakerClient {
+    fn new(endpoint_name: &str, region: &str) -> Self {
+        Self {
+            client:        Client::new(),
+            endpoint_name: endpoint_name.to_string(),
+            region:        region.to_string(),
+        }
+    }
+
+    /// サーバーレスエンドポイントにデプロイ設定を送信
+    fn deploy_serverless(&self, config: &ServerlessInferenceConfig) {
+        // 実際は aws-sdk-sagemaker の create_endpoint_config + create_endpoint を呼ぶ
+        println!("📦 Deploying to SageMaker Serverless:");
+        println!("   endpoint:   {}", self.endpoint_name);
+        println!("   memory:     {} MB", config.memory_size_in_mb);
+        println!("   max_conc:   {}", config.max_concurrency);
+        println!("   region:     {}", self.region);
+    }
+
+    /// 推論を実行する（invoke_endpoint）
+    fn predict(&self, payload: &serde_json::Value) -> serde_json::Value {
+        // 実際は AWS SigV4署名付きリクエストでエンドポイントを呼び出す
+        let url = format!(
+            "https://runtime.sagemaker.{}.amazonaws.com/endpoints/{}/invocations",
+            self.region, self.endpoint_name
+        );
+        println!("POST {} → {:?}", url, payload);
+        // 疑似レスポンス
+        json!({ "prediction": 0.87, "label": "fraud" })
+    }
+}
+
+fn main() {
+    let config = ServerlessInferenceConfig {
+        memory_size_in_mb: 2048,
+        max_concurrency:   20,
+    };
+
+    let client = SageMakerClient::new("fraud-detector-serverless", "us-east-1");
+    client.deploy_serverless(&config);
+
+    // 推論
+    let data = json!({ "features": [0.5, 1.2, -0.3, 2.1] });
+    let result = client.predict(&data);
+    println!("推論結果: {}", result);
+}
 ```
 
 **Cost comparison** (1M requests/month):

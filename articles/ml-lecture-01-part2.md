@@ -1501,7 +1501,7 @@ mindmap
 </details>
 
 <details><summary>Q: Python 以外の言語は使いますか？</summary>
-**A**: Course I（第1-8回）は Python 100%。Course II（第9-16回）で Julia が登場し、Course III 以降で Rust + Julia の多言語構成になる。各言語の導入時に丁寧にセットアップするので心配不要。
+**A**: Course I（第1-8回）は Python 100%。Course II（第9-16回）で Rust が登場し、Course III 以降で Rust + Rust の多言語構成になる。各言語の導入時に丁寧にセットアップするので心配不要。
 </details>
 
 <details><summary>Q: 講義の順番通りに進めるべきですか？</summary>

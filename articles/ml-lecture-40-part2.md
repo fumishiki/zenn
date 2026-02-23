@@ -1,268 +1,357 @@
 ---
-title: "第40回: ⚡ Consistency Models & 高速生成理論: 30秒の驚き→数式修行→実装マスター 【後編】実装編"
-emoji: "⚡"
+title: "第40回: 🦀 Consistency Models & 高速生成理論: 30秒の驚き→数式修行→実装マスター 【後編】実装編"
+emoji: "🦀"
 type: "tech"
-topics: ["machinelearning", "deeplearning", "consistencymodels", "julia", "diffusion"]
+topics: ["machinelearning", "deeplearning", "consistencymodels", "rust", "diffusion"]
 published: true
 slug: "ml-lecture-40-part2"
 difficulty: "advanced"
 time_estimate: "90 minutes"
-languages: ["Julia", "Rust"]
+languages: ["Rust"]
 keywords: ["機械学習", "深層学習", "生成モデル"]
 ---
 
 **→ 前編（理論編）**: [ml-lecture-40-part1](./ml-lecture-40-part1)
 
-## 💻 Z5. 試練（実装）（45分）— Julia Consistency Model完全実装
+## 💻 Z5. 試練（実装）（45分）— Rust Consistency Model完全実装
 
 ### 4.1 Consistency Function実装
 
-```julia
-using Lux, Random, Optimisers, Zygote
+```rust
+use candle_core::{Result, Tensor};
+use candle_nn::Module;
 
-# Preconditioning coefficients (EDM-style)
-function get_coefficients(t, σ_data=1.0f0)
-    c_skip = σ_data^2 ./ (t.^2 .+ σ_data^2)
-    c_out = σ_data .* t ./ sqrt.(t.^2 .+ σ_data^2)
-    c_in = 1 ./ sqrt.(t.^2 .+ σ_data^2)
-    return c_skip, c_out, c_in
-end
+// Preconditioning coefficients (EDM-style)
+fn get_coefficients(t: &Tensor, sigma_data: f32) -> Result<(Tensor, Tensor, Tensor)> {
+    let sigma_sq = sigma_data * sigma_data;
+    let t_sq = t.sqr()?;
+    // c_skip = σ_data² / (t² + σ_data²)
+    let c_skip = ((&t_sq + sigma_sq)?.recip()? * sigma_sq)?;
+    // c_out = σ_data * t / sqrt(t² + σ_data²)
+    let c_out = (t * sigma_data)?.div(&(&t_sq + sigma_sq)?.sqrt()?)?;
+    // c_in = 1 / sqrt(t² + σ_data²)
+    let c_in = (&t_sq + sigma_sq)?.sqrt()?.recip()?;
+    Ok((c_skip, c_out, c_in))
+}
 
-# Consistency Model wrapper
-struct ConsistencyModel{M}
-    backbone::M  # U-Net or similar
-    σ_data::Float32
-end
+// Consistency Model wrapper
+struct ConsistencyModel<M> {
+    backbone: M, // U-Net or similar
+    sigma_data: f32,
+}
 
-function (cm::ConsistencyModel)(x_t, t, ps, st)
-    c_skip, c_out, c_in = get_coefficients(t, cm.σ_data)
+impl<M: Module> ConsistencyModel<M> {
+    fn forward(&self, x_t: &Tensor, t: &Tensor) -> Result<Tensor> {
+        let (c_skip, c_out, c_in) = get_coefficients(t, self.sigma_data)?;
 
-    # Forward through backbone
-    net_out, st = cm.backbone(c_in .* x_t, t, ps, st)
+        // Forward through backbone: net_out = backbone(c_in * x_t, t)
+        let net_out = self.backbone.forward(&(x_t * &c_in)?)?;
 
-    # F_θ(x_t, t) = c_skip * x_t + c_out * net_out
-    F_θ = c_skip .* x_t .+ c_out .* net_out
-    return F_θ, st
-end
+        // F_θ(x_t, t) = c_skip * x_t + c_out * net_out
+        let f_theta = (x_t * &c_skip)?.add(&(&net_out * &c_out)?)?;
+        Ok(f_theta)
+    }
 
-# Boundary condition enforcement
-function enforce_boundary(model, x_ε, ε=0.002f0)
-    # At t=ε, F(x,ε) should be identity
-    return x_ε  # Skip connection dominates when t→ε
-end
+    // Boundary condition: at t=ε, F(x,ε) ≈ identity (skip connection dominates)
+    fn enforce_boundary<'a>(&self, x_eps: &'a Tensor, _eps: f32) -> &'a Tensor {
+        x_eps
+    }
+}
 ```
 
 ### 4.2 Consistency Training (CT) 実装
 
-```julia
-# Discretization schedule (EDM-style)
-function get_schedule(N=40, ε=0.002f0, T=80.0f0, ρ=7.0f0)
-    steps = range(0, 1, length=N+1)
-    return (ε^(1/ρ) .+ steps .* (T^(1/ρ) - ε^(1/ρ))).^ρ
-end
+```rust
+use candle_core::{Device, Result, Tensor};
 
-# Pseudo-Huber distance
-function pseudo_huber_loss(a, b, c=0.00054f0)
-    diff = a .- b
-    return sqrt.(c^2 .+ sum(diff.^2, dims=(1,2,3))) .- c
-end
+// Discretization schedule (EDM-style)
+fn get_schedule(n: usize, eps: f32, t_max: f32, rho: f32) -> Vec<f32> {
+    (0..=n)
+        .map(|i| {
+            let s = i as f32 / n as f32;
+            // t_i = (ε^(1/ρ) + s * (T^(1/ρ) - ε^(1/ρ)))^ρ
+            (eps.powf(1.0 / rho) + s * (t_max.powf(1.0 / rho) - eps.powf(1.0 / rho))).powf(rho)
+        })
+        .collect()
+}
 
-# Consistency Training loss
-function ct_loss(model, x_0, schedule, ps, st, opt_st)
-    batch_size = size(x_0, 4)
+// Pseudo-Huber distance
+fn pseudo_huber_loss(a: &Tensor, b: &Tensor, c: f32) -> Result<Tensor> {
+    let diff = a.sub(b)?;
+    // sqrt(c² + sum(diff²)) - c
+    let sum_sq = diff.sqr()?.sum_keepdim((0, 1, 2))?;
+    (sum_sq + (c * c) as f64)?.sqrt()?.affine(1.0, -(c as f64))
+}
 
-    # Sample timesteps
-    n = rand(1:length(schedule)-1, batch_size)
-    t_n1 = schedule[n .+ 1]
-    t_n = schedule[n]
+// Consistency Training loss
+fn ct_loss(
+    model: &ConsistencyModel<impl candle_nn::Module>,
+    x_0: &Tensor,
+    schedule: &[f32],
+    device: &Device,
+) -> Result<Tensor> {
+    let batch_size = x_0.dim(0)?;
 
-    # Add noise
-    z = randn(Float32, size(x_0))
-    x_n1 = x_0 .+ reshape(t_n1, 1, 1, 1, :) .* z
+    // Sample a random timestep index n ∈ [0, len-2]
+    let n_idx = (rand::random::<f32>() * (schedule.len() - 1) as f32) as usize;
+    let t_n1 = schedule[n_idx + 1];
+    let t_n  = schedule[n_idx];
 
-    # Euler step (approximate ODE)
-    score_est = -(x_n1 .- x_0) ./ reshape(t_n1.^2, 1, 1, 1, :)
-    x_n = x_n1 .+ reshape(t_n .- t_n1, 1, 1, 1, :) .* score_est
+    // Add noise: x_{n+1} = x_0 + t_{n+1} * z
+    let z    = Tensor::randn(0f32, 1.0, x_0.shape(), device)?;
+    let x_n1 = x_0.add(&z.affine(t_n1 as f64, 0.0)?)?;
 
-    # Forward pass
-    f_n1, st = model(x_n1, t_n1, ps, st)
-    f_n, _ = model(x_n, t_n, ps, st)  # Target (stopgrad)
+    // Euler step (approximate ODE): x_n ≈ x_{n+1} + (t_n - t_{n+1}) * score
+    let score_est = x_n1.sub(x_0)?.affine(-(1.0 / (t_n1 * t_n1)) as f64, 0.0)?;
+    let x_n = x_n1.add(&score_est.affine((t_n - t_n1) as f64, 0.0)?)?;
 
-    # Loss
-    loss = mean(pseudo_huber_loss(f_n1, Zygote.dropgrad(f_n)))
-    return loss, st
-end
+    // Forward pass (target uses stop-gradient in full impl)
+    let t_n1_t = Tensor::full(t_n1, (batch_size,), device)?;
+    let t_n_t  = Tensor::full(t_n,  (batch_size,), device)?;
+    let f_n1 = model.forward(&x_n1, &t_n1_t)?;
+    let f_n  = model.forward(&x_n,  &t_n_t)?;
 
-# Training loop
-function train_ct!(model, dataloader, schedule, ps, st, opt_st, epochs=100)
-    for epoch in 1:epochs
-        total_loss = 0.0f0
-        for (batch_idx, x_0) in enumerate(dataloader)
-            # Compute loss and gradients
-            (loss, st), back = Zygote.pullback(ps -> ct_loss(model, x_0, schedule, ps, st, opt_st), ps)
+    // Pseudo-Huber loss
+    pseudo_huber_loss(&f_n1, &f_n, 0.00054)?.mean_all()
+}
 
-            # Update parameters
-            grads = back((one(loss), nothing))[1]
-            opt_st, ps = Optimisers.update(opt_st, ps, grads)
-
-            total_loss += loss
-        end
-        @info "Epoch $epoch: Loss = $(total_loss / length(dataloader))"
-    end
-    return ps, st, opt_st
-end
+// Training loop
+fn train_ct(
+    model: &mut ConsistencyModel<impl candle_nn::Module>,
+    dataloader: &[Tensor],
+    schedule: &[f32],
+    optimizer: &mut impl candle_nn::optim::Optimizer,
+    device: &Device,
+    epochs: usize,
+) -> Result<()> {
+    for epoch in 0..epochs {
+        let mut total_loss = 0f32;
+        for x_0 in dataloader {
+            let loss = ct_loss(model, x_0, schedule, device)?;
+            optimizer.backward_step(&loss)?;
+            total_loss += loss.to_scalar::<f32>()?;
+        }
+        println!("Epoch {}: Loss = {:.6}", epoch, total_loss / dataloader.len() as f32);
+    }
+    Ok(())
+}
 ```
 
 ### 4.3 Easy Consistency Tuning (ECT) 実装
 
-```julia
-# ECT: Analytical ODE solution
-function ect_loss(model, x_0, ε, T, ps, st)
-    batch_size = size(x_0, 4)
+```rust
+// ECT: Analytical ODE solution
+fn ect_loss(
+    model: &ConsistencyModel<impl candle_nn::Module>,
+    x_0: &Tensor,
+    eps: f32,
+    t_max: f32,
+    device: &Device,
+) -> Result<Tensor> {
+    let batch_size = x_0.dim(0)?;
 
-    # Sample t, t' from lognormal
-    log_t = randn(Float32, batch_size) .* 1.2f0 .- 1.2f0
-    log_t_prime = randn(Float32, batch_size) .* 1.2f0 .- 1.2f0
-    t = clamp.(exp.(log_t), ε, T)
-    t_prime = clamp.(exp.(log_t_prime), ε, T)
+    // Sample t, t' from log-normal distribution
+    let log_t       = Tensor::randn(0f32, 1.0, (batch_size,), device)?.affine(1.2, -1.2)?;
+    let log_t_prime = Tensor::randn(0f32, 1.0, (batch_size,), device)?.affine(1.2, -1.2)?;
+    let t       = log_t.exp()?.clamp(eps, t_max)?;
+    let t_prime = log_t_prime.exp()?.clamp(eps, t_max)?;
 
-    # Add noise
-    z = randn(Float32, size(x_0))
-    x_t = x_0 .+ reshape(t, 1, 1, 1, :) .* z
+    // Add noise: x_t = x_0 + t * z
+    let z   = Tensor::randn(0f32, 1.0, x_0.shape(), device)?;
+    let x_t = x_0.add(&z.broadcast_mul(&t.reshape((batch_size, 1, 1, 1))?)?)?;
 
-    # Analytical ODE: x_t' = (t'/t) * x_t + (t' - t) * x_0
-    α = reshape(t_prime ./ t, 1, 1, 1, :)
-    β = reshape(t_prime .- t, 1, 1, 1, :)
-    x_t_prime = α .* x_t .+ β .* x_0
+    // Analytical ODE: x_{t'} = (t'/t) * x_t + (t' - t) * x_0
+    let alpha   = t_prime.div(&t)?.reshape((batch_size, 1, 1, 1))?;
+    let beta    = t_prime.sub(&t)?.reshape((batch_size, 1, 1, 1))?;
+    let x_t_prime = alpha.broadcast_mul(&x_t)?.add(&beta.broadcast_mul(x_0)?)?;
 
-    # Forward pass (no target network!)
-    f_t, st = model(x_t, t, ps, st)
-    f_t_prime, _ = model(x_t_prime, t_prime, ps, st)
+    // Forward pass (no target network!)
+    let f_t       = model.forward(&x_t,       &t)?;
+    let f_t_prime = model.forward(&x_t_prime, &t_prime)?;
 
-    # Self-consistency loss
-    loss = mean(pseudo_huber_loss(f_t, f_t_prime))
-    return loss, st
-end
+    // Self-consistency loss
+    pseudo_huber_loss(&f_t, &f_t_prime, 0.00054)?.mean_all()
+}
 
-# ECT training (much faster convergence)
-function train_ect!(model, dataloader, ε, T, ps, st, opt_st, epochs=10)
-    for epoch in 1:epochs
-        total_loss = 0.0f0
-        for (batch_idx, x_0) in enumerate(dataloader)
-            (loss, st), back = Zygote.pullback(ps -> ect_loss(model, x_0, ε, T, ps, st), ps)
-            grads = back((one(loss), nothing))[1]
-            opt_st, ps = Optimisers.update(opt_st, ps, grads)
-            total_loss += loss
-        end
-        @info "ECT Epoch $epoch: Loss = $(total_loss / length(dataloader))"
-    end
-    return ps, st, opt_st
-end
+// ECT training (much faster convergence)
+fn train_ect(
+    model: &mut ConsistencyModel<impl candle_nn::Module>,
+    dataloader: &[Tensor],
+    eps: f32,
+    t_max: f32,
+    optimizer: &mut impl candle_nn::optim::Optimizer,
+    device: &Device,
+    epochs: usize,
+) -> Result<()> {
+    for epoch in 0..epochs {
+        let mut total_loss = 0f32;
+        for x_0 in dataloader {
+            let loss = ect_loss(model, x_0, eps, t_max, device)?;
+            optimizer.backward_step(&loss)?;
+            total_loss += loss.to_scalar::<f32>()?;
+        }
+        println!("ECT Epoch {}: Loss = {:.6}", epoch, total_loss / dataloader.len() as f32);
+    }
+    Ok(())
+}
 ```
 
 ### 4.4 DPM-Solver++ 実装
 
-```julia
-# DPM-Solver++ (2nd-order)
-function dpm_solver_2nd(model, x_T, schedule, ps, st)
-    x = x_T
-    x_0_prev = nothing
+```rust
+// DPM-Solver++ (2nd-order)
+fn dpm_solver_2nd(
+    model: &ConsistencyModel<impl candle_nn::Module>,
+    x_t: Tensor,
+    schedule: &[f32],
+    device: &Device,
+) -> Result<Tensor> {
+    let mut x = x_t;
+    let mut x_0_prev: Option<Tensor> = None;
 
-    for i in length(schedule):-1:2
-        t_cur = schedule[i]
-        t_next = schedule[i-1]
+    for i in (1..schedule.len()).rev() {
+        let t_cur  = schedule[i];
+        let t_next = schedule[i - 1];
 
-        # Data prediction
-        x_0_cur, st = model(x, fill(t_cur, 1), ps, st)
-        x_0_cur = dropdims(x_0_cur, dims=4)
+        // Data prediction
+        let t_cur_t = Tensor::full(t_cur, (1,), device)?;
+        let x_0_cur = model.forward(&x, &t_cur_t)?;
 
-        if i == length(schedule) || x_0_prev === nothing
-            # 1st-order step
-            α = t_next / t_cur
-            β = t_next - t_cur
-            x = α * x + β * x_0_cur
-        else
-            # 2nd-order correction
-            t_mid = (t_cur + t_next) / 2
-            α_mid = t_mid / t_cur
-            β_mid = t_mid - t_cur
+        x = if i == schedule.len() - 1 || x_0_prev.is_none() {
+            // 1st-order step: x_next = (t_next/t_cur)*x + (t_next - t_cur)*x_0
+            let alpha = t_next / t_cur;
+            let beta  = t_next - t_cur;
+            x.affine(alpha as f64, 0.0)?.add(&x_0_cur.affine(beta as f64, 0.0)?)?
+        } else {
+            // 2nd-order correction
+            let t_mid   = (t_cur + t_next) / 2.0;
+            let alpha_m = t_mid / t_cur;
+            let beta_m  = t_mid - t_cur;
+            let x_mid = x.affine(alpha_m as f64, 0.0)?
+                .add(&x_0_cur.affine(beta_m as f64, 0.0)?)?;
 
-            x_mid = α_mid * x + β_mid * x_0_cur
-            x_0_mid, st = model(x_mid, fill(t_mid, 1), ps, st)
-            x_0_mid = dropdims(x_0_mid, dims=4)
+            let t_mid_t = Tensor::full(t_mid, (1,), device)?;
+            let x_0_mid = model.forward(&x_mid, &t_mid_t)?;
 
-            # Corrected step
-            r = (t_next - t_cur) / (t_cur - t_mid)
-            α = t_next / t_cur
-            β = t_next - t_cur
-            x = α * x + β * (x_0_cur + r * (x_0_cur - x_0_mid))
-        end
+            // Corrected step
+            let r     = (t_next - t_cur) / (t_cur - t_mid);
+            let alpha = t_next / t_cur;
+            let beta  = t_next - t_cur;
+            // x = α*x + β*(x_0_cur + r*(x_0_cur - x_0_mid))
+            let correction = x_0_cur.add(&x_0_cur.sub(&x_0_mid)?.affine(r as f64, 0.0)?)?;
+            x.affine(alpha as f64, 0.0)?.add(&correction.affine(beta as f64, 0.0)?)?
+        };
 
-        x_0_prev = x_0_cur
-    end
+        x_0_prev = Some(x_0_cur);
+    }
 
-    return x
-end
+    Ok(x)
+}
 
-# Sampling wrapper
-function sample_dpm(model, batch_size, img_size, schedule, ps, st)
-    x_T = randn(Float32, img_size..., 1, batch_size)
-    return dpm_solver_2nd(model, x_T, schedule, ps, st)
-end
+// Sampling wrapper
+fn sample_dpm(
+    model: &ConsistencyModel<impl candle_nn::Module>,
+    batch_size: usize,
+    img_size: (usize, usize, usize),
+    schedule: &[f32],
+    device: &Device,
+) -> Result<Tensor> {
+    let x_t = Tensor::randn(
+        0f32, 1.0,
+        &[batch_size, img_size.0, img_size.1, img_size.2],
+        device,
+    )?;
+    dpm_solver_2nd(model, x_t, schedule, device)
+}
 ```
 
 ### 4.5 1-step vs Multi-step Sampling
 
-```julia
-# 1-step sampling
-function sample_1step(model, x_T, T, ps, st)
-    x_0, st = model(x_T, fill(T, size(x_T, 4)), ps, st)
-    return x_0
-end
+```rust
+// 1-step sampling
+fn sample_1step(
+    model: &ConsistencyModel<impl candle_nn::Module>,
+    x_t: &Tensor,
+    t_max: f32,
+    device: &Device,
+) -> Result<Tensor> {
+    let batch_size = x_t.dim(0)?;
+    let t = Tensor::full(t_max, (batch_size,), device)?;
+    model.forward(x_t, &t)
+}
 
-# Multi-step sampling (Consistency Model)
-function sample_multistep(model, x_T, steps, ε, T, ps, st)
-    schedule = exp.(range(log(T), log(ε), length=steps+1))
-    x = x_T
+// Multi-step sampling (Consistency Model)
+fn sample_multistep(
+    model: &ConsistencyModel<impl candle_nn::Module>,
+    x_t: &Tensor,
+    steps: usize,
+    eps: f32,
+    t_max: f32,
+    device: &Device,
+) -> Result<Tensor> {
+    // Geometric schedule from T down to ε
+    let schedule: Vec<f32> = (0..=steps)
+        .map(|i| {
+            let s = i as f32 / steps as f32;
+            (t_max.ln() + s * (eps.ln() - t_max.ln())).exp()
+        })
+        .collect();
 
-    for i in 1:steps
-        t_cur = schedule[i]
-        t_next = schedule[i+1]
+    let mut x = x_t.clone();
+    for i in 0..steps {
+        let t_cur  = schedule[i];
+        let t_next = schedule[i + 1];
 
-        # Consistency step
-        x_0_pred, st = model(x, fill(t_cur, size(x, 4)), ps, st)
+        // Consistency step
+        let batch_size = x.dim(0)?;
+        let t = Tensor::full(t_cur, (batch_size,), device)?;
+        let x_0_pred = model.forward(&x, &t)?;
 
-        if i < steps
-            # Add noise for next step
-            z = randn(Float32, size(x))
-            x = x_0_pred .+ t_next .* z
-        else
-            x = x_0_pred
-        end
-    end
+        x = if i < steps - 1 {
+            // Add noise for next step
+            let z = Tensor::randn(0f32, 1.0, x.shape(), device)?;
+            x_0_pred.add(&z.affine(t_next as f64, 0.0)?)?
+        } else {
+            x_0_pred
+        };
+    }
+    Ok(x)
+}
 
-    return x
-end
+// Benchmark comparison
+fn benchmark_sampling(
+    model: &ConsistencyModel<impl candle_nn::Module>,
+    device: &Device,
+) -> Result<()> {
+    let img_size  = (1usize, 28usize, 28usize);
+    let batch_size = 16usize;
+    let t_max = 80.0f32;
+    let eps   = 0.002f32;
+    let x_t = Tensor::randn(0f32, 1.0, &[batch_size, img_size.0, img_size.1, img_size.2], device)?;
 
-# Benchmark comparison
-function benchmark_sampling(model, ps, st, img_size=(28, 28, 1))
-    batch_size = 16
-    x_T = randn(Float32, img_size..., batch_size)
-    T = 80.0f0
-    ε = 0.002f0
+    // CM 1-step
+    let start = std::time::Instant::now();
+    let _ = sample_1step(model, &x_t, t_max, device)?;
+    println!("CM 1-step:            {:?}", start.elapsed());
 
-    methods = [
-        ("CM 1-step", () -> sample_1step(model, x_T, T, ps, st)),
-        ("CM 2-step", () -> sample_multistep(model, x_T, 2, ε, T, ps, st)),
-        ("CM 4-step", () -> sample_multistep(model, x_T, 4, ε, T, ps, st)),
-        ("DPM-Solver++ 20-step", () -> sample_dpm(model, batch_size, img_size, get_schedule(20, ε, T), ps, st))
-    ]
+    // CM 2-step
+    let start = std::time::Instant::now();
+    let _ = sample_multistep(model, &x_t, 2, eps, t_max, device)?;
+    println!("CM 2-step:            {:?}", start.elapsed());
 
-    for (name, sampler) in methods
-        time = @elapsed x = sampler()
-        @info "$name: $(time) sec"
-    end
-end
+    // CM 4-step
+    let start = std::time::Instant::now();
+    let _ = sample_multistep(model, &x_t, 4, eps, t_max, device)?;
+    println!("CM 4-step:            {:?}", start.elapsed());
+
+    // DPM-Solver++ 20-step
+    let schedule = get_schedule(20, eps, t_max, 7.0);
+    let start = std::time::Instant::now();
+    let _ = sample_dpm(model, batch_size, img_size, &schedule, device)?;
+    println!("DPM-Solver++ 20-step: {:?}", start.elapsed());
+
+    Ok(())
+}
 ```
 
 ### 4.6 🦀 Rust高速推論実装
@@ -378,14 +467,14 @@ mod tests {
 
 ### 4.7 Math→Code対応表
 
-| 数式 | Julia Code | Rust Code | 説明 |
+| 数式 | Rust Code | Rust Code | 説明 |
 |:-----|:-----------|:----------|:-----|
 | $c_{\text{skip}}(t)$ | `σ_data^2 ./ (t.^2 .+ σ_data^2)` | `(t.sqr() + sigma_sq).recip() * sigma_sq` | Skip connection weight |
 | $F_\theta(\mathbf{x}_t, t)$ | `c_skip .* x_t .+ c_out .* model(...)` | `x_t * c_skip + net_out * c_out` | Consistency function |
 | $d_{\text{PH}}(\mathbf{a}, \mathbf{b})$ | `sqrt.(c^2 .+ sum((a .- b).^2))` | `(c.powi(2) + (a - b).sqr().sum()).sqrt()` | Pseudo-Huber loss |
 | $\mathbf{x}_{t'} = \alpha \mathbf{x}_t + \beta \mathbf{x}_0$ | `α .* x_t .+ β .* x_0` | `x_t * alpha + x_0 * beta` | Analytical ODE (ECT) |
 
-<details><summary>数式→Juliaコード完全対応 (20パターン)</summary>
+<details><summary>数式→Rustコード完全対応 (20パターン)</summary>
 
 1. **Preconditioning**:
    - 数式: $c_{\text{out}}(t) = \frac{\sigma_{\text{data}} t}{\sqrt{t^2 + \sigma_{\text{data}}^2}}$
@@ -407,7 +496,7 @@ mod tests {
    - 数式: $\mathbf{x}_{t'} = \frac{t'}{t} \mathbf{x}_t + (t' - t) \mathbf{x}_0$
    - Code: `x_next = (t_next / t_cur) * x + (t_next - t_cur) * x_0_pred`
 
-全20パターン → 各数式がJuliaコード1行に対応
+全20パターン → 各数式がRustコード1行に対応
 
 </details>
 
@@ -420,45 +509,49 @@ mod tests {
 
 ### 5.1 CM vs DDIM vs DPM-Solver++ 速度比較
 
-```julia
-using BenchmarkTools, Statistics
+```rust
+use std::collections::HashMap;
+use candle_core::{Device, Result, Tensor};
 
-# Benchmark setup
-img_size = (28, 28, 1)
-batch_size = 16
-x_T = randn(Float32, img_size..., batch_size)
-schedule_20 = get_schedule(20)
-schedule_1000 = get_schedule(1000)
+// Benchmark setup
+let img_size   = (1usize, 28usize, 28usize);
+let batch_size = 16usize;
+let x_t = Tensor::randn(0f32, 1.0, &[batch_size, img_size.0, img_size.1, img_size.2], &device)?;
+let schedule_20 = get_schedule(20, 0.002, 80.0, 7.0);
+// use criterion for benchmarking in Rust
 
-# Methods to compare
-results = Dict()
+let mut results: HashMap<&str, Tensor> = HashMap::new();
 
-# DDIM (50 steps)
-@time results["DDIM-50"] = ddim_sample(ddim_model, x_T, schedule_50, ps_ddim, st_ddim)
+// DDIM (50 steps)
+let start = std::time::Instant::now();
+results.insert("DDIM-50", ddim_sample(&ddim_model, &x_t, &schedule_50, &device)?);
+println!("DDIM-50:          {:?}", start.elapsed());
 
-# DPM-Solver++ (20 steps)
-@time results["DPM-20"] = dpm_solver_2nd(dpm_model, x_T, schedule_20, ps_dpm, st_dpm)
+// DPM-Solver++ (20 steps)
+let start = std::time::Instant::now();
+results.insert("DPM-20", dpm_solver_2nd(&dpm_model, x_t.clone(), &schedule_20, &device)?);
+println!("DPM-20:           {:?}", start.elapsed());
 
-# Consistency Model (1 step)
-@time results["CM-1"] = sample_1step(cm_model, x_T, 80.0f0, ps_cm, st_cm)
+// Consistency Model (1 step)
+let start = std::time::Instant::now();
+results.insert("CM-1", sample_1step(&cm_model, &x_t, 80.0f32, &device)?);
+println!("CM-1:             {:?}", start.elapsed());
 
-# Consistency Model (4 steps)
-@time results["CM-4"] = sample_multistep(cm_model, x_T, 4, 0.002f0, 80.0f0, ps_cm, st_cm)
+// Consistency Model (4 steps)
+let start = std::time::Instant::now();
+results.insert("CM-4", sample_multistep(&cm_model, &x_t, 4, 0.002f32, 80.0f32, &device)?);
+println!("CM-4:             {:?}", start.elapsed());
 
-# FID computation
-fid_scores = Dict(name => compute_fid(samples, real_data) for (name, samples) in results)
+// FID computation
+let fid_scores: HashMap<&str, f32> = results.iter()
+    .map(|(&name, samples)| (name, compute_fid(samples, &real_data)))
+    .collect();
 
-# Visualization
-using Plots
-methods = collect(keys(fid_scores))
-fids = collect(values(fid_scores))
-times = [0.5, 0.2, 0.01, 0.04]  # Measured times
-
-scatter(times, fids,
-        xlabel="Time (sec)", ylabel="FID ↓",
-        label=reshape(methods, 1, :),
-        title="CIFAR-10 Sampling Efficiency",
-        xscale=:log10, markersize=10)
+// Print results
+let times = [("DDIM-50", 0.5f32), ("DPM-20", 0.2), ("CM-1", 0.01), ("CM-4", 0.04)];
+for (name, time) in &times {
+    println!("{}: time = {:.3}s, FID = {:.2}", name, time, fid_scores[name]);
+}
 ```
 
 **Expected results** (CIFAR-10):
@@ -473,27 +566,43 @@ scatter(times, fids,
 
 ### 5.2 Self-consistency誤差の測定
 
-```julia
-# Self-consistency validation
-function measure_self_consistency(model, x_T, ps, st, num_timepoints=20)
-    ts = exp.(range(log(0.002), log(80.0), length=num_timepoints))
-    predictions = [model(x_T, fill(t, size(x_T, 4)), ps, st)[1] for t in ts]
+```rust
+// Self-consistency validation
+fn measure_self_consistency(
+    model: &ConsistencyModel<impl candle_nn::Module>,
+    x_t: &Tensor,
+    num_timepoints: usize,
+    device: &Device,
+) -> Result<f32> {
+    let batch_size = x_t.dim(0)?;
+    // Geometric schedule from ε to T
+    let ts: Vec<f32> = (0..num_timepoints)
+        .map(|i| {
+            let s = i as f32 / (num_timepoints - 1).max(1) as f32;
+            (0.002f32.ln() + s * (80.0f32.ln() - 0.002f32.ln())).exp()
+        })
+        .collect();
 
-    # Variance across time
-    pred_stack = cat(predictions..., dims=5)  # (H, W, C, B, T)
-    variance = var(pred_stack, dims=5)
-    mean_variance = mean(variance)
+    let predictions: Result<Vec<Tensor>> = ts.iter().map(|&t| {
+        let t_tensor = Tensor::full(t, (batch_size,), device)?;
+        model.forward(x_t, &t_tensor)
+    }).collect();
 
-    @info "Self-consistency error: $mean_variance"
-    return mean_variance
-end
+    // Variance across time predictions
+    let pred_stack = Tensor::stack(&predictions?, 0)?; // (T, B, H, W, C)
+    let variance   = pred_stack.var_keepdim(0)?;
+    let mean_var   = variance.mean_all()?.to_scalar::<f32>()?;
 
-# Compare with DDPM (no consistency guarantee)
-cm_error = measure_self_consistency(cm_model, x_T, ps_cm, st_cm)
-ddpm_error = measure_self_consistency(ddpm_model, x_T, ps_ddpm, st_ddpm)
+    println!("Self-consistency error: {:.6e}", mean_var);
+    Ok(mean_var)
+}
 
-@info "CM self-consistency error: $cm_error"
-@info "DDPM self-consistency error: $ddpm_error (no guarantee)"
+// Compare with DDPM (no consistency guarantee)
+let cm_error   = measure_self_consistency(&cm_model,   &x_t, 20, &device)?;
+let ddpm_error = measure_self_consistency(&ddpm_model, &x_t, 20, &device)?;
+
+println!("CM self-consistency error:   {:.6e}", cm_error);
+println!("DDPM self-consistency error: {:.6e} (no guarantee)", ddpm_error);
 ```
 
 **Expected**:
@@ -502,17 +611,17 @@ ddpm_error = measure_self_consistency(ddpm_model, x_T, ps_ddpm, st_ddpm)
 
 ### 5.3 Ablation Study — ECT vs CT
 
-```julia
-# Train both CT and ECT on same data
-ct_model = train_ct!(cm_model, train_loader, schedule, ps_ct, st, opt_st_ct, epochs=100)
-ect_model = train_ect!(cm_model, train_loader, 0.002f0, 80.0f0, ps_ect, st, opt_st_ect, epochs=10)
+```rust
+// Train both CT and ECT on the same data
+train_ct( &mut ct_model,  &train_loader, &schedule, &mut opt_ct,  &device, 100)?;
+train_ect(&mut ect_model, &train_loader, 0.002f32, 80.0f32, &mut opt_ect, &device, 10)?;
 
-# Compare convergence
-ct_fid = compute_fid(sample_1step(ct_model, x_T, 80.0f0, ps_ct, st_ct), real_data)
-ect_fid = compute_fid(sample_1step(ect_model, x_T, 80.0f0, ps_ect, st_ect), real_data)
+// Compare convergence
+let ct_fid  = compute_fid(&sample_1step(&ct_model,  &x_t, 80.0f32, &device)?, &real_data);
+let ect_fid = compute_fid(&sample_1step(&ect_model, &x_t, 80.0f32, &device)?, &real_data);
 
-@info "CT (100 epochs): FID = $ct_fid"
-@info "ECT (10 epochs): FID = $ect_fid"
+println!("CT  (100 epochs): FID = {:.2}", ct_fid);
+println!("ECT (10 epochs):  FID = {:.2}", ect_fid);
 ```
 
 **Expected** (CIFAR-10):
@@ -521,17 +630,22 @@ ect_fid = compute_fid(sample_1step(ect_model, x_T, 80.0f0, ps_ect, st_ect), real
 
 ### 5.4 Guidance Scale実験 (LCM)
 
-```julia
-# LCM with different guidance scales
-lcm_guided_sample(model, prompt, guidance_scales, ps, st) =
-    [lcm_sample(model, prompt, w, ps, st) for w in guidance_scales]
+```rust
+// LCM with different guidance scales
+fn lcm_guided_sample(
+    model: &impl Fn(&Tensor, &str, f32) -> Result<Tensor>,
+    prompt: &str,
+    guidance_scales: &[f32],
+) -> Result<Vec<Tensor>> {
+    guidance_scales.iter()
+        .map(|&w| model(&Tensor::zeros(&[1], &Device::Cpu)?, prompt, w))
+        .collect()
+}
 
-# Test guidance scales
-ws = [1.0, 2.0, 4.0, 7.5, 10.0]
-samples = lcm_guided_sample(lcm_model, "A cat sitting on a table", ws, ps_lcm, st_lcm)
-
-# Visualize
-plot([heatmap(s[:,:,1,1], title="w=$w") for (s, w) in zip(samples, ws)]...)
+// Test guidance scales
+let ws = [1.0f32, 2.0, 4.0, 7.5, 10.0];
+let samples = lcm_guided_sample(&lcm_model, "A cat sitting on a table", &ws)?;
+// Visualize: each sample corresponds to guidance scale in ws
 ```
 
 | Guidance Scale | 品質 | 多様性 | プロンプト忠実度 |
@@ -545,25 +659,39 @@ plot([heatmap(s[:,:,1,1], title="w=$w") for (s, w) in zip(samples, ws)]...)
 
 #### 演習 1: Self-consistency条件の数値検証
 
-```julia
-# Consistency error measurement across different time points
-function verify_self_consistency(model, x_T, ts, ps, st)
-    predictions = [model(x_T, fill(t, size(x_T, 4)), ps, st)[1] for t in ts]
+```rust
+// Consistency error measurement across different time points
+fn verify_self_consistency(
+    model: &ConsistencyModel<impl candle_nn::Module>,
+    x_t: &Tensor,
+    ts: &[f32],
+    device: &Device,
+) -> Result<f32> {
+    let batch_size = x_t.dim(0)?;
+    let predictions: Result<Vec<Tensor>> = ts.iter().map(|&t| {
+        let t_tensor = Tensor::full(t, (batch_size,), device)?;
+        model.forward(x_t, &t_tensor)
+    }).collect();
 
-    # Compute variance across all predictions
-    pred_stack = cat(predictions..., dims=5)
-    consistency_error = mean(var(pred_stack, dims=5))
+    // Compute variance across all predictions
+    let pred_stack = Tensor::stack(&predictions?, 0)?;
+    let consistency_error = pred_stack.var_keepdim(0)?.mean_all()?.to_scalar::<f32>()?;
 
-    @info "Self-consistency error: $consistency_error"
-    return consistency_error
-end
+    println!("Self-consistency error: {:.6e}", consistency_error);
+    Ok(consistency_error)
+}
 
-# Run experiment
-ts = exp.(range(log(0.002), log(80.0), length=50))
-cm_error = verify_self_consistency(cm_model, x_T, ts, ps_cm, st_cm)
-ddpm_error = verify_self_consistency(ddpm_model, x_T, ts, ps_ddpm, st_ddpm)
+// Run experiment
+let ts: Vec<f32> = (0..50)
+    .map(|i| {
+        let s = i as f32 / 49.0;
+        (0.002f32.ln() + s * (80.0f32.ln() - 0.002f32.ln())).exp()
+    })
+    .collect();
+let cm_error   = verify_self_consistency(&cm_model,   &x_t, &ts, &device)?;
+let ddpm_error = verify_self_consistency(&ddpm_model, &x_t, &ts, &device)?;
 
-# Expected: CM error << DDPM error
+// Expected: cm_error << ddpm_error
 ```
 
 **Expected output**:
@@ -572,100 +700,117 @@ ddpm_error = verify_self_consistency(ddpm_model, x_T, ts, ps_ddpm, st_ddpm)
 
 #### 演習 2: CT vs ECT収束速度比較
 
-```julia
-# Track FID during training
-function track_training_convergence(train_fn, dataloader, epochs, eval_every=10)
-    fid_history = []
-    for epoch in 1:epochs
-        train_fn(epoch)
+```rust
+// Track FID during training
+fn track_training_convergence(
+    train_fn: &mut impl FnMut(usize) -> Result<()>,
+    model: &ConsistencyModel<impl candle_nn::Module>,
+    test_data: &Tensor,
+    epochs: usize,
+    eval_every: usize,
+    device: &Device,
+) -> Result<Vec<f32>> {
+    let mut fid_history = Vec::new();
+    for epoch in 0..epochs {
+        train_fn(epoch)?;
 
-        if epoch % eval_every == 0
-            fid = evaluate_fid(model, test_data)
-            push!(fid_history, fid)
-            @info "Epoch $epoch: FID = $fid"
-        end
-    end
-    return fid_history
-end
+        if (epoch + 1) % eval_every == 0 {
+            let fid = evaluate_fid(model, test_data, device)?;
+            fid_history.push(fid);
+            println!("Epoch {}: FID = {:.2}", epoch + 1, fid);
+        }
+    }
+    Ok(fid_history)
+}
 
-# CT (100 epochs)
-ct_fid = track_training_convergence(train_ct!, train_loader, 100)
+// CT (100 epochs)
+let ct_fid  = track_training_convergence(&mut train_ct_fn,  &ct_model,  &test_data, 100, 10, &device)?;
 
-# ECT (10 epochs)
-ect_fid = track_training_convergence(train_ect!, train_loader, 10)
+// ECT (10 epochs)
+let ect_fid = track_training_convergence(&mut train_ect_fn, &ect_model, &test_data, 10,  1,  &device)?;
 
-# Plot convergence
-plot([ct_fid, ect_fid],
-     label=["CT (100 epochs)" "ECT (10 epochs)"],
-     xlabel="Evaluation Step", ylabel="FID ↓",
-     title="CT vs ECT Convergence")
+// Convergence comparison
+for (i, (ct, ect)) in ct_fid.iter().zip(ect_fid.iter()).enumerate() {
+    println!("Eval {}: CT FID = {:.2}, ECT FID = {:.2}", i + 1, ct, ect);
+}
 ```
 
 **課題**: ECTの収束が**10x速い**理由を、Analytical ODE vs Euler法の観点から説明せよ
 
 #### 演習 3: Multistep sampling最適化
 
-```julia
-# Find optimal number of steps
-function find_optimal_steps(model, x_T, max_steps=10, ps, st)
-    return map(1:max_steps) do steps
-        time = @elapsed x = sample_multistep(model, x_T, steps, 0.002f0, 80.0f0, ps, st)
-        fid = compute_fid(x, real_data)
-        (steps=steps, time=time, fid=fid)
-    end
-end
+```rust
+// Find optimal number of steps
+fn find_optimal_steps(
+    model: &ConsistencyModel<impl candle_nn::Module>,
+    x_t: &Tensor,
+    max_steps: usize,
+    device: &Device,
+) -> Result<Vec<(usize, f64, f32)>> {
+    (1..=max_steps).map(|steps| {
+        let start   = std::time::Instant::now();
+        let x       = sample_multistep(model, x_t, steps, 0.002f32, 80.0f32, device)?;
+        let elapsed = start.elapsed().as_secs_f64();
+        let fid     = compute_fid(&x, &real_data);
+        Ok((steps, elapsed, fid))
+    }).collect()
+}
 
-# Plot Pareto front
-results = find_optimal_steps(cm_model, x_T, 10, ps_cm, st_cm)
-scatter([r.time for r in results], [r.fid for r in results],
-        label=[string(r.steps, " steps") for r in results],
-        xlabel="Time (sec)", ylabel="FID ↓")
+// Print Pareto front
+let results = find_optimal_steps(&cm_model, &x_t, 10, &device)?;
+for (steps, time, fid) in &results {
+    println!("{} steps: time = {:.4}s, FID = {:.2}", steps, time, fid);
+}
 ```
 
 **課題**: 4-stepが"sweet spot"である理由を、Diminishing returnsの観点から説明せよ
 
-#### 演習 4: Julia vs Rust推論速度比較
+#### 演習 4: Rust vs Rust推論速度比較
 
-```julia
-# Julia benchmark
-@time begin
-    for i in 1:100
-        x = sample_1step(cm_model, randn(Float32, 28, 28, 1, 1), 80.0f0, ps_cm, st_cm)
-    end
-end
+```rust
+// Rust benchmark — 100 single-step samples
+let start = std::time::Instant::now();
+for _ in 0..100 {
+    let x_noise = Tensor::randn(0f32, 1.0, &[1, 1, 28, 28], &device)?;
+    let _ = sample_1step(&cm_model, &x_noise, 80.0f32, &device)?;
+}
+println!("Rust (100 samples): {:?}", start.elapsed());
 
-# Rust benchmark (call from Julia via JLLs)
-rust_time = run(`cargo bench --bench inference_bench`)
-
-# Expected: Rust ~8x faster than Julia, ~50x faster than Python
+// use criterion for benchmarking in Rust
+// Expected: Rust ~8x faster than Python reference, ~50x faster than naive Python
 ```
 
 **課題**: Rustの高速性の源泉を、ゼロコピー・SIMD・メモリレイアウトの観点から分析せよ
 
 #### 演習 5: Rate-Distortion曲線の経験的構築
 
-```julia
-# Vary distortion (sampling steps) and measure rate (FID)
-function build_rate_distortion_curve(model, steps_range, ps, st)
-    return map(steps_range) do steps
-        x = sample_multistep(model, x_T, steps, 0.002f0, 80.0f0, ps, st)
-        fid = compute_fid(x, real_data)
-        (steps=steps, fid=fid)
-    end
-end
+```rust
+// Vary distortion (sampling steps) and measure rate (FID)
+fn build_rate_distortion_curve(
+    model: &ConsistencyModel<impl candle_nn::Module>,
+    steps_range: &[usize],
+    x_t: &Tensor,
+    device: &Device,
+) -> Result<Vec<(usize, f32)>> {
+    steps_range.iter().map(|&steps| {
+        let x   = sample_multistep(model, x_t, steps, 0.002f32, 80.0f32, device)?;
+        let fid = compute_fid(&x, &real_data);
+        Ok((steps, fid))
+    }).collect()
+}
 
-# Plot R-D curve
-rd = build_rate_distortion_curve(cm_model, [1, 2, 4, 8, 16, 32], ps_cm, st_cm)
-plot([r.steps for r in rd], [r.fid for r in rd],
-     xlabel="Sampling Steps (Rate)", ylabel="FID (Distortion) ↓",
-     xscale=:log2, title="Rate-Distortion Curve")
+// Print R-D curve
+let rd = build_rate_distortion_curve(&cm_model, &[1, 2, 4, 8, 16, 32], &x_t, &device)?;
+for (steps, fid) in &rd {
+    println!("Steps = {:2}, FID = {:.2}", steps, fid);
+}
 ```
 
 **課題**: 理論的R-D曲線 $R(D) = I(\mathbf{x}; \hat{\mathbf{x}})$ と経験的曲線の乖離を説明せよ
 
 ### 5.6 チェックリスト: 自己診断テスト
 
-Consistency Models の理解度を確認するため、理論（Self-consistency条件導出、CT/CD/ECT違い、DPM-Solver++補正項、情報理論的下界など）、実装（Julia/Rust、preconditioning、各種損失関数）、実験（ベンチマーク、Ablation study、性能比較）の3軸で自己評価を行うこと。
+Consistency Models の理解度を確認するため、理論（Self-consistency条件導出、CT/CD/ECT違い、DPM-Solver++補正項、情報理論的下界など）、実装（Rust/Rust、preconditioning、各種損失関数）、実験（ベンチマーク、Ablation study、性能比較）の3軸で自己評価を行うこと。
 
 > **Note:** **全体の100%完了！**
 > 演習問題まで完了。Zone 6で最新研究、Zone 7で総まとめへ。
@@ -932,7 +1077,7 @@ InstaFlowが示した道:
 
 **現状 (2025)**:
 - SDXL (768x768): LCM 4-step, **0.4 sec** (A100)
-- Flux (1024x1024): CM 1-step, **0.3 sec** (H100)
+- Candle (1024x1024): CM 1-step, **0.3 sec** (H100)
 
 **目標 (2026-2027)**:
 - 4K resolution (3840x2160): **< 1 sec** (H100)
@@ -1099,19 +1244,28 @@ DMD2 = Distillation + GAN (第12回)
 **A**: 時間方向の一貫性を損失関数化
 
 **CT損失**:
-```julia
-function consistency_loss(model, x_0, t1, t2)
-    # Forward noise
-    x_t1 = add_noise(x_0, t1)
-    x_t2 = add_noise(x_0, t2)
+```rust
+fn consistency_loss(
+    model: &ConsistencyModel<impl candle_nn::Module>,
+    x_0: &Tensor,
+    t1: f32,
+    t2: f32,
+    device: &Device,
+) -> Result<Tensor> {
+    // Forward noise: x_ti = x_0 + ti * z (independent noise)
+    let z1   = Tensor::randn(0f32, 1.0, x_0.shape(), device)?;
+    let z2   = Tensor::randn(0f32, 1.0, x_0.shape(), device)?;
+    let x_t1 = x_0.add(&z1.affine(t1 as f64, 0.0)?)?;
+    let x_t2 = x_0.add(&z2.affine(t2 as f64, 0.0)?)?;
 
-    # One-step consistency
-    f_t1 = consistency_function(x_t1, t1, model)
-    f_t2 = consistency_function(x_t2, t2, model)
+    // One-step consistency function
+    let batch = x_0.dim(0)?;
+    let f_t1 = model.forward(&x_t1, &Tensor::full(t1, (batch,), device)?)?;
+    let f_t2 = model.forward(&x_t2, &Tensor::full(t2, (batch,), device)?)?;
 
-    # Pseudo-Huber distance
-    return pseudo_huber(f_t1, f_t2, c=0.00054)
-end
+    // Pseudo-Huber distance (c = 0.00054 for pixel range [-1,1])
+    pseudo_huber_loss(&f_t1, &f_t2, 0.00054)
+}
 ```
 
 **キーアイデア**: 同じ $\mathbf{x}_0$ から生成した $\mathbf{x}_{t_1}$ と $\mathbf{x}_{t_2}$ は、どちらも $F_\theta$ を通すと同じ $\mathbf{x}_\epsilon$ に到達すべき
@@ -1292,17 +1446,27 @@ $$
 3. **CFG蒸留**も同時実行
 
 **LCM実装**:
-```julia
-function consistency_function_cond(z_t, t, text_embed, model, cfg_scale=7.5)
-    # Conditional + Unconditional forward
-    ε_cond = model(z_t, t, text_embed)
-    ε_uncond = model(z_t, t, zeros_like(text_embed))
+```rust
+// LCM conditional consistency function with CFG distillation
+fn consistency_function_cond(
+    model: &impl Fn(&Tensor, &Tensor, Option<&Tensor>) -> Result<Tensor>,
+    z_t: &Tensor,
+    t: &Tensor,
+    text_embed: &Tensor,
+    cfg_scale: f32,
+) -> Result<Tensor> {
+    // Conditional + Unconditional forward pass
+    let eps_cond   = model(z_t, t, Some(text_embed))?;
+    let zeros      = text_embed.zeros_like()?;
+    let eps_uncond = model(z_t, t, Some(&zeros))?;
 
-    # CFG-distilled prediction
-    ε_guided = ε_uncond .+ cfg_scale .* (ε_cond .- ε_uncond)
+    // CFG-distilled prediction: ε_guided = ε_uncond + w*(ε_cond - ε_uncond)
+    let eps_guided = eps_uncond.add(
+        &eps_cond.sub(&eps_uncond)?.affine(cfg_scale as f64, 0.0)?
+    )?;
 
-    return consistency_transform(z_t, t, ε_guided)
-end
+    consistency_transform(z_t, t, &eps_guided)
+}
 ```
 
 **結果 (SDXL)**:
@@ -1392,7 +1556,7 @@ $$
 
 | 日 | Zone | 内容 | 時間 | 具体的タスク | 到達目標 |
 |:---|:-----|:-----|:-----|:-------------|:---------|
-| Day 8 | Z4.1-4.2 | Julia基礎実装 | 3h | MNIST CMを訓練 (CT) | 訓練ループ完全理解 |
+| Day 8 | Z4.1-4.2 | Rust基礎実装 | 3h | MNIST CMを訓練 (CT) | 訓練ループ完全理解 |
 | Day 9 | Z4.3 | Rust実装 | 2h | Candle CMでサンプリング高速化 | FFI境界理解 |
 | Day 10 | Z5 | ベンチマーク | 2h | 自前CMとDDPMを比較 | NFE vs FIDトレードオフ体感 |
 | Day 11 | Z6.1-6.3 | 蒸留系研究 | 3h | LCM/InstaFlow/DMD2論文読解 | Progressive系統樹理解 |
@@ -1408,7 +1572,7 @@ $$
 |:---|:-----|:-----|:-------|
 | Day 1 | Z0-2 + Z3.1-3.6 | 4h | QuickStart→CT/CD/iCT完全理解 |
 | Day 2 | Z3.7-3.14 | 5h | ECT+DPM++/UniPC+Progressive |
-| Day 3 | Z4 Julia実装 | 4h | CIFAR-10 CMフル実装 |
+| Day 3 | Z4 Rust実装 | 4h | CIFAR-10 CMフル実装 |
 | Day 4 | Z4 Rust実装 | 3h | Candle最適化 + ベンチマーク |
 | Day 5 | Z5 + Z6.1-6.3 | 4h | 比較実験 + LCM/InstaFlow/DMD2 |
 | Day 6 | Z6.4-6.6 | 3h | CTM理論 + 情報理論下界 |
@@ -1499,46 +1663,48 @@ graph TB
 #### 7.4.4 実装の累積（積み上げ式アプローチ）
 
 **Stage 1: DDPM実装** (第36回)
-```julia
-# 基本構造
-mutable struct DDPM
-    βs::Vector{Float32}
-    model::DenoisingUNet
-end
+```rust
+// 基本構造
+struct Ddpm {
+    betas: Vec<f32>,
+    model: DenoisingUNet,
+}
 ```
 
 **Stage 2: DDIM追加** (第36回で導出済み)
-```julia
-# DDPMを拡張
-function ddim_sample(ddpm::DDPM, x_T, η=0.0)
-    # DDPMのβsを再利用
-end
+```rust
+// DDPMを拡張
+fn ddim_sample(ddpm: &Ddpm, x_t: &Tensor, eta: f32) -> Result<Tensor> {
+    // DDPMのbetasを再利用
+    todo!()
+}
 ```
 
 **Stage 3: Score SDE統合** (第37回)
-```julia
-# SDE視点でのサンプリング
-function sde_sample(model, x_T, sde_type=:vp)
-    # VP-SDE または VE-SDE
-end
+```rust
+// SDE視点でのサンプリング
+fn sde_sample(model: &impl candle_nn::Module, x_t: &Tensor, sde_type: &str) -> Result<Tensor> {
+    // VP-SDE または VE-SDE
+    todo!()
+}
 ```
 
 **Stage 4: Latent Diffusion** (第39回)
-```julia
-# VAE追加
-struct LatentDiffusion
-    vae::VAE
-    diffusion::DDPM  # Stage 1-3を再利用
-end
+```rust
+// VAE追加
+struct LatentDiffusion {
+    vae: Vae,
+    diffusion: Ddpm, // Stage 1-3を再利用
+}
 ```
 
 **Stage 5: Consistency Model** (第40回)
-```julia
-# 新規実装（DDPMから蒸留可能）
-struct ConsistencyModel
-    F_θ::ConsistencyFunction
-    teacher::Union{DDPM, Nothing}  # CD時のみ
-end
+```rust
+// 新規実装（DDPMから蒸留可能）
+struct ConsistencyModel {
+    f_theta: ConsistencyFunction,
+    teacher: Option<Ddpm>, // CD時のみ
+}
 ```
 
 → **各講義の実装が次の講義の基礎になる設計**
@@ -1663,7 +1829,7 @@ end
 > - CT/CD/iCT/ECTの訓練手法を数式レベルで把握
 > - DPM-Solver++/UniPCとの比較で高次ソルバーを理解
 > - Progressive/LCM/InstaFlow/DMD2の蒸留系譜を整理
-> - JuliaでCT実装、RustでCandle推論を完成
+> - RustでCT実装、RustでCandle推論を完成
 > - 1-step生成の理論限界と実用トレードオフを習得
 >
 > **次の挑戦**:

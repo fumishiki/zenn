@@ -1,13 +1,13 @@
 ---
 title: "第27回: 推論最適化 & Production品質: 30秒の驚き→数式修行→実装マスター【後編】実装編"
 slug: "ml-lecture-27-part2"
-emoji: "⚡"
+emoji: "🦀"
 type: "tech"
 topics: ["machinelearning", "optimization", "rust", "elixir", "production"]
 published: true
 difficulty: "advanced"
 time_estimate: "90 minutes"
-languages: ["Julia", "Rust", "Elixir"]
+languages: ["Rust", "Elixir"]
 keywords: ["機械学習", "深層学習", "生成モデル"]
 ---
 
@@ -745,77 +745,73 @@ INT2 Results:
 
 ### 5.2 蒸留loss比較
 
-```julia
-using Flux, Statistics
+```rust
+// Knowledge Distillation: Teacher → Student training.
+// For production: use candle or burn for neural network layers with autodiff.
+// Here we define the loss functions using pure Rust numerics.
 
-# Teacher model (large)
-teacher = Chain(
-    Dense(100 => 256, relu),
-    Dense(256 => 256, relu),
-    Dense(256 => 10)
-)
+fn softmax(logits: &[f32]) -> Vec<f32> {
+    let max = logits.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
+    let exps: Vec<f32> = logits.iter().map(|x| (x - max).exp()).collect();
+    let sum: f32 = exps.iter().sum();
+    exps.iter().map(|e| e / sum).collect()
+}
 
-# Student model (small)
-student = Chain(
-    Dense(100 => 64, relu),
-    Dense(64 => 10)
-)
+fn kl_divergence(p: &[f32], q: &[f32]) -> f32 {
+    // KL(p || q) = Σ p_i * log(p_i / q_i)
+    p.iter().zip(q).map(|(pi, qi)| {
+        if *pi > 1e-10 { pi * (pi / qi.max(1e-10)).ln() } else { 0.0 }
+    }).sum()
+}
 
-# Data
-X_train = randn(Float32, 100, 1000)
-y_train = Flux.onehotbatch(rand(1:10, 1000), 1:10)
+fn cross_entropy(logits: &[f32], target_class: usize) -> f32 {
+    let probs = softmax(logits);
+    -probs[target_class].max(1e-10).ln()
+}
 
-# Train teacher
-opt_teacher = Adam(0.001)
-for epoch in 1:50
-    Flux.train!(teacher, [(X_train, y_train)], opt_teacher) do m, x, y
-        Flux.crossentropy(m(x), y)
-    end
-end
+/// Distillation loss: α * KL(soft_student || soft_teacher) * T² + (1-α) * CE(student, y_hard)
+///
+/// T: temperature (higher T = softer probability distribution)
+/// α: weight on soft targets (higher α = more distillation emphasis)
+fn distillation_loss(
+    logits_s: &[f32],    // student logits
+    logits_t: &[f32],    // teacher logits (frozen)
+    y_hard: usize,       // ground-truth class index
+    temperature: f32,
+    alpha: f32,
+) -> f32 {
+    // Soft targets with temperature scaling
+    let scaled_s: Vec<f32> = logits_s.iter().map(|x| x / temperature).collect();
+    let scaled_t: Vec<f32> = logits_t.iter().map(|x| x / temperature).collect();
+    let soft_student = softmax(&scaled_s);
+    let soft_teacher = softmax(&scaled_t);
 
-# Distillation training
-function distillation_loss(student, teacher, x, y; T=3.0, α=0.7)
-    logits_s = student(x)
-    logits_t = teacher(x)
+    // Soft target loss: KL(student || teacher) * T²  (forward KL)
+    let soft_loss = kl_divergence(&soft_student, &soft_teacher) * temperature * temperature;
 
-    # Soft target loss
-    soft_loss = Flux.kldivergence(
-        softmax(logits_s ./ T),
-        softmax(logits_t ./ T)
-    ) * T^2
+    // Hard target loss: cross-entropy with ground truth
+    let hard_loss = cross_entropy(logits_s, y_hard);
 
-    # Hard target loss
-    hard_loss = Flux.crossentropy(softmax(logits_s), y)
+    alpha * soft_loss + (1.0 - alpha) * hard_loss
+}
 
-    α * soft_loss + (1 - α) * hard_loss
-end
+// Experiment: vary temperature
+fn distillation_temperature_study() {
+    let temperatures = [1.0_f32, 3.0, 5.0, 10.0];
+    println!("\nDistillation Results:");
+    println!("{}", "=".repeat(60));
 
-# Experiment: vary temperature
-temperatures = [1.0, 3.0, 5.0, 10.0]
-results = Dict()
+    for &t in &temperatures {
+        // Placeholder: in production, run full training loop with candle/burn
+        let logits_s = vec![1.0_f32, 2.0, 0.5, -0.3, 0.8, 1.2, -0.5, 0.1, 0.3, 0.0];
+        let logits_t = vec![1.2_f32, 1.8, 0.6, -0.2, 0.9, 1.1, -0.4, 0.2, 0.4, 0.1];
+        let loss = distillation_loss(&logits_s, &logits_t, 1, t, 0.7);
 
-for T in temperatures
-    student_copy = deepcopy(student)
-    opt = Adam(0.001)
-
-    losses = map(1:100) do _
-        Flux.train!(student_copy, [(X_train, y_train)], opt) do m, x, y
-            distillation_loss(m, teacher, x, y; T=T, α=0.7)
-        end
-    end
-
-    # Evaluate
-    acc = mean(Flux.onecold(student_copy(X_train)) .== Flux.onecold(y_train))
-    results[T] = (final_loss = losses[end], accuracy = acc)
-end
-
-println("\nDistillation Results:")
-println("="^60)
-for T in temperatures
-    println("Temperature $T:")
-    println("  Final Loss: $(round(results[T].final_loss, digits=4))")
-    println("  Accuracy:   $(round(results[T].accuracy * 100, digits=2))%")
-end
+        println!("Temperature {}:", t);
+        println!("  Distillation Loss: {:.4}", loss);
+        // println!("  Accuracy: {:.2}%", accuracy * 100.0);
+    }
+}
 ```
 
 ### 5.3 自己診断チェックリスト
@@ -829,7 +825,7 @@ end
 - [ ] Rust の thiserror vs anyhow を使い分けられる
 - [ ] Elixir の Circuit Breaker を実装できる
 - [ ] PagedAttention のメモリ効率を理解している
-- [ ] 3言語 (Rust/Elixir/Julia) の統合アーキテクチャを設計できる
+- [ ] 3言語 (Rust/Elixir/Rust) の統合アーキテクチャを設計できる
 
 ---
 
@@ -1054,7 +1050,7 @@ A. Modified Rejection Samplingを使うため。棄却時に$p'(x) = \max(0, p(x
 A. **役割分担**が答え。
 - **Python**: プロトタイピング, 実験, データ分析 → 柔軟性
 - **Rust**: カーネル実装, 推論サーバー, FFI → 速度+安全性
-- **Julia**: 訓練スクリプト, 数値計算 → NumPy+速度
+- **Rust**: 訓練スクリプト, 数値計算 → NumPy+速度
 - **Elixir**: APIサーバー, 分散制御 → 並行性+耐障害性
 
 本講義は**Production推論**に焦点を当てているため、Rust/Elixir中心。Pythonは研究段階で使い、本番ではコンパイル言語に移行するのが現実的。
@@ -1088,7 +1084,7 @@ Elixirの強み:
 - 耐障害性: Let it crash → Supervisor自動復旧
 - ホットコードスワップ: ダウンタイムなし更新
 
-**ただし**: 数値計算はRust/Juliaに任せ、Elixirは**制御層**に徹する。
+**ただし**: 数値計算はRust/Rustに任せ、Elixirは**制御層**に徹する。
 
 </details>
 
@@ -1619,38 +1615,60 @@ $$
 
 **ステップ2**: イテレーションごとに完了リクエストを削除、新規を追加
 
-```julia
-# Continuous Batching: 可変長リクエストの動的バッチ管理
-struct Request
-    tokens::Vector{Int}
-    done::Bool
-end
+```rust
+// Continuous Batching: 可変長リクエストの動的バッチ管理
+use std::collections::VecDeque;
 
-function continuous_batching!(queue::Vector{Request}, model; max_batch=8, max_steps=1000)
-    active = Request[]
-    
-    for _ in 1:max_steps
-        # 完了リクエストを削除
-        filter!(r -> !r.done, active)
-        
-        # キューから新規リクエストを補充
-        while length(active) < max_batch && !isempty(queue)
-            push!(active, popfirst!(queue))
-        end
-        isempty(active) && break
-        
-        # バッチ forward（並列推論）
-        token_seqs = [r.tokens for r in active]
-        logits = model(token_seqs)        # shape: [vocab, batch]
-        
-        # 次トークンをサンプリング、状態更新
-        for (r, logit) in zip(active, eachcol(logits))
-            next_tok = sample_token(logit)
-            push!(r.tokens, next_tok)
-            r.done = is_eos(next_tok)
-        end
-    end
-end
+#[derive(Clone)]
+struct Request {
+    tokens: Vec<u32>,
+    done: bool,
+}
+
+impl Request {
+    fn new(prompt: Vec<u32>) -> Self { Self { tokens: prompt, done: false } }
+}
+
+fn sample_token(_logit: &[f32]) -> u32 { 0 } // placeholder: argmax or multinomial sampling
+fn is_eos(tok: u32) -> bool { tok == 2 }       // EOS token ID (model-specific)
+
+/// Continuous batching: dynamically fill the batch as requests complete.
+/// Throughput = B / E[L] vs static batching Throughput = B / max_i(L_i)
+fn continuous_batching<F>(
+    queue: &mut VecDeque<Request>,
+    model: &F,             // fn(&[&[u32]]) -> Vec<Vec<f32>>  — batch forward pass
+    max_batch: usize,
+    max_steps: usize,
+)
+where F: Fn(&[&[u32]]) -> Vec<Vec<f32>>
+{
+    let mut active: Vec<Request> = Vec::new();
+
+    for _ in 0..max_steps {
+        // 完了リクエストを削除
+        active.retain(|r| !r.done);
+
+        // キューから新規リクエストを補充 (fill up to max_batch)
+        while active.len() < max_batch {
+            match queue.pop_front() {
+                Some(req) => active.push(req),
+                None => break,
+            }
+        }
+        if active.is_empty() { break; }
+
+        // バッチ forward（並列推論）
+        let token_seqs: Vec<&[u32]> = active.iter().map(|r| r.tokens.as_slice()).collect();
+        let logits = model(&token_seqs); // shape: [batch][vocab]
+
+        // 次トークンをサンプリング、状態更新
+        for (req, logit) in active.iter_mut().zip(&logits) {
+            let next_tok = sample_token(logit);
+            req.tokens.push(next_tok);
+            req.done = is_eos(next_tok);
+        }
+    }
+}
 ```
 
 #### 7.3.3 スループット向上の理論解析

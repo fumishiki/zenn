@@ -7,7 +7,7 @@ published: true
 slug: "ml-lecture-46-part1"
 difficulty: "advanced"
 time_estimate: "90 minutes"
-languages: ["Julia", "Rust"]
+languages: ["Rust"]
 keywords: ["機械学習", "深層学習", "生成モデル"]
 ---
 
@@ -65,62 +65,91 @@ graph TD
 
 NeRFは「視点=関数の引数」と考える。空間座標 $(x,y,z)$ と視線方向 $(\theta,\phi)$ を入力すると、そこから見える色 $(r,g,b)$ と密度 $\sigma$ を返す関数 $F_\theta$ を学習する。
 
-```julia
-using Flux, Statistics
+```rust
+use std::f64::consts::PI;
 
-# NeRF: (x,y,z,θ,ϕ) → (r,g,b,σ)
-# 5次元入力 → MLPで非線形変換 → 4次元出力
-function tiny_nerf(pos, dir)
-    # pos: (x,y,z) 空間座標
-    # dir: (θ,ϕ) 視線方向
-    # 返り値: (r,g,b,σ) 色と密度
+// NeRF: (x,y,z,θ,ϕ) → (r,g,b,σ)
+// 5次元入力 → MLPで非線形変換 → 4次元出力
 
-    # 位置符号化: γ(x) = [sin(2^0πx), cos(2^0πx), ..., sin(2^Lπx), cos(2^Lπx)]
-    L = 10  # 周波数帯域数
-    encoded_pos = vcat([vcat(sin.(2^i * π * pos), cos.(2^i * π * pos)) for i in 0:L-1]...)
+/// 位置符号化: γ(x) = [sin(2^0πx), cos(2^0πx), ..., sin(2^(L-1)πx), cos(2^(L-1)πx)]
+fn positional_encode(pos: &[f64; 3], l: usize) -> Vec<f64> {
+    (0..l).flat_map(|i| {
+        let freq = (2_f64).powi(i as i32) * PI;
+        pos.iter().flat_map(move |&x| [(freq * x).sin(), (freq * x).cos()])
+    }).collect()
+}
 
-    # MLP: 63次元(3×2×10+3) → 256 → 256 → 4
-    mlp = Chain(Dense(63, 256, relu), Dense(256, 256, relu), Dense(256, 4))
-    output = mlp(encoded_pos)
+/// NeRF forward: pos(x,y,z), dir(θ,ϕ) → (rgb, density)
+fn tiny_nerf(pos: &[f64; 3], _dir: &[f64; 2]) -> ([f64; 3], f64) {
+    // pos: (x,y,z) 空間座標
+    // dir: (θ,ϕ) 視線方向
+    // 返り値: (rgb, σ) 色と密度
 
-    # rgb + σ
-    rgb = sigmoid.(output[1:3])  # [0,1]に正規化
-    σ = relu(output[4])          # 密度は非負
+    // 位置符号化: L=10 周波数帯域で 63次元 (3×2×10+3)
+    let encoded = positional_encode(pos, 10);
 
-    return (rgb=rgb, density=σ)
-end
+    // MLP: 63 → 256 → 256 → 4 (実際は学習済み重みを使用; ここはダミー出力で構造を示す)
+    let raw = encoded.iter().map(|&x| x.abs()).sum::<f64>() / encoded.len() as f64;
+    let sigma = raw.max(0.0);                    // relu: 密度は非負
+    let rgb = [                                  // sigmoid: [0,1] に正規化
+        (sigma * 0.5_f64).tanh(),
+        (sigma * 0.3_f64).tanh(),
+        (sigma * 0.1_f64).tanh(),
+    ];
+    (rgb, sigma)
+}
 
-# Volume Rendering: レイ上の点をサンプリングして積分
-function render_ray(ray_origin, ray_direction, nerf_model)
-    # t ∈ [t_near, t_far] で N点サンプリング
-    N = 64
-    t_vals = range(2.0, stop=6.0, length=N)
+/// Volume Rendering: レイ上の点をサンプリングして積分
+/// C = Σ T_i · (1 - exp(-σ_i·δ_i)) · c_i,  T_i = Π_{j<i}(1 - α_j) (透過率)
+fn render_ray(ray_origin: &[f64; 3], ray_direction: &[f64; 3]) -> [f64; 3] {
+    // t ∈ [t_near, t_far] で N点サンプリング
+    let n = 64_usize;
+    let (t_near, t_far) = (2.0_f64, 6.0_f64);
+    let t_vals: Vec<f64> = (0..n)
+        .map(|i| t_near + (t_far - t_near) * i as f64 / (n - 1) as f64)
+        .collect();
 
-    # 各点で NeRF を評価
-    results   = [tiny_nerf(ray_origin .+ t .* ray_direction, ray_direction[1:2]) for t in t_vals]
-    colors    = reduce(vcat, [r.rgb'    for r in results])
-    densities = getfield.(results, :density)
+    // 各点で NeRF を評価
+    let (colors, densities): (Vec<[f64; 3]>, Vec<f64>) = t_vals.iter().map(|&t| {
+        let pos = [
+            ray_origin[0] + t * ray_direction[0],
+            ray_origin[1] + t * ray_direction[1],
+            ray_origin[2] + t * ray_direction[2],
+        ];
+        tiny_nerf(&pos, &[ray_direction[0], ray_direction[1]])
+    }).unzip();
 
-    # Volume Rendering式: C = Σ T_i · (1 - exp(-σ_i·δ_i)) · c_i
-    # T_i = exp(-Σ_{j<i} σ_j·δ_j) (透過率)
-    δ = diff([t_vals..., t_vals[end] + 0.1])  # Δt
-    α = 1 .- exp.(-densities .* δ)           # 不透明度
-    T = cumprod([1.0; (1 .- α[1:end-1])])    # 透過率
-    weights = T .* α                          # 重み
+    // δ = Δt (区間幅)
+    let mut deltas: Vec<f64> = t_vals.windows(2).map(|w| w[1] - w[0]).collect();
+    deltas.push(0.1); // 最後のΔt
 
-    # 最終色 = 重み付き和
-    final_color = sum(weights .* colors, dims=1)[1, :]
+    // α_i = 1 - exp(-σ_i · δ_i): 不透明度
+    // weights = T_i · α_i (重み)
+    let mut transmittance = 1.0_f64;
+    let weights: Vec<f64> = densities.iter().zip(&deltas).map(|(&sigma, &delta)| {
+        let alpha = 1.0 - (-sigma * delta).exp(); // 不透明度
+        let w = transmittance * alpha;             // 重み
+        transmittance *= 1.0 - alpha;              // 透過率を更新
+        w
+    }).collect();
 
-    return final_color
-end
+    // 最終色 = 重み付き和
+    let mut final_color = [0.0_f64; 3];
+    for (w, c) in weights.iter().zip(&colors) {
+        final_color[0] += w * c[0];
+        final_color[1] += w * c[1];
+        final_color[2] += w * c[2];
+    }
+    final_color
+}
 
-# 実行例
-ray_o = [0.0, 0.0, 0.0]      # カメラ原点
-ray_d = [0.0, 0.0, 1.0]      # 視線方向(前方)
-pixel_color = render_ray(ray_o, ray_d, tiny_nerf)
-
-println("NeRF rendered pixel: RGB = ", pixel_color)
-# => [0.234, 0.567, 0.123] のような色が返る
+fn main() {
+    let ray_o = [0.0_f64, 0.0, 0.0]; // カメラ原点
+    let ray_d = [0.0_f64, 0.0, 1.0]; // 視線方向(前方)
+    let pixel_color = render_ray(&ray_o, &ray_d);
+    println!("NeRF rendered pixel: RGB = {:?}", pixel_color);
+    // => [0.234, 0.567, 0.123] のような色が返る
+}
 ```
 
 **出力例**:
@@ -330,7 +359,7 @@ graph TD
 | 数式導出 | △ 概念のみ | ◎ Volume Rendering方程式を1行ずつ |
 | 実装 | ❌ なし | ◎ Rust 3DGSラスタライザ |
 | 最新研究 | △ 2022年まで | ◎ 2025年の3DGS Applications Survey含む |
-| 言語 | 🐍 Python | ⚡ Julia + 🦀 Rust + 🔮 Elixir |
+| 言語 | 🐍 Python | 🦀 Rust + 🦀 Rust + 🔮 Elixir |
 
 松尾研は画像生成が中心。3D生成は扱わない。本シリーズは3Dも完全カバー。
 
@@ -1291,9 +1320,9 @@ VSD は CLIP スコア（テキスト適合）と多様性（LPIPS）の両方�
 Zone 3で学んだ3DGSの数式をRustで実装する。タイルベース並列処理 (16×16ピクセルブロック) をCPU実装で再現。
 
 
-### 4.2 Julia NeRF訓練: Instant NGP Hash Encoding
+### 4.2 Rust NeRF訓練: Instant NGP Hash Encoding
 
-Zone 3のInstant NGP理論をJuliaで実装する。Multi-Resolution Hash Encodingで1000倍高速化。
+Zone 3のInstant NGP理論をRustで実装する。Multi-Resolution Hash Encodingで1000倍高速化。
 
 
 ---
@@ -1457,7 +1486,7 @@ $$
 | **Zone 1** | 体験ゾーン — 5つの3D表現実装 | ✅ / ⚠️ / ❌ |
 | **Zone 2** | 直感ゾーン — 3D生成の歴史と重要性 | ✅ / ⚠️ / ❌ |
 | **Zone 3** | 数式修行 — NeRF/3DGS/DreamFusion完全導出 | ✅ / ⚠️ / ❌ |
-| **Zone 4** | 実装ゾーン — Rust 3DGS Rasterizer + Julia NeRF | ✅ / ⚠️ / ❌ |
+| **Zone 4** | 実装ゾーン — Rust 3DGS Rasterizer + Rust NeRF | ✅ / ⚠️ / ❌ |
 | **Zone 5** | 実験ゾーン — NeRF vs 3DGS 比較実験 | ✅ / ⚠️ / ❌ |
 | **Zone 6** | 発展ゾーン — 3DGS SLAM 2025最新研究 | ✅ / ⚠️ / ❌ |
 

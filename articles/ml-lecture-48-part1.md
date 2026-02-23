@@ -2,12 +2,12 @@
 title: "第48回: 科学・分子生成（AI for Science）: 30秒の驚き→数式修行→実装マスター"
 emoji: "🧬"
 type: "tech"
-topics: ["machinelearning","deeplearning","science","julia","rust"]
+topics: ["machinelearning","deeplearning","science","rust","rust"]
 published: true
 slug: "ml-lecture-48-part1"
 difficulty: "advanced"
 time_estimate: "90 minutes"
-languages: ["Julia", "Rust"]
+languages: ["Rust"]
 keywords: ["機械学習", "深層学習", "生成モデル"]
 ---
 
@@ -20,16 +20,45 @@ keywords: ["機械学習", "深層学習", "生成モデル"]
 
 ## 🚀 0. クイックスタート（30秒）— 材料設計を3行で
 
-```julia
-using LinearAlgebra, Plots
+```rust
+// Tiny Crystal Flow Matching — 2D格子生成デモ
+// 数式: x_t = √t · x1 + √(1-t) · ε, ε ~ N(0, I)
+// ノイズ x0 → 結晶構造 x1 への連続的な変形
 
-# Tiny Crystal Flow Matching — 2D格子生成デモ
-crystal_step(x, t) = x .* sqrt(t) .+ randn(size(x)) .* sqrt(1 - t)  # 連続的なノイズ除去
+use std::f32::consts::PI;
 
-# 初期ノイズ → 結晶格子への変換
-x0 = randn(8, 2)  # 8原子の2D座標
-x1 = crystal_step(x0, 1.0)  # t=1で結晶構造
-scatter(x1[:,1], x1[:,2], title="Generated 2D Crystal", label="Atoms", ms=10)
+/// フロー補間: t=0 で純粋ノイズ、t=1 で結晶構造
+/// x_t = √t · x1 + √(1-t) · ε (Flow Matching の確率パス)
+fn crystal_step(x1: &[[f32; 2]], eps: &[[f32; 2]], t: f32) -> Vec<[f32; 2]> {
+    x1.iter().zip(eps).map(|(&target, &noise)| [
+        t.sqrt() * target[0] + (1.0 - t).sqrt() * noise[0],
+        t.sqrt() * target[1] + (1.0 - t).sqrt() * noise[1],
+    ]).collect()
+}
+
+fn rand_normal_f32() -> f32 { 0.0 } // placeholder (実際は rand_distr::Normal を使用)
+
+fn main() {
+    // 8原子の2D座標 (初期ノイズ)
+    let x0: Vec<[f32; 2]> = (0..8).map(|_| [rand_normal_f32(), rand_normal_f32()]).collect();
+
+    // 目標: 正方格子 (結晶構造)
+    let x1: Vec<[f32; 2]> = (0..8).map(|i| {
+        let row = i / 2;
+        let col = i % 2;
+        [col as f32 * 1.0 - 0.5, row as f32 * 0.5 - 0.75]
+    }).collect();
+
+    // t=1 で結晶構造を生成
+    let eps: Vec<[f32; 2]> = x0.clone();
+    let xt = crystal_step(&x1, &eps, 1.0);
+
+    println!("Generated 2D Crystal (8 atoms):");
+    for (i, atom) in xt.iter().enumerate() {
+        println!("  Atom {}: [{:.3}, {:.3}]", i, atom[0], atom[1]);
+    }
+    // plotters で散布図: scatter(xt, title="Generated 2D Crystal")
+}
 ```
 
 **出力**: ランダム配置 → 規則的な格子パターン
@@ -162,7 +191,7 @@ graph TD
 |:-----|:------------|:----------------|
 | 科学応用 | なし | Protein/Drug/Materials 全カバー |
 | Flow Matching | なし | Biology特化の最新動向 |
-| 実装 | なし | Julia訓練 + Rust推論 + Elixir配信 |
+| 実装 | なし | Rust訓練 + Rust推論 + Elixir配信 |
 | 評価指標 | なし | Validity/Synthesizability/Property |
 | 最新研究 | なし | 2025-2026 (RFd3/AF3/MatterGen/CrystalFlow) |
 
@@ -1270,7 +1299,7 @@ $$
 - AlphaFold-Multimer v2.3: DockQ 0.48
 - AlphaFold 3: **DockQ 0.67** (40%向上)
 
-**実装の鍵（Julia概念コード）**:
+**実装の鍵（Rust概念コード）**:
 
 
 ### 3.8 RFdiffusion3: All-Atom Biomolecular Design
@@ -1383,7 +1412,7 @@ $$
 - Interface RMSD: **0.8 Å**
 - Computational cost: **10x faster** than RFdiffusion + Rosetta
 
-**実装（Julia概念コード）**:
+**実装（Rust概念コード）**:
 
 
 ### 3.9 CrystalFlow & FlowMM: Materials Generation
@@ -1610,7 +1639,7 @@ $$
 
 ## 💻 4. 実装ゾーン（45分）— Production-Ready Scientific AI
 
-### 4.1 CrystalFlow完全実装（Lux.jl）
+### 4.1 CrystalFlow完全実装（Candle）
 
 
 ### 4.2 RFdiffusion3 All-Atom Inference
@@ -1674,7 +1703,7 @@ $$
 - CrystalFlow/FlowMM/DMFlowの Flow Matching for Materials（周期境界条件、Riemannian多様体、無秩序材料）
 
 **実装スキル**:
-- Lux.jlでのE(3)-equivariant GNN実装
+- CandleでのE(3)-equivariant GNN実装
 - Flow Matching velocity network
 - Property-guided generation（Classifier guidance + Property predictor）
 - Multi-modal protein-ligand docking

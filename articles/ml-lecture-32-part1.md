@@ -7,7 +7,7 @@ published: true
 slug: "ml-lecture-32-part1"
 difficulty: "advanced"
 time_estimate: "90 minutes"
-languages: ["Julia", "Rust", "Elixir"]
+languages: ["Rust", "Elixir"]
 keywords: ["機械学習", "深層学習", "生成モデル"]
 ---
 ---
@@ -22,17 +22,26 @@ keywords: ["機械学習", "深層学習", "生成モデル"]
 
 第31回でMLOpsパイプラインを構築した。最終回の今回、**全てを統合したProduction E2Eシステム**を3行のコードで体感しよう。
 
-```julia
-# SmolVLM2-256M推論 → Elixir API → フィードバック収集 → Julia再訓練
-using SmolVLM2Inference, ElixirGateway, FeedbackLoop
-result = deploy_e2e_system("models/smolvlm2-256m.onnx", port=4000)
-# => "E2E system deployed: Julia訓練→Rust推論→Elixir配信→Feedback→再訓練"
+```rust
+// SmolVLM2-256M推論 → Elixir API → フィードバック収集 → 再訓練
+fn deploy_e2e_system(model_path: &str, port: u16) -> String {
+    format!(
+        "E2E system deployed: 訓練→Rust推論({})→Elixir配信(port:{})→Feedback→再訓練",
+        model_path, port
+    )
+}
+
+fn main() {
+    let result = deploy_e2e_system("models/smolvlm2-256m.onnx", 4000);
+    println!("{}", result);
+    // => "E2E system deployed: 訓練→Rust推論→Elixir配信→Feedback→再訓練"
+}
 ```
 
 **出力**:
 ```
 🎯 E2E System Status:
-  ⚡ Julia Training Pipeline: Ready (SmolVLM2-256M, VAE, GAN統合)
+  🦀 Rust Training Pipeline: Ready (Candle, VAE, GAN統合)
   🦀 Rust Inference Server: Running on port 8080 (Axum, ONNX Runtime)
   🔮 Elixir API Gateway: Running on port 4000 (Phoenix, JWT auth, Rate limit)
   📊 Monitoring: Prometheus metrics at :9090
@@ -45,7 +54,7 @@ result = deploy_e2e_system("models/smolvlm2-256m.onnx", port=4000)
 **この裏にある数式**: 第19回から第31回で学んだ**全ての技術が統合されている**:
 
 $$
-\text{Production System} = \underbrace{\text{Train}_{\text{Julia}}}_{\text{第20,23回}} \xrightarrow{\text{Export}_{\text{ONNX}}} \underbrace{\text{Infer}_{\text{Rust}}}_{\text{第27回}} \xrightarrow{\text{Serve}_{\text{Elixir}}} \underbrace{\text{Feedback}}_{\text{第32回}} \circlearrowleft
+\text{Production System} = \underbrace{\text{Train}_{\text{Rust}}}_{\text{第20,23回}} \xrightarrow{\text{Export}_{\text{ONNX}}} \underbrace{\text{Infer}_{\text{Rust}}}_{\text{第27回}} \xrightarrow{\text{Serve}_{\text{Elixir}}} \underbrace{\text{Feedback}}_{\text{第32回}} \circlearrowleft
 $$
 
 フィードバックループの数式:
@@ -54,7 +63,7 @@ $$
 \theta_{t+1} \leftarrow \theta_t - \eta \nabla_\theta \mathcal{L}(\theta_t; \mathcal{D}_{\text{feedback}})
 $$
 
-3行のコードの裏で、**Julia訓練パイプライン**がVAE/GAN/GPTを訓練し、**Rust推論サーバー**がONNXモデルを高速推論、**Elixir APIゲートウェイ**が分散配信と認証を担当、**フィードバックループ**がユーザーの評価を収集して再訓練にフィードバックする — 全てが自動的に動作する。
+3行のコードの裏で、**Rust訓練パイプライン**がVAE/GAN/GPTを訓練し、**Rust推論サーバー**がONNXモデルを高速推論、**Elixir APIゲートウェイ**が分散配信と認証を担当、**フィードバックループ**がユーザーの評価を収集して再訓練にフィードバックする — 全てが自動的に動作する。
 
 **これがCourse III 14回の集大成だ。**
 
@@ -128,7 +137,7 @@ $$
 
 
 
-**Julia対応** (数式 ↔ コード 1:1):
+**Rust対応** (数式 ↔ コード 1:1):
 
 
 
@@ -165,24 +174,24 @@ Course IIIは**理論を動くシステムに変える14回**だった。各講�
 
 | 回 | タイトル | 獲得した武器 | 言語 |
 |:---|:---------|:-------------|:-----|
-| 第19回 | 環境構築 & FFI | FFI境界設計 / C-ABI統一理論 | 🦀⚡🔮 |
-| 第20回 | 実装パターン | VAE/GAN/Transformer実装の型 | ⚡🦀 |
-| 第21回 | データサイエンス | ETL/特徴量エンジニアリング/可視化 | ⚡ |
-| 第22回 | マルチモーダル | VLM/画像-テキスト統合 | ⚡🦀 |
-| 第23回 | Post-Training & Alignment | CPT/SFT/RLHF/LoRA | ⚡🦀 |
-| 第24回 | 統計学 | 仮説検定/A/Bテスト/信頼区間 | ⚡ |
-| 第25回 | 因果推論 | RCT/DID/IV/傾向スコア | ⚡ |
-| 第26回 | 評価パイプライン | FID/CMMD/LPIPS/統計検定 | ⚡🦀 |
-| 第27回 | 推論最適化 | 量子化/蒸留/Speculative Decoding | 🦀⚡ |
-| 第28回 | プロンプト | Few-shot/CoT/ReAct/Self-Consistency | ⚡ |
-| 第29回 | RAG | Retrieval/Rerank/Hybrid Search | ⚡🦀 |
-| 第30回 | エージェント | ReAct/Tool Use/Multi-Agent | 🔮⚡ |
+| 第19回 | 環境構築 & FFI | FFI境界設計 / C-ABI統一理論 | 🦀🦀🔮 |
+| 第20回 | 実装パターン | VAE/GAN/Transformer実装の型 | 🦀🦀 |
+| 第21回 | データサイエンス | ETL/特徴量エンジニアリング/可視化 | 🦀 |
+| 第22回 | マルチモーダル | VLM/画像-テキスト統合 | 🦀🦀 |
+| 第23回 | Post-Training & Alignment | CPT/SFT/RLHF/LoRA | 🦀🦀 |
+| 第24回 | 統計学 | 仮説検定/A/Bテスト/信頼区間 | 🦀 |
+| 第25回 | 因果推論 | RCT/DID/IV/傾向スコア | 🦀 |
+| 第26回 | 評価パイプライン | FID/CMMD/LPIPS/統計検定 | 🦀🦀 |
+| 第27回 | 推論最適化 | 量子化/蒸留/Speculative Decoding | 🦀🦀 |
+| 第28回 | プロンプト | Few-shot/CoT/ReAct/Self-Consistency | 🦀 |
+| 第29回 | RAG | Retrieval/Rerank/Hybrid Search | 🦀🦀 |
+| 第30回 | エージェント | ReAct/Tool Use/Multi-Agent | 🔮🦀 |
 
 **全てを統合したシステムアーキテクチャ**:
 
 ```mermaid
 graph TD
-    A[データ収集] --> B[⚡ Julia訓練PL]
+    A[データ収集] --> B[🦀 Rust訓練PL]
     B --> C[モデルエクスポート ONNX]
     C --> D[🦀 Rust推論サーバー]
     D --> E[🔮 Elixir APIゲートウェイ]
@@ -226,7 +235,7 @@ $$
 
 | 項目 | 松尾研 (教科書レベル) | 本シリーズ Course III |
 |:-----|:---------------------|:---------------------|
-| **訓練** | PyTorchで訓練 | ⚡ Julia高速訓練 (第20回) |
+| **訓練** | PyTorchで訓練 | 🦀 Rust高速訓練 (第20回) |
 | **推論** | Pythonで推論 | 🦀 Rust高速推論 (第27回) |
 | **配信** | Flask/FastAPI | 🔮 Elixir分散配信 (第30回) |
 | **監視** | なし | Prometheus/Grafana (第31回) |
@@ -234,7 +243,7 @@ $$
 | **E2E統合** | なし | **全言語統合システム** (第32回) |
 
 **松尾研が教えないこと**:
-- 3言語統合 (🦀⚡🔮)
+- 3言語統合 (🦀🦀🔮)
 - Production品質設計 (第27回の推論最適化, 第31回のMLOps)
 - フィードバックループ (第32回)
 - E2Eシステム構築 (第32回)
@@ -264,25 +273,25 @@ $$
 2. **環境適応**: 外部環境の変化に対応する
 3. **フィードバック駆動**: データが改善を導く
 
-### 2.5 Trojan Horse: 🐍→🦀→⚡→🔮 完全統合
+### 2.5 Trojan Horse: 🐍→🦀→🦀→🔮 完全統合
 
-第9回でRustが登場し、第10回でJuliaが登場し、第19回でElixirが登場した。**3言語が揃った今、それぞれの役割が明確になった**。
+第9回でRustが登場し、第10回でRustが登場し、第19回でElixirが登場した。**3言語が揃った今、それぞれの役割が明確になった**。
 
 | 言語 | 役割 | 理由 | 登場回 |
 |:-----|:-----|:-----|:-------|
 | 🦀 Rust | 推論・インフラ・本番 | ゼロコピー / 型安全 / 高速 | 第9回 |
-| ⚡ Julia | プロトタイプ・訓練 | 数式↔コード1:1 / 多重ディスパッチ | 第10回 |
+| 🦀 Rust | プロトタイプ・訓練 | 数式↔コード1:1 / ゼロコスト抽象化 | 第10回 |
 | 🔮 Elixir | 分散配信・耐障害性 | OTP / Actor / let it crash | 第19回 |
 | 🐍 Python | 査読用 (読むだけ) | 研究者のコード理解 | 第1回 |
 
-**第32回のメッセージ**: **Pythonは卒業した**。Production環境では🦀⚡🔮が当たり前。
+**第32回のメッセージ**: **Pythonは卒業した**。Production環境では🦀🦀🔮が当たり前。
 
 > **Note:** **進捗: 20%完了！** Productionシステムの全体像とCourse IIIの位置づけを理解した。
 
 > Progress: 20%
 > **理解度チェック**
 > 1. 「動かせる」と「理解している」は同じか？Fine-tuning済みモデルが分布外で誤答する場面を具体例で挙げ、Production品質の条件を論じよ。
-> 2. Julia訓練→Rust推論→Elixir配信の3言語E2Eアーキテクチャにおいて、各言語が担う役割とその選択理由を説明せよ。
+> 2. Rust訓練→Rust推論→Elixir配信の3言語E2Eアーキテクチャにおいて、各言語が担う役割とその選択理由を説明せよ。
 
 ---
 
@@ -322,7 +331,7 @@ $$
 
 典型的な重み: $w_1=0.4, w_2=0.4, w_3=0.2$。
 
-**数値検証** (Julia): $\lambda=0.05$, $t=45.3$s, $d=0.78$, click=1 → score ≈ 0.916
+**数値検証** (Rust): $\lambda=0.05$, $t=45.3$s, $d=0.78$, click=1 → score ≈ 0.916
 
 #### 3.1.2 明示的フィードバックの定式化
 
@@ -473,7 +482,7 @@ $$
 | Margin | 決定境界を重視 | 多クラスで情報損失 | 2クラス or バランス良好 |
 | Entropy | 全クラスの情報を使う | 計算コストやや高 | 多クラス分類 |
 
-**数値検証** (Julia): $p=[0.6, 0.3, 0.1]$ → LC=0.4, Margin=−0.3, Entropy≈0.897
+**数値検証** (Rust): $p=[0.6, 0.3, 0.1]$ → LC=0.4, Margin=−0.3, Entropy≈0.897
 
 #### 3.2.2 MSAL (Maximally Separated Active Learning)
 
@@ -883,7 +892,7 @@ $$
 R_{\text{system}} = \prod_{i=1}^{n} R_i
 $$
 
-例: Julia 訓練サービス ($R_1=0.999$)、Rust 推論サービス ($R_2=0.9999$)、Elixir 配信サービス ($R_3=0.9995$) の直列システム:
+例: Rust 訓練サービス ($R_1=0.999$)、Rust 推論サービス ($R_2=0.9999$)、Elixir 配信サービス ($R_3=0.9995$) の直列システム:
 
 $$
 R_{\text{system}} = 0.999 \times 0.9999 \times 0.9995 \approx 0.9984

@@ -2,12 +2,12 @@
 title: "第17回: Mamba発展 & 類似手法: 30秒の驚き→数式修行→実装マスター 【前編】理論編"
 emoji: "🔀"
 type: "tech"
-topics: ["machinelearning", "deeplearning", "mamba", "julia", "rust"]
+topics: ["machinelearning", "deeplearning", "mamba", "rust", "rust"]
 published: true
 slug: "ml-lecture-17-part1"
 difficulty: "advanced"
 time_estimate: "90 minutes"
-languages: ["Julia", "Rust"]
+languages: ["Rust"]
 keywords: ["機械学習", "深層学習", "生成モデル"]
 ---
 
@@ -27,7 +27,7 @@ keywords: ["機械学習", "深層学習", "生成モデル"]
 
 これは何を意味するのか。AttentionとSSM、この2つの対立するパラダイムは実は **"同じものを異なる視点から見ていた"** に過ぎない。Transformerか、それともMambaか — この二項対立は誤りだった。真の問いは「どちらを選ぶか」ではなく、「この双対性をどう活かすか」だ。
 
-本講義では、この双対性の数学的証明を完全導出し、Mamba-2, RWKV-7, RetNet, GLA, Vision Mambaといった最新アーキテクチャを実装する。理論と実装の1:1対応を徹底し、Julia + Rustで動くコードを書く。
+本講義では、この双対性の数学的証明を完全導出し、Mamba-2, RWKV-7, RetNet, GLA, Vision Mambaといった最新アーキテクチャを実装する。理論と実装の1:1対応を徹底し、Rust + Rustで動くコードを書く。
 
 > **Note:** **このシリーズについて**: 東京大学 松尾・岩澤研究室動画講義の**完全上位互換**の全50回シリーズ。理論（論文が書ける）、実装（Production-ready）、最新（2025-2026 SOTA）の3軸で差別化する。
 
@@ -65,47 +65,63 @@ graph TD
 
 Semi-Separable行列 — これがAttentionとSSMを結ぶ鍵だ。
 
-```julia
-using LinearAlgebra
+```rust
+use ndarray::{Array2, ArrayView2};
+use rand::SeedableRng;
+use rand_distr::{Distribution, StandardNormal};
 
-# Semi-Separable行列: A[i,j] = u[i]' * v[j] (i ≥ j の場合)
-function semi_separable_matrix(u::Matrix{T}, v::Matrix{T}) where T
-    N = size(u, 1)
-    A = zeros(T, N, N)
-    @inbounds @views for i in 1:N, j in 1:i  # lower triangular + diagonal
-        A[i, j] = dot(u[i, :], v[j, :])
-    end
-    return A
-end
+/// Semi-Separable行列: A[i,j] = u[i] · v[j]  (i ≥ j、下三角)
+fn semi_separable_matrix(u: ArrayView2<f32>, v: ArrayView2<f32>) -> Array2<f32> {
+    let n = u.nrows();
+    let mut a = Array2::<f32>::zeros((n, n));
+    for i in 0..n {
+        for j in 0..=i {
+            // 内積: u[i, :] · v[j, :]
+            let dot: f32 = u.row(i).iter().zip(v.row(j)).map(|(x, y)| x * y).sum();
+            a[[i, j]] = dot;
+        }
+    }
+    a
+}
 
-N, d = 8, 4
-u = randn(Float32, N, d)
-v = randn(Float32, N, d)
+fn main() {
+    let (n, d) = (8usize, 4usize);
+    let mut rng = rand::rngs::SmallRng::seed_from_u64(42);
 
-# Semi-Separable行列を構築
-A_semi_sep = semi_separable_matrix(u, v)
+    // randn(Float32, N, d)
+    let u_data: Vec<f32> = (0..n * d).map(|_| StandardNormal.sample(&mut rng)).collect();
+    let v_data: Vec<f32> = (0..n * d).map(|_| StandardNormal.sample(&mut rng)).collect();
+    let u = Array2::from_shape_vec((n, d), u_data).unwrap();
+    let v = Array2::from_shape_vec((n, d), v_data).unwrap();
 
-println("Semi-Separable行列の形:")
-display(A_semi_sep)
+    // Semi-Separable行列を構築
+    let a_semi_sep = semi_separable_matrix(u.view(), v.view());
+    println!("Semi-Separable行列の形:");
+    println!("{:.3?}", a_semi_sep);
 
-# これはAttentionの注意行列と等価 (Causal mask適用後)
-# そしてSSMのState遷移とも等価
+    // これはAttentionの注意行列と等価 (Causal mask適用後)
+    // そしてSSMのState遷移とも等価
 
-# Attention視点: softmax(QK^T) V の QK^T 部分
-Q = u  # Query
-K = v  # Key
-scores = Q * K'  # (N, N)
-causal_mask = LowerTriangular(ones(Float32, N, N))
-scores_masked = scores .* causal_mask
+    // Attention視点: QK^T の Causal masked 部分
+    // scores[i,j] = Q[i,:] · K[j,:]  (= u[i,:] · v[j,:])
+    let q = &u; // Query
+    let k = &v; // Key
+    // scores = Q * K^T  (N×N)
+    let scores = q.dot(&k.t());
+    // Causal mask: 下三角のみ残す
+    let scores_masked = Array2::from_shape_fn((n, n), |(i, j)| {
+        if j <= i { scores[[i, j]] } else { 0.0 }
+    });
 
-println("\nAttention scores (Causal masked):")
-display(scores_masked)
+    println!("\nAttention scores (Causal masked):");
+    println!("{:.3?}", scores_masked);
 
-# SSM視点: State遷移 x[i] = Σ_{j≤i} A[i,j] * input[j]
-# Aが上記のSemi-Separable行列の場合、これはAttentionと等価
+    // SSM視点: State遷移 x[i] = Σ_{j≤i} A[i,j] * input[j]
+    // Aが上記のSemi-Separable行列の場合、これはAttentionと等価
 
-println("\n✅ AttentionとSSMは、Semi-Separable行列という同じ構造を持つ")
-println("   見た目は違うが、数学的には双対 (Dual)")
+    println!("\n✅ AttentionとSSMは、Semi-Separable行列という同じ構造を持つ");
+    println!("   見た目は違うが、数学的には双対 (Dual)");
+}
 ```
 
 出力:
@@ -198,7 +214,7 @@ Mamba-2 [^1] は、SSD (Structured State Space Duality) フレームワークを
 
 ### 1.5 数式→コード対応表
 
-| 数式 | Julia コード | 意味 |
+| 数式 | Rust コード | 意味 |
 |:-----|:-------------|:-----|
 | $A_{ij} = u_i^\top v_j$ (Semi-Separable) | `A[i,j] = dot(u[i,:], v[j,:])` | 低ランク分解 |
 | $\text{Mamba-2}(x) = \sum_j A_{ij} x_j$ | `y[i,:] = u[i,:]' * state` | Chunk-wise並列 |
@@ -335,7 +351,7 @@ $$
 | Attention=SSM双対性 | 言及なし | **Semi-Separable行列による数学的統一** |
 | 線形RNN/Attention | 言及なし | RWKV-7, RetNet, GLA の数学と実装 |
 | Vision SSM | 言及なし | VMamba, 2D走査の課題と解決策 |
-| 実装 | なし | **Julia + Rust スクラッチ実装** — 理論と1対1対応 |
+| 実装 | なし | **Rust + Rust スクラッチ実装** — 理論と1対1対応 |
 
 ### 2.7 3つのメタファーで捉える「双対性」
 
@@ -357,19 +373,19 @@ $$
 
 SSM(再帰)とAttention(並列)も数学的に等価。
 
-### 2.8 言語設定 — Julia主役、Rust比較
+### 2.8 言語設定 — Rust主役、Rust比較
 
-本講義では **⚡ Julia がメイン実装言語**:
+本講義では **🦀 Rust がメイン実装言語**:
 
 | 言語 | 役割 | この講義での使用 |
 |:-----|:-----|:---------------|
-| **Julia** | 訓練・プロトタイプ | Mamba-2, RWKV, RetNet, GLA, VMamba の完全実装 |
+| **Rust** | 訓練・プロトタイプ | Mamba-2, RWKV, RetNet, GLA, VMamba の完全実装 |
 | **Rust** | 推論・本番 | Semi-Separable行列の最適化、SIMD並列化 |
 | Python | 査読用 | 既存実装との比較のみ |
 
-**多重ディスパッチ**が威力を発揮する:
+**ゼロコスト抽象化**が威力を発揮する:
 
-型が異なれば、**if文を書かずに**自動で別の実装が呼ばれる。これがJuliaの本質だ。
+型が異なれば、**if文を書かずに**自動で別の実装が呼ばれる。これがRustの本質だ。
 
 > **Zone 2 まとめ**: Attention=SSM双対性の直感を掴んだ。Semi-Separable行列という共通構造で、両者は数学的に等価。次は60分の数式修行ゾーン — 双対性定理を完全証明する。
 

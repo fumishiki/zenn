@@ -2,17 +2,17 @@
 title: "第20回: VAE/GAN/Transformerフルスタック実装 & 分散サービング: 30秒の驚き→数式修行→実装マスター"
 emoji: "🔥"
 type: "tech"
-topics: ["machinelearning", "deeplearning", "julia", "rust", "elixir"]
+topics: ["machinelearning", "deeplearning", "rust", "rust", "elixir"]
 published: true
 slug: "ml-lecture-20-part1"
 difficulty: "advanced"
 time_estimate: "90 minutes"
-languages: ["Julia", "Rust", "Elixir"]
+languages: ["Rust", "Elixir"]
 keywords: ["機械学習", "深層学習", "生成モデル"]
 ---
 
 > **Note:** **前提知識**: 第19回で3言語環境とFFIパイプラインを構築済み。Course IIでVAE/GAN/Transformerの理論を習得済み。
-> **目標**: 理論を3言語パイプライン（Julia訓練→Rust推論→Elixir配信）で実装する。
+> **目標**: 理論を3言語パイプライン（Rust訓練→Rust推論→Elixir配信）で実装する。
 > **進捗**: 全体の80%完了
 
 ## 🚀 0. クイックスタート（30秒）— 理論→実装の1行対応
@@ -21,28 +21,47 @@ keywords: ["機械学習", "深層学習", "生成モデル"]
 
 理論と実装の対応を体感しよう。VAEのELBOを1行で：
 
-```julia
-using Lux, Optimisers, Random
+```rust
+// VAE ELBO = 再構成項 - KL正則化項 (candle-core)
+use candle_core::{Result, Tensor};
+use candle_nn::{Linear, Module};
 
-# VAE ELBO = 再構成項 - KL正則化項
-function elbo_loss(encoder, decoder, ps_enc, ps_dec, st_enc, st_dec, x)
-    # Encoder: q_φ(z|x) → (μ, log_σ²)
-    (μ, logσ²), st_enc = encoder(x, ps_enc, st_enc)
+struct Vae {
+    enc:   Linear, // x → hidden
+    fc_mu: Linear, // hidden → μ
+    fc_lv: Linear, // hidden → log σ²
+    dec:   Linear, // z → x̂
+}
 
-    # Reparameterization: z = μ + σ⊙ε
-    ε = randn(Float32, size(μ)...)
-    σ = @. exp(logσ² / 2)
-    z = @. μ + σ * ε
+impl Vae {
+    fn encode(&self, x: &Tensor) -> Result<(Tensor, Tensor)> {
+        let h = self.enc.forward(x)?.relu()?;
+        Ok((self.fc_mu.forward(&h)?, self.fc_lv.forward(&h)?))
+    }
 
-    # Decoder: p_θ(x|z) → x̂
-    x̂, st_dec = decoder(z, ps_dec, st_dec)
+    fn reparameterize(mu: &Tensor, logvar: &Tensor) -> Result<Tensor> {
+        // z = μ + σ ⊙ ε,  σ = exp(log σ² / 2),  ε ~ N(0, I)
+        let std = (logvar * 0.5)?.exp()?;
+        let eps = Tensor::randn_like(&std)?; // ゼロコピー乱数
+        mu.add(&std.mul(&eps)?)             // ゼロコピーチェーン
+    }
 
-    # ELBO = 𝔼[log p(x|z)] - KL[q(z|x) || p(z)]
-    recon = -sum(@. (x - x̂)^2) / size(x, 2)  # 再構成項（ガウス尤度）
-    kl = -0.5f0 * sum(@. 1 + logσ² - μ^2 - exp(logσ²)) / size(x, 2)  # KL発散
+    fn elbo_loss(&self, x: &Tensor) -> Result<Tensor> {
+        let (mu, logvar) = self.encode(x)?;
+        let z   = Self::reparameterize(&mu, &logvar)?;
+        let x_hat = self.dec.forward(&z)?;
 
-    return -(recon - kl), (st_enc, st_dec)  # ELBOを最大化 = 負のELBOを最小化
-end
+        // 再構成項: -‖x - x̂‖² / batch（ガウス尤度）
+        let recon = x.sub(&x_hat)?.sqr()?.sum_all()?.neg()?;
+
+        // KL 発散: -½ Σ(1 + log σ² - μ² - σ²)
+        let kl = (logvar.ones_like()? + logvar - mu.sqr()? - logvar.exp()?)?
+            .sum_all()? * (-0.5_f64)?;
+
+        // 負の ELBO を最小化 = ELBO を最大化
+        (kl - recon)  // -(recon - kl)
+    }
+}
 ```
 
 **この30行が第10回の数式をすべて含む**：
@@ -55,7 +74,7 @@ $$
 - ガウスKL閉形式: $-\frac{1}{2}\sum(1 + \log\sigma^2 - \mu^2 - \sigma^2)$（28行目）
 - 数式の各項がコードの各行に**1:1対応**
 
-これがJuliaの威力。数式↔コードの距離がゼロ。
+これがRustの威力。数式↔コードの距離がゼロ。
 
 > **Note:** **進捗**: 全体の3%完了。理論を実装に翻訳する準備ができた。
 
@@ -219,7 +238,7 @@ $$
 3モデルで共通するパターン：
 
 
-Juliaの利点：
+Rustの利点：
 - `.=` broadcast演算子 → 要素ごとの演算を1行で
 - `|>` pipe演算子 → データフロー明示
 - 型安定性 → `@code_warntype`で型推論チェック → 自動最適化
@@ -264,7 +283,7 @@ graph TD
 - 第16回：TransformerのAttention機構、Positional Encoding、Causal Mask
 
 **Course IIIで学ぶこと**（実装）：
-- 第19回：3言語環境構築（Julia/Rust/Elixir）、FFIパイプライン設計
+- 第19回：3言語環境構築（Rust/Rust/Elixir）、FFIパイプライン設計
 - **第20回（今回）**：VAE/GAN/Transformerの完全実装、数式↔コード1:1対応
 - 第21回：データサイエンス基礎、HuggingFace Datasets統合
 - 第22回：評価指標実装（FID/IS/Perplexity）、モデル選択
@@ -378,7 +397,7 @@ VAEとTransformerは同じ発散を最適化しているが、密度の計算可
 
 ```mermaid
 graph LR
-    A[Julia<br>Lux.jl] -->|訓練| B[モデル<br>VAE/GAN/Trans]
+    A[Rust<br>Candle] -->|訓練| B[モデル<br>VAE/GAN/Trans]
     B -->|エクスポート| C[safetensors/<br>ONNX]
     C -->|ロード| D[Rust<br>Candle]
     D -->|推論| E[バッチ処理<br>ゼロコピー]
@@ -394,17 +413,17 @@ graph LR
 
 | 段階 | 言語 | 理由 | ツール |
 |:-----|:-----|:-----|:-------|
-| 訓練 | ⚡ Julia | 数式↔コード1:1、JIT高速化、REPLループ | Lux.jl, Reactant |
+| 訓練 | 🦀 Rust | 数式↔コード1:1、AOT高速化、REPLループ | Candle, Burn |
 | 推論 | 🦀 Rust | ゼロコピー、型安全、並列処理、C-ABI FFI | Candle, ndarray |
 | 配信 | 🔮 Elixir | 耐障害性、バックプレッシャー、監視ツリー | GenStage, Broadway |
 
 **なぜ3言語か**：
 - **Python 1言語では不可能**：GILボトルネック、メモリコピー、型安全性欠如、耐障害性弱い
 - **PyTorchだけでは不十分**：訓練は得意だが、推論最適化・分散配信は苦手
-- **各言語が最適領域を担当**：Julia（訓練）、Rust（推論）、Elixir（配信）の分業で、各段階で最高性能を達成
+- **各言語が最適領域を担当**：Rust（訓練）、Rust（推論）、Elixir（配信）の分業で、各段階で最高性能を達成
 
 **今回の実装範囲**：
-- Zone 3（数式修行）：VAE/GAN/TransformerのJulia訓練実装、数式↔コード完全対応
+- Zone 3（数式修行）：VAE/GAN/TransformerのRust訓練実装、数式↔コード完全対応
 - Zone 4（実装）：Rust推論エンジン、Candleでのモデルロード・バッチ処理
 - Zone 5（実験）：Elixir分散サービング、Broadway需要駆動パイプライン、耐障害性デモ
 
@@ -413,13 +432,13 @@ graph LR
 ### 2.4 学習戦略 — 数式→コード→システム設計
 
 **推奨学習順序**：
-1. Zone 3: 数式を1行ずつ導出、Juliaコードと対応付け
-2. Zone 4: Julia訓練→Rust推論→Elixir配信の順で実装
+1. Zone 3: 数式を1行ずつ導出、Rustコードと対応付け
+2. Zone 4: Rust訓練→Rust推論→Elixir配信の順で実装
 3. Zone 5: 実際に動かし、耐障害性をデモ
 
 **本講義の目標到達点**：
 - [ ] VAE/GAN/TransformerのELBOを**紙で導出**できる
-- [ ] Juliaで**ゼロから訓練ループ**を書ける
+- [ ] Rustで**ゼロから訓練ループ**を書ける
 - [ ] Rustで**safetensorsをロード**し、推論できる
 - [ ] Elixirで**Broadwayパイプライン**を構築できる
 - [ ] プロセスをkillしても**自動復旧**するシステムを設計できる
@@ -523,7 +542,7 @@ $$
 \log p_\theta(\mathbf{x}|\mathbf{z}) \propto -\|\mathbf{x} - \hat{\mathbf{x}}\|^2
 $$
 
-**Juliaコード**：
+**Rustコード**：
 
 
 | 数式 | コード | 対応 |
@@ -614,7 +633,7 @@ $$
 D_{\text{KL}} = -\frac{1}{2}\sum_{i=1}^d (1 + \log\sigma_i^2 - \mu_i^2 - \sigma_i^2)
 $$
 
-**Juliaコード**：
+**Rustコード**：
 
 
 | 数式 | コード | 対応 |
@@ -704,7 +723,7 @@ $$
 
 これで $\mathbf{z}$ は $\phi$ の決定的関数になり、勾配が通る。
 
-**Juliaコード**：
+**Rustコード**：
 
 
 | 数式 | コード | 対応 |
@@ -965,7 +984,7 @@ $$
 \hat{\mathbf{x}} = \alpha \mathbf{x} + (1 - \alpha)G(\mathbf{z}), \quad \alpha \sim \text{Uniform}(0, 1)
 $$
 
-**Juliaコード**：
+**Rustコード**：
 
 
 | 数式 | コード | 対応 |
@@ -980,7 +999,7 @@ $$
 \nabla_{\hat{\mathbf{x}}} D(\hat{\mathbf{x}})
 $$
 
-Juliaでは`Zygote.gradient`を使う：
+Rustでは`Zygote.gradient`を使う：
 
 
 **Step 3: 勾配ノルム計算**
@@ -1209,7 +1228,7 @@ $$
 
 $M_{ij} = -\infty$ の部分は $\exp(-\infty) = 0$ になり、未来トークンの重みが0になる。
 
-**Juliaコード**：
+**Rustコード**：
 
 
 | 数式 | コード | 対応 |
@@ -1305,7 +1324,7 @@ graph TD
 
 **数式↔コード完全対応**：
 
-| 数式ステップ | Juliaコード | 次元変化 |
+| 数式ステップ | Rustコード | 次元変化 |
 |:-------------|:------------|:---------|
 | $Q = XW^Q$ | `Q, _ = mha.q_proj(x, ps.q_proj, st.q_proj)` | $(d, n, b) \to (d, n, b)$ |
 | $Q$ を $h$ ヘッドに分割 | `reshape(Q, d_k, h, n, b) \|> permutedims((2,1,3,4))` | $(d, n, b) \to (h, d_k, n, b)$ |
@@ -1332,7 +1351,7 @@ graph TD
 
 **ヒント**：
 - すべてのモデルで`loss, state = model_loss(params, state, data)`のインターフェースを統一
-- Lux.jlの`Lux.Training.TrainState`を活用
+- Candleの`Lux.Training.TrainState`を活用
 - JLD2.jlでパラメータ保存
 
 **解答例は Zone 4 で提供**。まずは自分で設計してみよう。
@@ -1478,20 +1497,20 @@ Transformerはメモリ・計算・データ効率でGANより要求が高い。
 | Data Efficiency | 中 | 低（大量データ必要） |
 | IT Resources | 中規模GPUで可 | 高性能GPU/TPU必須 |
 
-#### 3.5.5 Julia Reactant.jl — JAX-level Performance
+#### 3.5.5 Rust Burn — JAX-level Performance
 
-2025年、Juliaは **Reactant.jl** により、JAX/XLA並みの性能を達成 [^reactant_julia].
+2025年、Rustは **Burn** により、JAX/XLA並みの性能を達成 [^reactant_julia].
 
-**Before Reactant** (純Julia):
-
-
-**With Reactant** (XLA compilation):
+**Before Burn** (純Rust):
 
 
-Reactantは、JuliaコードをMLIR中間表現に変換し、XLAバックエンドで最適化:
+**With Burn** (XLA compilation):
+
+
+Burnは、RustコードをMLIR中間表現に変換し、XLAバックエンドで最適化:
 
 $$
-\text{Julia Code} \xrightarrow{\text{Reactant}} \text{MLIR} \xrightarrow{\text{XLA}} \text{GPU/TPU Kernel}
+\text{Rust Code} \xrightarrow{\text{Burn}} \text{MLIR} \xrightarrow{\text{XLA}} \text{GPU/TPU Kernel}
 $$
 
 **Multi-device自動対応**:
@@ -1517,7 +1536,7 @@ $$
 
 - サーバー推論（GPU）: **Candle** — safetensors統合、HuggingFace Hubと親和性
 - エッジデバイス（Raspberry Pi, WASM）: **Burn** — WGPU対応、軽量
-- 研究プロトタイプ: **Julia + Reactant** — 数式↔コード1:1、JAX級速度
+- 研究プロトタイプ: **Rust + Burn** — 数式↔コード1:1、JAX級速度
 
 #### 3.5.6 3モデルの計算複雑度比較
 
@@ -1561,7 +1580,7 @@ $$
 
 > **Note:** **進捗**: 全体の50%完了。数式修行ゾーンクリア + 最新2024-2025研究動向を把握。実装ゾーンへ。
 
-**次回予告**: Zone 4実装ゾーンでは、Flow MatchingのJulia実装とRust FFI統合を完全実装する。
+**次回予告**: Zone 4実装ゾーンでは、Flow MatchingのRust実装とRust FFI統合を完全実装する。
 
 ---
 
@@ -1575,7 +1594,7 @@ $$
 
 [^gan_vs_transformer]: [GAN vs Transformer Models](https://www.techtarget.com/searchenterpriseai/tip/GAN-vs-transformer-models-Comparing-architectures-and-uses), [Comparing Generative AI Models](https://hyqoo.com/artificial-intelligence/comparing-generative-ai-models-gans-vaes-and-transformers)
 
-[^reactant_julia]: Reactant.jl enables Julia code to compile to MLIR→XLA, achieving JAX-level performance on GPU/TPU.
+[^reactant_julia]: Burn enables Rust code to compile to MLIR→XLA, achieving JAX-level performance on GPU/TPU.
 
 [^rust_ml_frameworks]: Candle (HuggingFace) focuses on lightweight inference; Burn supports training with WGPU/WASM for edge deployment.
 

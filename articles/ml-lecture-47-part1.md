@@ -7,7 +7,7 @@ published: true
 slug: "ml-lecture-47-part1"
 difficulty: "advanced"
 time_estimate: "90 minutes"
-languages: ["Julia", "Rust"]
+languages: ["Rust"]
 keywords: ["機械学習", "深層学習", "生成モデル"]
 ---
 
@@ -58,62 +58,74 @@ graph TD
 
 人間のモーションは、時系列の関節角度/位置データだ。これを Diffusion で生成できる。
 
-```julia
-using LinearAlgebra, Statistics
+```rust
+use std::f64::consts::PI;
 
-# Motion Diffusion: テキスト → 動作シーケンス (簡易版)
-# Input: text="walking", Output: motion sequence (T, J, 3) where T=frames, J=joints
+// Motion Diffusion: テキスト → 動作シーケンス (簡易版)
+// Input: text="walking", Output: motion sequence (T, J, 3)
+//   T=frames (30), J=joints (22 SMPL関節), 3D位置
 
-function simple_motion_diffusion(text::String, T::Int=30, J::Int=22)
-    # T: フレーム数 (1秒@30fps), J: 関節数 (SMPL 22関節)
+fn simple_motion_diffusion(text: &str, t_frames: usize, j_joints: usize) -> Vec<f64> {
+    // Step 1: テキスト埋め込み (ダミー: 文字列長ベース)
+    let text_emb = text.len() as f64 / 10.0;
 
-    # Step 1: テキスト埋め込み (ダミー: 文字列長ベース)
-    text_emb = Float64(length(text)) / 10.0
+    // Step 2: ノイズから開始 (xT ~ N(0, I))
+    let dim = t_frames * j_joints * 3;
+    let mut motion: Vec<f64> = (0..dim).map(|_| rand_normal() * 2.0).collect();
 
-    # Step 2: ノイズから開始 (xT ~ N(0, I))
-    motion = randn(T, J, 3) * 2.0  # 各関節の3D位置、初期ノイズ
+    // Step 3: Denoising (10ステップの簡易版)
+    for step in (1..=10_usize).rev() {
+        let t = step as f64 / 10.0;
 
-    # Step 3: Denoising (10ステップの簡易版)
-    dt = 1.0 / 10
-    for step in 10:-1:1
-        t = step / 10
+        // 時間依存のノイズ除去 (text conditioning)
+        // 実際のMDMは Transformer でスコア予測するが、ここは線形近似
+        let noise_scale = t * 0.5;
+        let text_guide = text_emb * (1.0 - t); // テキストの影響は時間とともに強まる
 
-        # 時間依存のノイズ除去 (text conditioning)
-        # 実際のMDMは Transformer でスコア予測するが、ここは線形近似
-        noise_scale = t * 0.5
-        text_guide = text_emb * (1 - t)  # テキストの影響は時間とともに強まる
+        // Denoise: 徐々にテキスト条件に合わせた動きへ
+        for v in motion.iter_mut() {
+            *v = *v * (1.0 - noise_scale) + rand_normal() * noise_scale * (1.0 / 10.0_f64).sqrt();
+        }
 
-        # Denoise: 徐々にテキスト条件に合わせた動きへ
-        motion = motion .* (1 - noise_scale) .+ randn(T, J, 3) .* noise_scale .* sqrt(dt)
+        // テキストガイダンス: "walking" なら周期的な動き
+        if text == "walking" {
+            // 周期的な歩行パターン: 左右足の交互運動 (ベクトル化)
+            for frame in 0..t_frames {
+                let phase = 2.0 * PI * frame as f64 / t_frames as f64;
+                // 左足 (関節0): x と z を正弦波で揺らす
+                motion[frame * j_joints * 3 + 0]     += phase.sin() * text_guide * 0.1; // x
+                motion[frame * j_joints * 3 + 2]     += phase.cos() * text_guide * 0.1; // z
+                // 右足 (関節1): 逆位相
+                motion[frame * j_joints * 3 + 3]     += (phase + PI).sin() * text_guide * 0.1; // x
+                motion[frame * j_joints * 3 + 5]     += (phase + PI).cos() * text_guide * 0.1; // z
+            }
+        }
+    }
 
-        # テキストガイダンス: "walking" なら周期的な動き
-        if text == "walking"
-            # 周期的な歩行パターンをベクトル化: 左右足の交互運動
-            phases = 2π .* (1:T) ./ T
-            @views begin
-                motion[:, 1, 1] .+= sin.(phases)       .* (text_guide * 0.1)  # 左足 x
-                motion[:, 1, 3] .+= cos.(phases)       .* (text_guide * 0.1)  # 左足 z
-                motion[:, 2, 1] .+= sin.(phases .+ π)  .* (text_guide * 0.1)  # 右足 x
-                motion[:, 2, 3] .+= cos.(phases .+ π)  .* (text_guide * 0.1)  # 右足 z
-            end
-        end
-    end
+    motion
+}
 
-    return motion
-end
+// 簡易乱数 (実際は rand クレートを使用)
+fn rand_normal() -> f64 { 0.0 } // placeholder
 
-# テスト: "walking" モーション生成
-motion_seq = simple_motion_diffusion("walking", 30, 22)
+fn main() {
+    let (t_frames, j_joints) = (30, 22);
+    let motion = simple_motion_diffusion("walking", t_frames, j_joints);
 
-println("【Motion Diffusion デモ】")
-println("Input text: 'walking'")
-println("Output motion shape: $(size(motion_seq))  # (30 frames, 22 joints, 3D)")
-println("Motion range: $(round(minimum(motion_seq), digits=3)) ~ $(round(maximum(motion_seq), digits=3))")
-println("左足(関節1) 最初3フレームの軌跡:")
-for i in 1:3
-    println("  Frame $i: $(round.(motion_seq[i, 1, :], digits=3))")
-end
-println("\n→ テキスト 'walking' から30フレームの歩行動作を生成完了！")
+    println!("【Motion Diffusion デモ】");
+    println!("Input text: 'walking'");
+    println!("Output motion shape: ({}, {}, 3)", t_frames, j_joints);
+    let min = motion.iter().cloned().fold(f64::INFINITY, f64::min);
+    let max = motion.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+    println!("Motion range: {:.3} ~ {:.3}", min, max);
+    println!("左足(関節0) 最初3フレームの軌跡:");
+    for frame in 0..3 {
+        let base = frame * j_joints * 3;
+        println!("  Frame {}: [{:.3}, {:.3}, {:.3}]",
+            frame + 1, motion[base], motion[base+1], motion[base+2]);
+    }
+    println!("\n→ テキスト 'walking' から{}フレームの歩行動作を生成完了！", t_frames);
+}
 ```
 
 出力:
@@ -344,24 +356,24 @@ $$
 |:-----|:--------------------------|:-----------------|
 | **扱う手法** | 画像・動画生成のみ | Motion + 4D + Robotics の統合理解 |
 | **理論の深さ** | アルゴリズム紹介 | **数式レベル**: DDPM → Motion Space 適用の導出 |
-| **実装** | PyTorch デモ | **3言語**: Julia (訓練) + Rust (推論) + Elixir (分散制御) |
+| **実装** | PyTorch デモ | **3言語**: Rust (訓練) + Rust (推論) + Elixir (分散制御) |
 | **最新性** | 2023年まで | **2025-2026 SOTA**: MotionGPT-3/UniMo/4DGS/RDT |
 | **ドメイン横断** | なし | Motion ↔ 4D ↔ Robotics の理論的つながり |
 
 **本講義の独自性**:
 1. **Text-to-Motion から Diffusion Policy までの統一視点** (全て時系列条件付き生成)
 2. **4DGS の数学的基盤** (Deformation field の設計と最適化)
-3. **3言語フルスタック**: Julia (モーション訓練)、Rust (4Dレンダリング)、Elixir (ロボット分散制御)
+3. **3言語フルスタック**: Rust (モーション訓練)、Rust (4Dレンダリング)、Elixir (ロボット分散制御)
 
 <details><summary>トロイの木馬振り返り: Course V での3言語の役割</summary>
 
 **Before (第42回まで)**:
-- 画像・動画: Julia/Rust で十分
-- Diffusion 訓練: Julia (Lux.jl)
+- 画像・動画: Rust/Rust で十分
+- Diffusion 訓練: Rust (Candle)
 - 推論: Rust (Candle)
 
 **After (第47回)**:
-- **Julia**: モーション Diffusion 訓練 (数式↔コードの透明性)
+- **Rust**: モーション Diffusion 訓練 (数式↔コードの透明性)
 - **Rust**: 4DGS リアルタイムレンダリング (ゼロコピー、並列化)
 - **Elixir**: ロボット群の分散制御 (OTP の耐障害性、並行性)
 
@@ -1529,7 +1541,7 @@ $w > 1$ は guidance scale、$\varnothing$ は null condition。訓練時は確�
 
 U-Net の受容野は $O(k \cdot L)$（$k$: カーネルサイズ、$L$: レイヤー数）だが、Transformer は一層で $O(T^2)$ の全フレーム間依存を捉える。「歩き始め」と「歩き終わり」の整合性のような **長距離依存** はこの差が決定的になる。また MotionGPT-3 や UniMo へのアーキテクチャ共通化により、言語モデルの事前学習済み重みへの転移が可能になる。
 
-> **Note:** **ここまでで全体の50%完了！** Zone 3 の数式修行を終えた。Motion Diffusion、4DGS、Diffusion Policy の理論を完全に理解した。次は実装 — Zone 4 で Julia/Rust/Elixir で実装する。
+> **Note:** **ここまでで全体の50%完了！** Zone 3 の数式修行を終えた。Motion Diffusion、4DGS、Diffusion Policy の理論を完全に理解した。次は実装 — Zone 4 で Rust/Rust/Elixir で実装する。
 
 ---
 

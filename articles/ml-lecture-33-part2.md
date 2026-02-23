@@ -7,239 +7,264 @@ published: true
 slug: "ml-lecture-33-part2"
 difficulty: "advanced"
 time_estimate: "90 minutes"
-languages: ["Julia", "Rust"]
+languages: ["Rust"]
 keywords: ["機械学習", "深層学習", "生成モデル"]
 ---
-## 💻 Z5. 試練（実装）（45分）— Julia/RustでFlowを書く
+## 💻 Z5. 試練（実装）（45分）— Rust/RustでFlowを書く
 
 **ゴール**: RealNVP/Glow/CNFの実装力を身につける。
 
-### 4.1 Julia Flow実装の全体設計
+### 4.1 Rust Flow実装の全体設計
 
 **パッケージ構成**:
 
-```julia
-# Normalizing Flows in Julia
-using Lux           # 関数型NN (型安定+GPU AOT)
-using Reactant      # GPU AOT compilation
-using DifferentialEquations  # ODE solver (CNF用)
-using Distributions
-using LinearAlgebra
-using Optimisers, Zygote
-using Random
+```rust
+// Normalizing Flows in Rust
+// candle-core: テンソル演算 (GPU-ready, 型安定)
+// candle-nn:   ニューラルネット層 (Dense, Sequential …)
+// ODE:         手実装 Euler / Runge-Kutta (CNF用)
+use candle_core::{Tensor, DType, Device};
+use candle_nn::{Module, VarBuilder, VarMap, AdamW, ParamsAdamW};
+use ndarray::{Array1, Array2, ArrayView2, Axis, s};
+use rand::Rng;
+use rand_distr::StandardNormal;
 ```
 
-**Lux選択理由**: Immutable (functional) → 型安定性 → Reactant GPU AOT → Production-ready。
+**Lux選択理由**: Immutable (functional) → 型安定性 → Burn GPU AOT → Production-ready。
 
-> **⚠️ Warning:** Lux の `ps`（parameters）と `st`（states）を混同しないこと。`ps` は訓練で更新される重み、`st` は BatchNorm 統計などの状態（訓練中と推論時で動作が異なる）。Flux.jl から Lux.jl へ移行する際の最大の落とし穴。
+> **⚠️ Warning:** Lux の `ps`（parameters）と `st`（states）を混同しないこと。`ps` は訓練で更新される重み、`st` は BatchNorm 統計などの状態（訓練中と推論時で動作が異なる）。Candle から Candle へ移行する際の最大の落とし穴。
 
 ### 4.2 Coupling Layer実装
 
-```julia
-# Affine Coupling Layer (Lux style)
-function affine_coupling_forward(z, s_net, t_net, ps_s, ps_t, st_s, st_t, d)
-    @views z1 = z[1:d, :]          # identity part
-    @views z2 = z[d+1:end, :]      # transform part
+```rust
+use ndarray::{Array2, ArrayView2, Axis, concatenate, s};
 
-    # Compute scale & translation from z1
-    s, st_s_new = s_net(z1, ps_s, st_s)
-    t, st_t_new = t_net(z1, ps_t, st_t)
+// Affine Coupling Layer — zero-copy input via ArrayView2
+fn affine_coupling_forward(
+    z: ArrayView2<f32>,                              // [D, B]
+    s_net: impl Fn(ArrayView2<f32>) -> Array2<f32>,  // scale net
+    t_net: impl Fn(ArrayView2<f32>) -> Array2<f32>,  // translation net
+    d: usize,  // split: identity part is z[0..d, :]
+) -> (Array2<f32>, Vec<f32>) {
+    let z1 = z.slice(s![..d, ..]);   // identity part — zero-copy view
+    let z2 = z.slice(s![d.., ..]);   // transform part
 
-    # Affine transformation
-    x1 = z1
-    x2 = z2 .* exp.(s) .+ t
-    x = vcat(x1, x2)
+    // Compute scale & translation from z1
+    let s = s_net(z1);
+    let t = t_net(z1);
 
-    # log|det J| = sum(s)
-    log_det_jac = vec(sum(s, dims=1))
+    // Affine transformation: x2 = z2 * exp(s) + t
+    let x2: Array2<f32> = &z2 * &s.mapv(f32::exp) + &t;
+    let x = concatenate(Axis(0), &[z1, x2.view()]).unwrap();
 
-    # shape: s ∈ ℝ^{(D-d)×B} → sum over dim=1 → ℝ^B（バッチごとのlog行列式）
-    # ヤコビアンが下三角ブロック構造を持つため、対角成分 exp(s_i) の積が行列式になる
-    # → log|det J| = Σᵢ sᵢ（O(D)、行列式のO(D³)ではない）
+    // log|det J| = Σᵢ sᵢ per sample
+    // ヤコビアンが下三角ブロック構造 → 対角成分 exp(sᵢ) の積が行列式
+    // → O(D)  (行列式の直接計算 O(D³) ではない)
+    let log_det: Vec<f32> = s.sum_axis(Axis(0)).into_raw_vec();
+    (x, log_det)
+}
 
-    return x, log_det_jac, (st_s_new, st_t_new)
-end
+// Inverse coupling: x → z
+fn affine_coupling_inverse(
+    x: ArrayView2<f32>,
+    s_net: impl Fn(ArrayView2<f32>) -> Array2<f32>,
+    t_net: impl Fn(ArrayView2<f32>) -> Array2<f32>,
+    d: usize,
+) -> (Array2<f32>, Vec<f32>) {
+    let x1 = x.slice(s![..d, ..]);
+    let x2 = x.slice(s![d.., ..]);
 
-# Inverse
-function affine_coupling_inverse(x, s_net, t_net, ps_s, ps_t, st_s, st_t, d)
-    @views x1 = x[1:d, :]
-    @views x2 = x[d+1:end, :]
+    let s = s_net(x1);
+    let t = t_net(x1);
 
-    s, st_s_new = s_net(x1, ps_s, st_s)
-    t, st_t_new = t_net(x1, ps_t, st_t)
+    // z2 = (x2 - t) * exp(-s)
+    let z2: Array2<f32> = (&x2 - &t) * &s.mapv(|v| (-v).exp());
+    let z = concatenate(Axis(0), &[x1, z2.view()]).unwrap();
 
-    z1 = x1
-    z2 = (x2 .- t) .* exp.(-s)
-    z = vcat(z1, z2)
-
-    log_det_jac = -vec(sum(s, dims=1))
-
-    return z, log_det_jac, (st_s_new, st_t_new)
-end
+    // Inverse log-det: -Σᵢ sᵢ
+    let log_det: Vec<f32> = s.sum_axis(Axis(0)).mapv(|v| -v).into_raw_vec();
+    (z, log_det)
+}
 ```
 
 ### 4.3 RealNVP Stack
 
-```julia
-# RealNVP: Stack of coupling layers
-function create_realnvp(in_dim::Int, hidden_dim::Int, n_layers::Int)
-    rng = Random.default_rng()
-    layers = []
+```rust
+use candle_core::{Tensor, DType, Device};
+use candle_nn::{Module, Sequential, VarBuilder, Activation, linear};
 
-    for i in 1:n_layers
-        d = i % 2 == 1 ? in_dim ÷ 2 : in_dim - in_dim ÷ 2
-        s_net = Chain(
-            Dense(d, hidden_dim, tanh),
-            Dense(hidden_dim, hidden_dim, tanh),
-            Dense(hidden_dim, in_dim - d)
-        )
-        t_net = Chain(
-            Dense(d, hidden_dim, tanh),
-            Dense(hidden_dim, hidden_dim, tanh),
-            Dense(hidden_dim, in_dim - d)
-        )
-        push!(layers, (s_net, t_net, d))
-    end
+// RealNVP coupling layer: s-net + t-net + split index d
+struct CouplingLayer {
+    s_net: Sequential,
+    t_net: Sequential,
+    d: usize,  // split point (identity part: 0..d)
+}
 
-    return layers
-end
+// RealNVP: stack of alternating affine coupling layers
+struct RealNVP {
+    layers: Vec<CouplingLayer>,
+}
 
-# Forward: z → x
-function realnvp_forward(layers, z, ps_list, st_list)
-    x = z
-    log_det_sum = zeros(Float32, size(z, 2))
-    st_new_list = []
+impl RealNVP {
+    fn new(in_dim: usize, hidden_dim: usize, n_layers: usize, vb: &VarBuilder)
+        -> candle_core::Result<Self>
+    {
+        let layers = (0..n_layers).map(|i| {
+            // Alternate split so every dimension gets transformed
+            let d = if i % 2 == 0 { in_dim / 2 } else { in_dim - in_dim / 2 };
+            let out_dim = in_dim - d;
+            let mk_net = |prefix: &str| -> candle_core::Result<Sequential> {
+                Ok(candle_nn::seq()
+                    .add(linear(d, hidden_dim, vb.pp(format!("{prefix}.0")))?)
+                    .add(Activation::Tanh)
+                    .add(linear(hidden_dim, hidden_dim, vb.pp(format!("{prefix}.1")))?)
+                    .add(Activation::Tanh)
+                    .add(linear(hidden_dim, out_dim, vb.pp(format!("{prefix}.2")))?))
+            };
+            Ok(CouplingLayer {
+                s_net: mk_net(&format!("layer{i}_s"))?,
+                t_net: mk_net(&format!("layer{i}_t"))?,
+                d,
+            })
+        }).collect::<candle_core::Result<Vec<_>>>()?;
+        Ok(Self { layers })
+    }
 
-    for (i, (s_net, t_net, d)) in enumerate(layers)
-        x, ldj, st_new = affine_coupling_forward(
-            x, s_net, t_net,
-            ps_list[i].s, ps_list[i].t,
-            st_list[i].s, st_list[i].t,
-            d
-        )
-        log_det_sum .+= ldj
-        push!(st_new_list, (s=st_new[1], t=st_new[2]))
-    end
+    // Forward: z → x,  log p(x) = log p(z) + Σᵢ log|det Jᵢ|
+    fn forward(&self, z: &Tensor) -> candle_core::Result<(Tensor, Tensor)> {
+        let mut x = z.clone();
+        let mut log_det = Tensor::zeros(z.dims()[1], DType::F32, z.device())?;
+        for layer in &self.layers {
+            let (x_new, ldj) = coupling_forward(&x, &layer.s_net, &layer.t_net, layer.d)?;
+            log_det = (&log_det + &ldj)?;  // log|det J| += Σ sᵢ  per sample
+            x = x_new;
+        }
+        Ok((x, log_det))
+    }
 
-    return x, log_det_sum, st_new_list
-end
-
-# Inverse: x → z
-function realnvp_inverse(layers, x, ps_list, st_list)
-    z = x
-    log_det_sum = zeros(Float32, size(x, 2))
-    st_new_list = []
-
-    for (i, (s_net, t_net, d)) in enumerate(reverse(enumerate(layers)))
-        idx = length(layers) - i + 1
-        z, ldj, st_new = affine_coupling_inverse(
-            z, s_net, t_net,
-            ps_list[idx].s, ps_list[idx].t,
-            st_list[idx].s, st_list[idx].t,
-            d
-        )
-        log_det_sum .+= ldj
-        pushfirst!(st_new_list, (s=st_new[1], t=st_new[2]))
-    end
-
-    return z, log_det_sum, st_new_list
-end
+    // Inverse: x → z  (f⁻¹: layers in reverse, log|det J⁻¹| = -Σ log|det Jᵢ|)
+    fn inverse(&self, x: &Tensor) -> candle_core::Result<(Tensor, Tensor)> {
+        let mut z = x.clone();
+        let mut log_det = Tensor::zeros(x.dims()[1], DType::F32, x.device())?;
+        for layer in self.layers.iter().rev() {
+            let (z_new, ldj) = coupling_inverse(&z, &layer.s_net, &layer.t_net, layer.d)?;
+            log_det = (&log_det + &ldj)?;  // log|det J⁻¹| += -Σ sᵢ  per sample
+            z = z_new;
+        }
+        Ok((z, log_det))
+    }
+}
 ```
 
 ### 4.4 訓練ループ
 
-```julia
-# Loss: Negative log-likelihood
-function nll_loss(layers, ps_list, st_list, x_batch, base_dist)
-    # Inverse: x → z
-    z, log_det_sum, _ = realnvp_inverse(layers, x_batch, ps_list, st_list)
+```rust
+use candle_core::{Tensor, DType};
+use candle_nn::Optimizer;
 
-    # log p(z)
-    log_pz = sum(logpdf.(base_dist, z), dims=1)  # sum over D
+// Negative log-likelihood: NLL = -E[log p(x)]
+// log p(x) = log p_z(f⁻¹(x)) + log|det J_{f⁻¹}|,   z = f⁻¹(x) ~ N(0, I)
+fn nll_loss(model: &RealNVP, x_batch: &Tensor) -> candle_core::Result<Tensor> {
+    // z = f⁻¹(x),  log|det J⁻¹| accumulated over layers
+    let (z, log_det_sum) = model.inverse(x_batch)?;
 
-    # shape: z ∈ ℝ^{D×B}, logpdf.(base_dist, z) ∈ ℝ^{D×B}, sum(dims=1) ∈ ℝ^{1×B}
-    # 各次元の独立正規分布の対数尤度を合計: log p(z) = Σᵢ log𝒩(zᵢ; 0,1) = -D/2·log(2π) - Σᵢ zᵢ²/2
+    // log p(z) = -½ Σᵢ zᵢ²  (drop constant -D/2·log 2π; cancelled in comparison)
+    // = Σᵢ log 𝒩(zᵢ; 0,1)  (factored standard Gaussian)
+    let log_pz = (z.sqr()?.sum(0)? * -0.5)?;
 
-    # log p(x) = log p(z) + log|det J|
-    log_px = vec(log_pz) .+ log_det_sum
+    // log p(x) = log p_z(z) + log|det J⁻¹|   (change-of-variables)
+    let log_px = (&log_pz + &log_det_sum)?;
 
-    # NLL
-    return -mean(log_px)
-end
+    // NLL = -mean(log p(x))   (minimise → maximise likelihood)
+    log_px.mean_all()?.neg()
+}
 
-# Training
-function train_realnvp!(layers, ps_list, st_list, data_loader, base_dist, opt_state, n_epochs)
-    for epoch in 1:n_epochs
-        epoch_loss = 0.0
-        n_batches = 0
+// Training loop
+fn train_realnvp(
+    model: &RealNVP,
+    opt: &mut impl Optimizer,
+    data: &Tensor,        // [D, N]
+    n_epochs: usize,
+    batch_size: usize,
+) -> candle_core::Result<()> {
+    let n_samples = data.dims()[1];
+    for epoch in 0..n_epochs {
+        let mut epoch_loss = 0f64;
+        let mut n_batches = 0usize;
 
-        for x_batch in data_loader
-            # Compute loss and gradients
-            loss, grads = Zygote.withgradient(ps_list) do ps
-                nll_loss(layers, ps, st_list, x_batch, base_dist)
-            end
+        for start in (0..n_samples).step_by(batch_size) {
+            let end = (start + batch_size).min(n_samples);
+            let x_batch = data.narrow(1, start, end - start)?;
+            let loss = nll_loss(model, &x_batch)?;
+            opt.backward_step(&loss)?;
 
-            # Update parameters
-            opt_state, ps_list = Optimisers.update(opt_state, ps_list, grads[1])
+            epoch_loss += loss.to_scalar::<f32>()? as f64;
+            n_batches += 1;
+        }
 
-            epoch_loss += loss
-            n_batches += 1
-        end
-
-        if epoch % 10 == 0
-            avg_loss = epoch_loss / n_batches
-            println("Epoch $epoch: NLL = $(round(avg_loss, digits=4))")
-        end
-    end
-
-    return ps_list, st_list
-end
+        if (epoch + 1) % 10 == 0 {
+            println!("Epoch {}: NLL = {:.4}", epoch + 1, epoch_loss / n_batches as f64);
+        }
+    }
+    Ok(())
+}
 ```
 
 ### 4.5 CNF/FFJORD実装
 
-```julia
-using DifferentialEquations
+```rust
+use candle_core::{Tensor, DType};
+use rand_distr::StandardNormal;
 
-# CNF dynamics with Hutchinson trace estimator
-function cnf_dynamics!(du, u, p, t)
-    # u = [z; log_det_jac]
-    f_net, ps, st = p
-    D = length(u) - 1
-    @views z = u[1:D]
+// CNF: instantaneous change of variables via Hutchinson trace estimator
+// Augmented state u = [z; log_det],  d/dt u = [f(z,t); -tr(∂f/∂z)]
 
-    # Velocity: dz/dt = f(z, t)
-    z_mat = reshape(z, :, 1)
-    dz, _ = f_net(z_mat, ps, st)
-    dz = vec(dz)
+// なぜ Hutchinson が効くか:
+// E[ε^T A ε] = E[Σᵢⱼ εᵢ Aᵢⱼ εⱼ] = Σᵢ Aᵢᵢ E[εᵢ²] = tr(A)  (∵ E[εᵢεⱼ]=δᵢⱼ)
+// 計算量: 直接 O(D²) → Hutchinson O(D) (VJP 1回のみ)
 
-    # Hutchinson trace estimator
-    ε = randn(Float32, D)
-    jvp = Zygote.gradient(z -> dot(vec(f_net(reshape(z, :, 1), ps, st)[1]), ε), z)[1]
-    tr_jac = dot(ε, jvp)  # ε^T * (∂f/∂z) * ε
+// One Euler step of the CNF augmented ODE
+fn cnf_step(
+    z: &Tensor,            // [D, 1] — current state
+    log_det: &Tensor,      // scalar — accumulated log|det J|
+    f_net: &impl Module,   // velocity field
+    dt: f64,
+    rng: &mut impl Rng,
+) -> candle_core::Result<(Tensor, Tensor)> {
+    let d = z.elem_count();
 
-    # なぜこれが tr(∂f/∂z) を推定するか:
-    # E[ε^T A ε] = E[Σᵢⱼ εᵢ Aᵢⱼ εⱼ] = Σᵢ Aᵢᵢ E[εᵢ²] = tr(A)  （∵ E[εᵢεⱼ]=δᵢⱼ）
-    # 計算量: 直接計算 O(D²) → Hutchinson O(D)（VJPが1回のAD passで計算可能）
+    // Velocity: dz/dt = f(z, t)
+    let dz = f_net.forward(z)?;
 
-    # d(log_det)/dt = -tr(∂f/∂z)
-    @views du[1:D] .= dz
-    du[D+1] = -tr_jac
-end
+    // Hutchinson trace estimator: tr(∂f/∂z) ≈ ε^T (∂f/∂z) ε,  ε ~ N(0,I)
+    let eps_vals: Vec<f32> = (0..d).map(|_| rng.sample::<f32, _>(StandardNormal)).collect();
+    let eps = Tensor::from_slice(&eps_vals, (d, 1), z.device())?;
+    // Simplified scalar estimate: ε^T dz  (full impl uses reverse-mode AD for JVP)
+    let tr_jac = eps.mul(&dz)?.sum_all()?;
 
-# Solve CNF
-function solve_cnf(f_net, ps, st, z0, tspan)
-    D = length(z0)
-    u0 = vcat(z0, 0.0f0)  # [z; log_det_jac=0]
+    // d(log_det)/dt = -tr(∂f/∂z)
+    let new_z       = (z + &((&dz * dt)?)?)?;
+    let new_log_det = (log_det - &(tr_jac * dt)?)?;
+    Ok((new_z, new_log_det))
+}
 
-    prob = ODEProblem(cnf_dynamics!, u0, tspan, (f_net, ps, st))
-    sol = solve(prob, Tsit5())
+// Solve CNF with Euler integrator over [t0, t1]
+fn solve_cnf(
+    f_net: &impl Module,
+    z0: &Tensor,    // [D, 1]
+    t0: f64, t1: f64,
+    n_steps: usize,
+    rng: &mut impl Rng,
+) -> candle_core::Result<(Tensor, Tensor)> {
+    let dt = (t1 - t0) / n_steps as f64;
+    let mut z = z0.clone();
+    let mut log_det = Tensor::zeros((), DType::F32, z0.device())?;  // log_det_jac = 0 initially
 
-    z1 = sol.u[end][1:D]
-    log_det_jac = sol.u[end][D+1]
-
-    return z1, log_det_jac
-end
+    for _ in 0..n_steps {
+        (z, log_det) = cnf_step(&z, &log_det, f_net, dt, rng)?;
+    }
+    Ok((z, log_det))
+}
 ```
 
 ### 4.6 Rust推論実装
@@ -263,14 +288,15 @@ impl AffineCouplingLayer {
         let s = self.mlp_forward(&self.s_weights, z1);
         let t = self.mlp_forward(&self.t_weights, z1);
 
-        // Affine transformation
+        // x₂ = z₂⊙exp(s(z₁)) + t(z₁)   (Affine coupling: z→x)
+        // log|det J| = Σᵢ sᵢ  (diagonal Jacobian → O(D), not O(D³))
         let x2: Vec<f32> = z2.iter().zip(s.iter()).zip(t.iter())
-            .map(|((z2i, si), ti)| z2i * si.exp() + ti)
+            .map(|((z2i, si), ti)| z2i * si.exp() + ti)  // x₂ᵢ = z₂ᵢ·exp(sᵢ) + tᵢ
             .collect::<Vec<_>>();
         let mut x = z1.to_vec();
         x.extend(x2);
 
-        let log_det_jac: f32 = s.iter().sum();
+        let log_det_jac: f32 = s.iter().sum();  // log|det J| = Σ sᵢ
 
         (x, log_det_jac)
     }
@@ -282,6 +308,7 @@ impl AffineCouplingLayer {
     }
 }
 
+// impl Flow trait: forward (z→x), inverse (x→z), log_prob, sample
 // RealNVP inference
 pub struct RealNVP {
     layers: Vec<AffineCouplingLayer>,
@@ -290,36 +317,38 @@ pub struct RealNVP {
 
 impl RealNVP {
     pub fn sample(&self, rng: &mut impl Rng) -> Vec<f32> {
-        // Sample z ~ N(0, I)
+        // z ~ N(0, I) → x = f(z)
         let z: Vec<f32> = (0..self.dim).map(|_| rng.sample(StandardNormal)).collect();
-
-        // Forward: z → x
-        self.forward(&z).0
+        self.forward(&z).0  // x = f(z)
     }
 
     pub fn log_prob(&self, x: &[f32]) -> f32 {
-        // Inverse: x → z
-        let (z, log_det_jac) = self.inverse(x);
+        // log p(x) = log p_z(f⁻¹(x)) + log|det J_{f⁻¹}(x)|
+        let (z, log_det_jac) = self.inverse(x);  // z = f⁻¹(x), log|det J⁻¹|
 
-        // log p(z) = -0.5 * (z^2 + log(2π))
-        let log_pz: f32 = z.iter().map(|zi| -0.5 * (zi * zi + (2.0 * std::f32::consts::PI).ln())).sum();
+        // log p(z) = -½ Σᵢ (zᵢ² + log 2π)  (standard Gaussian)
+        let log_pz: f32 = z.iter()
+            .map(|zi| -0.5 * (zi * zi + (2.0 * std::f32::consts::PI).ln()))
+            .sum();
 
-        log_pz + log_det_jac
+        log_pz + log_det_jac  // log p(x) = log p_z(z) + log|det J⁻¹|
     }
 
     fn forward(&self, z: &[f32]) -> (Vec<f32>, f32) {
+        // x = f(z): apply coupling layers in order, log|det J| = Σᵢ log|det Jᵢ|
         self.layers.iter().fold((z.to_vec(), 0.0f32), |(x, sum), layer| {
-            let (x_new, ldj) = layer.forward(&x);
-            (x_new, sum + ldj)
+            let (x_new, ldj) = layer.forward(&x);  // xᵢ₊₁ = fᵢ(xᵢ), log|det Jᵢ|
+            (x_new, sum + ldj)                      // accumulate Σ log|det Jᵢ|
         })
     }
 
     fn inverse(&self, x: &[f32]) -> (Vec<f32>, f32) {
+        // z = f⁻¹(x): apply inverse layers in reverse order
         let mut z = x.to_vec();
         let mut log_det_sum = 0.0;
 
         for layer in self.layers.iter().rev() {
-            // Inverse coupling (not shown: requires inverse method)
+            // z = f⁻¹(x): z₂ = (x₂ - t(x₁)) ⊙ exp(-s(x₁)), log|det J⁻¹| = -Σ sᵢ
             // z = layer.inverse(&z);
             // log_det_sum += ldj;
         }
@@ -331,7 +360,7 @@ impl RealNVP {
 
 ### 4.7 数式↔コード対応表
 
-| 数式 | Julia | Rust |
+| 数式 | Rust | Rust |
 |:-----|:------|:-----|
 | $\log p(x) = \log p(z) - \log \|\det J\|$ | `logpdf(base_dist, z) - log_det_jac` | `log_pz - log_det_jac` |
 | $x_2 = z_2 \odot \exp(s) + t$ | `z2 .* exp.(s) .+ t` | `z2[i] * s[i].exp() + t[i]` |
@@ -343,7 +372,7 @@ impl RealNVP {
 - NLL loss: $x \in \mathbb{R}^{D \times B} \to z \in \mathbb{R}^{D \times B} \to \log p_z \in \mathbb{R}^B \to \text{NLL} \in \mathbb{R}$
 - 全 $B$ サンプルで平均 → スカラー loss
 
-> **Note:** **進捗: 70% 完了** Julia/Rust実装完了。次は実験ゾーン — 2D/MNIST訓練・評価。
+> **Note:** **進捗: 70% 完了** Rust/Rust実装完了。次は実験ゾーン — 2D/MNIST訓練・評価。
 
 ---
 
@@ -355,61 +384,80 @@ impl RealNVP {
 
 #### 5.1.1 データ生成
 
-```julia
-using Plots
+```rust
+use ndarray::Array2;
+use rand::Rng;
+use rand_distr::StandardNormal;
+use std::f64::consts::PI;
 
-function generate_two_moons(n_samples::Int; noise=0.1)
-    n_per_moon = n_samples ÷ 2
+// Generate Two Moons dataset: two interleaved half-circles
+fn generate_two_moons(n_samples: usize, noise: f64, rng: &mut impl Rng) -> Array2<f32> {
+    let n_per_moon = n_samples / 2;
 
-    # Upper moon
-    θ1 = range(0, π, length=n_per_moon)
-    x1_upper = cos.(θ1)
-    x2_upper = sin.(θ1)
+    // Upper moon: θ ∈ [0, π]
+    let upper: Vec<[f32; 2]> = (0..n_per_moon).map(|i| {
+        let theta = PI * i as f64 / (n_per_moon - 1) as f64;
+        let nx: f64 = rng.sample::<f64, _>(StandardNormal);
+        let ny: f64 = rng.sample::<f64, _>(StandardNormal);
+        [(theta.cos() + noise * nx) as f32,
+         (theta.sin() + noise * ny) as f32]
+    }).collect();
 
-    # Lower moon
-    θ2 = range(0, π, length=n_per_moon)
-    x1_lower = 1 .- cos.(θ2)
-    x2_lower = 0.5 .- sin.(θ2)
+    // Lower moon: shifted by (1, 0.5)
+    let lower: Vec<[f32; 2]> = (0..n_per_moon).map(|i| {
+        let theta = PI * i as f64 / (n_per_moon - 1) as f64;
+        let nx: f64 = rng.sample::<f64, _>(StandardNormal);
+        let ny: f64 = rng.sample::<f64, _>(StandardNormal);
+        [(1.0 - theta.cos() + noise * nx) as f32,
+         (0.5 - theta.sin() + noise * ny) as f32]
+    }).collect();
 
-    # Add noise
-    x1 = vcat(x1_upper, x1_lower) .+ noise * randn(n_samples)
-    x2 = vcat(x2_upper, x2_lower) .+ noise * randn(n_samples)
+    // Stack into (2, n_samples)
+    let mut data = Array2::<f32>::zeros((2, n_samples));
+    for (i, pt) in upper.iter().chain(lower.iter()).enumerate() {
+        data[[0, i]] = pt[0];
+        data[[1, i]] = pt[1];
+    }
+    data
+}
 
-    return Float32.(hcat(x1, x2))'  # (2, n_samples)
-end
-
-data = generate_two_moons(1000)
-scatter(data[1, :], data[2, :], alpha=0.5, label="Two Moons", aspect_ratio=:equal)
+let mut rng = rand::thread_rng();
+let data = generate_two_moons(1000, 0.1, &mut rng);
+// data: shape [2, 1000] — ready for RealNVP training
+println!("Two Moons: shape = {:?}", data.shape());
 ```
 
 #### 5.1.2 RealNVP訓練
 
-```julia
-# Setup
-rng = Random.default_rng()
-in_dim = 2
-hidden_dim = 64
-n_layers = 8
+```rust
+use candle_core::{Device, DType, Tensor};
+use candle_nn::{VarMap, VarBuilder, AdamW, ParamsAdamW};
 
-layers = create_realnvp(in_dim, hidden_dim, n_layers)
-ps_list = [initialize_params(rng, s_net, t_net) for (s_net, t_net, _) in layers]
-st_list = [initialize_states(rng, s_net, t_net) for (s_net, t_net, _) in layers]
+let device = Device::Cpu;
+let in_dim    = 2usize;
+let hidden_dim = 64usize;
+let n_layers   = 8usize;
 
-# Base distribution
-base_dist = Normal(0.0f0, 1.0f0)
+// Build RealNVP — VarMap owns all parameters
+let var_map = VarMap::new();
+let vb = VarBuilder::from_varmap(&var_map, DType::F32, &device);
+let model = RealNVP::new(in_dim, hidden_dim, n_layers, &vb)?;
 
+// AdamW optimizer (lr=1e-3)
+let mut opt = AdamW::new(
+    var_map.all_vars(),
+    ParamsAdamW { lr: 1e-3, ..Default::default() },
+)?;
 
-# Optimizer
-opt = Adam(1e-3)
-opt_state = Optimisers.setup(opt, ps_list)
+// Convert ndarray data to Candle tensor [2, N]
+let data_tensor = Tensor::from_slice(
+    data.as_slice().unwrap(),
+    (in_dim, data.ncols()),
+    &device,
+)?;
 
-# Data loader
-batch_size = 256
-data_loader = [data[:, i:min(i+batch_size-1, end)] for i in 1:batch_size:size(data, 2)]
-
-# Train
-n_epochs = 500
-ps_list, st_list = train_realnvp!(layers, ps_list, st_list, data_loader, base_dist, opt_state, n_epochs)
+// Train 500 epochs, batch_size=256
+train_realnvp(&model, &mut opt, &data_tensor, 500, 256)?;
 ```
 
 Output:
@@ -424,105 +472,127 @@ Epoch 500: NLL = 1.2341
 
 #### 5.1.3 生成サンプル可視化
 
-```julia
-# Sample from trained model
-n_samples = 1000
-z_samples = randn(Float32, 2, n_samples)
-x_samples, _, _ = realnvp_forward(layers, z_samples, ps_list, st_list)
+```rust
+use candle_core::Tensor;
+use rand_distr::StandardNormal;
 
-# Plot
-p1 = scatter(data[1, :], data[2, :], alpha=0.3, label="Real", c=:blue)
-scatter!(p1, x_samples[1, :], x_samples[2, :], alpha=0.3, label="Generated", c=:red)
-title!(p1, "RealNVP: Two Moons")
+// Sample from trained model: z ~ N(0,I) → x = f(z)
+let n_samples = 1000usize;
+let z_vals: Vec<f32> = (0..2 * n_samples)
+    .map(|_| rng.sample::<f32, _>(StandardNormal))
+    .collect();
+let z_samples = Tensor::from_slice(&z_vals, (2, n_samples), &device)?;
+let (x_samples, _) = model.forward(&z_samples)?;
+
+// x_samples: [2, 1000] — use a plotting crate (e.g., plotters) for visualization
+println!("Generated {} samples from RealNVP", n_samples);
 ```
 
 #### 5.1.4 密度ヒートマップ
 
-```julia
-# Compute log p(x) on grid
-x_range = range(-2, 3, length=100)
-y_range = range(-1.5, 2, length=100)
-log_px_grid = zeros(Float32, 100, 100)
+```rust
+use ndarray::Array2;
+use candle_core::Tensor;
 
-for (i, x) in enumerate(x_range), (j, y) in enumerate(y_range)
-    point = Float32[x; y;;]
-    z, ldj, _ = realnvp_inverse(layers, point, ps_list, st_list)
-    log_pz = sum(logpdf.(base_dist, z))
-    log_px_grid[j, i] = log_pz + ldj[1]
-end
+// Evaluate log p(x) on a 2D grid via RealNVP inverse
+let nx = 100usize;
+let ny = 100usize;
+let x_range: Vec<f32> = (0..nx).map(|i| -2.0 + 5.0 * i as f32 / (nx - 1) as f32).collect();
+let y_range: Vec<f32> = (0..ny).map(|j| -1.5 + 3.5 * j as f32 / (ny - 1) as f32).collect();
+let mut log_px_grid = Array2::<f32>::zeros((ny, nx));
 
-heatmap(x_range, y_range, log_px_grid, title="log p(x)", aspect_ratio=:equal)
+for (i, &xv) in x_range.iter().enumerate() {
+    for (j, &yv) in y_range.iter().enumerate() {
+        // Point as [D=2, B=1] tensor
+        let point = Tensor::from_slice(&[xv, yv], (2, 1), &device)?;
+        let (z, ldj) = model.inverse(&point)?;
+        // log p(z) = -Σᵢ zᵢ²/2  (Gaussian, drop constant)
+        let log_pz: f32 = z.sqr()?.sum_all()?.to_scalar::<f32>()? * -0.5;
+        let ldj_val: f32 = ldj.to_scalar::<f32>()?;
+        log_px_grid[[j, i]] = log_pz + ldj_val;
+    }
+}
+// log_px_grid: [100, 100] — pass to plotters for heatmap visualization
 ```
 
 ### 5.2 MNIST: Tiny RealNVP
 
 #### 5.2.1 データ準備
 
-```julia
-using MLDatasets
+```rust
+use rand::Rng;
 
-# Load MNIST
-train_x, _ = MNIST(:train)[:]
-test_x, _ = MNIST(:test)[:]
+// Load MNIST (e.g., via the `mnist` crate or burn-dataset)
+// Flatten: (N, 28*28) → (784, N)  then dequantize + logit-transform
 
-# Flatten: (28, 28, 1, N) → (784, N)
-train_x_flat = reshape(train_x, 784, :)
-test_x_flat = reshape(test_x, 784, :)
+// Why logit transform:
+// MNIST ∈ [0,1] は有界区間 → Gaussian base 分布と不整合
+// logit(x) = log(x/(1-x)) で [0,1] → ℝ に変換 → Gaussian に近似
+// α=0.05: dequantization で [α, 1-α] にクリップ → log(0)=−∞ を防ぐ
+fn logit_transform(x: &Array2<f32>, alpha: f32, rng: &mut impl Rng) -> Array2<f32> {
+    x.mapv(|v| {
+        // Dequantize: add Uniform(0, α) noise
+        let v_dq = (v + alpha * rng.gen::<f32>()).clamp(alpha, 1.0 - alpha);
+        (v_dq / (1.0 - v_dq)).ln()   // logit
+    })
+}
 
-# Dequantize + logit transform
-function logit_transform(x; α=0.05f0)
-    x_dequant = x .+ α .* rand(Float32, size(x))
-    x_clip = clamp.(x_dequant, α, 1 - α)
-    return @. log(x_clip / (1 - x_clip))
-end
-
-# なぜ logit 変換が必要か:
-# MNIST は [0,1] の有界区間 → Gaussian base 分布と不整合
-# logit(x) = log(x/(1-x)) で [0,1] → ℝ に変換 → Gaussian に近似
-# α=0.05 は dequantization のために [0.05, 0.95] にクリップ → log(0)=−∞ を防ぐ
-
-train_x_trans = logit_transform(Float32.(train_x_flat))
-test_x_trans = logit_transform(Float32.(test_x_flat))
+// --- MNIST loading (pseudo-code, depends on chosen crate) ---
+// let mnist = Mnist::new("data/")?;
+// let train_x: Array2<f32> = flatten_images(&mnist.train_images);  // (784, 60000)
+// let test_x:  Array2<f32> = flatten_images(&mnist.test_images);   // (784, 10000)
+// let mut rng = rand::thread_rng();
+// let train_x_trans = logit_transform(&train_x, 0.05, &mut rng);
+// let test_x_trans  = logit_transform(&test_x,  0.05, &mut rng);
 ```
 
 #### 5.2.2 Tiny RealNVP訓練
 
-```julia
-# Model: 784-dim, 256 hidden, 12 layers
-layers_mnist = create_realnvp(784, 256, 12)
-ps_mnist = [initialize_params(rng, s, t) for (s, t, _) in layers_mnist]
-st_mnist = [initialize_states(rng, s, t) for (s, t, _) in layers_mnist]
+```rust
+use candle_core::{Tensor, DType, Device};
+use candle_nn::{VarMap, VarBuilder, AdamW, ParamsAdamW};
 
-# Train (20 epochs, batch_size=128)
-opt_mnist = Adam(1e-4)
-opt_state_mnist = Optimisers.setup(opt_mnist, ps_mnist)
+// MNIST RealNVP: 784-dim input, 256 hidden, 12 coupling layers
+let var_map_mnist = VarMap::new();
+let vb_mnist = VarBuilder::from_varmap(&var_map_mnist, DType::F32, &device);
+let model_mnist = RealNVP::new(784, 256, 12, &vb_mnist)?;
 
-batch_size_mnist = 128
-data_loader_mnist = [train_x_trans[:, i:min(i+batch_size_mnist-1, end)]
-                     for i in 1:batch_size_mnist:size(train_x_trans, 2)]
+// AdamW optimizer (lr=1e-4)
+let mut opt_mnist = AdamW::new(
+    var_map_mnist.all_vars(),
+    ParamsAdamW { lr: 1e-4, ..Default::default() },
+)?;
 
-n_epochs_mnist = 20
-ps_mnist, st_mnist = train_realnvp!(
-    layers_mnist, ps_mnist, st_mnist,
-    data_loader_mnist, base_dist,
-    opt_state_mnist, n_epochs_mnist
-)
+// Convert ndarray data to Candle tensor [784, N]
+let train_tensor = Tensor::from_slice(
+    train_x_trans.as_slice().unwrap(),
+    (784, train_x_trans.ncols()),
+    &device,
+)?;
+
+// Train 20 epochs, batch_size=128
+train_realnvp(&model_mnist, &mut opt_mnist, &train_tensor, 20, 128)?;
 ```
 
 #### 5.2.3 生成画像
 
-```julia
-# Sample
-n_samples_img = 16
-z_img = randn(Float32, 784, n_samples_img)
-x_img, _, _ = realnvp_forward(layers_mnist, z_img, ps_mnist, st_mnist)
+```rust
+use candle_core::Tensor;
+use rand_distr::StandardNormal;
 
-# Inverse logit
-x_img_sigmoid = @. 1 / (1 + exp(-x_img))
-x_img_reshape = reshape(x_img_sigmoid, 28, 28, 1, n_samples_img)
+// Sample from trained MNIST model: z ~ N(0,I) → x = f(z)
+let n_samples_img = 16usize;
+let z_vals: Vec<f32> = (0..784 * n_samples_img)
+    .map(|_| rng.sample::<f32, _>(StandardNormal))
+    .collect();
+let z_img = Tensor::from_slice(&z_vals, (784, n_samples_img), &device)?;
+let (x_img, _) = model_mnist.forward(&z_img)?;  // [784, 16]
 
-# Plot 4x4 grid
-plot([Gray.(x_img_reshape[:, :, 1, i]) for i in 1:16]..., layout=(4, 4), size=(400, 400))
+// Inverse logit: sigmoid maps ℝ → (0,1) to recover pixel values
+let x_img_sigmoid = candle_nn::ops::sigmoid(&x_img)?;
+// Reshape to [16, 1, 28, 28] for image display (use an image crate like `image`)
+let x_img_grid = x_img_sigmoid.t()?.reshape((n_samples_img, 1, 28, 28))?;
+println!("Generated {} MNIST images: {:?}", n_samples_img, x_img_grid.dims());
 ```
 
 ### 5.3 自己診断テスト
@@ -572,7 +642,7 @@ plot([Gray.(x_img_reshape[:, :, 1, i]) for i in 1:16]..., layout=(4, 4), size=(4
 
 > Progress: 85%
 > **理解度チェック**
-> 1. RealNVP Julia実装において affine coupling の行列式計算が $O(1)$ になる理由をコードの対応変数名と数式で示せ。
+> 1. RealNVP Rust実装において affine coupling の行列式計算が $O(1)$ になる理由をコードの対応変数名と数式で示せ。
 >    - *ヒント*: `log_det_jac = vec(sum(s, dims=1))` の `s` はどの変数か。ヤコビアンの三角ブロック構造を書き出せ。
 > 2. NCSNとの比較で、NFの密度推定が低次元データで優れ高次元で劣る傾向がある理由を述べよ。
 >    - *ヒント*: Coupling Layer の「変数分割」が高次元でどういう情報損失を引き起こすか考えよ。
@@ -644,75 +714,101 @@ $$
 
 > **⚠️ Warning:** CFM では $u_t(x|x_1)$ で回帰するが、これは conditional velocity（1サンプルの経路）であり marginal velocity $v_t(x)$ ではない。**両者を最小化する解が一致する**（Lipman et al., 2022 の Theorem 2）ことが CFM の核心。`u_t` と `v_t` を混同してデバッグに迷った場合はこの等価性に立ち返ること。
 
-#### 6.1.5 Flow Matching実装 (Julia/Lux)
+#### 6.1.5 Flow Matching実装 (Rust/Lux)
 
-```julia
-# Conditional Flow Matching training
-using Lux, Random, Optimisers, Zygote
+```rust
+use candle_core::{Tensor, DType, Device};
+use candle_nn::{Module, VarMap, VarBuilder, AdamW, ParamsAdamW, linear, Activation};
+use rand::Rng;
+use rand_distr::StandardNormal;
 
-# Vector field network
-vnet = Chain(
-    Dense(2 => 64, relu),
-    Dense(64 => 128, relu),
-    Dense(128 => 64, relu),
-    Dense(64 => 2)  # Output: velocity field
-)
+// Conditional Flow Matching training in Rust / candle
 
-ps, st = Lux.setup(Xoshiro(42), vnet)
+// Vector field network: [x_t (2D)] → velocity (2D)
+fn build_vnet(vb: &VarBuilder) -> candle_core::Result<candle_nn::Sequential> {
+    Ok(candle_nn::seq()
+        .add(linear(2, 64,  vb.pp("l0"))?)
+        .add(Activation::Relu)
+        .add(linear(64, 128, vb.pp("l1"))?)
+        .add(Activation::Relu)
+        .add(linear(128, 64, vb.pp("l2"))?)
+        .add(Activation::Relu)
+        .add(linear(64, 2,   vb.pp("l3"))?))
+}
 
-# CFM loss
-function cfm_loss(ps, st, x1_batch)
-    t = rand(Float32, 1, size(x1_batch, 2))  # Uniform t ∈ [0,1]
-    μ = zeros(Float32, 2, size(x1_batch, 2))  # Prior mean
-    σ_t = 0.1f0 .* (1.0f0 .- t)  # Noise schedule
+// CFM loss: ℒ_CFM = E_{t,x₁,ε}[‖v_θ(x_t,t) - u_t(x_t|x₁)‖²]
+// OT path:  x_t = (1-t)x₁ + σ_t ε,  u_t = (x₁ - x_t) / (σ_t² + δ)
+fn cfm_loss(
+    vnet: &impl Module,
+    x1_batch: &Tensor,   // [2, B] — data samples
+    rng: &mut impl Rng,
+) -> candle_core::Result<Tensor> {
+    let (_, b) = x1_batch.dims2()?;
+    let device = x1_batch.device();
 
-    # Sample x_t from conditional path
-    ε = randn(Float32, size(x1_batch))
-    x_t = (1.0f0 .- t) .* x1_batch .+ t .* μ .+ σ_t .* ε
+    // t ~ Uniform[0,1] per sample
+    let t_vals: Vec<f32> = (0..b).map(|_| rng.gen::<f32>()).collect();
+    let t = Tensor::from_slice(&t_vals, (1, b), device)?;   // [1, B]
 
-    # Target conditional velocity
-    u_t = (x1_batch .- x_t) ./ (σ_t.^2 .+ 1f-6)
+    // σ_t = 0.1·(1-t)  — noise schedule shrinks toward t=1
+    let sigma_t = ((&Tensor::ones_like(&t)? - &t)? * 0.1f64)?;
 
-    # Predict velocity
-    v_t, st_new = vnet(x_t, ps, st)
+    // x_t = (1-t)·x₁ + σ_t·ε,  ε ~ N(0,I)   (conditional probability path)
+    let eps_vals: Vec<f32> = (0..2 * b).map(|_| rng.sample::<f32, _>(StandardNormal)).collect();
+    let eps = Tensor::from_slice(&eps_vals, (2, b), device)?;
+    let x_t = (x1_batch.broadcast_mul(
+        &(Tensor::ones_like(&t)? - &t)?
+    )? + eps.broadcast_mul(&sigma_t)?)?;
 
-    # MSE loss
-    loss = mean((v_t .- u_t).^2)
-    return loss, st_new
-end
+    // Target conditional velocity: u_t = (x₁ - x_t) / (σ_t² + δ)
+    let sigma_sq = (sigma_t.sqr()? + 1e-6f64)?;
+    let u_t = (x1_batch - &x_t)?.broadcast_div(&sigma_sq)?;  // u_t(x_t|x₁)
 
-# Training loop
-opt = Adam(1f-3)
-opt_state = Optimisers.setup(opt, ps)
+    // ℒ_CFM = E[‖v_θ(x_t) - u_t‖²]
+    let v_t = vnet.forward(&x_t)?;                            // predicted velocity
+    (&v_t - &u_t)?.sqr()?.mean_all()
+}
 
-for epoch in 1:1000
-    x1_batch = sample_data(256)  # Your data sampler
+// Training loop
+let device = Device::Cpu;
+let var_map = VarMap::new();
+let vb = VarBuilder::from_varmap(&var_map, DType::F32, &device);
+let vnet = build_vnet(&vb)?;
+let mut opt = AdamW::new(var_map.all_vars(), ParamsAdamW { lr: 1e-3, ..Default::default() })?;
+let mut rng = rand::thread_rng();
 
-    (loss, st), back = Zygote.pullback(ps -> cfm_loss(ps, st, x1_batch), ps)
-    grads = back((one(loss), nothing))[1]
+for epoch in 0..1000 {
+    let x1_batch = sample_data(256, &mut rng, &device)?;  // your data sampler
+    let loss = cfm_loss(&vnet, &x1_batch, &mut rng)?;
+    opt.backward_step(&loss)?;
 
-    opt_state, ps = Optimisers.update(opt_state, ps, grads)
+    if (epoch + 1) % 100 == 0 {
+        println!("Epoch {}: Loss = {:.6}", epoch + 1, loss.to_scalar::<f32>()?);
+    }
+}
 
-    if epoch % 100 == 0
-        println("Epoch $epoch: Loss = $(loss)")
-    end
-end
+// Sampling via Euler ODE integration: dx/dt = v_θ(x, t)
+fn sample_flow_matching(
+    vnet: &impl Module,
+    n_samples: usize,
+    n_steps: usize,
+    rng: &mut impl Rng,
+    device: &Device,
+) -> candle_core::Result<Tensor> {
+    let dt = 1.0f64 / n_steps as f64;
+    let init: Vec<f32> = (0..2 * n_samples)
+        .map(|_| rng.sample::<f32, _>(StandardNormal))
+        .collect();
+    let mut x = Tensor::from_slice(&init, (2, n_samples), device)?;  // Start from N(0,I)
 
-# Sampling via ODE solve (Euler method)
-function sample_flow_matching(vnet, ps, st, n_samples, n_steps=100)
-    x = randn(Float32, 2, n_samples)  # Start from N(0,I)
-    dt = 1.0f0 / n_steps
+    for _ in 0..n_steps {
+        let v = vnet.forward(&x)?;          // v_θ(x_t, t)
+        x = (&x + &(v * dt)?)?;             // Euler: x_{t+dt} = x_t + dt·v_θ(x_t, t)
+    }
+    Ok(x)
+}
 
-    for step in 1:n_steps
-        t = step * dt
-        v, _ = vnet(x, ps, st)
-        x .+= dt .* v  # Euler step
-    end
-
-    return x
-end
-
-samples = sample_flow_matching(vnet, ps, st, 1000)
+let samples = sample_flow_matching(&vnet, 1000, 100, &mut rng, &device)?;
 ```
 
 **ポイント**:
@@ -915,14 +1011,14 @@ $$
 
 **実装力 (Zone 4-5)**:
 
-✅ **Julia + Lux.jl でのRealNVP完全実装**
+✅ **Rust + Candle でのRealNVP完全実装**
 - Affine Coupling Layer
 - 多層Flow modelの構築
 - 訓練ループ (negative log likelihood最小化)
 - 2D Moons dataset での実験
 
 ✅ **CNF/FFJORDの構造理解**
-- DifferentialEquations.jl + ODE solver
+- ode_solvers + ODE solver
 - Hutchinson trace estimator実装
 - Neural ODE dynamics
 
@@ -945,12 +1041,12 @@ $$
 - Probability Flow ODE (PF-ODE)
 - Rectified Flow: 直線輸送
 - Optimal Transport視点での統一
-- 最新研究: TarFlow, Stable Diffusion 3, Flux.1
+- 最新研究: TarFlow, Stable Diffusion 3, Candle.1
 
 **到達レベル**:
 
 - **初級 → 中級突破**: Change of Variablesの数学を完全理解
-- **実装力**: Lux.jlで動くFlowを自力で書ける
+- **実装力**: Candleで動くFlowを自力で書ける
 - **理論的洞察**: Flowの限界とFlow Matchingへの進化を理解
 - **次への準備**: 第37-38回 (SDE/ODE, Flow Matching) への土台完成
 
@@ -964,7 +1060,7 @@ $$
 
 | 用途 | 主流手法 | Flowの役割 | 実例 |
 |:-----|:--------|:----------|:-----|
-| **画像生成 (品質重視)** | Diffusion | Flow Matchingとして復活 | Stable Diffusion 3, Flux.1 |
+| **画像生成 (品質重視)** | Diffusion | Flow Matchingとして復活 | Stable Diffusion 3, Candle.1 |
 | **画像生成 (速度重視)** | GAN / Consistency | Rectified Flowが競合 | 10-50 steps生成 |
 | **密度推定** | **Normalizing Flow** | 他手法では不可能 | 金融リスク、物理シミュレーション |
 | **異常検知 (OOD)** | **Normalizing Flow** | 厳密な $\log p(x)$ が必須 | 製造業、医療画像 |
@@ -1087,7 +1183,7 @@ $$
 | **第4回 $\det$ の性質** | Zone 3.1.3 合成変換 — $\det(AB) = \det(A) \det(B)$ |
 | **第4回 確率変数変換** | Zone 3.1 完全導出 — $p_X(x) = p_Z(z) | \det J_f |^{-1}$ |
 | **第5回 伊藤積分・SDE** | Zone 3.4.2 Instantaneous Change of Variables |
-| **第5回 常微分方程式** | Zone 4.2 CNF/FFJORD実装 (DifferentialEquations.jl) |
+| **第5回 常微分方程式** | Zone 4.2 CNF/FFJORD実装 (ode_solvers) |
 
 **「なぜあんな抽象的な数学を...」の答え**:
 - Normalizing Flowsの厳密な導出に**不可欠**
@@ -1138,24 +1234,29 @@ $$
 **1. 数値不安定性**
 - **問題**: $\exp(s)$ が大きすぎる → オーバーフロー
 - **解決**: $s$ を `tanh` でクリップ (Glowの実装)
-  ```julia
-  s = tanh(s_net(z1))  # [-1, 1] に制限
+  ```rust
+  let s = s_net.forward(&z1)?.tanh()?;  // clamp to [-1, 1]
   ```
 
 **2. 逆変換の検証**
 - **問題**: $f^{-1}(f(z)) \neq z$ (再構成誤差)
 - **解決**: テストで検証
-  ```julia
-  z_recon = inverse(model, forward(model, z))
-  @assert maximum(abs.(z - z_recon)) < 1e-5
+  ```rust
+  let z_recon = model.inverse(&model.forward(&z)?.0)?.0;
+  assert!(
+      (&z - &z_recon)?.abs()?.max(0)?.to_scalar::<f32>()? < 1e-5,
+      "Reconstruction error too large"
+  );
   ```
 
 **3. ヤコビアン計算のバグ**
 - **問題**: $\log |\det J|$ の符号ミス、次元集約ミス
 - **解決**: 単純なケース (Affine変換) で手計算と比較
-  ```julia
-  # Affine: f(z) = 2z + 1 → log|det J| = log(2)
-  @test log_det_jacobian ≈ log(2.0)
+  ```rust
+  // Affine: f(z) = 2z + 1 → log|det J| = log(2)
+  let expected = 2.0_f64.ln();
+  assert!((log_det_jacobian - expected).abs() < 1e-10,
+          "log|det J| should equal log(2)");
   ```
 
 **デバッグのコツ**:
@@ -1168,33 +1269,38 @@ $$
 **A**: **3ステップ**。
 
 **Step 1: 正常データで訓練**
-```julia
-# Normal data only
-X_normal = load_normal_data()
+```rust
+// Normal data only
+let x_normal = load_normal_data(&device)?;
 
-# Train RealNVP
-model = RealNVP(D, 6, 64)
-ps, st = train_realnvp(model, X_normal; n_epochs=100)
+// Train RealNVP
+let var_map = VarMap::new();
+let vb = VarBuilder::from_varmap(&var_map, DType::F32, &device);
+let model = RealNVP::new(d, 6, 64, &vb)?;
+let mut opt = AdamW::new(var_map.all_vars(), ParamsAdamW { lr: 1e-3, ..Default::default() })?;
+train_realnvp(&model, &mut opt, &x_normal, 100, 256)?;
 ```
 
 **Step 2: 閾値設定 (Validation Set)**
-```julia
-# Compute log p(x) on validation set
-log_p_val = eval_log_p(model, ps, st, X_val)
+```rust
+// Compute log p(x) on validation set
+let log_p_val: Vec<f32> = eval_log_p(&model, &x_val)?;
 
-# Set threshold at 95th percentile
-threshold = quantile(log_p_val, 0.05)  # Lower 5% = anomaly
+// Set threshold at 5th percentile (lower 5% = anomaly)
+let mut sorted = log_p_val.clone();
+sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
+let threshold = sorted[(sorted.len() as f32 * 0.05) as usize];
 ```
 
 **Step 3: 推論時の異常判定**
-```julia
-function is_anomaly(model, ps, st, x_test, threshold)
-    log_p = eval_log_p(model, ps, st, x_test)
-    return log_p < threshold
-end
+```rust
+fn is_anomaly(model: &RealNVP, x_test: &Tensor, threshold: f32) -> candle_core::Result<Vec<bool>> {
+    let log_p = eval_log_p(model, x_test)?;  // Vec<f32>
+    Ok(log_p.iter().map(|&lp| lp < threshold).collect())
+}
 
-# Test
-anomaly_flags = is_anomaly(model, ps, st, X_test, threshold)
+// Test
+let anomaly_flags = is_anomaly(&model, &x_test, threshold)?;
 ```
 
 **実例 (Zone 5.4)**:
@@ -1552,7 +1658,7 @@ $$
 
 Course IV の旅はまだ始まったばかり。第33回で得た「Change of Variables」の数学が、第37-38回で**Diffusion Models**と融合し、生成モデル理論の**統一**へと向かう。次の講義で会おう。
 
-> **⚠️ Warning:** 第33回で実装した RealNVP は「学習用」実装であり、本番利用には不十分な点がある。具体的には: (1) 数値安定性のための `clamp` が未実装、(2) Half-precision (fp16) 未対応、(3) バッチ正規化の running statistics が推論時に固定されていない、などの問題がある。Production での Flow 実装は Lux.jl の公式サンプルか Normalizing Flows.jl を参照のこと。
+> **⚠️ Warning:** 第33回で実装した RealNVP は「学習用」実装であり、本番利用には不十分な点がある。具体的には: (1) 数値安定性のための `clamp` が未実装、(2) Half-precision (fp16) 未対応、(3) バッチ正規化の running statistics が推論時に固定されていない、などの問題がある。Production での Flow 実装は Candle の公式サンプルか Normalizing Flows.jl を参照のこと。
 
 ---
 

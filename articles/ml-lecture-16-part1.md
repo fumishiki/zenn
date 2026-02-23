@@ -2,12 +2,12 @@
 title: "第16回: SSM理論 & Mambaの克服: 30秒の驚き→数式修行→実装マスター 【前編】理論編"
 emoji: "🦛"
 type: "tech"
-topics: ["machinelearning", "deeplearning", "ssm", "julia", "rust"]
+topics: ["machinelearning", "deeplearning", "ssm", "rust", "rust"]
 published: true
 slug: "ml-lecture-16-part1"
 difficulty: "advanced"
 time_estimate: "90 minutes"
-languages: ["Julia", "Rust"]
+languages: ["Rust"]
 keywords: ["機械学習", "深層学習", "生成モデル"]
 ---
 
@@ -25,7 +25,7 @@ keywords: ["機械学習", "深層学習", "生成モデル"]
 
 **O(N)の計算量。O(1)の推論。長距離依存の理論的保証。** そして何より、**"忘れる"という根本的限界をどう克服したか**。
 
-本講義では、SSMの数学的基礎から最前線のMambaまでを完全導出する。連続時間状態空間→離散化→HiPPO→S4の対角化→Mambaの選択性。全てを⚡Julia + 🦀Rustで実装する。
+本講義では、SSMの数学的基礎から最前線のMambaまでを完全導出する。連続時間状態空間→離散化→HiPPO→S4の対角化→Mambaの選択性。全てを🦀Rust + 🦀Rustで実装する。
 
 > **Note:** **このシリーズについて**: 東京大学 松尾・岩澤研究室動画講義の**完全上位互換**の全50回シリーズ。理論(論文が書ける)、実装(Production-ready)、最新(2025-2026 SOTA)の3軸で差別化する。
 
@@ -66,32 +66,44 @@ graph TD
 
 状態空間モデルは、隠れ状態$h_t$を介して入力$u_t$を出力$y_t$に変換する。
 
-```julia
-using LinearAlgebra
+```rust
+use ndarray::{array, Array1, Array2, ArrayView1, ArrayView2};
 
-# Discrete SSM: h_t = A h_{t-1} + B u_t, y_t = C h_t
-function discrete_ssm(u::Vector{Float32}, A::Matrix{Float32}, B::Vector{Float32}, C::Vector{Float32})
-    N = length(u)
-    h = zeros(Float32, length(B))
-    y = zeros(Float32, N)
-    @inbounds for t in 1:N
-        h = A * h + B * u[t]  # recurrent update (inherently sequential)
-        y[t] = dot(C, h)       # output projection
-    end
-    return y
-end
+// Discrete SSM: h_t = A h_{t-1} + B u_t, y_t = C h_t
+fn discrete_ssm(
+    u: &[f32],
+    a: ArrayView2<f32>,
+    b: ArrayView1<f32>,
+    c: ArrayView1<f32>,
+) -> Vec<f32> {
+    let d = b.len();
+    let mut h = Array1::<f32>::zeros(d);
+    u.iter()
+        .map(|&u_t| {
+            h = a.dot(&h) + &b * u_t; // recurrent update (inherently sequential)
+            c.dot(&h)                  // output projection
+        })
+        .collect()
+}
 
-# Example: 1D SSM with d=2 hidden state
-A = Float32[0.9 0.1; -0.1 0.9]  # stable dynamics
-B = Float32[1.0, 0.0]
-C = Float32[1.0, 0.5]
+// Example: 1D SSM with d=2 hidden state
+let a: Array2<f32> = array![[0.9, 0.1], [-0.1, 0.9]]; // stable dynamics
+let b: Array1<f32> = array![1.0_f32, 0.0];
+let c: Array1<f32> = array![1.0_f32, 0.5];
 
-u = randn(Float32, 16)  # input sequence
-y = discrete_ssm(u, A, B, C)
+use rand::SeedableRng;
+use rand_distr::{Distribution, StandardNormal};
+let mut rng = rand::rngs::SmallRng::seed_from_u64(0);
+let u: Vec<f32> = (0..16).map(|_| StandardNormal.sample(&mut rng)).collect();
 
-println("Input:  ", round.(u[1:5], digits=2))
-println("Output: ", round.(y[1:5], digits=2))
-println("SSM shape: d=$(size(A,1)), N=$(length(u))")
+let y = discrete_ssm(&u, a.view(), b.view(), c.view());
+
+let fmt_slice = |s: &[f32]| -> String {
+    s.iter().map(|v| format!("{:.2}", v)).collect::<Vec<_>>().join(", ")
+};
+println!("Input:  [{}]", fmt_slice(&u[..5]));
+println!("Output: [{}]", fmt_slice(&y[..5]));
+println!("SSM shape: d={}, N={}", a.nrows(), u.len());
 ```
 
 出力:
@@ -221,13 +233,13 @@ graph TD
 
 ### 2.4 学習戦略: 数式→コード→実験
 
-Zone 3で連続時間SSM→離散化→HiPPO→S4→Mambaの完全導出を行う。Zone 4で⚡Julia実装。Zone 5でLong Range Arenaでベンチマーク。
+Zone 3で連続時間SSM→離散化→HiPPO→S4→Mambaの完全導出を行う。Zone 4で🦀Rust実装。Zone 5でLong Range Arenaでベンチマーク。
 
 **ここが踏ん張りどころ**: S4の対角化証明とMambaのSelective SSMは、このシリーズで最も難解な数式の1つ。だが**理解すれば2025年のSSM論文が全て読める**ようになる。
 
-<details><summary>トロイの木馬: Juliaの活躍</summary>
+<details><summary>トロイの木馬: Rustの活躍</summary>
 
-第10回でJuliaが登場し、多重ディスパッチで型に応じた自動最適化を実現した。SSMのような数値計算では、Juliaの型安定性とJITコンパイルが威力を発揮する。S4のFFTカーネル、Mambaのscanアルゴリズムなど、数式がほぼそのままコードになる。
+第10回でRustが登場し、ゼロコスト抽象化で型に応じた自動最適化を実現した。SSMのような数値計算では、Rustの型安定性とAOTコンパイルが威力を発揮する。S4のFFTカーネル、Mambaのscanアルゴリズムなど、数式がほぼそのままコードになる。
 
 </details>
 
@@ -1259,7 +1271,7 @@ Mambaは**「何もしない」という機能**($\Delta_t \to 0 \Rightarrow \ba
 
 Mambaは**動的な離散化**と**並列スキャン**によって、**Bengioの定理の適用範囲外**にある。CNNとRNNの欠点をMambaがどう解決したか、これで数学的に理解できる。
 
-**数値検証** (Julia):
+**数値検証** (Rust):
 
 
 

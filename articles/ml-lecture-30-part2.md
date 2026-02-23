@@ -3,11 +3,11 @@ title: "第30回: エージェント完全版: 30秒の驚き→数式修行→�
 slug: "ml-lecture-30-part2"
 emoji: "🤖"
 type: "tech"
-topics: ["machinelearning", "agent", "rust", "elixir", "julia"]
+topics: ["machinelearning", "agent", "rust", "elixir", "rust"]
 published: true
 difficulty: "advanced"
 time_estimate: "90 minutes"
-languages: ["Julia", "Rust", "Elixir"]
+languages: ["Rust", "Elixir"]
 keywords: ["機械学習", "深層学習", "生成モデル"]
 ---
 
@@ -15,7 +15,7 @@ keywords: ["機械学習", "深層学習", "生成モデル"]
 
 ## 💻 Z5. 試練（実装）（60分）— Production Agent System
 
-**ゴール**: Rust / Elixir / Juliaを組み合わせた本番品質のエージェントシステムを構築する。
+**ゴール**: Rust / Elixir / Rustを組み合わせた本番品質のエージェントシステムを構築する。
 
 ### 4.1 システム全体構成
 
@@ -25,7 +25,7 @@ graph TB
         A["🌐 Web UI<br/>Phoenix LiveView"]
     end
 
-    subgraph "⚡ Julia Orchestration Layer"
+    subgraph "🦀 Rust Orchestration Layer"
         B["Planning Engine"]
         C["Execution Coordinator"]
     end
@@ -289,164 +289,194 @@ defmodule Agent.Worker do
 end
 ```
 
-### 4.5 ⚡ Julia: Complete Orchestration with LLM Integration
+### 4.5 🦀 Rust: Complete Orchestration with LLM Integration
 
 実際のLLM APIと統合する。
 
-```julia
-using HTTP, JSON3, Base64
+```rust
+use reqwest::blocking::Client;
+use serde_json::{json, Value};
+use std::collections::HashMap;
 
-# OpenAI API client
-struct OpenAIClient
-    api_key::String
-    base_url::String
-    model::String
+// OpenAI API クライアント
+struct OpenAIClient {
+    api_key: String,
+    base_url: String,
+    model: String,
+}
 
-    function OpenAIClient(;
-        api_key::String=ENV["OPENAI_API_KEY"],
-        base_url::String="https://api.openai.com/v1",
-        model::String="gpt-4"
+impl OpenAIClient {
+    fn new() -> Self {
+        OpenAIClient {
+            api_key: std::env::var("OPENAI_API_KEY").expect("OPENAI_API_KEY not set"),
+            base_url: "https://api.openai.com/v1".to_string(),
+            model: "gpt-4".to_string(),
+        }
+    }
+}
+
+fn call_llm(client: &OpenAIClient, messages: &[Value]) -> Result<String, reqwest::Error> {
+    let http = Client::new();
+    let body = json!({
+        "model": client.model,
+        "messages": messages,
+        "temperature": 0.7
+    });
+
+    let response: Value = http
+        .post(format!("{}/chat/completions", client.base_url))
+        .bearer_auth(&client.api_key)
+        .json(&body)
+        .send()?
+        .json()?;
+
+    Ok(response["choices"][0]["message"]["content"]
+        .as_str()
+        .unwrap_or("")
+        .to_string())
+}
+
+// ReAct Agent with LLM
+struct ReActAgent {
+    client: OpenAIClient,
+    tools: HashMap<String, Box<dyn Fn(&Value) -> String>>,
+    history: Vec<Value>,
+    max_steps: usize,
+}
+
+enum StepResult {
+    Finished(String),
+    Continue(String),
+}
+
+enum Action {
+    Finish(String),
+    Tool { name: String, args: Value },
+    Thinking,
+}
+
+impl ReActAgent {
+    fn step(&mut self) -> StepResult {
+        // Build context from history
+        let mut messages = vec![json!({
+            "role": "system",
+            "content": build_system_prompt(&self.tools)
+        })];
+        messages.extend(self.history.clone());
+
+        // LLM reasoning
+        let response = call_llm(&self.client, &messages).unwrap_or_default();
+
+        // Parse response
+        match parse_action(&response) {
+            Action::Finish(content) => StepResult::Finished(content),
+            Action::Tool { name, args } => {
+                // Execute tool
+                let tool_result = self.tools
+                    .get(&name)
+                    .map(|f| f(&args))
+                    .unwrap_or_else(|| format!("Tool '{}' not found", name));
+
+                // Update history
+                self.history.push(json!({"role": "assistant", "content": response}));
+                self.history.push(json!({"role": "user",
+                    "content": format!("Observation: {}", tool_result)}));
+
+                StepResult::Continue(tool_result)
+            }
+            Action::Thinking => StepResult::Continue(response),
+        }
+    }
+
+    fn run(&mut self, query: &str) -> String {
+        self.history.push(json!({"role": "user", "content": query}));
+
+        for _ in 0..self.max_steps {
+            match self.step() {
+                StepResult::Finished(answer) => return answer,
+                StepResult::Continue(_) => {}
+            }
+        }
+
+        "Max steps reached".to_string()
+    }
+}
+
+// Build system prompt
+fn build_system_prompt(tools: &HashMap<String, Box<dyn Fn(&Value) -> String>>) -> String {
+    let tool_descriptions: Vec<String> = tools.keys()
+        .map(|name| format!("{}: (tool)", name))
+        .collect();
+
+    format!(
+        "You are a helpful AI agent with access to the following tools:\n\n{}\n\n\
+         Use the following format:\n\n\
+         Thought: [your reasoning]\n\
+         Action: [tool name]\n\
+         Action Input: [arguments as JSON]\n\n\
+         Observation: [tool result will be provided]\n\n\
+         ... (repeat Thought/Action/Observation as needed)\n\n\
+         When you have the final answer, use:\n\
+         Thought: I have the final answer\n\
+         Final Answer: [your answer]",
+        tool_descriptions.join("\n")
     )
-        new(api_key, base_url, model)
-    end
-end
+}
 
-function call_llm(client::OpenAIClient, messages::Vector)
-    headers = [
-        "Authorization" => "Bearer $(client.api_key)",
-        "Content-Type" => "application/json"
-    ]
-
-    body = JSON3.write(Dict(
-        "model" => client.model,
-        "messages" => messages,
-        "temperature" => 0.7
-    ))
-
-    response = HTTP.post(
-        "$(client.base_url)/chat/completions",
-        headers,
-        body
-    )
-
-    result = JSON3.read(String(response.body))
-    return result.choices[1].message.content
-end
-
-# ReAct Agent with LLM
-mutable struct ReActAgent
-    client::OpenAIClient
-    tools::Dict{String, Function}
-    history::Vector
-    max_steps::Int
-end
-
-function step!(agent::ReActAgent)
-    # Build context from history
-    messages = [
-        Dict("role" => "system", "content" => build_system_prompt(agent.tools)),
-        [Dict("role" => h.role, "content" => h.content) for h in agent.history]...
-    ]
-
-    # LLM reasoning
-    response = call_llm(agent.client, messages)
-
-    # Parse response
-    action = parse_action(response)
-
-    if action.type == "finish"
-        return (status=:finished, answer=action.content)
-    end
-
-    # Execute tool
-    tool_result = agent.tools[action.name](action.args)
-
-    # Update history
-    push!(agent.history, (role="assistant", content=response))
-    push!(agent.history, (role="user", content="Observation: $tool_result"))
-
-    return (status=:continue, observation=tool_result)
-end
-
-function run!(agent::ReActAgent, query::String)
-    push!(agent.history, (role="user", content=query))
-
-    for step in 1:agent.max_steps
-        result = step!(agent)
-
-        if result.status == :finished
-            return result.answer
-        end
-    end
-
-    return "Max steps reached"
-end
-
-# Build system prompt
-function build_system_prompt(tools::Dict)
-    tool_descriptions = join([
-        "$(name): $(get(tool, :description, ""))"
-        for (name, tool) in tools
-    ], "\n")
-
-    return """
-    You are a helpful AI agent with access to the following tools:
-
-    $tool_descriptions
-
-    Use the following format:
-
-    Thought: [your reasoning]
-    Action: [tool name]
-    Action Input: [arguments as JSON]
-
-    Observation: [tool result will be provided]
-
-    ... (repeat Thought/Action/Observation as needed)
-
-    When you have the final answer, use:
-    Thought: I have the final answer
-    Final Answer: [your answer]
-    """
-end
-
-# Parse LLM response
-function parse_action(response::String)
-    lines = split(response, "\n")
-
-    for (i, line) in enumerate(lines)
-        if startswith(line, "Final Answer:")
-            return (type="finish", content=strip(replace(line, "Final Answer:" => "")))
-        elseif startswith(line, "Action:")
-            action_name = strip(replace(line, "Action:" => ""))
-            action_input = i < length(lines) ? strip(replace(lines[i+1], "Action Input:" => "")) : "{}"
-            return (type="tool", name=action_name, args=JSON3.read(action_input))
-        end
-    end
-
-    return (type="thinking", content=response)
-end
+// Parse LLM response
+fn parse_action(response: &str) -> Action {
+    for (i, line) in response.lines().enumerate() {
+        if let Some(rest) = line.strip_prefix("Final Answer:") {
+            return Action::Finish(rest.trim().to_string());
+        } else if let Some(rest) = line.strip_prefix("Action:") {
+            let action_name = rest.trim().to_string();
+            let action_input = response.lines()
+                .nth(i + 1)
+                .and_then(|l| l.strip_prefix("Action Input:"))
+                .map(|s| s.trim())
+                .unwrap_or("{}");
+            let args = serde_json::from_str(action_input).unwrap_or(json!({}));
+            return Action::Tool { name: action_name, args };
+        }
+    }
+    Action::Thinking
+}
 ```
 
 ### 4.6 統合例: Complete Agent System
 
 3言語を統合したエージェントシステム。
 
-```julia
-# Initialize components
-client = OpenAIClient()
+```rust
+use serde_json::Value;
+use std::collections::HashMap;
 
-tools = Dict(
-    "search"     => args -> tool_execute("search", args),
-    "calculator" => args -> eval(Meta.parse(args["expr"]))
-)
+fn main() {
+    // Initialize components
+    let client = OpenAIClient::new();
 
-# Create agent
-agent = ReActAgent(client, tools, [], 10)
+    let mut tools: HashMap<String, Box<dyn Fn(&Value) -> String>> = HashMap::new();
+    tools.insert("search".to_string(), Box::new(|args| {
+        format!("Search result for: {:?}", args)
+    }));
+    tools.insert("calculator".to_string(), Box::new(|args| {
+        // 実際には式を評価するライブラリ(e.g. fasteval crate)を使用
+        let expr = args["expr"].as_str().unwrap_or("");
+        format!("Calculated: {}", expr)
+    }));
 
-# Run agent
-answer = run!(agent, "What is 123 * 456 + 789?")
-println("Final Answer: $answer")
+    // Create agent
+    let mut agent = ReActAgent {
+        client,
+        tools,
+        history: vec![],
+        max_steps: 10,
+    };
+
+    // Run agent
+    let answer = agent.run("What is 123 * 456 + 789?");
+    println!("Final Answer: {}", answer);
+}
 ```
 
 Elixir Multi-Agent Orchestration:
@@ -465,7 +495,7 @@ with {:ok, _} <- Agent.Application.start(:normal, []),
 end
 ```
 
-> **Note:** **progress: 70%** — Zone 4完了。Rust / Elixir / Juliaを統合した本番品質のエージェントシステムを構築した。
+> **Note:** **progress: 70%** — Zone 4完了。Rust / Elixir / Rustを統合した本番品質のエージェントシステムを構築した。
 
 ---
 
@@ -504,163 +534,112 @@ AgentBench [^7] は、LLMエージェントを評価するベンチマークだ�
 
 Zero-shot / Plan-and-Execute / ReWOOを比較する。
 
-```julia
-using Statistics, DataFrames, CSV
+```rust
+use std::collections::HashMap;
 
-# Benchmark on HotpotQA subset (2-hop reasoning)
-function benchmark_planning_methods()
-    # Dataset: 2-hop reasoning questions
-    questions = [
+// HotpotQA サブセットでのPlanning手法ベンチマーク (2-hopリーズニング)
+fn benchmark_planning_methods() {
+    // Dataset: 2-hop reasoning questions
+    let questions = [
         "What is the capital of the country where the Eiffel Tower is located?",
         "Who is the author of the book that inspired the movie 'The Shawshank Redemption'?",
         "What year did the company that makes the iPhone go public?",
         "In what city is the university where Albert Einstein worked in 1905 located?",
-        "What is the population of the birthplace of Steve Jobs?"
-    ]
+        "What is the population of the birthplace of Steve Jobs?",
+    ];
+    let ground_truth = ["Paris", "Stephen King", "1980", "Bern", "San Francisco"];
 
-    ground_truth = ["Paris", "Stephen King", "1980", "Bern", "San Francisco"]
+    // Track detailed metrics: (correct, steps, tokens)
+    let mut results: HashMap<&str, (Vec<f64>, Vec<usize>, Vec<usize>)> = HashMap::from([
+        ("zero_shot",    (vec![], vec![], vec![])),
+        ("plan_execute", (vec![], vec![], vec![])),
+        ("rewoo",        (vec![], vec![], vec![])),
+    ]);
 
-    # Track detailed metrics
-    results = Dict(
-        "zero_shot" => Dict("correct" => [], "steps" => [], "tokens" => []),
-        "plan_execute" => Dict("correct" => [], "steps" => [], "tokens" => []),
-        "rewoo" => Dict("correct" => [], "steps" => [], "tokens" => [])
-    )
+    for (q, truth) in questions.iter().zip(ground_truth.iter()) {
+        println!("\n🔍 Question: {}", q);
+        println!("Ground Truth: {}", truth);
 
-    for (q, truth) in zip(questions, ground_truth)
-        println("\n🔍 Question: $q")
-        println("Ground Truth: $truth")
+        // Zero-shot ReAct
+        let zs = run_zero_shot_agent(q);
+        let correct_zs = exact_match(&zs.answer, truth);
+        let r = results.get_mut("zero_shot").unwrap();
+        r.0.push(correct_zs); r.1.push(zs.steps); r.2.push(zs.tokens);
+        println!("  Zero-shot: {} | Steps: {} | Correct: {}", zs.answer, zs.steps, correct_zs);
 
-        # Zero-shot ReAct
-        zero_shot_result = run_zero_shot_agent(q)
-        is_correct_zs = exact_match(zero_shot_result.answer, truth)
-        push!(results["zero_shot"]["correct"], is_correct_zs)
-        push!(results["zero_shot"]["steps"], zero_shot_result.steps)
-        push!(results["zero_shot"]["tokens"], zero_shot_result.tokens)
-        println("  Zero-shot: $(zero_shot_result.answer) | Steps: $(zero_shot_result.steps) | Correct: $is_correct_zs")
+        // Plan-and-Execute
+        let pe = run_plan_execute_agent(q);
+        let correct_pe = exact_match(&pe.answer, truth);
+        let r = results.get_mut("plan_execute").unwrap();
+        r.0.push(correct_pe); r.1.push(pe.steps); r.2.push(pe.tokens);
+        println!("  Plan-Execute: {} | Steps: {} | Correct: {}", pe.answer, pe.steps, correct_pe);
 
-        # Plan-and-Execute
-        plan_exec_result = run_plan_execute_agent(q)
-        is_correct_pe = exact_match(plan_exec_result.answer, truth)
-        push!(results["plan_execute"]["correct"], is_correct_pe)
-        push!(results["plan_execute"]["steps"], plan_exec_result.steps)
-        push!(results["plan_execute"]["tokens"], plan_exec_result.tokens)
-        println("  Plan-Execute: $(plan_exec_result.answer) | Steps: $(plan_exec_result.steps) | Correct: $is_correct_pe")
+        // ReWOO
+        let rw = run_rewoo_agent(q);
+        let correct_rw = exact_match(&rw.answer, truth);
+        let r = results.get_mut("rewoo").unwrap();
+        r.0.push(correct_rw); r.1.push(rw.steps); r.2.push(rw.tokens);
+        println!("  ReWOO: {} | Steps: {} | Correct: {}", rw.answer, rw.steps, correct_rw);
+    }
 
-        # ReWOO
-        rewoo_result = run_rewoo_agent(q)
-        is_correct_rw = exact_match(rewoo_result.answer, truth)
-        push!(results["rewoo"]["correct"], is_correct_rw)
-        push!(results["rewoo"]["steps"], rewoo_result.steps)
-        push!(results["rewoo"]["tokens"], rewoo_result.tokens)
-        println("  ReWOO: $(rewoo_result.answer) | Steps: $(rewoo_result.steps) | Correct: $is_correct_rw")
-    end
+    // Calculate aggregate metrics
+    println!("\n📊 Summary:");
+    for (method, (correct, steps, tokens)) in &results {
+        let acc        = correct.iter().sum::<f64>() / correct.len() as f64 * 100.0;
+        let avg_steps  = steps.iter().sum::<usize>()  as f64 / steps.len()  as f64;
+        let avg_tokens = tokens.iter().sum::<usize>() as f64 / tokens.len() as f64;
+        println!("{}:", method);
+        println!("  Accuracy: {:.2}%", acc);
+        println!("  Avg Steps: {:.2}", avg_steps);
+        println!("  Avg Tokens: {:.0}", avg_tokens);
+    }
+}
 
-    # Calculate aggregate metrics
-    println("\n📊 Summary:")
-    df = DataFrame(
-        Method = String[],
-        Accuracy = Float64[],
-        AvgSteps = Float64[],
-        AvgTokens = Float64[]
-    )
+fn exact_match(pred: &str, truth: &str) -> f64 {
+    if pred.trim().to_lowercase() == truth.trim().to_lowercase() { 1.0 } else { 0.0 }
+}
 
-    for (method, metrics) in results
-        acc = mean(metrics["correct"]) * 100
-        avg_steps = mean(metrics["steps"])
-        avg_tokens = mean(metrics["tokens"])
+struct AgentResult { answer: String, steps: usize, tokens: usize }
 
-        push!(df, (method, acc, avg_steps, avg_tokens))
+// Zero-shot ReAct エージェントのシミュレーション
+fn run_zero_shot_agent(query: &str) -> AgentResult {
+    // 簡略化シミュレーション: 現実的なステップ数とトークン数
+    // 実際: LLM APIを呼び出す
+    let steps = 3 + (query.len() % 4);  // 3〜6ステップ
+    let tokens = steps * 500;            // ~500 tokens/step
+    AgentResult { answer: mock_answer(query), steps, tokens }
+}
 
-        println("$method:")
-        println("  Accuracy: $(round(acc, digits=2))%")
-        println("  Avg Steps: $(round(avg_steps, digits=2))")
-        println("  Avg Tokens: $(round(avg_tokens, digits=0))")
-    end
+// Plan-and-Execute エージェントのシミュレーション
+fn run_plan_execute_agent(query: &str) -> AgentResult {
+    // Plan-and-Execute: 明示的プランニングによりステップ数が少ない
+    let steps = 2 + (query.len() % 3);  // 2〜4ステップ
+    let tokens = steps * 600 + 300;     // プランニングオーバーヘッド
+    AgentResult { answer: mock_answer(query), steps, tokens }
+}
 
-    return df
-end
+// ReWOO エージェントのシミュレーション
+fn run_rewoo_agent(query: &str) -> AgentResult {
+    // ReWOO: 並列実行によりステップ数が少ない
+    let steps = 1 + (query.len() % 3);  // 1〜3ステップ
+    let tokens = steps * 400;           // トークン消費5x削減 (Xu+ 2023)
+    AgentResult { answer: mock_answer(query), steps, tokens }
+}
 
-exact_match(pred::String, truth::String) =
-    lowercase(strip(pred)) == lowercase(strip(truth)) ? 1.0 : 0.0
+fn mock_answer(query: &str) -> String {
+    if query.contains("Eiffel Tower")                            { "Paris".to_string() }
+    else if query.contains("Shawshank")                          { "Stephen King".to_string() }
+    else if query.contains("iPhone")                             { "1980".to_string() }
+    else if query.contains("Einstein") && query.contains("1905") { "Bern".to_string() }
+    else if query.contains("Steve Jobs")                         { "San Francisco".to_string() }
+    else                                                         { "Unknown".to_string() }
+}
 
-# Simulate Zero-shot ReAct agent
-function run_zero_shot_agent(query::String)
-    # Simplified simulation: realistic step count and token usage
-    # Real: calls LLM API
-    steps = rand(3:6)
-    tokens = steps * 500  # ~500 tokens per step
-
-    # Mock answer (in production: actual LLM output)
-    answer = if contains(query, "Eiffel Tower")
-        "Paris"
-    elseif contains(query, "Shawshank")
-        "Stephen King"
-    elseif contains(query, "iPhone")
-        "1980"
-    elseif contains(query, "Einstein") && contains(query, "1905")
-        "Bern"
-    elseif contains(query, "Steve Jobs")
-        "San Francisco"
-    else
-        "Unknown"
-    end
-
-    return (answer=answer, steps=steps, tokens=tokens)
-end
-
-# Simulate Plan-and-Execute agent
-function run_plan_execute_agent(query::String)
-    # Plan-and-Execute: fewer steps due to explicit planning
-    steps = rand(2:4)
-    tokens = steps * 600 + 300  # Planning overhead
-
-    answer = if contains(query, "Eiffel Tower")
-        "Paris"
-    elseif contains(query, "Shawshank")
-        "Stephen King"
-    elseif contains(query, "iPhone")
-        "1980"
-    elseif contains(query, "Einstein") && contains(query, "1905")
-        "Bern"
-    elseif contains(query, "Steve Jobs")
-        "San Francisco"
-    else
-        "Unknown"
-    end
-
-    return (answer=answer, steps=steps, tokens=tokens)
-end
-
-# Simulate ReWOO agent
-function run_rewoo_agent(query::String)
-    # ReWOO: parallel execution, fewer steps
-    steps = rand(1:3)
-    tokens = steps * 400  # 5x token reduction (Xu+ 2023)
-
-    answer = if contains(query, "Eiffel Tower")
-        "Paris"
-    elseif contains(query, "Shawshank")
-        "Stephen King"
-    elseif contains(query, "iPhone")
-        "1980"
-    elseif contains(query, "Einstein") && contains(query, "1905")
-        "Bern"
-    elseif contains(query, "Steve Jobs")
-        "San Francisco"
-    else
-        "Unknown"
-    end
-
-    return (answer=answer, steps=steps, tokens=tokens)
-end
-
-# Run benchmark
-df = benchmark_planning_methods()
-
-# Save results
-CSV.write("planning_benchmark_results.csv", df)
-println("\n✅ Results saved to planning_benchmark_results.csv")
+fn main() {
+    benchmark_planning_methods();
+    // 結果はCSVライブラリ(csv crate)で保存可能
+    println!("\n✅ Benchmark complete");
+}
 ```
 
 **予想される結果** (実際のLLM APIを使った場合):
@@ -681,82 +660,112 @@ println("\n✅ Results saved to planning_benchmark_results.csv")
 
 Memory有無での性能差を測定する。
 
-```julia
-function benchmark_memory_effect()
-    # Task: Answer questions about a story
-    story = """
-    Alice went to Paris in 2020. She visited the Eiffel Tower and the Louvre Museum.
-    In 2021, she moved to London and started working at a tech company.
-    Her favorite programming language is Julia.
-    """
+```rust
+use std::collections::HashMap;
 
-    questions = [
-        "Where did Alice go in 2020?",
-        "What is Alice's favorite programming language?",
-        "When did Alice move to London?"
-    ]
+// Memory有無での性能差ベンチマーク
+fn benchmark_memory_effect() {
+    // Task: ストーリーに関する質問に答える
+    let story = "\
+        Alice went to Paris in 2020. She visited the Eiffel Tower and the Louvre Museum. \
+        In 2021, she moved to London and started working at a tech company. \
+        Her favorite programming language is Rust.";
 
-    ground_truth = ["Paris", "Julia", "2021"]
+    let questions    = ["Where did Alice go in 2020?",
+                        "What is Alice's favorite programming language?",
+                        "When did Alice move to London?"];
+    let ground_truth = ["Paris", "Rust", "2021"];
 
-    # Without memory
-    no_memory_scores = [exact_match(run_agent_no_memory(story, q), truth)
-                        for (q, truth) in zip(questions, ground_truth)]
+    // Without memory
+    let no_memory_scores: Vec<f64> = questions.iter()
+        .zip(ground_truth.iter())
+        .map(|(q, truth)| exact_match(&run_agent_no_memory(story, q), truth))
+        .collect();
 
-    # With memory
-    memory = init_memory(story)
-    memory_scores = [exact_match(run_agent_with_memory(memory, q), truth)
-                     for (q, truth) in zip(questions, ground_truth)]
+    // With memory
+    let memory = init_memory(story);
+    let memory_scores: Vec<f64> = questions.iter()
+        .zip(ground_truth.iter())
+        .map(|(q, truth)| exact_match(&run_agent_with_memory(&memory, q), truth))
+        .collect();
 
-    println("Without Memory: Accuracy = $(round(mean(no_memory_scores) * 100, digits=2))%")
-    println("With Memory: Accuracy = $(round(mean(memory_scores) * 100, digits=2))%")
-end
+    let no_mem_acc = no_memory_scores.iter().sum::<f64>() / no_memory_scores.len() as f64 * 100.0;
+    let mem_acc    = memory_scores.iter().sum::<f64>()    / memory_scores.len()    as f64 * 100.0;
+    println!("Without Memory: Accuracy = {:.2}%", no_mem_acc);
+    println!("With Memory:    Accuracy = {:.2}%", mem_acc);
+}
 
-init_memory(text::String) = Dict("text" => text)
+fn init_memory(text: &str) -> HashMap<&str, &str> {
+    HashMap::from([("text", text)])
+}
 
-run_agent_no_memory(story::String, query::String) = "Paris"
+fn run_agent_no_memory(_story: &str, _query: &str) -> String { "Paris".to_string() }
 
-run_agent_with_memory(memory::Dict, query::String) = "Paris"
+fn run_agent_with_memory(_memory: &HashMap<&str, &str>, _query: &str) -> String {
+    "Paris".to_string()
+}
 
-benchmark_memory_effect()
+fn exact_match(pred: &str, truth: &str) -> f64 {
+    if pred.trim().to_lowercase() == truth.trim().to_lowercase() { 1.0 } else { 0.0 }
+}
+
+fn main() {
+    benchmark_memory_effect();
+}
 ```
 
 ### 5.4 Multi-Agent Debateの効果
 
 Single Agent vs Multi-Agent Debateを比較する。
 
-```julia
-function benchmark_multi_agent_debate()
-    questions = [
-        "Is 17 a prime number?",
-        "What is the square root of 144?",
-        "Is water wet?"
-    ]
+```rust
+use std::collections::HashMap;
 
-    ground_truth = ["Yes", "12", "Yes"]
+// Single Agent vs Multi-Agent Debateのベンチマーク
+fn benchmark_multi_agent_debate() {
+    let questions    = ["Is 17 a prime number?", "What is the square root of 144?", "Is water wet?"];
+    let ground_truth = ["Yes", "12", "Yes"];
 
-    # Single agent
-    single_scores = [exact_match(run_single_agent(q), truth)
-                     for (q, truth) in zip(questions, ground_truth)]
+    // Single agent
+    let single_scores: Vec<f64> = questions.iter()
+        .zip(ground_truth.iter())
+        .map(|(q, truth)| exact_match(&run_single_agent(q), truth))
+        .collect();
 
-    # Multi-agent debate
-    debate_scores = [exact_match(run_multi_agent_debate(q, n_agents=3, n_rounds=2), truth)
-                     for (q, truth) in zip(questions, ground_truth)]
+    // Multi-agent debate
+    let debate_scores: Vec<f64> = questions.iter()
+        .zip(ground_truth.iter())
+        .map(|(q, truth)| exact_match(&run_multi_agent_debate(q, 3, 2), truth))
+        .collect();
 
-    println("Single Agent: Accuracy = $(round(mean(single_scores) * 100, digits=2))%")
-    println("Multi-Agent Debate: Accuracy = $(round(mean(debate_scores) * 100, digits=2))%")
-end
+    let single_acc = single_scores.iter().sum::<f64>() / single_scores.len() as f64 * 100.0;
+    let debate_acc = debate_scores.iter().sum::<f64>() / debate_scores.len() as f64 * 100.0;
+    println!("Single Agent:       Accuracy = {:.2}%", single_acc);
+    println!("Multi-Agent Debate: Accuracy = {:.2}%", debate_acc);
+}
 
-run_single_agent(::String) = "Yes"
+fn run_single_agent(_query: &str) -> String { "Yes".to_string() }
 
-function run_multi_agent_debate(query::String; n_agents::Int, n_rounds::Int)
-    answers = [run_single_agent(query) for _ in 1:n_agents]
+fn run_multi_agent_debate(query: &str, n_agents: usize, _n_rounds: usize) -> String {
+    // 各エージェントが回答 → 多数決
+    let answers: Vec<String> = (0..n_agents).map(|_| run_single_agent(query)).collect();
+    let mut counts: HashMap<&str, usize> = HashMap::new();
+    for a in &answers {
+        *counts.entry(a.as_str()).or_insert(0) += 1;
+    }
+    counts.into_iter()
+        .max_by_key(|&(_, c)| c)
+        .map(|(a, _)| a.to_string())
+        .unwrap_or_default()
+}
 
-    # Majority voting
-    counts = Dict(a => count(==(a), answers) for a in unique(answers))
-    return argmax(counts)
-end
+fn exact_match(pred: &str, truth: &str) -> f64 {
+    if pred.trim().to_lowercase() == truth.trim().to_lowercase() { 1.0 } else { 0.0 }
+}
 
-benchmark_multi_agent_debate()
+fn main() {
+    benchmark_multi_agent_debate();
+}
 ```
 
 ### 5.5 Self-診断テスト
@@ -1121,37 +1130,58 @@ end
 
 Anthropic's Constitutional AIをエージェントに適用:
 
-```julia
-# Reflexion: 自己批評による反復改善エージェント
-# 数式: π_{t+1} = argmax_π 𝔼[R | s_t, verbal_reflection(π_t)]
+```rust
+// Reflexion: 自己批評による反復改善エージェント
+// 数式: π_{t+1} = argmax_π 𝔼[R | s_t, verbal_reflection(π_t)]
 
-struct ReflexionAgent
-    memory::Vector{String}
-end
+struct ReflexionAgent {
+    memory: Vec<String>,
+}
 
-function solve_with_reflection!(agent::ReflexionAgent, task::String; max_trials::Int=3)
-    for trial in 1:max_trials
-        # 試行
-        solution = attempt(task, agent.memory)
-        
-        # 自己評価
-        eval_result = evaluate_solution(solution, task)
-        
-        if eval_result.success
-            return solution  # 成功
-        end
-        
-        # Verbal Reflection: 失敗原因の言語化
-        reflection = reflect(solution, eval_result.feedback)
-        push!(agent.memory, reflection)
-    end
-    return nothing  # max_trials exceeded
-end
+struct EvalResult {
+    success: bool,
+    feedback: String,
+}
 
-# 検算: メモリは反復ごとに蓄積
-agent = ReflexionAgent(String[])
-# After trial 1: length(agent.memory) == 1
-# After trial 2: length(agent.memory) == 2
+impl ReflexionAgent {
+    fn new() -> Self {
+        ReflexionAgent { memory: vec![] }
+    }
+
+    fn solve_with_reflection(&mut self, task: &str, max_trials: usize) -> Option<String> {
+        for _ in 0..max_trials {
+            // 試行
+            let solution = attempt(task, &self.memory);
+
+            // 自己評価
+            let eval_result = evaluate_solution(&solution, task);
+
+            if eval_result.success {
+                return Some(solution);  // 成功
+            }
+
+            // Verbal Reflection: 失敗原因の言語化
+            let reflection = reflect(&solution, &eval_result.feedback);
+            self.memory.push(reflection);
+        }
+        None  // max_trials exceeded
+    }
+}
+
+fn attempt(_task: &str, _memory: &[String]) -> String { "solution".to_string() }
+fn evaluate_solution(_sol: &str, _task: &str) -> EvalResult {
+    EvalResult { success: false, feedback: "needs improvement".to_string() }
+}
+fn reflect(_sol: &str, feedback: &str) -> String { format!("Reflection: {}", feedback) }
+
+// 検算: メモリは反復ごとに蓄積
+fn main() {
+    let mut agent = ReflexionAgent::new();
+    // After trial 1: agent.memory.len() == 1
+    // After trial 2: agent.memory.len() == 2
+    let _ = agent.solve_with_reflection("task", 3);
+    println!("Memory entries after 3 trials: {}", agent.memory.len());
+}
 ```
 
 ### 6.6 Agent Evaluation Benchmarks (2024-2025)
@@ -1266,35 +1296,52 @@ ROI: 80x cost reduction for routine tasks.
 
 **Emerging Architecture: Agent + World Model**:
 
-```julia
-# WorldModelAgent: 世界モデルを使った計画エージェント
-# 数式: π* = argmax_π Σ_t r(s_t, a_t)  s.t.  world_model(s, a) → s'
+```rust
+// WorldModelAgent: 世界モデルを使った計画エージェント
+// 数式: π* = argmax_π Σ_t r(s_t, a_t)  s.t.  world_model(s, a) → s'
 
-struct WorldModelAgent
-    llm::LLMClient
-    world_model::LearnedEnvironmentModel
-end
+struct LLMClient;
+struct LearnedEnvironmentModel;
+struct Plan(String);
+struct Outcome { success_prob: f64 }
 
-function plan_with_simulation(agent::WorldModelAgent, goal::String)
-    candidates = generate_plan_candidates(agent.llm, goal)
+struct WorldModelAgent {
+    llm: LLMClient,
+    world_model: LearnedEnvironmentModel,
+}
 
-    # 世界モデルで各候補をシミュレーション → 最良プランを選択
-    best_plan, best_prob = nothing, -Inf
-    for plan in candidates
-        outcome = simulate(agent.world_model, plan)
-        if outcome.success_prob > best_prob
-            best_plan = plan
-            best_prob  = outcome.success_prob
-        end
-    end
+impl WorldModelAgent {
+    fn plan_with_simulation(&self, goal: &str) {
+        let candidates = generate_plan_candidates(&self.llm, goal);
 
-    # 最良プランを実環境で実行
-    execute_plan(best_plan)
-end
+        // 世界モデルで各候補をシミュレーション → 最良プランを選択
+        let best = candidates.iter()
+            .map(|plan| {
+                let outcome = simulate(&self.world_model, plan);
+                (plan, outcome.success_prob)
+            })
+            .max_by(|a, b| a.1.partial_cmp(&b.1).unwrap());
 
-# 検算: success_prob ∈ [0, 1]、最大値のプランが選択される
-agent = WorldModelAgent(LLMClient(), LearnedEnvironmentModel())
-# plan_with_simulation(agent, "Build a web scraper") → best_prob == maximum(p.success_prob for p in outcomes)
+        if let Some((plan, prob)) = best {
+            println!("Best plan: {}, success_prob: {:.3}", plan.0, prob);
+            // 最良プランを実環境で実行
+            execute_plan(plan);
+        }
+    }
+}
+
+fn generate_plan_candidates(_llm: &LLMClient, goal: &str) -> Vec<Plan> {
+    vec![Plan(format!("Plan A for: {}", goal)), Plan(format!("Plan B for: {}", goal))]
+}
+fn simulate(_model: &LearnedEnvironmentModel, _plan: &Plan) -> Outcome { Outcome { success_prob: 0.8 } }
+fn execute_plan(plan: &Plan) { println!("Executing: {}", plan.0); }
+
+// 検算: success_prob ∈ [0, 1]、最大値のプランが選択される
+fn main() {
+    let agent = WorldModelAgent { llm: LLMClient, world_model: LearnedEnvironmentModel };
+    // plan_with_simulation(agent, "Build a web scraper") → best_prob == max(p.success_prob for p in outcomes)
+    agent.plan_with_simulation("Build a web scraper");
+}
 ```
 
 ---
@@ -1395,11 +1442,11 @@ AgentBench以降、評価手法が多様化:
 |:----------|:----------|:-----|
 | **1. ReAct Loop** | $\text{thought}_t \to a_t \to o_{t+1}$ | Rust State Machine |
 | **2. Tool Use** | $\mathcal{T} = \langle \text{name}, \text{schema}, \text{function} \rangle$ | Rust Tool Registry |
-| **3. Planning** | $\text{task} \to \{ \text{subtask}_i \}$ | Julia Planning Engine |
+| **3. Planning** | $\text{task} \to \{ \text{subtask}_i \}$ | Rust Planning Engine |
 | **4. Memory** | $\mathcal{M} = \{ (k_i, v_i) \}$ | Rust + Qdrant |
 | **5. Multi-Agent** | $\mathcal{MAS} = \{ \mathcal{A}_1, \ldots, \mathcal{A}_N \}$ | Elixir GenServer |
-| **6. MCP** | JSON-RPC 2.0 over stdio/HTTP | Rust Server + Julia Client |
-| **7. Production** | Rust+Elixir+Julia統合 | Complete Agent System |
+| **6. MCP** | JSON-RPC 2.0 over stdio/HTTP | Rust Server + Rust Client |
+| **7. Production** | Rust+Elixir+Rust統合 | Complete Agent System |
 
 ### 6.7 到達点
 
@@ -1455,12 +1502,12 @@ AgentBench以降、評価手法が多様化:
 </details>
 
 <details>
-<summary><strong>Q7. なぜRust / Elixir / Juliaの3言語？</strong></summary>
+<summary><strong>Q7. なぜRust / Elixir / Rustの3言語？</strong></summary>
 
 **A**:
 - **Rust**: Tool Registry / State Machineは型安全・高速が必須
 - **Elixir**: Multi-Agentは障害耐性・分散並行が必須
-- **Julia**: Orchestrationは数式↔コード1:1が必須
+- **Rust**: Orchestrationは数式↔コード1:1が必須
 
 Pythonだけでは全てを最適化できない。
 </details>
@@ -1479,7 +1526,7 @@ Pythonだけでは全てを最適化できない。
 | **Day 2** | Zone 3 Part A-B | 60分 | Tool Registry実装 |
 | **Day 3** | Zone 3 Part C-D | 60分 | Planning Engine実装 |
 | **Day 4** | Zone 3 Part E-F | 60分 | Multi-Agent + MCP |
-| **Day 5** | Zone 3 Part G + Zone 4 | 90分 | Rust/Elixir/Julia統合 |
+| **Day 5** | Zone 3 Part G + Zone 4 | 90分 | Rust/Elixir/Rust統合 |
 | **Day 6** | Zone 5 | 60分 | AgentBench評価 |
 | **Day 7** | Zone 6 + 復習 | 60分 | 最新論文読解 |
 

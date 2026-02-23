@@ -2,12 +2,12 @@
 title: "第12回: GAN: 基礎からStyleGANまで: 30秒の驚き→数式修行→実装マスター 【前編】理論編"
 emoji: "⚔️"
 type: "tech"
-topics: ["machinelearning", "deeplearning", "gan", "julia", "rust"]
+topics: ["machinelearning", "deeplearning", "gan", "rust", "rust"]
 published: true
 slug: "ml-lecture-12-part1"
 difficulty: "advanced"
 time_estimate: "90 minutes"
-languages: ["Julia", "Rust"]
+languages: ["Rust"]
 keywords: ["機械学習", "深層学習", "生成モデル"]
 ---
 
@@ -62,44 +62,76 @@ graph LR
 
 本物と偽物を戦わせる。それだけだ。生成器Gはノイズ $z$ から画像を作り、判別器Dは本物の画像 $x$ か偽物 $G(z)$ かを見分ける。Gは「Dを騙せ」と学習し、Dは「騙されるな」と学習する。この戦いが収束したとき、Gは本物と見分けがつかない画像を生成できるようになっている。
 
-```julia
-using Flux, Random
+```rust
+use candle_core::{DType, Device, Result, Tensor};
+use candle_nn::{linear, optim, Linear, Module, Optimizer, VarBuilder, VarMap};
 
-# Tiny GAN (Julia)
-Random.seed!(42)
-G = Chain(Dense(2 => 16, relu), Dense(16 => 2))        # Generator
-D = Chain(Dense(2 => 16, relu), Dense(16 => 1, σ))     # Discriminator (σ=sigmoid)
+// Tiny GAN (Rust / candle)
+struct Generator     { fc1: Linear, fc2: Linear }
+struct Discriminator { fc1: Linear, fc2: Linear }
 
-# Training loop (simplified)
-opt_g = Adam(1e-3)
-opt_d = Adam(1e-3)
-for _ in 1:500
-    # Sample real data (circle)
-    θ      = rand(2, 32) .* 2π
-    real_x = @views vcat(cos.(θ[1,:]), sin.(θ[1,:]))
+impl Module for Generator {
+    fn forward(&self, z: &Tensor) -> Result<Tensor> {
+        self.fc1.forward(z)?.relu()?.apply(&self.fc2)
+    }
+}
+impl Module for Discriminator {
+    fn forward(&self, x: &Tensor) -> Result<Tensor> {
+        self.fc1.forward(x)?.relu()?.apply(&self.fc2)?.sigmoid()
+    }
+}
 
-    # Generate fake data
-    z = randn(Float32, 2, 32)
-    fake_x = G(z)
+fn gan_loss(d_real: &Tensor, d_fake: &Tensor) -> Result<(Tensor, Tensor)> {
+    let ones  = Tensor::ones_like(d_real)?;
+    let zeros = Tensor::zeros_like(d_fake)?;
+    let d_loss = candle_nn::loss::binary_cross_entropy_with_logit(d_real, &ones)?
+        .add(&candle_nn::loss::binary_cross_entropy_with_logit(d_fake, &zeros)?)?;
+    let g_loss = candle_nn::loss::binary_cross_entropy_with_logit(d_fake, &ones)?;
+    Ok((d_loss, g_loss))
+}
 
-    # Train Discriminator: maximize log D(x) + log(1 - D(G(z)))
-    gs_d = gradient(Flux.params(D)) do
-        -mean(log.(D(real_x) .+ 1f-8)) - mean(log.(1 .- D(fake_x) .+ 1f-8))
-    end
-    Flux.update!(opt_d, Flux.params(D), gs_d)
+fn train_tiny_gan() -> Result<()> {
+    let device = Device::Cpu;
+    let varmap_g = VarMap::new();
+    let varmap_d = VarMap::new();
+    let vb_g = VarBuilder::from_varmap(&varmap_g, DType::F32, &device);
+    let vb_d = VarBuilder::from_varmap(&varmap_d, DType::F32, &device);
 
-    # Train Generator: maximize log D(G(z))  (minimize -log D(G(z)))
-    gs_g = gradient(Flux.params(G)) do
-        -mean(log.(D(G(randn(Float32, 2, 32))) .+ 1f-8))
-    end
-    Flux.update!(opt_g, Flux.params(G), gs_g)
-end
+    let g = Generator     { fc1: linear(2, 16, vb_g.pp("fc1"))?, fc2: linear(16, 2, vb_g.pp("fc2"))? };
+    let d = Discriminator { fc1: linear(2, 16, vb_d.pp("fc1"))?, fc2: linear(16, 1, vb_d.pp("fc2"))? };
 
-# Generate samples
-z_test = randn(Float32, 2, 100)
-samples = G(z_test)
-println("Generated $(size(samples, 2)) samples from noise")
-println("Sample mean: $(mean(samples)), std: $(std(samples))")
+    let mut opt_g = optim::AdamW::new(varmap_g.all_vars(), optim::ParamsAdamW { lr: 1e-3, ..Default::default() })?;
+    let mut opt_d = optim::AdamW::new(varmap_d.all_vars(), optim::ParamsAdamW { lr: 1e-3, ..Default::default() })?;
+
+    for _ in 0..500 {
+        // Sample real data (unit circle)
+        let theta  = Tensor::rand(0f32, std::f32::consts::TAU, (1, 32), &device)?;
+        let real_x = Tensor::cat(&[theta.cos()?, theta.sin()?], 0)?;
+
+        // Generate fake data
+        let z      = Tensor::randn(0f32, 1f32, (2, 32), &device)?;
+        let fake_x = g.forward(&z)?;
+
+        // Train Discriminator
+        let d_real  = d.forward(&real_x)?;
+        let d_fake  = d.forward(&fake_x.detach())?;
+        let (d_loss, _) = gan_loss(&d_real, &d_fake)?;
+        opt_d.backward_step(&d_loss)?;
+
+        // Train Generator
+        let fake_x2 = g.forward(&Tensor::randn(0f32, 1f32, (2, 32), &device)?)?;
+        let d_fake2  = d.forward(&fake_x2)?;
+        let ones     = Tensor::ones_like(&d_fake2)?;
+        let g_loss   = candle_nn::loss::binary_cross_entropy_with_logit(&d_fake2, &ones)?;
+        opt_g.backward_step(&g_loss)?;
+    }
+
+    // Generate samples
+    let z_test  = Tensor::randn(0f32, 1f32, (2, 100), &device)?;
+    let samples = g.forward(&z_test)?;
+    println!("Generated {} samples from noise", samples.dim(1)?);
+    Ok(())
+}
 ```
 
 出力:
@@ -177,7 +209,7 @@ $$
 | $G(z)$ | `G(z)` | 生成器がノイズから画像を生成 |
 | $D(G(z))$ | `D(G(z))` | 判別器が偽画像を評価 |
 | $-\log D(G(z))$ | `-mean(log.(D(fake_x) .+ 1f-8))` | 生成器損失（最小化） |
-| `gradient(Flux.params(G))` | $\nabla_{\theta_G} \mathcal{L}_G$ | 生成器パラメータの勾配 |
+| `gradient(Candle.params(G))` | $\nabla_{\theta_G} \mathcal{L}_G$ | 生成器パラメータの勾配 |
 
 ### 1.3 敵対的ダイナミクスの可視化
 
@@ -288,7 +320,7 @@ graph TD
 | WGAN理論 | Wasserstein導入の動機 | Kantorovich双対性完全証明（第11回接続） |
 | StyleGAN | アーキテクチャ概要 | AdaIN数式 + W空間操作 + PPL理論 |
 | 最新研究 | 2023年まで | R3GAN [^4] / Diffusion2GAN [^6] (2025年) |
-| 実装 | PyTorch | ⚡Julia訓練 + 🦀Rust推論（3言語比較） |
+| 実装 | PyTorch | 🦀Rust訓練 + 🦀Rust推論（3言語比較） |
 
 本講義は、理論的厳密性と最新性の両面で松尾研を上回る。
 
@@ -312,11 +344,11 @@ graph TD
 
 本講義での言語使用:
 
-- **⚡Julia**: GAN訓練ループ全体（DCGAN / WGAN-GP / StyleGAN潜在空間操作）
+- **🦀Rust**: GAN訓練ループ全体（DCGAN / WGAN-GP / StyleGAN潜在空間操作）
 - **🦀Rust**: 判別器推論（ONNX Runtime）+ StyleGAN推論パイプライン
 - **🐍Python**: 比較対象としてのみ登場（PyTorchとの速度比較）
 
-Juliaは第10回（VAE）で導入済み。Rustは第9回で導入済み。両言語を実戦投入する。
+Rustは第10回（VAE）で導入済み。Rustは第9回で導入済み。両言語を実戦投入する。
 
 > **Note:** **進捗: 20% 完了** GANの動機と全体像を理解した。ここから数式の深みに入る。準備はいいか？
 
@@ -1241,7 +1273,7 @@ $$
 - CelebA-HQ 256×256: FID 4.8（GP: 6.3、SN: 5.1）
 - **訓練安定性**: GPより3倍収束が速い
 
-**Julia実装**:
+**Rust実装**:
 
 
 ### 3.7 StyleGAN系列の進化 — アーキテクチャと訓練手法の革新

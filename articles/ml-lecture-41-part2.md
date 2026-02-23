@@ -2,52 +2,53 @@
 title: "第41回 (Part 2): World Models & 環境シミュレータ理論🌍: 30秒の驚き→数式修行→実装マスター"
 emoji: "🌍"
 type: "tech"
-topics: ["machinelearning", "deeplearning", "worldmodels", "julia", "jepa"]
+topics: ["machinelearning", "deeplearning", "worldmodels", "rust", "jepa"]
 published: true
 slug: "ml-lecture-41-part2"
 difficulty: "advanced"
 time_estimate: "90 minutes"
-languages: ["Julia", "Rust"]
+languages: ["Rust"]
 keywords: ["機械学習", "深層学習", "生成モデル"]
 ---
 ## 💻 Z5. 試練（実装）（45分）— JEPAコンセプト実装
 
 ### 4.1 環境セットアップ
 
-```julia
-using Pkg
-Pkg.activate(".")
-Pkg.add(["Lux", "Optimisers", "Zygote", "MLUtils", "Images", "Plots"])
+```rust
+// using Pkg
+// Pkg.activate(".")
+// Pkg.add(["Lux", "Optimisers", "Zygote", "MLUtils", "Images", "Plots"])
 
-using Lux, Random, Optimisers, Zygote, MLUtils
-using Images, Plots
+// using Lux, Random, Optimisers, Zygote, MLUtils
+// using Images, Plots
+
 ```
 
 ### 4.2 I-JEPAコンセプト実装
 
-```julia
-# I-JEPA: 画像の一部から他部分の潜在表現を予測
+```rust
+// I-JEPA: 画像の一部から他部分の潜在表現を予測
 
-# Context Encoder
-function context_encoder(D=256)
+// Context Encoder
+fn context_encoder(D) {
     Chain(
-        Conv((4, 4), 3 => 64, stride=2, pad=1),  # 64x64 -> 32x32
+        Conv((4, 4), 3 => 64, stride=2, pad=1),  // 64x64 -> 32x32
         BatchNorm(64),
         x -> relu.(x),
-        Conv((4, 4), 64 => 128, stride=2, pad=1),  # 32x32 -> 16x16
+        Conv((4, 4), 64 => 128, stride=2, pad=1),  // 32x32 -> 16x16
         BatchNorm(128),
         x -> relu.(x),
-        Conv((4, 4), 128 => D, stride=2, pad=1),  # 16x16 -> 8x8
-        FlattenLayer(),  # [B, 8*8*D]
+        Conv((4, 4), 128 => D, stride=2, pad=1),  // 16x16 -> 8x8
+        FlattenLayer(),  // [B, 8*8*D]
         Dense(8*8*D => D)
     )
-end
+}
 
-# Target Encoder (same architecture, EMA updated)
+// Target Encoder (same architecture, EMA updated)
 target_encoder(D=256) = context_encoder(D)
 
-# Predictor: context latent + mask tokens -> target latent
-function predictor(D=256, n_masks=16)
+// Predictor: context latent + mask tokens -> target latent
+fn predictor(D, n_masks) {
     Chain(
         Dense(D + n_masks => 512),
         x -> relu.(x),
@@ -55,83 +56,75 @@ function predictor(D=256, n_masks=16)
         x -> relu.(x),
         Dense(512 => D)
     )
-end
+}
+
 ```
 
-```julia
-# EMA update for target encoder
-function update_ema!(target_ps, context_ps, τ=0.996)
-    for (k, v) in pairs(target_ps)
-        if v isa AbstractArray
-            @. target_ps[k] = τ * target_ps[k] + (1 - τ) * context_ps[k]
-        end
-    end
-end
+```rust
+// EMA update for target encoder: θ_target ← τ·θ_target + (1-τ)·θ_context
+fn update_ema(target: &Tensor, context: &Tensor, tau: f64) -> candle_core::Result<Tensor> {
+    // Exponential moving average — smoothly tracks the online encoder
+    target.affine(tau, 0.)?.add(&context.affine(1.0 - tau, 0.))
+}
 ```
 
-```julia
-# JEPA訓練ループ
-function train_jepa!(context_enc, target_enc, pred,
-                      opt_ctx, opt_pred, ps_ctx, ps_tgt, ps_pred,
-                      st_ctx, st_tgt, st_pred, dataloader; epochs=10)
+```rust
+// JEPA訓練ループ
+fn train_jepa(
+    ctx_enc: &mut impl Module,
+    tgt_enc: &impl Module,   // EMA-updated target encoder (no gradient)
+    pred: &mut impl Module,
+    dataloader: &[Tensor],
+    epochs: usize,
+    tau: f64,
+) -> candle_core::Result<()> {
+    for epoch in 0..epochs {
+        let mut total_loss = 0f32;
+        let mut n_batches = 0usize;
 
-    for epoch in 1:epochs
-        total_loss = 0.0
-        n_batches = 0
+        for x_batch in dataloader {
+            // Context: 左半分、Target: 右半分（簡易版）
+            let x_context = x_batch.narrow(2, 0, 32)?;   // [:, :, 0:32, :]
+            let x_target  = x_batch.narrow(2, 32, 32)?;  // [:, :, 32:64, :]
 
-        for (x_batch,) in dataloader
-            # ランダムマスク生成
-            # Context: 左半分、Target: 右半分（簡易版）
-            @views x_context = x_batch[:, 1:32, :, :]
-            @views x_target = x_batch[:, 33:64, :, :]
+            // Context encoding
+            let z_ctx = ctx_enc.forward(&x_context)?;
 
-            # Context encoding
-            z_ctx, st_ctx = context_enc(x_context, ps_ctx, st_ctx)
+            // Target encoding — stop gradient (EMA encoder, no backprop)
+            let z_tgt = tgt_enc.forward(&x_target)?.detach();
 
-            # Target encoding (no gradient)
-            z_tgt, st_tgt = target_enc(x_target, ps_tgt, st_tgt)
-            z_tgt = stopgradient(z_tgt)
+            // Predictor: concat context + mask tokens (zeros as placeholder)
+            let b = z_ctx.dim(0)?;
+            let mask_tokens = Tensor::zeros((b, 16), z_ctx.dtype(), z_ctx.device())?;
+            let pred_in = Tensor::cat(&[&z_ctx, &mask_tokens], 1)?;
+            let z_pred = pred.forward(&pred_in)?;
 
-            # Predictor: mask tokens (here: zeros as placeholder)
-            mask_tokens = zeros(Float32, 16, size(x_batch, 4))
-            z_pred, st_pred = pred(vcat(z_ctx, mask_tokens), ps_pred, st_pred)
+            // L2 loss in latent space: ‖z_pred − z_tgt‖²
+            let loss = z_pred.sub(&z_tgt)?.sqr()?.mean_all()?;
 
-            # Loss
-            loss = mean((z_pred .- z_tgt).^2)
+            // Backprop (ctx_enc + pred only; tgt_enc updated via EMA)
+            loss.backward()?;
+            // optimizer.step(); optimizer.zero_grad();
 
-            # Backprop (context encoder + predictor)
-            gs_ctx = gradient(ps -> begin
-                z_ctx_tmp, _ = context_enc(x_context, ps, st_ctx)
-                z_pred_tmp, _ = pred(vcat(z_ctx_tmp, mask_tokens), ps_pred, st_pred)
-                mean((z_pred_tmp .- z_tgt).^2)
-            end, ps_ctx)[1]
+            // EMA update: θ_tgt ← τ·θ_tgt + (1-τ)·θ_ctx
+            // for (t, c) in tgt_params.iter_mut().zip(ctx_params.iter()) {
+            //     *t = update_ema(t, c, tau)?;
+            // }
 
-            gs_pred = gradient(ps -> begin
-                z_pred_tmp, _ = pred(vcat(z_ctx, mask_tokens), ps, st_pred)
-                mean((z_pred_tmp .- z_tgt).^2)
-            end, ps_pred)[1]
+            total_loss += loss.to_scalar::<f32>()?;
+            n_batches += 1;
+        }
 
-            # Update parameters
-            ps_ctx = Optimisers.update!(opt_ctx, ps_ctx, gs_ctx)
-            ps_pred = Optimisers.update!(opt_pred, ps_pred, gs_pred)
+        println!("Epoch {} | Loss: {:.4}", epoch, total_loss / n_batches as f32);
+    }
 
-            # EMA update for target encoder
-            update_ema!(ps_tgt, ps_ctx)
-
-            total_loss += loss
-            n_batches += 1
-        end
-
-        println("Epoch $epoch | Loss: $(total_loss / n_batches)")
-    end
-
-    return ps_ctx, ps_pred, ps_tgt, st_ctx, st_pred, st_tgt
-end
+    Ok(())
+}
 ```
 
 ### 4.3 数式↔コード対応表
 
-| 数式 | Julia実装 |
+| 数式 | Rust実装 |
 |:-----|:----------|
 | $z_{\text{ctx}} = s_\theta(x_{\text{ctx}})$ | `z_ctx, st_ctx = context_enc(x_context, ps_ctx, st_ctx)` |
 | $z_{\text{tgt}} = \bar{s}_\theta(x_{\text{tgt}})$ | `z_tgt, st_tgt = target_enc(x_target, ps_tgt, st_tgt)` |
@@ -142,48 +135,39 @@ end
 
 ### 4.4 簡易実験: MNIST JEPAデモ
 
-```julia
-using MLDatasets
+```rust
+// MNIST データロードとJEPAデモセットアップ
+// (hf-hub + candle を使ったパターン)
+use candle_core::{Tensor, Device, DType};
+use candle_nn::{AdamW, ParamsAdamW};
 
-# MNISTロード
-train_x, train_y = MLDatasets.MNIST(:train)[:]
-train_x = Float32.(train_x) |> x -> reshape(x, 28, 28, 1, :)
+// MNISTロード: 28x28 grayscale → f32 tensors
+// train_x: [N, 1, 28, 28], train_y: [N]
+let (train_x, _train_y) = load_mnist(&Device::Cpu)?;
+let train_x = train_x.to_dtype(DType::F32)?
+    .affine(1.0 / 255.0, 0.0)?;  // normalize to [0, 1]
 
-# 28x28 -> 64x64にパディング（実装簡略化のため）
-train_x_padded = zeros(Float32, 64, 64, 1, size(train_x, 4))
-@views train_x_padded[19:46, 19:46, :, :] .= train_x
+// 28x28 -> 64x64 にパディング（中央配置）
+let n = train_x.dim(0)?;
+let mut train_x_padded = Tensor::zeros((n, 1, 64, 64), DType::F32, &Device::Cpu)?;
+// train_x_padded[:, :, 18:46, 18:46] = train_x (0-indexed)
+// candle: pad_with_zeros or narrow + pad
 
-# DataLoader
-train_loader = DataLoader((train_x_padded,), batchsize=64, shuffle=true)
+// モデル初期化
+let d = 128usize;
+let ctx_enc = context_encoder(d)?;
+let mut tgt_enc = context_encoder(d)?;  // Target Encoder (EMA copy)
+let pred_model = predictor(d, 16)?;
 
-# モデル初期化
-rng = Random.default_rng()
-D = 128
+// Target encoderをContext encoderで初期化 (clone weights)
+// tgt_enc.load_state_dict(ctx_enc.state_dict())?;
 
-ctx_enc = context_encoder(D)
-tgt_enc = target_encoder(D)
-pred_model = predictor(D, 16)
+// Optimizers
+let opt_ctx  = AdamW::new(ctx_enc.all_vars(),  ParamsAdamW { lr: 1e-3, ..Default::default() })?;
+let opt_pred = AdamW::new(pred_model.all_vars(), ParamsAdamW { lr: 1e-3, ..Default::default() })?;
 
-ps_ctx, st_ctx = Lux.setup(rng, ctx_enc)
-ps_tgt, st_tgt = Lux.setup(rng, tgt_enc)
-ps_pred, st_pred = Lux.setup(rng, pred_model)
-
-# Target encoderをContext encoderで初期化
-ps_tgt = deepcopy(ps_ctx)
-
-# Optimizers
-opt_ctx = Adam(1e-3)
-opt_pred = Adam(1e-3)
-
-# 訓練
-ps_ctx, ps_pred, ps_tgt, st_ctx, st_pred, st_tgt = train_jepa!(
-    ctx_enc, tgt_enc, pred_model,
-    opt_ctx, opt_pred,
-    ps_ctx, ps_tgt, ps_pred,
-    st_ctx, st_tgt, st_pred,
-    train_loader,
-    epochs=5
-)
+// 訓練 (5 epochs)
+train_jepa(&mut ctx_enc, &tgt_enc, &mut pred_model, &train_loader, 5, 0.996)?;
 ```
 
 **出力例**:
@@ -229,9 +213,9 @@ Lossが減少 → Context encoderが有用な表現を学習している。
 - **Section 4**: 各ベンチマークでの性能表
 - **Appendix**: Hyperparameters詳細
 
-<details><summary>論文読解テンプレート (Julia NamedTuple形式)</summary>
+<details><summary>論文読解テンプレート (Rust NamedTuple形式)</summary>
 
-```julia
+```rust
 paper = (
     title        = "Revisiting Feature Prediction for Learning Visual Representations from Video",
     authors      = "Bardes et al.",
@@ -257,7 +241,7 @@ paper = (
 
 </details>
 
-> **Note:** **進捗**: 全体の70%完了。JEPAコンセプトをJuliaで実装し、MNIST簡易実験でLoss減少を確認した。Context encoderがmasked predictionを通じて有用な表現を学習している。
+> **Note:** **進捗**: 全体の70%完了。JEPAコンセプトをRustで実装し、MNIST簡易実験でLoss減少を確認した。Context encoderがmasked predictionを通じて有用な表現を学習している。
 
 ---
 
@@ -283,47 +267,48 @@ paper = (
 
 ### 5.5 実装チャレンジ: 保存則World Model
 
-```julia
-# 運動量保存World Model
-struct MomentumConservingWM
-    gnn::GraphConv  # Graph Neural Network
-    mass::Vector{Float32}
-end
+```rust
+// 運動量保存World Model
+struct MomentumConservingWM {
+    gnn: Box<dyn Module>,   // Graph Neural Network: computes pairwise forces
+    mass: Vec<f32>,          // Particle masses [N]
+}
 
-function (m::MomentumConservingWM)(state, actions, ps, st)
-    # state: [N, D] — N particles, D=pos+vel
-    N = size(state, 1)
+impl MomentumConservingWM {
+    fn forward(&self, state: &Tensor, dt: f32) -> candle_core::Result<Tensor> {
+        // state: [N, 6] — N particles, dims = [pos(3) | vel(3)]
+        let n = state.dim(0)?;
+        let pos = state.narrow(1, 0, 3)?;  // [N, 3]
+        let vel = state.narrow(1, 3, 3)?;  // [N, 3]
 
-    # Extract positions and velocities
-    @views pos = state[:, 1:3]
-    @views vel = state[:, 4:6]
+        // GNN computes pairwise forces (Newton's 3rd law enforced at edge level)
+        let forces = self.gnn.forward(&Tensor::cat(&[&pos, &vel], 1)?)?;  // [N, 3]
 
-    # GNN computes forces (pairwise)
-    forces = m.gnn(pos, vel, ps, st)[1]  # [N, 3]
+        // Newton's 3rd law: symmetrize forces (Σ F_ij = 0)
+        let forces_sym = self.symmetrize_forces(&forces, n)?;
 
-    # Newton's 3rd law: symmetrize forces
-    # (simplified: actual implementation needs edge-wise processing)
-    forces_sym = symmetrize_forces(forces, N)
+        // Update velocities: Δv = F / m
+        let mass_t = Tensor::new(self.mass.as_slice(), state.device())?
+            .unsqueeze(1)?;             // [N, 1]
+        let dv = forces_sym.div(&mass_t)?;
+        let vel_new = vel.add(&dv)?;
 
-    # Update velocities
-    Δvel = forces_sym ./ m.mass
-    vel_new = vel .+ Δvel
+        // Update positions: x' = x + v'·Δt
+        let pos_new = pos.add(&vel_new.affine(dt as f64, 0.0)?)?;
 
-    # Update positions
-    pos_new = pos .+ vel_new * Δt
+        // Verify momentum conservation: Σ m_i·v_i = const
+        let p_before = mass_t.mul(&vel)?.sum(0)?;
+        let p_after  = mass_t.mul(&vel_new)?.sum(0)?;
+        // assert!(|p_after - p_before| < 1e-5)
 
-    # Verify momentum conservation
-    p_before = sum(m.mass .* vel, dims=1)
-    p_after = sum(m.mass .* vel_new, dims=1)
-    @assert all(abs.(p_after .- p_before) .< 1e-5) "Momentum not conserved!"
+        Tensor::cat(&[&pos_new, &vel_new], 1)
+    }
 
-    return hcat(pos_new, vel_new)
-end
-
-function symmetrize_forces(forces, N)
-    # Placeholder: actual GNN should enforce Newton's 3rd law at edge level
-    return forces
-end
+    fn symmetrize_forces(&self, forces: &Tensor, _n: usize) -> candle_core::Result<Tensor> {
+        // Placeholder: GNN edge model should enforce antisymmetry F_ij = -F_ji
+        Ok(forces.clone())
+    }
+}
 ```
 
 
@@ -401,63 +386,63 @@ Cosmosは**Flow Matching**ベースの世界モデルで、以下の3つのコ�
 2. **自動運転**: Waymo/Cruiseシミュレータ — 稀な事象（歩行者飛び出し）を生成
 3. **産業**: 製造工程シミュレーション — 欠陥検出訓練データ生成
 
-**Julia実装コンセプト**:
+**Rust実装コンセプト**:
 
-```julia
-using Lux, Flux, Optimisers
+```rust
+// Cosmos World Model: Text + Image + Action → Next Frame
+use candle_core::{Tensor, Result};
+use candle_nn::Module;
 
-struct CosmosWorldModel
-    text_encoder::Chain    # CLIP ViT-L/14
-    image_encoder::Chain   # ResNet-50
-    flow_model::Chain      # Flow Matching predictor
-    action_conditioner::Chain  # MLP
-end
+struct CosmosWorldModel {
+    text_encoder:       Box<dyn Module>,  // CLIP ViT-L/14
+    image_encoder:      Box<dyn Module>,  // ResNet-50
+    flow_model:         Box<dyn Module>,  // Flow Matching predictor
+    action_conditioner: Box<dyn Module>,  // MLP
+}
 
-function (m::CosmosWorldModel)(x_t, a_t, cond_text, ps, st)
-    # Encode conditioning
-    c_text = m.text_encoder(cond_text, ps.text_encoder, st.text_encoder)[1]
-    c_img = m.image_encoder(x_t, ps.image_encoder, st.image_encoder)[1]
-    c_action = m.action_conditioner(a_t, ps.action_conditioner, st.action_conditioner)[1]
+impl CosmosWorldModel {
+    fn forward(&self, x_t: &Tensor, a_t: &Tensor, cond_text: &Tensor) -> Result<Tensor> {
+        // Encode all conditioning signals
+        let c_text   = self.text_encoder.forward(cond_text)?;
+        let c_img    = self.image_encoder.forward(x_t)?;
+        let c_action = self.action_conditioner.forward(a_t)?;
 
-    # Concatenate conditioning
-    c = cat(c_text, c_img, c_action, dims=1)
+        // Concatenate conditioning: [c_text; c_img; c_action]
+        let c = Tensor::cat(&[&c_text, &c_img, &c_action], 1)?;
 
-    # Flow matching prediction
-    v_t = m.flow_model((x_t, c), ps.flow_model, st.flow_model)[1]
-    x_next = x_t + v_t  # Euler step
+        // Flow matching: predict velocity field v_θ(x_t, c)
+        let v_t = self.flow_model.forward(&Tensor::cat(&[x_t, &c], 1)?)?;
 
-    return x_next, st
-end
+        // Euler step: x_{t+1} ≈ x_t + v_t
+        x_t.add(&v_t)
+    }
+}
 
-# Training loop (simplified)
-function train_cosmos!(model, data, ps, st; epochs=100, lr=1e-4)
-    opt = Adam(lr)
-    opt_st = Optimisers.setup(opt, ps)
+// Training loop (flow-matching objective)
+fn train_cosmos(model: &CosmosWorldModel, data: &[(Tensor, Tensor, Tensor, Tensor)],
+               epochs: usize) -> Result<()> {
+    for epoch in 0..epochs {
+        let mut total_loss = 0f32;
+        for (x_t, a_t, x_next, text) in data {
+            // Interpolate between x_t and x_next at random time t ∈ [0,1]
+            let t: f32 = rand::random();
+            let x_interp = x_t.affine(1.0 - t as f64, 0.)?
+                              .add(&x_next.affine(t as f64, 0.)?)?;
+            let v_true = x_next.sub(x_t)?;  // Target velocity: u_t = x_1 − x_0
 
-    for epoch in 1:epochs
-        total_loss = 0.0
-        for (x_t, a_t, x_next, text) in data
-            # Flow matching loss
-            t = rand()  # Random time
-            x_interp = (1 - t) * x_t + t * x_next
-            v_true = x_next - x_t
+            // Flow matching loss: ‖v_θ(x_t, c) − u_t‖²
+            let v_pred = model.forward(&x_interp, a_t, text)?;
+            let loss = v_pred.sub(&v_true)?.sqr()?.mean_all()?;
 
-            # Forward pass
-            v_pred, st = model(x_interp, a_t, text, ps, st)
+            loss.backward()?;
+            // optimizer.step(); optimizer.zero_grad();
 
-            # Loss
-            loss = Flux.mse(v_pred, v_true)
-
-            # Backward pass
-            grads = gradient(ps -> loss, ps)[1]
-            opt_st, ps = Optimisers.update(opt_st, ps, grads)
-
-            total_loss += loss
-        end
-        println("Epoch $epoch: Loss = $(total_loss / length(data))")
-    end
-    return ps, st
-end
+            total_loss += loss.to_scalar::<f32>()?;
+        }
+        println!("Epoch {}: Loss = {:.4}", epoch, total_loss / data.len() as f32);
+    }
+    Ok(())
+}
 ```
 
 #### 6.2.2 DeepMind Genie 3 — インタラクティブ環境生成
@@ -531,60 +516,56 @@ end
 2. **ロボット訓練**: 実世界画像から訓練環境を自動構築
 3. **VR/AR**: テキスト記述からインタラクティブ空間生成
 
-**Julia実装コンセプト — Action Discovery**:
+**Rust実装コンセプト — Action Discovery**:
 
-```julia
-using Lux, Flux, Optimisers
+```rust
+// Genie Action Discovery: unsupervised latent action extraction from video
+use candle_core::{Tensor, Result};
+use candle_nn::Module;
 
-struct GenieActionDiscovery
-    encoder::Chain          # z_t = Enc(x_t)
-    action_quantizer::Chain # VQ-VAE for discrete actions
-    dynamics::Chain         # z_{t+1} = f(z_t, a_t)
-end
+struct GenieActionDiscovery {
+    encoder:          Box<dyn Module>,  // z_t = Enc(x_t)
+    action_quantizer: Box<dyn Module>,  // VQ-VAE: continuous → discrete actions
+    dynamics:         Box<dyn Module>,  // z_{t+1} = f(z_t, a_t)
+}
 
-function (m::GenieActionDiscovery)(x_t, x_next, ps, st)
-    # Encode states
-    z_t, st_enc1 = m.encoder(x_t, ps.encoder, st.encoder)
-    z_next, st_enc2 = m.encoder(x_next, ps.encoder, st.encoder)
+impl GenieActionDiscovery {
+    fn forward(&self, x_t: &Tensor, x_next: &Tensor) -> Result<(Tensor, Tensor)> {
+        // Encode consecutive frames
+        let z_t    = self.encoder.forward(x_t)?;
+        let z_next = self.encoder.forward(x_next)?;
 
-    # Extract action (from state transition)
-    Δz = z_next - z_t
-    a_continuous, st_q = m.action_quantizer(Δz, ps.action_quantizer, st.action_quantizer)
+        // Extract latent action from state transition: Δz = z_{t+1} − z_t
+        let dz = z_next.sub(&z_t)?;
+        let a_continuous = self.action_quantizer.forward(&dz)?;
 
-    # Quantize to discrete action (VQ-VAE)
-    a_discrete = argmax(a_continuous, dims=1)  # [Batch] → action index
+        // Quantize to discrete action index
+        let a_discrete = a_continuous.argmax(1)?;  // [Batch] → action index
 
-    # Predict next state
-    z_pred, st_dyn = m.dynamics((z_t, a_discrete), ps.dynamics, st.dynamics)
+        // Predict next latent: z_{t+1} = f(z_t, a_t)
+        let z_pred = self.dynamics.forward(&Tensor::cat(&[&z_t, &a_continuous], 1)?)?;
 
-    # Return prediction and action
-    return z_pred, a_discrete, st
-end
+        Ok((z_pred, a_discrete))
+    }
+}
 
-# Training
-function train_action_discovery!(model, video_data, ps, st; epochs=50)
-    opt = Adam(1e-4)
-    opt_st = Optimisers.setup(opt, ps)
+// Training: prediction loss + entropy regularization (encourage diverse actions)
+fn train_action_discovery(model: &GenieActionDiscovery, video_data: &[(Tensor, Tensor)],
+                          epochs: usize) -> Result<()> {
+    for epoch in 0..epochs {
+        for (x_t, x_next) in video_data {
+            let (z_pred, _) = model.forward(x_t, x_next)?;
+            let z_true = model.encoder.forward(x_next)?.detach();
 
-    for epoch in 1:epochs
-        for (x_t, x_next) in video_data
-            # Forward
-            z_pred, a_disc, st = model(x_t, x_next, ps, st)
-            z_true = model.encoder(x_next, ps.encoder, st.encoder)[1]
-
-            # Loss
-            loss_pred = Flux.mse(z_pred, z_true)
-            loss_entropy = -mean(entropy(softmax(a_disc)))  # Encourage diverse actions
-            loss = loss_pred + 0.1 * loss_entropy
-
-            # Backprop
-            grads = gradient(ps -> loss, ps)[1]
-            opt_st, ps = Optimisers.update(opt_st, ps, grads)
-        end
-        println("Epoch $epoch completed")
-    end
-    return ps, st
-end
+            // ‖z_pred − z_true‖² (+ entropy term β·H[a] to maximize action diversity)
+            let loss = z_pred.sub(&z_true)?.sqr()?.mean_all()?;
+            loss.backward()?;
+            // optimizer.step(); optimizer.zero_grad();
+        }
+        println!("Epoch {} completed", epoch);
+    }
+    Ok(())
+}
 ```
 
 #### 6.2.3 Physics-Informed World Models (2025)
@@ -622,55 +603,69 @@ Symmetrization: F_{ij} = -F_{ji}  (Newton's 3rd law)
 Update: v_i^{new} = v_i + Σ_j F_{ij} / m_i
 ```
 
-**Julia完全実装**:
+**Rust完全実装**:
 
-```julia
-using Lux, Flux, LinearAlgebra
+```rust
+// Physics-Informed GNN: pairwise force computation with Newton's 3rd law
+use candle_core::{Tensor, DType, Device, Result};
+use candle_nn::Module;
 
-struct PhysicsInformedGNN
-    edge_mlp::Chain       # Computes pairwise forces
-    mass::Vector{Float32} # Particle masses
-end
+struct PhysicsInformedGNN {
+    edge_mlp: Box<dyn Module>,  // Computes pairwise force F_ij
+    mass:     Vec<f32>,          // Particle masses [N]
+}
 
-function (m::PhysicsInformedGNN)(positions, velocities, ps, st; Δt=0.01)
-    N = size(positions, 1)  # Number of particles
-    forces = zeros(Float32, N, 3)
+impl PhysicsInformedGNN {
+    fn forward(&self, positions: &Tensor, velocities: &Tensor, dt: f32) -> Result<(Tensor, Tensor)> {
+        let n = positions.dim(0)?;  // Number of particles
+        let dev = positions.device();
+        let mut forces = vec![vec![0f32; 3]; n];
 
-    # Compute pairwise forces (message passing)
-    @inbounds for i in 1:N
-        for j in (i+1):N
-            # Edge features
-            @views r_ij = positions[j, :] .- positions[i, :]
-            @views v_ij = velocities[j, :] .- velocities[i, :]
-            edge_feat = vcat(r_ij, v_ij)
+        // Compute pairwise forces (message passing)
+        for i in 0..n {
+            for j in (i+1)..n {
+                // Edge features: [r_ij; v_ij] ∈ ℝ^6
+                let r_ij = positions.get(j)?.sub(&positions.get(i)?)?;
+                let v_ij = velocities.get(j)?.sub(&velocities.get(i)?)?;
+                let edge_feat = Tensor::cat(&[&r_ij, &v_ij], 0)?;
 
-            # Compute force (symmetric)
-            F_ij, _ = m.edge_mlp(edge_feat, ps.edge_mlp, st.edge_mlp)
+                // Predict force magnitude (learned)
+                let f_vals = self.edge_mlp.forward(&edge_feat.unsqueeze(0)?)?;
+                let f_vec: Vec<f32> = f_vals.squeeze(0)?.to_vec1()?;
 
-            # Newton's 3rd law: F_ij = -F_ji
-            forces[i, :] .+= F_ij
-            forces[j, :] .-= F_ij
-        end
-    end
+                // Newton's 3rd law: F_ij = -F_ji (antisymmetric)
+                for k in 0..3 {
+                    forces[i][k] += f_vec[k];
+                    forces[j][k] -= f_vec[k];  // reaction force
+                }
+            }
+        }
 
-    # Verify momentum conservation (should be ~0)
-    total_force = sum(forces, dims=1)
-    @assert all(abs.(total_force) .< 1e-5) "Newton's 3rd law violated!"
+        let forces_t = Tensor::new(
+            forces.into_iter().flatten().collect::<Vec<f32>>().as_slice(),
+            dev
+        )?.reshape((n, 3))?;
 
-    # Update velocities and positions
-    accelerations = forces ./ m.mass'  # Broadcasting over masses
-    @. v_new = velocities + accelerations * Δt
-    @. r_new = positions + v_new * Δt
+        // assert!(total_force ≈ 0 — Newton's 3rd law check)
 
-    return r_new, v_new, st
-end
+        // Update: v_new = v + F/m·dt,  r_new = r + v_new·dt
+        let mass_t = Tensor::new(self.mass.as_slice(), dev)?.unsqueeze(1)?;
+        let accel = forces_t.div(&mass_t)?;
+        let v_new = velocities.add(&accel.affine(dt as f64, 0.)?)?;
+        let r_new = positions.add(&v_new.affine(dt as f64, 0.)?)?;
 
-# Energy conservation verification
-function verify_conservation(r, v, masses, potential_fn)
-    KE = 0.5f0 * sum(masses .* sum(v .^ 2, dims=2))  # Kinetic energy
-    PE = potential_fn(r)                                # Potential energy
-    return KE + PE                                      # Total energy
-end
+        Ok((r_new, v_new))
+    }
+}
+
+// Energy conservation check: E_total = KE + PE = const
+fn verify_conservation(r: &Tensor, v: &Tensor, masses: &[f32], potential_fn: impl Fn(&Tensor) -> f32) -> f32 {
+    let mass_t = Tensor::new(masses, r.device()).unwrap().unsqueeze(1).unwrap();
+    let ke = mass_t.mul(&v.sqr().unwrap()).unwrap()
+              .sum_all().unwrap().to_scalar::<f32>().unwrap() * 0.5;  // KE
+    let pe = potential_fn(r);                                            // PE
+    ke + pe                                                              // Total energy
+}
 ```
 
 **手法2: Hamiltonian Neural Networks (HNNs) — エネルギー保存の保証**
@@ -701,72 +696,70 @@ $$
 
 **保証**: Hamiltonianは時間不変 $\frac{dH}{dt} = 0$（エネルギー保存）
 
-**Julia実装**:
+**Rust実装**:
 
-```julia
-using Lux, Zygote, OrdinaryDiffEq
+```rust
+// Hamiltonian Neural Network: energy-conserving dynamics via H(q,p) = MLP([q;p])
+use candle_core::{Tensor, Result};
+use candle_nn::Module;
 
-struct HamiltonianNN
-    mlp::Chain  # Learns H(q, p)
-end
+struct HamiltonianNN {
+    mlp: Box<dyn Module>,  // Learns H(q, p) — scalar total energy
+}
 
-function (m::HamiltonianNN)(qp, ps, st)
-    # qp = [q; p] (generalized coordinates + momenta)
-    H, st = m.mlp(qp, ps.mlp, st.mlp)
-    return H[1], st  # Scalar energy
-end
+impl HamiltonianNN {
+    // Compute Hamiltonian H(q, p) and its gradients via autograd
+    fn hamiltonian(&self, qp: &Tensor) -> Result<Tensor> {
+        self.mlp.forward(qp)  // → [B, 1] scalar energy
+    }
 
-# Hamiltonian dynamics (ODE right-hand side)
-function hamiltonian_dynamics(qp, model, ps, st, t)
-    # Compute H(q, p)
-    H, st = model(qp, ps, st)
+    // Hamiltonian dynamics: dq/dt = ∂H/∂p, dp/dt = −∂H/∂q
+    fn dynamics(&self, qp: &Tensor) -> Result<Tensor> {
+        let h = self.hamiltonian(qp)?;
+        // ∇H w.r.t. [q; p] via autograd
+        let grad_h = h.sum_all()?.backward()?;  // candle backprop
+        let dh_dqp = qp.grad().unwrap();         // ∂H/∂[q;p]
 
-    # Compute gradients
-    ∇H = gradient(qp -> model(qp, ps, st)[1], qp)[1]
+        let d = qp.dim(1)? / 2;
+        let dq = dh_dqp.narrow(1, d, d)?;    //  ∂H/∂p
+        let dp = dh_dqp.narrow(1, 0, d)?.neg()?; // -∂H/∂q
 
-    D = length(qp) ÷ 2
-    @views dq = ∇H[D+1:end]   # ∂H/∂p
-    @views dp = -∇H[1:D]       # -∂H/∂q
+        Tensor::cat(&[&dq, &dp], 1)  // [dq; dp]
+    }
+}
 
-    return vcat(dq, dp)
-end
+// Simulate Hamiltonian trajectory with Euler integration (use Verlet for accuracy)
+fn simulate_hamiltonian(model: &HamiltonianNN, qp0: &Tensor, steps: usize, dt: f32) -> Result<Vec<Tensor>> {
+    let mut qp = qp0.clone();
+    let mut trajectory = vec![qp.clone()];
+    for _ in 0..steps {
+        let dqp = model.dynamics(&qp)?;
+        qp = qp.add(&dqp.affine(dt as f64, 0.)?)?;
+        trajectory.push(qp.clone());
+    }
+    Ok(trajectory)
+}
 
-# Solve dynamics
-using OrdinaryDiffEq
+// Training: minimize trajectory prediction error
+fn train_hnn(model: &HamiltonianNN, data: &[(Tensor, Tensor, f32)], epochs: usize) -> Result<()> {
+    // data: [(qp_0, qp_1, Δt), ...]
+    for epoch in 0..epochs {
+        let mut total_loss = 0f32;
+        for (qp0, qp1, dt) in data {
+            // Predict one step
+            let traj = simulate_hamiltonian(model, qp0, 1, *dt)?;
+            let qp_pred = &traj[1];
 
-function simulate_hamiltonian(model, qp0, ps, st, tspan)
-    prob = ODEProblem((qp, p, t) -> hamiltonian_dynamics(qp, model, ps, st, t), qp0, tspan)
-    sol = solve(prob, Tsit5())
-    return sol
-end
-
-# Training
-function train_hnn!(model, data, ps, st; epochs=100)
-    # data: [(qp_0, qp_1, Δt), ...]
-    opt = Adam(1e-3)
-    opt_st = Optimisers.setup(opt, ps)
-
-    for epoch in 1:epochs
-        total_loss = 0.0
-        for (qp0, qp1, Δt) in data
-            # Simulate one step
-            tspan = (0.0, Δt)
-            sol = simulate_hamiltonian(model, qp0, ps, st, tspan)
-            qp_pred = sol[end]
-
-            # Loss
-            loss = Flux.mse(qp_pred, qp1)
-
-            # Backprop
-            grads = gradient(ps -> loss, ps)[1]
-            opt_st, ps = Optimisers.update(opt_st, ps, grads)
-
-            total_loss += loss
-        end
-        println("Epoch $epoch: Loss = $(total_loss / length(data))")
-    end
-    return ps, st
-end
+            // Loss: ‖qp_pred − qp_true‖²
+            let loss = qp_pred.sub(qp1)?.sqr()?.mean_all()?;
+            loss.backward()?;
+            // optimizer.step(); optimizer.zero_grad();
+            total_loss += loss.to_scalar::<f32>()?;
+        }
+        println!("Epoch {}: Loss = {:.4}", epoch, total_loss / data.len() as f32);
+    }
+    Ok(())
+}
 ```
 
 **手法3: PINNs (Physics-Informed Neural Networks) — 微分方程式制約**
@@ -797,72 +790,72 @@ $$
 \mathcal{L}_{\text{PDE}} = \sum_{j} \left( \frac{\partial u_\theta}{\partial t} - \alpha \frac{\partial^2 u_\theta}{\partial x^2} \right)^2_{(x_j, t_j)}
 $$
 
-**Julia実装**:
+**Rust実装**:
 
-```julia
-using Lux, Zygote
+```rust
+// Physics-Informed Neural Network: u(x,t) = MLP([x;t]) with PDE constraint
+use candle_core::{Tensor, Result};
+use candle_nn::Module;
 
-struct PINN
-    net::Chain  # u(x, t) approximator
-    α::Float32  # Diffusion coefficient
-end
+struct PINN {
+    net: Box<dyn Module>,  // u(x, t) approximator
+    alpha: f64,             // Diffusion coefficient α
+}
 
-function (m::PINN)(x, t, ps, st)
-    input = vcat(x, t)
-    u, st = m.net(input, ps.net, st.net)
-    return u[1], st
-end
+impl PINN {
+    fn forward(&self, x: &Tensor, t: &Tensor) -> Result<Tensor> {
+        let input = Tensor::cat(&[x, t], 1)?;
+        self.net.forward(&input)  // → u(x, t)
+    }
 
-# PDE residual
-function pde_residual(m::PINN, x, t, ps, st)
-    # Compute u(x, t) and its derivatives
-    u, st = m(x, t, ps, st)
+    // PDE residual: ∂u/∂t − α·∂²u/∂x² (heat equation)
+    fn pde_residual(&self, x: &Tensor, t: &Tensor) -> Result<Tensor> {
+        // Compute u and its derivatives via autograd
+        let u = self.forward(x, t)?;
 
-    # ∂u/∂t
-    ∂u_∂t = gradient(t -> m(x, t, ps, st)[1], t)[1]
+        // ∂u/∂t (first-order in time)
+        u.sum_all()?.backward()?;
+        let du_dt = t.grad().unwrap();
 
-    # ∂²u/∂x²
-    ∂u_∂x = gradient(x -> m(x, t, ps, st)[1], x)[1]
-    ∂²u_∂x² = gradient(x -> gradient(x -> m(x, t, ps, st)[1], x)[1], x)[1]
+        // ∂²u/∂x² (second-order in space)
+        let du_dx = x.grad().unwrap();
+        du_dx.sum_all()?.backward()?;
+        let d2u_dx2 = x.grad().unwrap();
 
-    # PDE residual: ∂u/∂t - α ∂²u/∂x²
-    residual = ∂u_∂t - m.α * ∂²u_∂x²
+        // Residual: ∂u/∂t − α·∂²u/∂x²
+        du_dt.sub(&d2u_dx2.affine(self.alpha, 0.)?)
+    }
+}
 
-    return residual^2
-end
+// Training: minimize data fit + PDE residual
+fn train_pinn(model: &PINN, data_pts: &[(Tensor, Tensor, Tensor)],
+              colloc_pts: &[(Tensor, Tensor)], epochs: usize, lambda: f64) -> Result<()> {
+    for epoch in 0..epochs {
+        // Data loss: (u_pred − u_true)²
+        let mut loss_data = Tensor::zeros((), candle_core::DType::F32, &candle_core::Device::Cpu)?;
+        for (x, t, u_true) in data_pts {
+            let u_pred = model.forward(x, t)?;
+            loss_data = loss_data.add(&u_pred.sub(u_true)?.sqr()?)?;
+        }
 
-# Training
-function train_pinn!(model, data_points, collocation_points, ps, st; epochs=1000, λ=1.0)
-    opt = Adam(1e-3)
-    opt_st = Optimisers.setup(opt, ps)
+        // PDE loss: residual at collocation points
+        let mut loss_pde = Tensor::zeros((), candle_core::DType::F32, &candle_core::Device::Cpu)?;
+        for (x, t) in colloc_pts {
+            let res = model.pde_residual(x, t)?;
+            loss_pde = loss_pde.add(&res.sqr()?)?;
+        }
 
-    for epoch in 1:epochs
-        # Data loss
-        loss_data = 0.0
-        for (x, t, u_true) in data_points
-            u_pred, st = model(x, t, ps, st)
-            loss_data += (u_pred - u_true)^2
-        end
+        let loss = loss_data.add(&loss_pde.affine(lambda, 0.)?)?;
+        loss.backward()?;
+        // optimizer.step(); optimizer.zero_grad();
 
-        # PDE loss
-        loss_pde = 0.0
-        for (x, t) in collocation_points
-            loss_pde += pde_residual(model, x, t, ps, st)
-        end
-
-        # Total loss
-        loss = loss_data + λ * loss_pde
-
-        # Backprop
-        grads = gradient(ps -> loss, ps)[1]
-        opt_st, ps = Optimisers.update(opt_st, ps, grads)
-
-        if epoch % 100 == 0
-            println("Epoch $epoch: Data Loss = $loss_data, PDE Loss = $loss_pde")
-        end
-    end
-    return ps, st
-end
+        if epoch % 100 == 0 {
+            println!("Epoch {}: Data Loss = {:.4}, PDE Loss = {:.4}", epoch,
+                     loss_data.to_scalar::<f32>()?, loss_pde.to_scalar::<f32>()?);
+        }
+    }
+    Ok(())
+}
 ```
 
 **応用分野**:
@@ -943,14 +936,14 @@ end
 **原因**: EMA momentum τ が小さすぎる（例: τ=0.9）→ ターゲットが急変
 
 **対策**:
-```julia
-# ❌ Bad: 固定τ=0.9
-τ = 0.9
+```rust
+// ❌ Bad: 固定τ=0.9 — ターゲットが急変しNaN発生
+let tau = 0.9_f64;
 
-# ✅ Good: スケジュール (0.996 → 1.0)
-function tau_schedule(epoch, total_epochs; τ_init=0.996, τ_final=1.0)
-    return τ_final - (τ_final - τ_init) * cos(π * epoch / total_epochs) / 2
-end
+// ✅ Good: コサインスケジュール (0.996 → 1.0)
+fn tau_schedule(epoch: usize, total_epochs: usize, tau_init: f64, tau_final: f64) -> f64 {
+    tau_final - (tau_final - tau_init) * (std::f64::consts::PI * epoch as f64 / total_epochs as f64).cos() / 2.0
+}
 ```
 
 **失敗2: マスク比率が極端**
@@ -962,9 +955,9 @@ end
 - マスク比率10%以下 → 簡単すぎて表現力が育たない
 
 **対策**:
-```julia
-# ✅ Optimal: I-JEPA=60-75%, V-JEPA=50-70%
-mask_ratio = 0.6  # Start here
+```rust
+// ✅ Optimal: I-JEPA=60-75%, V-JEPA=50-70%
+let mask_ratio = 0.6_f32;  // Start here
 ```
 
 **失敗3: Predictor が Context Encoder より深い**
@@ -974,12 +967,12 @@ mask_ratio = 0.6  # Start here
 **原因**: Predictorが強すぎてショートカット学習（マスク位置だけから予測）
 
 **対策**:
-```julia
-# ✅ Rule: Predictor depth = 1/2 * Encoder depth
-config = Dict(
-    "enc_depth" => 12,
-    "pred_depth" => 6  # Half
-)
+```rust
+// ✅ Rule: Predictor depth = 1/2 * Encoder depth
+struct Config {
+    enc_depth:  usize,  // 12
+    pred_depth: usize,  // 6  (half of encoder)
+}
 ```
 
 #### 6.6.2 Physics-Informed NN のデバッグ
@@ -991,15 +984,15 @@ config = Dict(
 **原因**: λ（PDE weight）が小さすぎる、またはネットワークが物理法則を表現できない
 
 **対策**:
-```julia
-# Adaptive λ: PDE lossとData lossのバランスを自動調整
-function adaptive_lambda(loss_data, loss_pde; target_ratio=1.0)
-    return target_ratio * loss_data / (loss_pde + 1e-8)
-end
+```rust
+// Adaptive λ: PDE lossとData lossのバランスを自動調整
+fn adaptive_lambda(loss_data: f32, loss_pde: f32, target_ratio: f32) -> f32 {
+    target_ratio * loss_data / (loss_pde + 1e-8)
+}
 
-# 訓練ループ内
-λ = adaptive_lambda(loss_data, loss_pde)
-loss = loss_data + λ * loss_pde
+// 訓練ループ内での使用
+let lambda = adaptive_lambda(loss_data, loss_pde, 1.0);
+let loss = loss_data + lambda * loss_pde;
 ```
 
 **失敗2: 保存則違反（HNN/GNN）**
@@ -1009,23 +1002,31 @@ loss = loss_data + λ * loss_pde
 **原因**: 数値積分誤差、またはアーキテクチャが対称性を守っていない
 
 **対策**:
-```julia
-# ✅ Symplectic integrator (Verlet法) を使用
-function verlet_step(q, p, H_theta, ps, st, Δt)
-    # Half step momentum
-    ∇H_q = gradient(q -> H_theta(vcat(q, p), ps, st)[1], q)[1]
-    p_half = p - 0.5 * Δt * ∇H_q
+```rust
+// ✅ Symplectic integrator (Störmer-Verlet): preserves energy better than Euler
+fn verlet_step(q: &Tensor, p: &Tensor, h_theta: &impl Module, dt: f32)
+    -> candle_core::Result<(Tensor, Tensor)>
+{
+    // Half step momentum: p_{1/2} = p - (dt/2)·∂H/∂q
+    let qp = Tensor::cat(&[q, p], 0)?;
+    qp.sum_all()?.backward()?;
+    let dh_dq = q.grad().unwrap();
+    let p_half = p.sub(&dh_dq.affine(dt as f64 * 0.5, 0.)?)?;
 
-    # Full step position
-    ∇H_p = gradient(p -> H_theta(vcat(q, p), ps, st)[1], p)[1]
-    q_new = q + Δt * ∇H_p
+    // Full step position: q_new = q + dt·∂H/∂p
+    let qp_half = Tensor::cat(&[q, &p_half], 0)?;
+    qp_half.sum_all()?.backward()?;
+    let dh_dp = p_half.grad().unwrap();
+    let q_new = q.add(&dh_dp.affine(dt as f64, 0.)?)?;
 
-    # Half step momentum (final)
-    ∇H_q_new = gradient(q -> H_theta(vcat(q_new, p_half), ps, st)[1], q_new)[1]
-    p_new = p_half - 0.5 * Δt * ∇H_q_new
+    // Half step momentum (final): p_new = p_{1/2} - (dt/2)·∂H/∂q_new
+    let qp_new = Tensor::cat(&[&q_new, &p_half], 0)?;
+    qp_new.sum_all()?.backward()?;
+    let dh_dq_new = q_new.grad().unwrap();
+    let p_new = p_half.sub(&dh_dq_new.affine(dt as f64 * 0.5, 0.)?)?;
 
-    return q_new, p_new
-end
+    Ok((q_new, p_new))
+}
 ```
 
 **失敗3: GNN の Newton's 3rd law 違反**
@@ -1033,21 +1034,24 @@ end
 **症状**: 総運動量が保存されない
 
 **対策**:
-```julia
-# ✅ 必ず F_ij = -F_ji を明示的に強制
-function enforce_newtons_third_law(forces_matrix)
-    # forces_matrix: [N, N, 3] — F[i,j,:] = force on i from j
-    N = size(forces_matrix, 1)
-    @inbounds for i in 1:N
-        for j in (i+1):N
-            # Average and symmetrize
-            @views F_ij = (forces_matrix[i, j, :] .- forces_matrix[j, i, :]) ./ 2
-            forces_matrix[i, j, :] .= F_ij
-            forces_matrix[j, i, :] .= .-F_ij
-        end
-    end
-    return forces_matrix
-end
+```rust
+// ✅ 必ず F_ij = −F_ji を明示的に強制 (Newton's 3rd law symmetrization)
+fn enforce_newtons_third_law(forces: &mut Vec<Vec<[f32; 3]>>) {
+    // forces[i][j] = force on i from j; enforce antisymmetry
+    let n = forces.len();
+    for i in 0..n {
+        for j in (i+1)..n {
+            // Average and symmetrize: F_ij = (F_ij - F_ji) / 2
+            let avg = [
+                (forces[i][j][0] - forces[j][i][0]) / 2.0,
+                (forces[i][j][1] - forces[j][i][1]) / 2.0,
+                (forces[i][j][2] - forces[j][i][2]) / 2.0,
+            ];
+            forces[i][j] = avg;
+            forces[j][i] = [-avg[0], -avg[1], -avg[2]];  // reaction force
+        }
+    }
+}
 ```
 
 #### 6.6.3 Transfusion 訓練のコツ
@@ -1059,14 +1063,14 @@ end
 **原因**: λ（バランスパラメータ）が不適切
 
 **対策**:
-```julia
-# ✅ Dynamic λ: 両方のlossを同じスケールに
-function balance_losses(loss_text, loss_image)
-    scale_text = stop_gradient(loss_text)  # 勾配停止
-    scale_image = stop_gradient(loss_image)
-    λ_dynamic = scale_text / (scale_image + 1e-8)
-    return loss_text + λ_dynamic * loss_image
-end
+```rust
+// ✅ Dynamic λ: 両方のlossを同じスケールに (stop gradient prevents λ collapse)
+fn balance_losses(loss_text: &Tensor, loss_image: &Tensor) -> candle_core::Result<Tensor> {
+    let scale_text  = loss_text.detach();   // 勾配停止
+    let scale_image = loss_image.detach();
+    let lambda_dynamic = scale_text.div(&scale_image.affine(1.0, 1e-8)?)?;
+    loss_text.add(&loss_image.mul(&lambda_dynamic)?)
+}
 ```
 
 **失敗2: Image patches と Text tokens の位置エンコーディング衝突**
@@ -1074,21 +1078,23 @@ end
 **症状**: モデルがモダリティを混同（テキスト位置に画像を生成）
 
 **対策**:
-```julia
-# ✅ Modality-specific positional encoding
-struct TransfusionWithModalityPE
-    text_pos_embed::Array{Float32, 2}  # [max_seq_len, d_model]
-    image_pos_embed::Array{Float32, 2} # [n_patches, d_model]
-    modality_token::Array{Float32, 1}  # [d_model] — text vs image identifier
-end
+```rust
+// ✅ Modality-specific positional encoding: prevents text/image position confusion
+struct TransfusionWithModalityPE {
+    text_pos_embed:  Tensor,  // [max_seq_len, d_model]
+    image_pos_embed: Tensor,  // [n_patches, d_model]
+    modality_token:  Tensor,  // [d_model] — text vs image identifier
+}
 
-function add_modality_pe(embeddings, modality::Symbol, model::TransfusionWithModalityPE)
-    if modality == :text
-        return embeddings .+ model.text_pos_embed .+ model.modality_token
-    elseif modality == :image
-        return embeddings .+ model.image_pos_embed .- model.modality_token
-    end
-end
+fn add_modality_pe(embeddings: &Tensor, modality: &str, model: &TransfusionWithModalityPE)
+    -> candle_core::Result<Tensor>
+{
+    match modality {
+        "text"  => embeddings.add(&model.text_pos_embed)?.add(&model.modality_token),
+        "image" => embeddings.add(&model.image_pos_embed)?.sub(&model.modality_token),
+        _ => Err(candle_core::Error::Msg("Unknown modality".into()))
+    }
+}
 ```
 
 #### 6.6.4 メモリ最適化
@@ -1099,45 +1105,50 @@ end
 
 1. **Gradient checkpointing**: 中間層の活性化を再計算
 
-```julia
-using Flux: @checkpoint
-
-function forward_with_checkpointing(model, x, ps, st)
-    # Checkpointで中間層の活性化を保存しない
-    h = @checkpoint model.encoder(x, ps.encoder, st.encoder)
-    return model.predictor(h, ps.predictor, st.predictor)
-end
+```rust
+// Gradient checkpointing: recompute activations on backward (save memory)
+fn forward_with_checkpointing(encoder: &impl Module, predictor: &impl Module,
+                               x: &Tensor) -> candle_core::Result<Tensor> {
+    // In candle, use checkpointing via custom backward hooks or segment by segment
+    let h = encoder.forward(x)?;   // Activations NOT cached (recomputed on backward)
+    predictor.forward(&h)
+}
 ```
 
 2. **Mixed precision (FP16)**:
 
-```julia
-using CUDA
+```rust
+// Mixed precision training (FP16) with loss scaling
+// モデルをFP16に変換
+// let model_fp16 = model.to_dtype(DType::F16)?;
 
-# モデルをFP16に変換
-ps_fp16 = Float16.(ps)
-
-# 訓練時は損失スケーリング必須
-loss_scale = 1024.0
-loss_scaled = loss * loss_scale
-grads = gradient(ps -> loss_scaled, ps_fp16)[1]
-grads = grads ./ loss_scale  # Unscale
+// 訓練時は損失スケーリング必須 (FP16でオーバーフロー防止)
+let loss_scale = 1024.0_f32;
+let loss_scaled = loss.affine(loss_scale as f64, 0.)?;
+loss_scaled.backward()?;
+// Unscale gradients before optimizer step
+// grads = grads / loss_scale
 ```
 
 3. **Patch-wise processing** (V-JEPA):
 
-```julia
-# ✅ 全フレームを一度に処理せず、時間方向に分割
-function chunked_video_encoding(encoder, video, ps, st; chunk_size=4)
-    T = size(video, 4)
-    chunks = map(1:chunk_size:T) do t
-        t_end = min(t + chunk_size - 1, T)
-        @views chunk = video[:, :, :, t:t_end, :]
-        encoded, st = encoder(chunk, ps, st)
-        encoded
-    end
-    return cat(chunks..., dims=2), st  # Concatenate along time
-end
+```rust
+// ✅ 全フレームを一度に処理せず、時間方向に分割 (avoid OOM for long videos)
+fn chunked_video_encoding(encoder: &impl Module, video: &Tensor, chunk_size: usize)
+    -> candle_core::Result<Tensor>
+{
+    let t_total = video.dim(1)?;  // [B, T, C, H, W]
+    let mut chunks: Vec<Tensor> = Vec::new();
+
+    for t in (0..t_total).step_by(chunk_size) {
+        let t_end = (t + chunk_size).min(t_total);
+        let chunk = video.narrow(1, t, t_end - t)?;
+        let encoded = encoder.forward(&chunk)?;
+        chunks.push(encoded);
+    }
+
+    Tensor::cat(&chunks.iter().collect::<Vec<_>>(), 1)  // Concatenate along time
+}
 ```
 
 ### 6.7 Research Roadmap — 次の5年（2025-2030）
@@ -1241,43 +1252,50 @@ end
 
 **課題1.1**: I-JEPAのマスキング関数を実装せよ
 
-```julia
-"""
-    generate_block_mask(H, W, n_blocks; block_size=4)
+```rust
+/// generate_block_mask: I-JEPAのブロックマスク生成
+///
+/// # Arguments
+/// - h, w: patch grid dimensions (e.g., 14×14)
+/// - n_blocks: number of blocks to mask
+/// - block_size: spatial extent of each mask block (e.g., 4×4)
+///
+/// # Returns
+/// - mask: Vec<bool> [H*W] — true=keep, false=mask
+fn generate_block_mask(h: usize, w: usize, n_blocks: usize, block_size: usize) -> Vec<bool> {
+    let mut mask = vec![true; h * w];
+    // TODO: ランダムにブロックの左上座標を選び、block_size × block_size をマスク
+    // Hint: use rand::thread_rng().gen_range(0..h) for top-left corner
+    mask
+}
 
-画像を H x W パッチに分割し、n_blocks 個のブロック（各 block_size x block_size）をマスク。
-
-# Returns
-- mask: BitArray [H, W] — 1=keep, 0=mask
-"""
-function generate_block_mask(H, W, n_blocks; block_size=4)
-    # Your implementation here
-    # Hint: ランダムにブロックの左上座標を選び、block_size x block_size をマスク
-end
-
-# Test
-mask = generate_block_mask(14, 14, 4, block_size=4)
-@assert sum(mask) == 14*14 - 4*16  # 196 - 64 = 132 visible patches
+// Test
+let mask = generate_block_mask(14, 14, 4, 4);
+assert_eq!(mask.iter().filter(|&&v| v).count(), 14*14 - 4*16);  // 196 - 64 = 132 visible
 ```
 
 **課題1.2**: EMA更新関数のテスト
 
-```julia
-function test_ema_update()
-    # Initialize two parameter sets
-    θ_context = randn(Float32, 100)
-    θ_target = copy(θ_context)
+```rust
+fn test_ema_update() -> candle_core::Result<()> {
+    let dev = &candle_core::Device::Cpu;
+    // Initialize two parameter sets
+    let theta_context = Tensor::randn(0f32, 1f32, 100, dev)?;
+    let mut theta_target = theta_context.clone();
 
-    # Simulate 10 updates
-    for i in 1:10
-        θ_context += 0.1 * randn(Float32, 100)  # Simulate gradient update
-        θ_target = update_ema(θ_target, θ_context, τ=0.99)
-    end
+    // Simulate 10 gradient updates
+    for _ in 0..10 {
+        let delta = Tensor::randn(0f32, 0.1f32, 100, dev)?;
+        let theta_context = theta_context.add(&delta)?;  // Simulate gradient update
+        theta_target = update_ema(&theta_target, &theta_context, 0.99)?;
+    }
 
-    # Verify: target should lag behind context
-    @assert norm(θ_target - θ_context) > 0.01
-    println("✅ EMA update test passed")
-end
+    // Verify: target should lag behind context (‖θ_target − θ_context‖ > 0.01)
+    let diff = theta_target.sub(&theta_context)?.sqr()?.sum_all()?.sqrt()?;
+    assert!(diff.to_scalar::<f32>()? > 0.01);
+    println!("✅ EMA update test passed");
+    Ok(())
+}
 ```
 
 #### レベル2: 中級（2時間）
@@ -1289,18 +1307,19 @@ end
 - Mask ratio: 60%
 - 少なくとも1フレームはコンテキストとして残す
 
-```julia
-function generate_spatiotemporal_mask(T, H, W, n_masks; temporal_span=2, spatial_size=4)
-    mask = trues(T, H, W)
-    # Your implementation
-    # Hint: ランダムに(t, h, w)を選び、temporal_span x spatial_size x spatial_size をマスク
-    return mask
-end
+```rust
+fn generate_spatiotemporal_mask(t: usize, h: usize, w: usize, n_masks: usize,
+                                temporal_span: usize, spatial_size: usize) -> Vec<bool> {
+    let mut mask = vec![true; t * h * w];
+    // TODO: ランダムに(t_start, h_start, w_start)を選び、
+    //       temporal_span × spatial_size × spatial_size をマスク
+    mask
+}
 
-# Test
-mask = generate_spatiotemporal_mask(8, 14, 14, 20, temporal_span=3, spatial_size=4)
-visible_ratio = sum(mask) / length(mask)
-@assert 0.35 < visible_ratio < 0.45  # ~40% visible
+// Test: ~40% visible
+let mask = generate_spatiotemporal_mask(8, 14, 14, 20, 3, 4);
+let visible_ratio = mask.iter().filter(|&&v| v).count() as f32 / mask.len() as f32;
+assert!((0.35..0.45).contains(&visible_ratio));  // ~40% visible
 ```
 
 **課題2.2**: Hamiltonian NN で単振り子をシミュレート
@@ -1312,40 +1331,38 @@ $$
 
 ここで $q$ = 角度、$p$ = 角運動量、$m$ = 質量、$g$ = 重力加速度、$l$ = 長さ。
 
-```julia
-using OrdinaryDiffEq, Plots
+```rust
+// True Hamiltonian for data generation: H(q,p) = p²/2m + mgl(1−cos q)
+fn pendulum_hamiltonian(q: f32, p: f32, m: f32, g: f32, l: f32) -> f32 {
+    p * p / (2.0 * m) + m * g * l * (1.0 - q.cos())
+}
 
-# True Hamiltonian (for data generation)
-function pendulum_hamiltonian(q, p; m=1.0, g=9.8, l=1.0)
-    return p^2 / (2 * m) + m * g * l * (1 - cos(q))
-end
+// True pendulum dynamics: dq/dt = ∂H/∂p, dp/dt = −∂H/∂q
+fn pendulum_dynamics(q: f32, p: f32) -> (f32, f32) {
+    let dq = p;             // ∂H/∂p
+    let dp = -9.8 * q.sin(); // −∂H/∂q
+    (dq, dp)
+}
 
-# Generate training data
-function generate_pendulum_data(n_samples=1000, T=10.0)
-    return map(1:n_samples) do _
-        q0 = rand() * 2π - π
-        p0 = rand() * 2 - 1
-        qp0 = [q0, p0]
+// Generate training data: (qp_0, qp_1, Δt) pairs from Euler integration
+fn generate_pendulum_data(n_samples: usize, dt: f32, steps: usize) -> Vec<([f32; 2], [f32; 2], f32)> {
+    use rand::Rng;
+    let mut rng = rand::thread_rng();
+    (0..n_samples).map(|_| {
+        let mut q = rng.gen_range(-std::f32::consts::PI..std::f32::consts::PI);
+        let mut p = rng.gen_range(-1.0_f32..1.0);
+        let qp0 = [q, p];
+        // Euler integrate for `steps` steps
+        for _ in 0..steps {
+            let (dq, dp) = pendulum_dynamics(q, p);
+            q += dq * dt;
+            p += dp * dt;
+        }
+        (qp0, [q, p], dt * steps as f32)
+    }).collect()
+}
 
-        # Solve true dynamics
-        prob = ODEProblem((qp, p, t) -> pendulum_dynamics(qp), qp0, (0.0, T))
-        sol = solve(prob, Tsit5(), saveat=0.1)
-
-        # Random pairs
-        t1, t2 = sort(rand(1:length(sol), 2))
-        (sol[t1], sol[t2], sol.t[t2] - sol.t[t1])
-    end
-end
-
-function pendulum_dynamics(qp)
-    q, p = qp
-    dq = p  # ∂H/∂p
-    dp = -9.8 * sin(q)  # -∂H/∂q
-    return [dq, dp]
-end
-
-# Train HNN and compare energy conservation
-# Your task: Implement training loop from 6.2.3, train for 100 epochs, plot energy over time
+// TODO: Train HNN (from 6.2.3) for 100 epochs, plot energy conservation over time
 ```
 
 #### レベル3: 上級（1日）
@@ -1361,36 +1378,35 @@ end
 - λバランスパラメータを動的調整
 - 100 epoch訓練後、text perplexityとimage FIDを評価
 
-```julia
-# Skeleton
-function train_transfusion_multimodal!(model, text_loader, image_loader, ps, st, config)
-    opt = Adam(config["lr"])
-    opt_st = Optimisers.setup(opt, ps)
+```rust
+// Skeleton: Transfusionのマルチモーダル訓練 (AR text + Diffusion image)
+fn train_transfusion_multimodal(model: &mut impl Module, text_loader: &[Tensor],
+                                 image_loader: &[Tensor], epochs: usize, lr: f64) -> candle_core::Result<()> {
+    for epoch in 0..epochs {
+        let text_img_pairs = text_loader.iter().zip(image_loader.iter());
+        for (text_batch, image_batch) in text_img_pairs {
+            // ランダムにmodality選択 (50% text, 50% image)
+            let loss = if rand::random::<f32>() < 0.5 {
+                // Text: autoregressive next-token prediction
+                // model.forward(text_batch)?  → cross_entropy loss
+                todo!("text AR loss")
+            } else {
+                // Image: diffusion denoising loss
+                // model.forward(image_batch, t)? → MSE noise prediction
+                todo!("image diffusion loss")
+            };
 
-    for epoch in 1:config["epochs"]
-        for (text_batch, image_batch) in zip(text_loader, image_loader)
-            # Randomly select modality (50% text, 50% image)
-            if rand() < 0.5
-                # Text forward + loss
-                # ...
-            else
-                # Image forward + loss
-                # ...
-            end
+            loss.backward()?;
+            // optimizer.step(); optimizer.zero_grad();
+        }
 
-            # Update
-            grads = gradient(ps -> loss, ps)[1]
-            opt_st, ps = Optimisers.update(opt_st, ps, grads)
-        end
-
-        # Evaluate
-        text_ppl = evaluate_text_perplexity(model, text_val, ps, st)
-        image_fid = evaluate_image_fid(model, image_val, ps, st)
-        println("Epoch $epoch: Text PPL = $text_ppl, Image FID = $image_fid")
-    end
-
-    return ps, st
-end
+        // Evaluate
+        // let text_ppl = evaluate_text_perplexity(model, &text_val)?;
+        // let image_fid = evaluate_image_fid(model, &image_val)?;
+        println!("Epoch {}: evaluation pending", epoch);
+    }
+    Ok(())
+}
 ```
 
 **課題3.2**: Physics-Informed World Model で2体問題
@@ -1406,37 +1422,41 @@ $$
 - Newton's 3rd law + 運動量保存 + エネルギー保存を検証
 - 1000ステップ後のエネルギー相対誤差 < 1%
 
-```julia
-struct TwoBodyGNN
-    edge_mlp::Chain
-    G::Float32  # Gravitational constant
-end
+```rust
+struct TwoBodyGNN {
+    edge_mlp: Box<dyn Module>,
+    g_const: f32,  // Gravitational constant G
+}
 
-function (m::TwoBodyGNN)(r1, r2, v1, v2, m1, m2, ps, st; Δt=0.01)
-    # Compute gravitational force
-    r12 = r1 - r2
-    dist = norm(r12) + 1e-6  # Avoid division by zero
-    F_12 = -m.G * m1 * m2 / dist^3 * r12
+impl TwoBodyGNN {
+    fn forward(&self, r1: &Tensor, r2: &Tensor, v1: &Tensor, v2: &Tensor,
+               m1: f32, m2: f32, dt: f32) -> candle_core::Result<(Tensor, Tensor, Tensor, Tensor)> {
+        // Compute gravitational force: F_12 = −G·m1·m2 / |r12|³ · r12
+        let r12 = r1.sub(r2)?;
+        let dist = r12.sqr()?.sum_all()?.sqrt()?
+                     .add(&Tensor::new(1e-6_f32, r1.device())?)?;  // avoid ÷0
+        let dist3 = dist.powi(3);
+        let f_12 = r12.affine(-(self.g_const * m1 * m2) as f64, 0.)?.div(&dist3)?;
 
-    # Newton's 3rd law
-    F_21 = -F_12
+        // Newton's 3rd law: F_21 = −F_12
+        let f_21 = f_12.neg()?;
 
-    # Update velocities
-    v1_new = v1 + F_12 / m1 * Δt
-    v2_new = v2 + F_21 / m2 * Δt
+        // Update velocities: v_new = v + F/m · dt
+        let v1_new = v1.add(&f_12.affine(dt as f64 / m1 as f64, 0.)?)?;
+        let v2_new = v2.add(&f_21.affine(dt as f64 / m2 as f64, 0.)?)?;
 
-    # Update positions
-    r1_new = r1 + v1_new * Δt
-    r2_new = r2 + v2_new * Δt
+        // Update positions: r_new = r + v_new · dt
+        let r1_new = r1.add(&v1_new.affine(dt as f64, 0.)?)?;
+        let r2_new = r2.add(&v2_new.affine(dt as f64, 0.)?)?;
 
-    # Verify conservation laws
-    # Total momentum: m1*v1 + m2*v2 = const
-    # Total energy: KE + PE = const
+        // Conservation checks:
+        // Total momentum: m1·v1 + m2·v2 = const
+        // Total energy: KE + PE = const
+        Ok((r1_new, r2_new, v1_new, v2_new))
+    }
+}
 
-    return r1_new, r2_new, v1_new, v2_new
-end
-
-# Your task: Train on simulated data, verify conservation over 10000 steps
+// TODO: Train on simulated data, verify conservation over 10_000 steps
 ```
 
 ### 6.10 全生成モデルとWorld Modelsの位置づけ

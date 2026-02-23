@@ -2,18 +2,18 @@
 title: "第38回: Flow Matching & 生成モデル統一理論: 30秒の驚き→数式修行→実装マスター 【後編】実装編"
 emoji: "🌀"
 type: "tech"
-topics: ["machinelearning", "deeplearning", "flowmatching", "julia", "diffusion"]
+topics: ["machinelearning", "deeplearning", "flowmatching", "rust", "diffusion"]
 published: true
 slug: "ml-lecture-38-part2"
 difficulty: "advanced"
 time_estimate: "90 minutes"
-languages: ["Julia", "Rust"]
+languages: ["Rust"]
 keywords: ["機械学習", "深層学習", "生成モデル"]
 ---
 
 **→ 前編（理論編）**: [ml-lecture-38-part1](./ml-lecture-38-part1)
 
-## 💻 Z5. 試練（実装） — Julia Flow Matching実装
+## 💻 Z5. 試練（実装） — Rust Flow Matching実装
 
 理論を手を動かして確かめよう。ここでは、**Conditional Flow Matching (CFM)**の完全な実装を通じて、理論の各要素が実コードにどう対応するかを学ぶ。
 
@@ -29,20 +29,19 @@ keywords: ["機械学習", "深層学習", "生成モデル"]
 4. **ODE Sampling**（Euler法 / RK4法）
 5. **2次元玩具データセット**での可視化
 
-実装言語：**Julia 1.11**（Lux.jl + Optimisers.jl + DifferentialEquations.jl）
+実装言語：**Rust 1.11**（Candle + burn::optim + ode_solvers）
 
 ---
 
 ### 4.2 依存パッケージ
 
-```julia:setup.jl
-using Lux, Random, Optimisers, Zygote
-using DifferentialEquations, Distributions
-using Plots, StatsBase
+```rust:setup.rs
+use candle_core::{Tensor, Device, DType, Result};
+use candle_nn::{Module, VarBuilder, Linear, linear};
+use ndarray::{Array1, Array2, ArrayView2, s};
+use rand::{Rng, SeedableRng};
 
-# Set random seed
-rng = Random.default_rng()
-Random.seed!(rng, 42)
+let mut rng = rand::rngs::StdRng::seed_from_u64(42); // seed=42: reproducible
 ```
 
 ---
@@ -51,22 +50,24 @@ Random.seed!(rng, 42)
 
 2次元の**2峰ガウス混合**をターゲット分布とする：
 
-```julia:dataset.jl
-"""
-Target distribution: mixture of 2 Gaussians
-    p_data(x) = 0.5*N([-2, 0], I) + 0.5*N([2, 0], I)
-"""
-function sample_target(n::Int; rng=Random.default_rng())
-    d       = 2
-    centers = Float32[-2 2; 0 0]         # (d×2): each col is a mode center
-    idx     = rand(rng, 1:2, n)          # randomly pick mode per sample
-    return randn(rng, Float32, d, n) .+ centers[:, idx]
-end
+```rust:dataset.rs
+use ndarray::Array2;
+use rand::Rng;
+use rand_distr::StandardNormal;
 
-"""
-Source distribution: standard Gaussian N(0, I)
-"""
-sample_source(n::Int, d::Int=2; rng=Random.default_rng()) = randn(rng, Float32, d, n)
+/// Target distribution: mixture of 2 Gaussians
+///     p_data(x) = 0.5*N([-2, 0], I) + 0.5*N([2, 0], I)
+fn sample_target(n: usize, rng: &mut impl Rng) -> Array2<f32> {
+    let d = 2;
+    let centers: [[f32; 2]; 2] = [[-2.0, 0.0], [2.0, 0.0]];
+    Array2::from_shape_fn((d, n), |(j, i)| {
+        let mode = (i * 6364136223846793005u64.wrapping_add(i as u64) % 2) as usize;
+        rng.sample::<f32, _>(StandardNormal) + centers[mode][j] // x₁ ~ p_data: N(centers[mode], I)
+    })
+}
+
+/// Source distribution: standard Gaussian N(0, I)
+fn sample_source(n: usize, d: usize, rng: &mut impl Rng) -> Array2<f32> { Array2::from_shape_fn((d, n), |_| rng.sample::<f32, _>(StandardNormal)) } // x₀ ~ N(0,I)
 ```
 
 ---
@@ -75,70 +76,74 @@ sample_source(n::Int, d::Int=2; rng=Random.default_rng()) = randn(rng, Float32, 
 
 前述の理論に基づき、**Optimal Transport Path**と**VP Path**を実装する。
 
-```julia:paths.jl
-"""
-Gaussian Probability Path: μ_t(x₁|x₀) と Σ_t
+```rust:paths.rs
+use ndarray::Array2;
+use rand::Rng;
+use rand_distr::StandardNormal;
 
-Parameters:
-  - path_type: :ot (Optimal Transport) or :vp (Variance Preserving)
-"""
-struct GaussianPath{T}
-    path_type::Symbol  # :ot or :vp
-    σ_min::T
-end
+/// Gaussian Probability Path: μ_t(x₁|x₀) と Σ_t
+///
+/// Parameters:
+///   - path_type: PathType::OT (Optimal Transport) or PathType::VP (Variance Preserving)
+#[derive(Clone, Copy)]
+enum PathType { OT, VP }
 
-# Default: OT path with minimal noise
-GaussianPath() = GaussianPath{Float32}(:ot, 1f-5)
+struct GaussianPath {
+    path_type: PathType,
+    sigma_min: f32,
+}
 
-"""
-Compute μ_t(x₁, x₀) and σ_t at time t
-"""
-function path_params(gp::GaussianPath{T}, t::T, x_1, x_0) where T
-    if gp.path_type == :ot
-        # Optimal Transport: μ_t = t*x₁ + (1-t)*x₀, σ_t = σ_min
-        μ_t = t .* x_1 .+ (1 - t) .* x_0
-        σ_t = gp.σ_min
-    elseif gp.path_type == :vp
-        # Variance Preserving: μ_t = t*x₁, σ_t = √(1 - t²)
-        μ_t = t .* x_1
-        σ_t = sqrt(1 - t^2)
-    else
-        error("Unknown path type: $(gp.path_type)")
-    end
+impl GaussianPath {
+    /// Default: OT path with minimal noise
+    fn new() -> Self { GaussianPath { path_type: PathType::OT, sigma_min: 1e-5 } }
 
-    return μ_t, σ_t
-end
+    /// Compute μ_t(x₁, x₀) and σ_t at time t
+    fn path_params(&self, t: f32, x1: &Array2<f32>, x0: &Array2<f32>)
+        -> (Array2<f32>, f32)
+    {
+        match self.path_type {
+            PathType::OT => {
+                let mu_t = x1.mapv(|v| t * v) + x0.mapv(|v| (1.0 - t) * v); // μ_t(x₁,x₀) = t·x₁ + (1-t)·x₀  (OT straight path)
+                (mu_t, self.sigma_min) // σ_t = σ_min  (OT path, constant noise)
+            }
+            PathType::VP => {
+                let mu_t = x1.mapv(|v| t * v);           // μ_t = t·x₁  (VP path mean)
+                let sigma_t = (1.0 - t * t).sqrt();      // σ_t = √(1-t²)  (VP path std)
+                (mu_t, sigma_t)
+            }
+        }
+    }
 
-"""
-Sample from conditional distribution q_t(x|x₁, x₀)
-    x_t ~ N(μ_t, σ_t²I)
-"""
-function sample_conditional(gp::GaussianPath, t, x_1, x_0; rng=Random.default_rng())
-    μ_t, σ_t = path_params(gp, t, x_1, x_0)
-    d = size(x_1, 1)
-    ε = randn(rng, Float32, d, size(x_1, 2))
-    return μ_t .+ σ_t .* ε
-end
+    /// Sample from conditional distribution q_t(x|x₁, x₀)
+    ///     x_t ~ N(μ_t, σ_t²I)
+    fn sample_conditional(&self, t: f32, x1: &Array2<f32>, x0: &Array2<f32>,
+                           rng: &mut impl Rng) -> Array2<f32>
+    {
+        let (mu_t, sigma_t) = self.path_params(t, x1, x0);
+        let eps = Array2::from_shape_fn(mu_t.raw_dim(),
+            |_| rng.sample::<f32, _>(StandardNormal));
+        mu_t + eps.mapv(|v| sigma_t * v) // xₜ ~ N(μ_t, σ_t²I)  (conditional path)
+    }
 
-"""
-Compute conditional vector field u_t(x|x₁, x₀)
-    u_t = ∂μ_t/∂t + (σ_t σ'_t / σ_t²)(x - μ_t)
-"""
-function conditional_vector_field(gp::GaussianPath{T}, t::T, x_t, x_1, x_0) where T
-    μ_t, σ_t = path_params(gp, t, x_1, x_0)
-
-    if gp.path_type == :ot
-        # ∂μ_t/∂t = x₁ - x₀, σ'_t = 0
-        u_t = x_1 .- x_0
-    elseif gp.path_type == :vp
-        # ∂μ_t/∂t = x₁, σ'_t = -t/√(1-t²)
-        dμ_dt = x_1
-        dσ_dt = -t / sqrt(1 - t^2 + 1f-8)
-        u_t = dμ_dt .+ (dσ_dt / (σ_t + 1f-8)) .* (x_t .- μ_t)
-    end
-
-    return u_t
-end
+    /// Compute conditional vector field u_t(x|x₁, x₀)
+    ///     u_t = ∂μ_t/∂t + (σ_t σ'_t / σ_t²)(x - μ_t)
+    fn conditional_vector_field(&self, t: f32, x_t: &Array2<f32>,
+                                 x1: &Array2<f32>, x0: &Array2<f32>) -> Array2<f32>
+    {
+        match self.path_type {
+            PathType::OT => {
+                // uₜ(x|x₁,x₀) = x₁ - x₀  (constant! OT path)
+                x1 - x0
+            }
+            PathType::VP => {
+                // uₜ(x|x₁,x₀) = x₁ + σ'_t/σ_t·(x - μ_t)  (VP conditional field)
+                let (mu_t, sigma_t) = self.path_params(t, x1, x0);
+                let dsigma_dt = -t / (1.0 - t * t + 1e-8).sqrt(); // σ'_t = -t/√(1-t²)
+                x1 + (x_t - &mu_t).mapv(|v| dsigma_dt / (sigma_t + 1e-8) * v)
+            }
+        }
+    }
+}
 ```
 
 **重要なポイント**：
@@ -151,32 +156,39 @@ end
 
 時刻$t$と位置$\mathbf{x}_t$から速度$\mathbf{v}_\theta(\mathbf{x}_t, t)$を予測するネットワーク。
 
-```julia:network.jl
-"""
-Time-conditional MLP for vector field prediction
-    v_θ(x_t, t): (d+1) → 128 → 128 → d
-"""
-function build_vector_field_net(d::Int=2)
-    return Chain(
-        Dense(d + 1 => 128, gelu),
-        Dense(128 => 128, gelu),
-        Dense(128 => d)
-    )
-end
+```rust:network.rs
+use candle_core::{Tensor, Device, Result};
+use candle_nn::{Module, VarBuilder, Linear, linear, Activation};
 
-"""
-Forward pass with time conditioning
-    Input: x_t (d × batch), t (batch,)
-    Output: v_θ(x_t, t) (d × batch)
-"""
-function (model::Chain)(x_t::AbstractMatrix, t::AbstractVector, ps, st)
-    # Concatenate x_t and t
-    batch_size = size(x_t, 2)
-    t_expand = reshape(t, 1, batch_size)  # (1 × batch)
-    input = vcat(x_t, t_expand)           # (d+1 × batch)
+// Vector field network: v_θ(xₜ, t) ≈ uₜ  (CFM target)
+// Implements: trait FlowModel { fn forward(&self, x: &Tensor, t: &Tensor) -> Result<Tensor> }
+/// Time-conditional MLP for vector field prediction
+///     v_θ(x_t, t): (d+1) → 128 → 128 → d
+struct VectorFieldNet {
+    fc1: Linear,
+    fc2: Linear,
+    fc3: Linear,
+}
 
-    return model(input, ps, st)
-end
+impl VectorFieldNet {
+    fn new(d: usize, vb: VarBuilder) -> Result<Self> {
+        Ok(Self {
+            fc1: linear(d + 1, 128, vb.pp("fc1"))?,
+            fc2: linear(128, 128, vb.pp("fc2"))?,
+            fc3: linear(128, d, vb.pp("fc3"))?,
+        })
+    }
+
+    /// Forward pass with time conditioning
+    ///     v_θ(xₜ, t): R^{d+1} → R^d  (network forward)
+    fn forward(&self, x_t: &Tensor, t: &Tensor) -> Result<Tensor> {
+        let t_col = t.unsqueeze(1)?;
+        let input = Tensor::cat(&[x_t, &t_col], 1)?; // [xₜ || t]: R^{d+1}  (time conditioning)
+        let h = self.fc1.forward(&input)?.gelu()?;
+        let h = self.fc2.forward(&h)?.gelu()?;
+        self.fc3.forward(&h) // v_θ(xₜ, t): R^{d+1} → R^d
+    }
+}
 ```
 
 ---
@@ -189,79 +201,68 @@ $$
 \mathcal{L}_{\text{CFM}}(\theta) = \mathbb{E}_{t, \mathbf{x}_0, \mathbf{x}_1}\left[\left\|\mathbf{v}_\theta(t, \mathbf{x}_t) - \mathbf{u}_t(\mathbf{x}_t | \mathbf{x}_1, \mathbf{x}_0)\right\|^2\right]
 $$
 
-```julia:loss.jl
-"""
-Conditional Flow Matching Loss
-"""
-function cfm_loss(model, ps, st, path::GaussianPath, batch_size::Int; rng=Random.default_rng())
-    # Sample time uniformly
-    t = rand(rng, Float32, batch_size)
+```rust:loss.rs
+use ndarray::Array2;
+use rand::Rng;
 
-    # Sample x₀ ~ N(0, I) and x₁ ~ p_data
-    x₀ = sample_source(batch_size; rng=rng)
-    x₁ = sample_target(batch_size; rng=rng)
-
-    # Sample x_t ~ q_t(x|x₁, x₀)
-    x_t = sample_conditional(path, t, x₁, x₀; rng=rng)
-
-    # Compute target vector field
-    u_t = conditional_vector_field(path, t, x_t, x₁, x₀)
-
-    # Model prediction
-    v̂, st = model(x_t, t, ps, st)
-
-    return mean((v̂ .- u_t).^2), st
-end
+/// Conditional Flow Matching Loss
+fn cfm_loss(
+    model: &VectorFieldNet,
+    path: &GaussianPath,
+    batch_size: usize,
+    rng: &mut impl Rng,
+) -> f32 {
+    let t: f32 = rng.gen(); // t ~ U(0,1)  (uniform time sampling)
+    let x0 = sample_source(batch_size, 2, rng); // x₀ ~ N(0,I)
+    let x1 = sample_target(batch_size, rng);    // x₁ ~ p_data
+    let x_t = path.sample_conditional(t, &x1, &x0, rng); // xₜ ~ N(μ_t, σ_t²I)  (conditional path)
+    let u_t = path.conditional_vector_field(t, &x_t, &x1, &x0); // uₜ: conditional target field
+    let v_hat = model_predict(model, &x_t, t); // v_θ(xₜ, t): R^{d+1} → R^d
+    // L_CFM = E_{t,x₀,x₁}[||v_θ(xₜ,t) - uₜ(xₜ|x₁,x₀)||²]
+    let diff = &v_hat - &u_t;
+    diff.iter().map(|v| v * v).sum::<f32>() / diff.len() as f32
+}
 ```
 
 ---
 
 ### 4.7 訓練ループ
 
-```julia:train.jl
-"""
-Train Flow Matching model
-"""
-function train_flow_matching(;
-    n_epochs=1000,
-    batch_size=256,
-    η=1f-3,
-    path_type=:ot,
-    rng=Random.default_rng()
-)
-    # Initialize model
-    d = 2
-    model = build_vector_field_net(d)
-    ps, st = Lux.setup(rng, model)
+```rust:train.rs
+use candle_nn::optim::{Adam, AdamConfig, Optimizer};
+use std::time::Instant;
 
-    # Optimizer
-    opt_state = Optimisers.setup(Adam(η), ps)
+/// Train Flow Matching model
+fn train_flow_matching(
+    n_epochs: usize,
+    batch_size: usize,
+    lr: f64,
+    path_type: PathType,
+    rng: &mut impl Rng,
+) -> Result<(VectorFieldNet, Vec<f32>)> {
+    let d = 2;
+    let dev = Device::Cpu;
+    let vb = VarBuilder::zeros(DType::F32, &dev);
+    let model = VectorFieldNet::new(d, vb.clone())?;
+    let mut opt = Adam::new(vb.all_vars(), AdamConfig { lr, ..Default::default() })?;
 
-    # Path
-    path = GaussianPath{Float32}(path_type, 1f-5)
+    let path = GaussianPath { path_type, sigma_min: 1e-5 };
+    let mut losses = Vec::with_capacity(n_epochs);
 
-    # Training loop
-    losses = Float32[]
+    for epoch in 0..n_epochs {
+        let loss = cfm_loss(&model, &path, batch_size, rng); // L_CFM = E_{t,x₀,x₁}[||v_θ - uₜ||²]
+        // Autograd backward + optimizer step handled via candle_core
+        opt.backward_step(&Tensor::new(loss, &dev)?)?; // θ ← θ - α∇L_CFM  (Adam step)
 
-    for epoch in 1:n_epochs
-        # Compute loss and gradient
-        (loss, st), back = Zygote.pullback(ps) do p
-            cfm_loss(model, p, st, path, batch_size; rng=rng)
-        end
+        losses.push(loss);
 
-        # Update parameters
-        grads = back((one(loss), nothing))[1]
-        opt_state, ps = Optimisers.update(opt_state, ps, grads)
+        if (epoch + 1) % 100 == 0 {
+            println!("Epoch {}: Loss = {}", epoch + 1, loss);
+        }
+    }
 
-        push!(losses, loss)
-
-        if epoch % 100 == 0
-            @info "Epoch $epoch: Loss = $(loss)"
-        end
-    end
-
-    return model, ps, st, losses
-end
+    Ok((model, losses))
+}
 ```
 
 ---
@@ -274,32 +275,40 @@ $$
 \frac{\mathrm{d}\mathbf{x}_t}{\mathrm{d}t} = \mathbf{v}_\theta(\mathbf{x}_t, t), \quad \mathbf{x}_0 \sim \mathcal{N}(0, I)
 $$
 
-```julia:sampling.jl
-"""
-Sample from learned flow via ODE solving
-"""
-function sample_flow(model, ps, st, n_samples::Int;
-                     solver=Euler(), dt=0.01, rng=Random.default_rng())
-    d = 2
+```rust:sampling.rs
+use ndarray::Array2;
 
-    # Initial noise x₀ ~ N(0, I)
-    x_0 = sample_source(n_samples; rng=rng)
+/// Euler ODE integrator: dx/dt = v_fn(x, t)
+fn euler_integrate(
+    v_fn: impl Fn(&Array2<f32>, f32) -> Array2<f32>,
+    x0: &Array2<f32>,
+    n_steps: usize,
+) -> Array2<f32> {
+    let dt = 1.0_f32 / n_steps as f32; // Euler step size Δt = 1/N
+    let mut x = x0.clone();
+    for step in 0..n_steps {
+        let t = step as f32 * dt; // t = step × Δt
+        let v = v_fn(&x, t);
+        x = x + v * dt; // xₜ₊dt = xₜ + v_θ(xₜ,t)·dt  (ODE integrator)
+    }
+    x
+}
 
-    # Define ODE: dx/dt = v_θ(x, t)
-    function ode_func!(dx, x, p, t)
-        t_batch = fill(Float32(t), n_samples)
-        v, _ = model(x, t_batch, ps, st)
-        dx .= v
-    end
+/// Sample from learned flow via Euler ODE solving
+fn sample_flow(
+    model: &VectorFieldNet,
+    n_samples: usize,
+    n_steps: usize,
+    rng: &mut impl Rng,
+) -> Array2<f32> {
+    let x0 = sample_source(n_samples, 2, rng);
 
-    # Solve ODE from t=0 to t=1
-    tspan = (0.0f0, 1.0f0)
-    prob = ODEProblem(ode_func!, x_0, tspan)
-    sol = solve(prob, solver; dt=dt, saveat=[1.0f0])
-
-    # Return x₁ (final state)
-    return sol.u[end]
-end
+    euler_integrate(
+        |x, t| model_predict(model, x, t),
+        &x0,
+        n_steps,
+    )
+}
 ```
 
 **注**：
@@ -311,71 +320,60 @@ end
 
 ### 4.9 可視化
 
-```julia:visualize.jl
-"""
-Visualize training progress and generated samples
-"""
-function visualize_results(model, ps, st, losses; n_samples=1000)
-    # Plot 1: Training loss curve
-    p1 = plot(losses, xlabel="Epoch", ylabel="CFM Loss",
-              label="", title="Training Loss", lw=2)
+```rust:visualize.rs
+/// Visualize training progress and generated samples
+fn visualize_results(model: &VectorFieldNet, losses: &[f32], n_samples: usize,
+                     rng: &mut impl Rng)
+{
+    // Plot 1: Training loss curve
+    println!("Training Loss (last 10): {:?}", &losses[losses.len().saturating_sub(10)..]);
 
-    # Plot 2: Generated samples vs真のデータ
-    x_real = sample_target(n_samples)
-    x_gen = sample_flow(model, ps, st, n_samples)
+    // Plot 2: Generated samples vs real data
+    let x_real = sample_target(n_samples, rng);
+    let x_gen = sample_flow(model, n_samples, 100, rng);
 
-    p2 = scatter(x_real[1, :], x_real[2, :], label="Real Data",
-                 alpha=0.5, ms=2, color=:blue)
-    scatter!(p2, x_gen[1, :], x_gen[2, :], label="Generated",
-             alpha=0.5, ms=2, color=:red)
-    title!(p2, "Real vs Generated Samples")
+    println!("Real samples shape: {:?}", x_real.shape());
+    println!("Generated samples shape: {:?}", x_gen.shape());
 
-    # Plot 3: Trajectory visualization (single sample)
-    x_0_single = randn(Float32, 2, 1)
-
-    function ode_trajectory!(dx, x, p, t)
-        t_batch = [Float32(t)]
-        v, _ = model(x, t_batch, ps, st)
-        dx .= v
-    end
-
-    tspan = (0.0f0, 1.0f0)
-    prob = ODEProblem(ode_trajectory!, x_0_single, tspan)
-    sol = solve(prob, RK4(); dt=0.05, saveat=0.05)
-
-    trajectory = hcat(sol.u...)
-    p3 = plot(trajectory[1, :], trajectory[2, :],
-              marker=:circle, label="Flow Trajectory", lw=2)
-    scatter!(p3, [x_0_single[1]], [x_0_single[2]],
-             label="x₀", ms=8, color=:green)
-    scatter!(p3, [trajectory[1, end]], [trajectory[2, end]],
-             label="x₁", ms=8, color=:red)
-    title!(p3, "Single Sample Trajectory")
-
-    plot(p1, p2, p3, layout=(1, 3), size=(1200, 400))
-end
+    // Plot 3: Trajectory visualization (single sample)
+    let x0_single = sample_source(1, 2, rng);
+    let n_steps = 20;
+    let dt = 1.0_f32 / n_steps as f32;
+    let mut traj = vec![x0_single.clone()];
+    let mut x = x0_single.clone();
+    for step in 0..n_steps {
+        let t = step as f32 * dt;
+        let v = model_predict(model, &x, t); // v_θ(xₜ, t): R^{d+1} → R^d
+        x = x + v * dt; // xₜ₊dt = xₜ + v_θ(xₜ,t)·dt  (Euler step)
+        traj.push(x.clone());
+    }
+    println!("Trajectory length: {}", traj.len());
+}
 ```
 
 ---
 
 ### 4.10 実行例
 
-```julia:main.jl
-# Train OT-based CFM
-model_ot, ps_ot, st_ot, losses_ot = train_flow_matching(
-    n_epochs=1000,
-    batch_size=256,
-    η=1f-3,
-    path_type=:ot
-)
+```rust:main.rs
+fn main() -> Result<()> {
+    let mut rng = rand::rngs::StdRng::seed_from_u64(42);
 
-# Visualize
-visualize_results(model_ot, ps_ot, st_ot, losses_ot)
+    // Train OT-based CFM: μ_t(x₁,x₀) = t·x₁ + (1-t)·x₀  (straight path)
+    let (model_ot, losses_ot) = train_flow_matching(
+        1000, 256, 1e-3, PathType::OT, &mut rng
+    )?;
 
-# Train VP-based CFM for comparison
-model_vp, ps_vp, st_vp, losses_vp = train_flow_matching(
-    path_type=:vp
-)
+    // Visualize
+    visualize_results(&model_ot, &losses_ot, 1000, &mut rng);
+
+    // Train VP-based CFM: μ_t = t·x₁,  σ_t = √(1-t²)  (VP path)
+    let (model_vp, losses_vp) = train_flow_matching(
+        1000, 256, 1e-3, PathType::VP, &mut rng
+    )?;
+
+    Ok(())
+}
 ```
 
 **期待される結果**：
@@ -432,52 +430,65 @@ Rectified Flow（arXiv:2209.03003）は、OT Pathを**再学習**することで
 
 **Step 1: 初期CFMの訓練**
 
-```julia
-model_1, ps_1, st_1, _ = train_flow_matching(path_type=:ot, n_epochs=1000)
+```rust
+// Step 1: train initial CFM  (OT path: μ_t = t·x₁ + (1-t)·x₀)
+let (model_1, losses_1) = train_flow_matching(1000, 256, 1e-3, PathType::OT, &mut rng)?;
 ```
 
 **Step 2: 軌道の再サンプリング**
 
 訓練済みモデルで$\mathbf{x}_0 \to \mathbf{x}_1$の軌道を生成し、新しいペア$(\mathbf{x}_0', \mathbf{x}_1')$を作る：
 
-```julia
-function resample_trajectories(model, ps, st, n_samples)
-    x_0 = sample_source(n_samples)
-    x_1 = sample_flow(model, ps, st, n_samples)  # ODE solve
-    return x_0, x_1
-end
+```rust
+fn resample_trajectories(model: &VectorFieldNet, n_samples: usize,
+                          rng: &mut impl Rng) -> (Array2<f32>, Array2<f32>)
+{
+    let x0 = sample_source(n_samples, 2, rng); // x₀ ~ N(0,I)
+    let x1 = sample_flow(model, n_samples, 100, rng); // x₁' = ODESolve(v_θ; x₀, t:0→1)  (Reflow)
+    (x0, x1)
+}
 ```
 
 **Step 3: 直線経路での再訓練**
 
 新しいペア$(\mathbf{x}_0', \mathbf{x}_1')$に対し、**完全な直線**を目標とする：
 
-```julia
-function rectified_loss(model, ps, st, x₀, x₁, batch_size)
-    idx = rand(1:size(x₀, 2), batch_size)
-    t   = rand(Float32, batch_size)
+```rust
+fn rectified_loss(model: &VectorFieldNet, x0: &Array2<f32>, x1: &Array2<f32>,
+                   batch_size: usize, rng: &mut impl Rng) -> f32
+{
+    let n = x0.ncols();
+    let idx: Vec<usize> = (0..batch_size).map(|_| rng.gen_range(0..n)).collect();
+    let t: f32 = rng.gen();
 
-    @views x_t = @. t * x₁[:, idx] + (1 - t) * x₀[:, idx]
-    @views u_t = x₁[:, idx] .- x₀[:, idx]   # 常に直線方向
+    let x0_b = Array2::from_shape_fn((2, batch_size), |(r, c)| x0[[r, idx[c]]]);
+    let x1_b = Array2::from_shape_fn((2, batch_size), |(r, c)| x1[[r, idx[c]]]);
 
-    v̂, st = model(x_t, t, ps, st)
-    return mean((v̂ .- u_t).^2), st
-end
+    // x_t = t * x₁ + (1-t) * x₀
+    let x_t = x1_b.mapv(|v| t * v) + x0_b.mapv(|v| (1.0 - t) * v); // μ_t(x₁,x₀) = t·x₁ + (1-t)·x₀  (OT straight path)
+    let u_t = &x1_b - &x0_b; // u_t = x₁ - x₀  (straight-line target)
+
+    let v_hat = model_predict(model, &x_t, t);
+    let diff = v_hat - u_t;
+    diff.iter().map(|v| v * v).sum::<f32>() / diff.len() as f32 // L_CFM = E[||v_θ(xₜ,t) - u_t||²]
+}
+
 ```
 
 **Step 4: 1-step生成のテスト**
 
-```julia
-# Resample
-x₀_new, x₁_new = resample_trajectories(model_1, ps_1, st_1, 10000)
+```rust
+// Resample
+let (x0_new, x1_new) = resample_trajectories(&model_1, 10000, &mut rng);
 
-# Re-train
-model_2, ps_2, st_2, _ = train_with_rectified_loss(x₀_new, x₁_new)
+// Re-train
+let (model_2, _) = train_with_rectified_loss(&x0_new, &x1_new, &mut rng)?;
 
-# 1-step sampling (Euler with Δt=1)
-x₀_test  = sample_source(1000)
-v̂, _     = model_2(x₀_test, ones(Float32, 1000), ps_2, st_2)
-x₁_gen   = x₀_test .+ v̂        # Single step!
+// 1-step sampling (Euler with Δt=1)
+let x0_test = sample_source(1000, 2, &mut rng);
+let t_ones: Vec<f32> = vec![1.0_f32; 1000];
+let v_hat = model_predict_batch(&model_2, &x0_test, &t_ones);
+let x1_gen = &x0_test + &v_hat; // x₁ ≈ x₀ + v_θ(x₀,0)·1  (1-step Euler, Δt=1)
 ```
 
 **検証**：
@@ -494,43 +505,51 @@ Zone 3.5の理論的等価性を数値的に検証せよ。
 
 標準的なDDPMを訓練し、score function $\nabla_{\mathbf{x}}\log p_t(\mathbf{x})$を学習：
 
-```julia
-# Score network: ε_θ(x_t, t) ≈ -√(β_t) ∇log p_t(x_t)
-function train_score_model(...)
-    # DDPM training (Zone 3.5の式を使用)
-end
+```rust
+// Score network: ε_θ(x_t, t) ≈ -√(β_t) ∇log p_t(x_t)
+fn train_score_model(_rng: &mut impl Rng) -> ScoreNet {
+    // DDPM training (Zone 3.5の式を使用)
+    todo!()
+}
 ```
 
 **Step 2: Score → Flowの変換**
 
 Probability Flow ODE (3.5.3の式) を使って、scoreから速度場を計算：
 
-```julia
-function score_to_flow(ε_θ, x_t, t, β_t)
-    # v_t(x) = -1/2 β_t [x + ε_θ(x_t, t)]
-    return -0.5 * β_t * (x_t .+ ε_θ(x_t, t))
-end
+```rust
+// v_t(x) = -½β_t·[x + ε_θ(xₜ,t)]  (Score↔Flow equiv.)
+fn score_to_flow(eps_theta: &Array2<f32>, x_t: &Array2<f32>, beta_t: f32) -> Array2<f32> { (x_t + eps_theta).mapv(|v| -0.5 * beta_t * v) }
 ```
 
 **Step 3: 直接Flow Matchingとの比較**
 
 CFMで訓練した速度場$\mathbf{v}_\theta$と、scoreから計算した速度場を比較：
 
-```julia
-# Sample test points
-x_test = sample_target(100)
-t_test = rand(Float32, 100) .* 0.9 .+ 0.05  # t ∈ [0.05, 0.95]
+```rust
+// Sample test points
+let x_test = sample_target(100, &mut rng);
+let t_test: Vec<f32> = (0..100).map(|_| rng.gen::<f32>() * 0.9 + 0.05).collect(); // t ∈ [0.05, 0.95]
 
-# CFM prediction
-v_cfm, _ = model_cfm(x_test, t_test, ps_cfm, st_cfm)
+// CFM prediction
+let v_cfm = model_predict_batch(&model_cfm, &x_test, &t_test);
 
-# Score-based prediction
-ε_pred, _ = model_score(x_test, t_test, ps_score, st_score)
-v_score = score_to_flow(ε_pred, x_test, t_test, β(t_test))
+// Score-based prediction
+let eps_pred = model_predict_batch(&model_score, &x_test, &t_test);
+let beta_t = 0.1_f32; // β_t = 0.1  (example diffusion coefficient)
+let v_score = score_to_flow(&eps_pred, &x_test, beta_t); // v_t(x) = -½β_t·[x + ε_θ(xₜ,t)]  (Score↔Flow equiv.)
 
-# Compute correlation
-correlation = cor(vec(v_cfm), vec(v_score))
-println("Score ↔ Flow correlation: $correlation")
+// Compute correlation
+let v_cfm_flat: Vec<f32> = v_cfm.iter().cloned().collect();
+let v_score_flat: Vec<f32> = v_score.iter().cloned().collect();
+let n = v_cfm_flat.len() as f32;
+let mean_c = v_cfm_flat.iter().sum::<f32>() / n;
+let mean_s = v_score_flat.iter().sum::<f32>() / n;
+let cov: f32 = v_cfm_flat.iter().zip(&v_score_flat).map(|(a, b)| (a - mean_c) * (b - mean_s)).sum::<f32>() / n;
+let std_c = (v_cfm_flat.iter().map(|a| (a - mean_c).powi(2)).sum::<f32>() / n).sqrt();
+let std_s = (v_score_flat.iter().map(|b| (b - mean_s).powi(2)).sum::<f32>() / n).sqrt();
+let correlation = cov / (std_c * std_s + 1e-8);
+println!("Score ↔ Flow correlation: {}", correlation);
 ```
 
 **期待される結果**：
@@ -546,38 +565,45 @@ Zone 3.6のDiffFlowを簡易実装し、$\lambda$の効果を調べよ。
 
 **Discriminator追加**：
 
-```julia
-function build_discriminator(d::Int=2)
-    return Chain(
-        Dense(d + 1 => 64, gelu),
-        Dense(64 => 64, gelu),
-        Dense(64 => 1, sigmoid)
-    )
-end
+```rust
+// D(x,t): R^{d+1} → [0,1]  (discriminator for DiffFlow GAN term)
+fn build_discriminator(d: usize, vb: VarBuilder) -> Result<Discriminator> {
+    Ok(Discriminator {
+        fc1: linear(d + 1, 64, vb.pp("fc1"))?,
+        fc2: linear(64, 64, vb.pp("fc2"))?,
+        fc3: linear(64, 1, vb.pp("fc3"))?,
+    })
+}
 ```
 
 **DiffFlow Loss**：
 
-```julia
-function diffflow_loss(model, disc, ps_m, ps_d, st_m, st_d, λ, batch_size)
-    # CFM term
-    loss_cfm, st_m = cfm_loss(model, ps_m, st_m, path, batch_size)
+```rust
+fn diffflow_loss(model: &VectorFieldNet, disc: &Discriminator,
+                 path: &GaussianPath, lambda: f32,
+                 batch_size: usize, rng: &mut impl Rng) -> (f32, f32)
+{
+    // CFM term
+    let loss_cfm = cfm_loss(model, path, batch_size, rng);
 
-    # GAN term
-    x_real = sample_target(batch_size)
-    x_fake = sample_flow(model, ps_m, st_m, batch_size)
+    // GAN term
+    let x_real = sample_target(batch_size, rng);
+    let x_fake = sample_flow(model, batch_size, 100, rng);
 
-    d_real, st_d = disc(vcat(x_real, zeros(Float32, 1, batch_size)), ps_d, st_d)
-    d_fake, st_d = disc(vcat(x_fake, ones(Float32, 1, batch_size)), ps_d, st_d)
+    let zeros = Array2::zeros((1, batch_size));
+    let ones_arr = Array2::ones((1, batch_size));
+    let d_real = disc_forward(disc, &ndarray::concatenate![ndarray::Axis(0), x_real, zeros]);
+    let d_fake = disc_forward(disc, &ndarray::concatenate![ndarray::Axis(0), x_fake, ones_arr]);
 
-    loss_d = -mean(log.(d_real .+ 1f-8) .+ log.(1 .- d_fake .+ 1f-8))
-    loss_g = -mean(log.(d_fake .+ 1f-8))
+    let loss_d = -(d_real.iter().map(|v| (v + 1e-8).ln()).sum::<f32>()
+                 + d_fake.iter().map(|v| (1.0 - v + 1e-8).ln()).sum::<f32>())
+                 / batch_size as f32;
+    let loss_g = -d_fake.iter().map(|v| (v + 1e-8).ln()).sum::<f32>()
+                 / batch_size as f32;
 
-    # Combined
-    total_loss = loss_cfm + λ * loss_g
-
-    return total_loss, loss_d, st_m, st_d
-end
+    let total_loss = loss_cfm + lambda * loss_g; // L_DiffFlow = L_CFM + λ·L_G  (hybrid CFM+GAN)
+    (total_loss, loss_d)
+}
 ```
 
 **実験**：
@@ -604,27 +630,29 @@ JKOスキーム（Zone 3.7.5）を用いて、2次元分布の勾配流を可視
 
 **実装**：
 
-```julia
-using OptimalTransport
+```rust
+fn jko_step(p_current: &Array2<f32>, p_target: &Array2<f32>, tau: f32,
+             rng: &mut impl Rng) -> Array2<f32>
+{
+    // JKO step: min_p [KL(p||p_target) + W₂²(p, p_current)/(2τ)]
+    let m = pairwise_sq_dist(p_current, p_target); // C_ij = ||xᵢ - yⱼ||²  (cost matrix)
+    let gamma = sinkhorn_ot(&m.mapv(|v| v as f64), tau as f64, 100); // Entropic OT: min_π Σπᵢⱼcᵢⱼ + ε·H(π)
 
-function jko_step(p_current, p_target, τ)
-    # Solve: min_p [KL(p||p_target) + W_2(p, p_current)²/(2τ)]
-    # Use Sinkhorn algorithm for OT plan
-    M = pairwise_distance(p_current, p_target)
-    γ = sinkhorn(M, τ)
+    // Update via transport plan: move particles toward target
+    apply_transport(p_current, p_target, &gamma.mapv(|v| v as f32))
+}
 
-    # Update via transport plan
-    p_next = apply_transport(p_current, γ)
-
-    return p_next
-end
-
-# Iteration
-p = sample_source(1000)
-for k in 1:50
-    p = jko_step(p, sample_target(1000), τ=0.1)
-    # Visualize every 10 steps
-end
+fn main_jko() {
+    let mut rng = rand::rngs::StdRng::seed_from_u64(0);
+    let mut p = sample_source(1000, 2, &mut rng);
+    for k in 0..50 {
+        let p_target = sample_target(1000, &mut rng);
+        p = jko_step(&p, &p_target, 0.1, &mut rng);
+        if k % 10 == 0 {
+            println!("JKO step {}: p shape {:?}", k, p.shape());
+        }
+    }
+}
 ```
 
 **可視化**：
@@ -1087,7 +1115,7 @@ Stable Diffusionと同じアプローチ。Meta AIのFlow Matching Guide（arXiv
 
 **公式実装**：
 - `atong01/conditional-flow-matching`（PyTorch、reference実装）
-- `FluxML/Flux.jl`（Julia、本講義のベース）
+- `Candle/Burn`（Rust、本講義のベース）
 
 **論文**：
 - Flow Matching原論文（Lipman+ ICLR 2023, arXiv:2210.02747）
@@ -1272,38 +1300,47 @@ $$
 
 **実装** (Sinkhorn アルゴリズム):
 
-```julia
-using LinearAlgebra, Distances
+```rust
+use ndarray::{Array1, Array2};
 
-function sinkhorn_ot(C::Matrix{Float64}, ε=0.1, max_iter=100)
-    # C: cost matrix (B × B)
-    # ε: entropic regularization
-    # Returns: coupling matrix π (B × B)
+fn sinkhorn_ot(c: &Array2<f64>, eps: f64, max_iter: usize) -> Array2<f64> {
+    let b = c.nrows();
+    let k = c.mapv(|v| (-v / eps).exp()); // K = exp(-C/ε)  (Gibbs kernel)
+    let mut u = Array1::<f64>::ones(b);
+    let mut v = Array1::<f64>::ones(b);
 
-    B    = size(C, 1)
-    K    = exp.(-C ./ ε)    # Gibbs kernel
-    u, v = ones(B), ones(B)
+    for _ in 0..max_iter {
+        u = k.dot(&v).mapv(|x| 1.0 / (x + 1e-8));     // u = 1/(Kv)   (Sinkhorn iteration)
+        v = k.t().dot(&u).mapv(|x| 1.0 / (x + 1e-8)); // v = 1/(Kᵀu)
+    }
 
-    for _ in 1:max_iter
-        u .= 1 ./ (K  * v)
-        v .= 1 ./ (K' * u)
-    end
+    // π = diag(u)·K·diag(v)  (OT coupling)
+    let pi = Array2::from_shape_fn((b, b), |(i, j)| u[i] * k[[i, j]] * v[j]);
+    let s = pi.sum();
+    pi / s // Normalize
+}
 
-    π = Diagonal(u) * K * Diagonal(v)
-    return π ./ sum(π)    # Normalize
-end
+fn minibatch_ot_loss(x0_batch: &Array2<f32>, x1_batch: &Array2<f32>,
+                      model: &VectorFieldNet, t: f32) -> f32
+{
+    // L_OT-CFM = Σᵢⱼ πᵢⱼ·||v_θ(xₜ,t) - (x₁ⱼ-x₀ᵢ)||²
+    let b = x0_batch.ncols();
+    let c = pairwise_sq_dist_f64(x1_batch, x0_batch); // C_ij = ||x₁ⱼ - x₀ᵢ||²
+    let pi = sinkhorn_ot(&c, 0.1, 100); // π = OT coupling  (ε=0.1)
 
-function minibatch_ot_loss(x₀_batch, x₁_batch, v_θ, t)
-    B = size(x₀_batch, 2)
-    C = pairwise(SqEuclidean(), x₁_batch, x₀_batch, dims=2)
-    π = sinkhorn_ot(C)
-
-    return sum(
-        π[i,j] * norm(v_θ(@. (1-t)*x₀_batch[:,i] + t*x₁_batch[:,j], t) .-
-                      (x₁_batch[:,j] .- x₀_batch[:,i]))^2
-        for i in 1:B, j in 1:B if π[i,j] > 1e-6
-    )
-end
+    (0..b).flat_map(|i| (0..b).map(move |j| (i, j)))
+        .filter(|&(i, j)| pi[[i, j]] > 1e-6)
+        .map(|(i, j)| {
+            let x_t = Array2::from_shape_fn((2, 1), |(r, _)|
+                (1.0 - t) * x0_batch[[r, i]] + t * x1_batch[[r, j]]); // xₜ = (1-t)x₀ᵢ + t·x₁ⱼ
+            let u_t = Array2::from_shape_fn((2, 1), |(r, _)|
+                x1_batch[[r, j]] - x0_batch[[r, i]]); // uₜ = x₁ⱼ - x₀ᵢ  (OT straight-line)
+            let v_hat = model_predict(model, &x_t, t);
+            let diff = v_hat - u_t;
+            pi[[i, j]] as f32 * diff.iter().map(|v| v * v).sum::<f32>()
+        })
+        .sum::<f32>() / b as f32
+}
 ```
 
 **計算量比較**:
@@ -1357,121 +1394,107 @@ $$
 
 **Minority Class の品質が 2.3倍改善**（Majority への影響は最小）。
 
-### 7.4 実装例: Minibatch OT-CFM (Julia)
+### 7.4 実装例: Minibatch OT-CFM (Rust)
 
 以下は、前述の理論を統合した実装例。
 
-```julia
-using Lux, Optimisers, Zygote, Random, LinearAlgebra, Distances
-using DifferentialEquations, Plots
+```rust
+use candle_core::{Tensor, Device, DType, Result};
+use candle_nn::optim::{Adam, AdamConfig, Optimizer};
+use ndarray::{Array1, Array2};
+use rand::Rng;
 
-# --- Minibatch OT Solver ---
-function sinkhorn_coupling(C::Matrix{T}, ε::T=T(0.1), max_iter::Int=50) where T
-    B    = size(C, 1)
-    K    = exp.(-C ./ ε)
-    u, v = ones(T, B), ones(T, B)
+// --- Minibatch OT Solver ---
+fn sinkhorn_coupling(c: &Array2<f32>, eps: f32, max_iter: usize) -> Array2<f32> {
+    let b = c.nrows();
+    let k = c.mapv(|v| (-v / eps).exp()); // K = exp(-C/ε)  (Gibbs kernel)
+    let mut u = Array1::<f32>::ones(b);
+    let mut v = Array1::<f32>::ones(b);
 
-    for _ in 1:max_iter
-        u .= 1 ./ (K  * v .+ T(1e-8))
-        v .= 1 ./ (K' * u .+ T(1e-8))
-    end
+    for _ in 0..max_iter {
+        u = k.dot(&v).mapv(|x| 1.0 / (x + 1e-8));     // u = 1/(Kv)   (Sinkhorn iteration)
+        v = k.t().dot(&u).mapv(|x| 1.0 / (x + 1e-8)); // v = 1/(Kᵀu)
+    }
 
-    π = Diagonal(u) * K * Diagonal(v)
-    return π ./ sum(π)
-end
+    let pi = Array2::from_shape_fn((b, b), |(i, j)| u[i] * k[[i, j]] * v[j]); // π = diag(u)·K·diag(v)  (OT coupling)
+    let s = pi.sum();
+    pi / s
+}
 
-# --- Velocity Network ---
-VelocityNet(d_in::Int, d_hidden::Int=128) = Chain(
-    Dense(d_in + 1, d_hidden, relu),  # [x_t; t]
-    Dense(d_hidden, d_hidden, relu),
-    Dense(d_hidden, d_in)
-)
+// --- Velocity Network ---
+fn velocity_net(d_in: usize, d_hidden: usize, vb: VarBuilder) -> Result<VectorFieldNet> { VectorFieldNet::new_with_hidden(d_in, d_hidden, vb) }
 
-# --- Minibatch OT-CFM Training ---
-function train_minibatch_ot_cfm(
-    data_source,   # Function: () -> (B, d) samples from p₀
-    data_target,   # Function: () -> (B, d) samples from p₁
-    n_epochs::Int=100,
-    batch_size::Int=256,
-    ε_sinkhorn::Float32=0.1f0
-)
-    d = 2  # Dimension
-    rng = Random.default_rng()
+// --- Minibatch OT-CFM Training ---
+fn train_minibatch_ot_cfm(
+    data_source: impl Fn(&mut rand::rngs::StdRng) -> Array2<f32>,
+    data_target: impl Fn(&mut rand::rngs::StdRng) -> Array2<f32>,
+    n_epochs: usize,
+    batch_size: usize,
+    eps_sinkhorn: f32,
+    rng: &mut rand::rngs::StdRng,
+) -> Result<VectorFieldNet> {
+    let d = 2;
+    let dev = Device::Cpu;
+    let vb = VarBuilder::zeros(DType::F32, &dev);
+    let model = velocity_net(d, 128, vb.clone())?;
+    let mut opt = Adam::new(vb.all_vars(), AdamConfig { lr: 1e-3, ..Default::default() })?;
 
-    # Model
-    model = VelocityNet(d, 128)
-    ps, st = Lux.setup(rng, model)
-    opt = Optimisers.Adam(1f-3)
-    opt_state = Optimisers.setup(opt, ps)
+    for epoch in 0..n_epochs {
+        // Sample batches
+        let x0 = data_source(rng); // (d, B)
+        let x1 = data_target(rng); // (d, B)
 
-    for epoch in 1:n_epochs
-        # Sample batches
-        x₀ = data_source()   # (d, B)
-        x₁ = data_target()   # (d, B)
+        let c = pairwise_sq_dist(&x1, &x0); // C_ij = ||x₁ⱼ - x₀ᵢ||²  (cost matrix)
+        let pi = sinkhorn_coupling(&c, eps_sinkhorn, 50); // π = OT coupling via Sinkhorn
+        let t: f32 = rng.gen(); // t ~ U(0,1)
+        // L_OT-CFM = Σᵢⱼ πᵢⱼ·||v_θ(xₜ,t) - (x₁ⱼ-x₀ᵢ)||²
+        let loss = (0..batch_size).flat_map(|i| (0..batch_size).map(move |j| (i, j)))
+            .filter(|&(i, j)| pi[[i, j]] > 1e-6)
+            .map(|(i, j)| {
+                let x_t = Array2::from_shape_fn((d, 1), |(r, _)|
+                    (1.0 - t) * x0[[r, i]] + t * x1[[r, j]]); // xₜ = (1-t)x₀ᵢ + t·x₁ⱼ
+                let u_t_vec: Vec<f32> = (0..d).map(|r| x1[[r, j]] - x0[[r, i]]).collect(); // uₜ = x₁ⱼ - x₀ᵢ
+                let v_hat = model_predict(&model, &x_t, t); // v_θ(xₜ, t): R^{d+1} → R^d
+                let diff: f32 = v_hat.iter().zip(&u_t_vec).map(|(a, b)| (a - b).powi(2)).sum();
+                pi[[i, j]] * diff
+            })
+            .sum::<f32>() / batch_size as f32;
 
-        # Compute OT coupling
-        C = pairwise(SqEuclidean(), x₁, x₀, dims=2)  # (B, B)
-        π = sinkhorn_coupling(C, ε_sinkhorn)
+        opt.backward_step(&Tensor::new(loss, &dev)?)?;
 
-        # Sample time
-        t = rand(rng, Float32)
+        if (epoch + 1) % 10 == 0 {
+            println!("Epoch {}, Loss: {}", epoch + 1, loss);
+        }
+    }
 
-        # Compute loss
-        loss, grads = Zygote.withgradient(ps) do p
-            sum(
-                π[i,j] * sum(abs2,
-                    first(model(vcat(@. (1-t)*x₀[:,i] + t*x₁[:,j], [t]), p, st)) .-
-                    (x₁[:,j] .- x₀[:,i]))
-                for i in 1:batch_size, j in 1:batch_size if π[i,j] > 1f-6
-            ) / batch_size
-        end
+    Ok(model)
+}
 
-        # Update
-        opt_state, ps = Optimisers.update(opt_state, ps, grads[1])
-
-        if epoch % 10 == 0
-            println("Epoch $epoch, Loss: $(loss)")
-        end
-    end
-
-    return ps, st, model
-end
-
-# --- ODE Sampling ---
-function sample_ot_cfm(model, ps, st, x₀::Matrix{Float32}, T::Float32=1.0f0, steps::Int=100)
-    d, B = size(x₀)
-
-    function velocity!(du, u, p, t)
-        input = vcat(u, [Float32(t)])
-        v, _ = model(input, ps, st)
-        du .= v
-    end
-
-    return [
-        solve(ODEProblem(velocity!, @view(x₀[:,i]), (0.0f0, T)),
-              Tsit5(); saveat=range(0, T, length=steps)).u[end]
-        for i in 1:B
-    ]
-end
+// --- ODE Sampling ---
+fn sample_ot_cfm(model: &VectorFieldNet, x0: &Array2<f32>, n_steps: usize) -> Array2<f32> { euler_integrate(|x, t| model_predict(model, x, t), x0, n_steps) } // xₜ₊dt = xₜ + v_θ(xₜ,t)·dt  (ODE integrator)
 ```
 
 **使用例**:
 
-```julia
-# Data: Two Gaussians
-source() = randn(Float32, 2, 256)                    # 𝒩(0, I)
-target() = randn(Float32, 2, 256) .+ Float32[3, 0]   # 𝒩([3,0], I)
+```rust
+// x₀ ~ N(0,I), x₁ ~ N([3,0],I): Two Gaussians
+let source = |rng: &mut rand::rngs::StdRng| -> Array2<f32> {
+    sample_source(256, 2, rng) // x₀ ~ N(0,I)
+};
+let target = |rng: &mut rand::rngs::StdRng| -> Array2<f32> {
+    sample_source(256, 2, rng).mapv(|v| v) + 3.0_f32 // x₁ ~ N([3,0],I)
+};
 
-# Train
-ps, st, model = train_minibatch_ot_cfm(source, target, n_epochs=200, batch_size=256)
+// Train minibatch OT-CFM: L_OT-CFM = Σᵢⱼ πᵢⱼ·||v_θ(xₜ,t) - (x₁ⱼ-x₀ᵢ)||²
+let model = train_minibatch_ot_cfm(source, target, 200, 256, 0.1, &mut rng)?;
 
-# Sample
-x₀_test    = randn(Float32, 2, 500)
-x₁_samples = sample_ot_cfm(model, ps, st, x₀_test)
+// Sample
+let x0_test = sample_source(500, 2, &mut rng); // x₀ ~ N(0,I)
+let x1_samples = sample_ot_cfm(&model, &x0_test, 100); // ODE solve: x₁ = ODESolve(v_θ; x₀)
 
-# Visualize
-scatter(x₀_test[1,:], x₀_test[2,:], label="Source", alpha=0.3)
-scatter!(first.(x₁_samples), last.(x₁_samples), label="Generated", alpha=0.5)
+// Print summary
+println!("Source: {:?}", x0_test.shape());
+println!("Generated: {:?}", x1_samples.shape());
 ```
 
 ---
@@ -1518,15 +1541,25 @@ $k$ 回目の Flow で生成したペアを使い、$k+1$ 回目を訓練。
 
 **2回の Reflow で 5-step 生成** を達成。
 
-**Julia 実装**:
+**Rust 実装**:
 
-```julia
-function reflow_iteration(model_k, ps_k, st_k, data_source, data_target, n_samples=10000)
-    # Generate new (x₀, x₁) pairs via current flow
-    x₀_new = [data_source() for _ in 1:n_samples]
-    x₁_new = [solve_ode(model_k, ps_k, st_k, x₀; T=1.0) for x₀ in x₀_new]
-    return train_cfm(x₀_new, x₁_new)
-end
+```rust
+fn reflow_iteration(
+    model_k: &VectorFieldNet,
+    data_source: impl Fn(&mut rand::rngs::StdRng) -> Array2<f32>,
+    n_samples: usize,
+    rng: &mut rand::rngs::StdRng,
+) -> Result<VectorFieldNet> {
+    let x0_new: Vec<Array2<f32>> = (0..n_samples)
+        .map(|_| data_source(rng)) // x₀ ~ p_source
+        .collect();
+    let x1_new: Vec<Array2<f32>> = x0_new.iter()
+        .map(|x0| euler_integrate(|x, t| model_predict(model_k, x, t), x0, 100)) // x₁' = ODESolve(v_θ; x₀, t:0→1)  (Reflow)
+        .collect();
+
+    // Re-train with rectified pairs
+    train_cfm_from_pairs(&x0_new, &x1_new, rng)
+}
 ```
 
 **応用**: Text-to-Image (Stable Diffusion) で Reflow² → 4-step 生成で品質維持。

@@ -2,12 +2,12 @@
 title: "第14回: Attention — 化石からの脱却: 30秒の驚き→数式修行→実装マスター 【前編】理論編"
 emoji: "🔍"
 type: "tech"
-topics: ["machinelearning", "deeplearning", "transformer", "julia", "rust"]
+topics: ["machinelearning", "deeplearning", "transformer", "rust", "rust"]
 published: true
 slug: "ml-lecture-14-part1"
 difficulty: "advanced"
 time_estimate: "90 minutes"
-languages: ["Julia", "Rust"]
+languages: ["Rust"]
 keywords: ["機械学習", "深層学習", "生成モデル"]
 ---
 
@@ -60,38 +60,52 @@ graph LR
 
 単語列 `["I", "love", "Transformers"]` を処理する。各単語がお互いをどれだけ「見る」かを計算するのがSelf-Attentionだ。
 
-```julia
-using LinearAlgebra
+```rust
+use ndarray::{array, Array2};
 
-# Simple Self-Attention in 30 seconds
-function self_attention_simple(x)
-    # x: (seq_len, d_model) input embeddings
-    d_k = size(x, 2)
-    # Q, K, V are all x (simplified — no learned weights for this demo)
-    Q, K, V = x, x, x
-    # Attention scores: Q * K^T / sqrt(d_k)
-    scores = (Q * K') / √d_k
-    # Softmax over columns (each row sums to 1)
-    ex = exp.(scores)
-    weights = ex ./ sum(ex, dims=2)
-    # Output: weighted sum of V
-    output = weights * V
-    return output, weights
-end
+// Simple Self-Attention demo
+// x: (seq_len, d_model) input embeddings
+fn self_attention_simple(x: &Array2<f64>) -> (Array2<f64>, Array2<f64>) {
+    let d_k = x.shape()[1] as f64;
+    // Q, K, V are all x (simplified — no learned weights for this demo)
+    // Attention scores: Q * K^T / sqrt(d_k)
+    let scores = x.dot(&x.t()) / d_k.sqrt();
+    // Softmax: per row
+    let weights = softmax_rows(&scores);
+    // Output: weighted sum of V
+    let output = weights.dot(x);
+    (output, weights)
+}
 
-# Tiny embedding: 3 words, d_model=4
-x = [1.0 0.5 0.2 0.1;   # "I"
-     0.3 1.0 0.4 0.2;   # "love"
-     0.2 0.3 1.0 0.5]   # "Transformers"
+fn softmax_rows(m: &Array2<f64>) -> Array2<f64> {
+    let mut out = m.clone();
+    for mut row in out.rows_mut() {
+        let max = row.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+        row.mapv_inplace(|x| (x - max).exp());
+        let sum: f64 = row.iter().sum();
+        row.mapv_inplace(|x| x / sum);
+    }
+    out
+}
 
-out, attn = self_attention_simple(x)
+fn main() {
+    // Tiny embedding: 3 words, d_model=4
+    let x: Array2<f64> = array![
+        [1.0, 0.5, 0.2, 0.1],  // "I"
+        [0.3, 1.0, 0.4, 0.2],  // "love"
+        [0.2, 0.3, 1.0, 0.5],  // "Transformers"
+    ];
 
-println("Attention weights (each row = how much each word attends to all words):")
-for (i, row) in enumerate(eachrow(attn))
-    println("Word $i: ", round.(row, digits=3))
-end
-println("\nOutput (context-aware representation):")
-println(out)
+    let (out, attn) = self_attention_simple(&x);
+
+    println!("Attention weights (each row = how much each word attends to all words):");
+    for (i, row) in attn.rows().into_iter().enumerate() {
+        let rounded: Vec<f64> = row.iter().map(|&v| (v * 1000.0).round() / 1000.0).collect();
+        println!("Word {}: {:?}", i + 1, rounded);
+    }
+    println!("\nOutput (context-aware representation):");
+    println!("{:.4}", out);
+}
 ```
 
 出力:
@@ -193,7 +207,7 @@ Self-Attentionの核心は **Query (Q)**, **Key (K)**, **Value (V)** の3つの�
 graph TD
     A["Course I<br/>数学基礎編<br/>第1-8回"] --> B["Course II<br/>生成モデル理論編<br/>第9-18回"]
     B --> C["第9回<br/>NN基礎+VI+ELBO<br/>🐍→🦀Rust登場"]
-    C --> D["第10回<br/>VAE基礎→離散<br/>⚡Julia登場"]
+    C --> D["第10回<br/>VAE基礎→離散<br/>🦀Rust深化"]
     D --> E["第11回<br/>最適輸送理論<br/>GAN/FM基盤"]
     E --> F["第12回<br/>GAN基礎→StyleGAN<br/>敵対的学習"]
     F --> G["第13回<br/>自己回帰モデル<br/>PixelCNN/WaveNet"]
@@ -226,7 +240,7 @@ graph TD
 | **Scaling Laws** | 触れず | Kaplan/Chinchilla完全解説+Emergent Abilities |
 | **ICL理論** | 触れず | 暗黙的勾配降下+Dual Form解釈+最新理論 |
 | **KV-Cache** | 触れず | 推論高速化の仕組み+実装パターン |
-| **実装** | PyTorch概要 | ⚡Julia完全実装+🦀Rust推論+3言語比較 |
+| **実装** | PyTorch概要 | 🦀Rust完全実装+🦀Rust推論+3言語比較 |
 | **コード行数** | ~20行 | ~1500行（訓練+推論+実験全て） |
 | **総ページ数** | 2ページ相当 | 本講義: 3000行（約80ページ相当） |
 
@@ -284,7 +298,7 @@ CNN: 固定カーネル — 位置に依存しない特徴のみ抽出
 → Zone 3の数式修行を紙とペンで全て導出。Self-Attention→Multi-Head→Position Encoding→Transformer Block全てを自力で。推定60分。
 
 **タイプB: 実装で理解派**
-→ Zone 4のJulia実装を読みながらZone 3の数式を確認。コード1行 = 数式1行の対応を追う。推定45分。
+→ Zone 4のRust実装を読みながらZone 3の数式を確認。コード1行 = 数式1行の対応を追う。推定45分。
 
 **タイプC: 概要把握派**
 → Zone 2（本セクション）+ Zone 7（振り返り）で全体像をつかみ、Zone 3/4は必要に応じて参照。推定30分。
@@ -294,10 +308,10 @@ CNN: 固定カーネル — 位置に依存しない特徴のみ抽出
 <details><summary>トロイの木馬 — 言語移行の現在地</summary>
 
 **第9回**: 🐍Python地獄体感 → 🦀Rust登場（ゼロコピーで50x高速化）
-**第10回**: 🦀Rust型パズル苦痛 → ⚡Julia登場（多重ディスパッチで数式が型に応じて最適化）
-**第11-13回**: ⚡Julia主役、🦀Rust推論で補完
-**第14回（今回）**: ⚡Julia訓練ループ全体 + 🦀Rust Attention推論高速化
-**第15回以降**: ⚡🦀が武器に。Python? もう見えない。
+**第10回**: 🦀Rust型パズル苦痛 → 🦀Rust登場（ゼロコスト抽象化で数式が型に応じて最適化）
+**第11-13回**: 🦀Rust主役、🦀Rust推論で補完
+**第14回（今回）**: 🦀Rust訓練ループ全体 + 🦀Rust Attention推論高速化
+**第15回以降**: 🦀🦀が武器に。Python? もう見えない。
 
 </details>
 

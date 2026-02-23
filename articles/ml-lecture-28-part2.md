@@ -3,11 +3,11 @@ title: "第28回: プロンプトエンジニアリング: 30秒の驚き→数�
 slug: "ml-lecture-28-part2"
 emoji: "💬"
 type: "tech"
-topics: ["machinelearning", "prompt", "rust", "julia", "llm"]
+topics: ["machinelearning", "prompt", "rust", "rust", "llm"]
 published: true
 difficulty: "advanced"
 time_estimate: "90 minutes"
-languages: ["Julia", "Rust", "Elixir"]
+languages: ["Rust", "Elixir"]
 keywords: ["機械学習", "深層学習", "生成モデル"]
 ---
 
@@ -22,9 +22,9 @@ topics: ["machinelearning", "prompt", "rust", "julia", "llm"]
 published: true
 ---
 
-## 💻 Z5. 試練（実装）（45分）— Template Engine + Julia実験
+## 💻 Z5. 試練（実装）（45分）— Template Engine + Rust実験
 
-**ゴール**: プロンプトを型安全に管理する🦀 Rust Template Engineと、プロンプト効果を定量測定する⚡ Julia実験環境を構築する。
+**ゴール**: プロンプトを型安全に管理する🦀 Rust Template Engineと、プロンプト効果を定量測定する🦀 Rust実験環境を構築する。
 
 ### 4.1 なぜTemplate Engineが必要なのか？
 
@@ -317,209 +317,152 @@ vars.insert("problem".to_string(), "太郎は12個のリンゴを...".to_string(
 let prompt = template.render(&vars)?;
 ```
 
-### 4.3 ⚡ Julia Prompt実験環境
+### 4.3 🦀 Rust Prompt実験環境
 
 #### 4.3.1 実験設計
 
 プロンプト手法の効果を定量測定する実験環境を構築:
 
-```julia
-module PromptExperiments
+```rust
+// Prompt実験モジュール: LLM呼び出し + Self-Consistency
+use std::collections::HashMap;
 
-using HTTP, JSON3
-using Statistics, StatsBase
-using DataFrames, CSV
+/// LLM API呼び出し（Ollama前提）
+fn call_llm(prompt: &str, model: &str, temperature: f64) -> Result<String, Box<dyn std::error::Error>> {
+    let client = reqwest::blocking::Client::new();
+    let body = serde_json::json!({
+        "model": model,
+        "prompt": prompt,
+        "stream": false,
+        "options": { "temperature": temperature }
+    });
+    let result: serde_json::Value = client
+        .post("http://localhost:11434/api/generate")
+        .json(&body)
+        .send()?
+        .json()?;
+    Ok(result["response"].as_str().unwrap_or("").to_owned())
+}
 
-"""
-LLM API呼び出し（Ollama前提）
-"""
-function call_llm(prompt::String; model::String="llama3.2:3b", temperature::Float64=0.7)
-    url = "http://localhost:11434/api/generate"
-    body = JSON3.write(Dict(
-        "model" => model,
-        "prompt" => prompt,
-        "stream" => false,
-        "options" => Dict("temperature" => temperature)
-    ))
+/// 答えを抽出（簡易パーサー）: "答え: N" / "N個" / 単独の数字
+fn extract_answer(response: &str) -> Option<i64> {
+    for pattern in [r"答え[：:]\s*(\d+)", r"(\d+)個", r"^\d+$"] {
+        let re = regex::Regex::new(pattern).unwrap();
+        if let Some(cap) = re.captures(response) {
+            if let Ok(n) = cap[1].parse() {
+                return Some(n);
+            }
+        }
+    }
+    None
+}
 
-    response = HTTP.post(url, ["Content-Type" => "application/json"], body)
-    result = JSON3.read(String(response.body))
+/// Self-Consistency: n回サンプリングして多数決
+fn self_consistency(prompt: &str, n: usize, model: &str) -> Option<i64> {
+    let answers: Vec<i64> = (0..n)
+        .filter_map(|_| call_llm(prompt, model, 0.8).ok().and_then(|r| extract_answer(&r)))
+        .collect();
+    if answers.is_empty() { return None; }
+    let mut counts: HashMap<i64, usize> = HashMap::new();
+    for &a in &answers { *counts.entry(a).or_default() += 1; }
+    counts.into_iter().max_by_key(|(_, c)| *c).map(|(a, _)| a)
+}
 
-    result.response
-end
+/// 実験結果レコード
+#[derive(Debug)]
+struct ExperimentResult {
+    method: String,
+    question_id: usize,
+    trial: usize,
+    answer: Option<i64>,
+    correct: Option<bool>,
+    latency_ms: f64,
+}
 
-"""
-答えを抽出（簡易パーサー）
-"""
-function extract_answer(response::String)::Union{Int,Nothing}
-    # "答え: N" or "N個" or 単独の数字を抽出
-    patterns = [
-        r"答え:\s*(\d+)",
-        r"(\d+)個",
-        r"^(\d+)$"m
-    ]
+/// プロンプト手法の比較実験
+fn run_experiment(
+    experiments: &[(&str, &dyn Fn(&str) -> String)],
+    questions: &[(&str, i64)],
+    model: &str,
+    n_trials: usize,
+) -> Vec<ExperimentResult> {
+    let mut results = Vec::new();
+    for &(method_name, prompt_fn) in experiments {
+        for (q_id, &(question, truth)) in questions.iter().enumerate() {
+            let prompt = prompt_fn(question);
+            for trial in 0..n_trials {
+                let start = std::time::Instant::now();
+                let response = call_llm(&prompt, model, 0.7).unwrap_or_default();
+                let latency_ms = start.elapsed().as_secs_f64() * 1000.0;
+                let answer = extract_answer(&response);
+                let correct = answer.map(|a| a == truth);
+                results.push(ExperimentResult {
+                    method: method_name.to_string(),
+                    question_id: q_id, trial, answer, correct, latency_ms,
+                });
+            }
+        }
+    }
+    results
+}
 
-    for pattern in patterns
-        m = match(pattern, response)
-        m !== nothing && return parse(Int, m.captures[1])
-    end
-
-    nothing
-end
-
-"""
-Self-Consistency実装
-"""
-function self_consistency(prompt::String, n::Int=5; model::String="llama3.2:3b")
-    responses = [call_llm(prompt; model=model, temperature=0.8) for _ in 1:n]
-    answers = filter(!isnothing, extract_answer.(responses))
-
-    if isempty(answers)
-        return nothing, Dict{Int,Int}()
-    end
-
-    # 多数決
-    counts = countmap(answers)
-    majority = argmax(counts)
-
-    return majority, counts
-end
-
-"""
-プロンプト手法の比較実験
-"""
-struct PromptExperiment
-    name::String
-    prompt_fn::Function  # (question::String) -> prompt::String
-end
-
-function run_experiment(
-    experiments::Vector{PromptExperiment},
-    questions::Vector{Tuple{String,Int}};  # (question, ground_truth)
-    model::String="llama3.2:3b",
-    n_trials::Int=3
-)
-    results = DataFrame(
-        method=String[],
-        question_id=Int[],
-        trial=Int[],
-        answer=Union{Int,Missing}[],
-        correct=Union{Bool,Missing}[],
-        latency_ms=Float64[]
-    )
-
-    for (method_id, exp) in enumerate(experiments)
-        @info "Running experiment: $(exp.name)"
-
-        for (q_id, (question, truth)) in enumerate(questions)
-            prompt = exp.prompt_fn(question)
-
-            for trial in 1:n_trials
-                start_time = time()
-                response = call_llm(prompt; model=model)
-                latency = (time() - start_time) * 1000  # ms
-
-                answer = extract_answer(response)
-                correct = answer !== nothing ? (answer == truth) : missing
-
-                push!(results, (
-                    method=exp.name,
-                    question_id=q_id,
-                    trial=trial,
-                    answer=answer,
-                    correct=correct,
-                    latency_ms=latency
-                ))
-            end
-        end
-    end
-
-    return results
-end
-
-"""
-結果を集計
-"""
-function summarize_results(results::DataFrame)
-    summary = combine(groupby(results, :method)) do df
-        accuracy = mean(skipmissing(df.correct)) * 100
-        latency_mean = mean(df.latency_ms)
-        latency_std = std(df.latency_ms)
-
-        (
-            accuracy=accuracy,
-            latency_mean=latency_mean,
-            latency_std=latency_std,
-            n_total=nrow(df),
-            n_valid=count(!ismissing, df.correct)
-        )
-    end
-
-    return summary
-end
-
-end  # module
+/// 結果を集計: method → (accuracy%, mean_latency_ms)
+fn summarize_results(results: &[ExperimentResult]) -> Vec<(String, f64, f64)> {
+    let mut by_method: HashMap<&str, Vec<&ExperimentResult>> = HashMap::new();
+    for r in results { by_method.entry(&r.method).or_default().push(r); }
+    by_method.into_iter().map(|(method, records)| {
+        let correct: Vec<f64> = records.iter()
+            .filter_map(|r| r.correct)
+            .map(|c| c as u8 as f64)
+            .collect();
+        let accuracy = if correct.is_empty() { 0.0 }
+                       else { correct.iter().sum::<f64>() / correct.len() as f64 * 100.0 };
+        let mean_latency = records.iter().map(|r| r.latency_ms).sum::<f64>()
+            / records.len() as f64;
+        (method.to_string(), accuracy, mean_latency)
+    }).collect()
+}
 ```
 
 #### 4.3.2 実験実行例
 
-```julia
-using .PromptExperiments
+```rust
+fn main() {
+    // テストケース（算数問題）
+    let questions: &[(&str, i64)] = &[
+        ("太郎は12個のリンゴを持っていて、花子に3個あげました。その後、母親から5個もらいました。太郎は今何個のリンゴを持っていますか？", 14),
+        ("教室に生徒が25人います。5人が帰りました。その後、3人が来ました。今、教室には何人いますか？", 23),
+        ("りんごが8個、みかんが5個あります。合わせて何個ですか？", 13),
+        ("100円のノートを3冊買いました。1000円出したらおつりはいくらですか？", 700),
+        ("1時間は60分です。2時間30分は何分ですか？", 150),
+    ];
 
-# テストケース（算数問題）
-questions = [
-    ("太郎は12個のリンゴを持っていて、花子に3個あげました。その後、母親から5個もらいました。太郎は今何個のリンゴを持っていますか？", 14),
-    ("教室に生徒が25人います。5人が帰りました。その後、3人が来ました。今、教室には何人いますか？", 23),
-    ("りんごが8個、みかんが5個あります。合わせて何個ですか？", 13),
-    ("100円のノートを3冊買いました。1000円出したらおつりはいくらですか？", 700),
-    ("1時間は60分です。2時間30分は何分ですか？", 150),
-]
+    // プロンプト手法の定義
+    let direct:       &dyn Fn(&str) -> String = &|q| format!("次の問題を解いてください。\n\n問題: {}\n答え:", q);
+    let zero_cot:     &dyn Fn(&str) -> String = &|q| format!("次の問題を解いてください。\n\n問題: {}\n\nLet's think step by step.", q);
+    let few_cot:      &dyn Fn(&str) -> String = &|q| format!(
+        "以下の算数問題を解いてください。\n\n# 例1\n問題: リンゴが5個あります。2個食べました。残りは何個ですか？\n推論:\n- 最初にリンゴが5個ある\n- 2個食べたので、5 - 2 = 3\n答え: 3個\n\n# 問題\n問題: {}\n推論:", q
+    );
 
-# プロンプト手法の定義
-experiments = [
-    # Direct
-    PromptExperiment("Direct", q -> """
-        次の問題を解いてください。
+    let experiments: &[(&str, &dyn Fn(&str) -> String)] = &[
+        ("Direct",        direct),
+        ("Zero-shot CoT", zero_cot),
+        ("Few-shot CoT",  few_cot),
+    ];
 
-        問題: $q
-        答え:
-    """),
+    // 実験実行
+    let results = run_experiment(experiments, questions, "llama3.2:3b", 3);
 
-    # Zero-shot CoT
-    PromptExperiment("Zero-shot CoT", q -> """
-        次の問題を解いてください。
+    // 結果集計
+    let mut summary = summarize_results(&results);
+    summary.sort_by(|a, b| a.0.cmp(&b.0));
+    for (method, accuracy, latency) in &summary {
+        println!("{}: accuracy={:.1}%, mean_latency={:.1}ms", method, accuracy, latency);
+    }
 
-        問題: $q
-
-        Let's think step by step.
-    """),
-
-    # Few-shot CoT
-    PromptExperiment("Few-shot CoT", q -> """
-        以下の算数問題を解いてください。
-
-        # 例1
-        問題: リンゴが5個あります。2個食べました。残りは何個ですか？
-        推論:
-        - 最初にリンゴが5個ある
-        - 2個食べたので、5 - 2 = 3
-        答え: 3個
-
-        # 問題
-        問題: $q
-        推論:
-    """),
-]
-
-# 実験実行
-results = run_experiment(experiments, questions; n_trials=3)
-
-# 結果集計
-summary = summarize_results(results)
-println(summary)
-
-# CSV保存
-CSV.write("prompt_experiment_results.csv", results)
+    // CSV保存（serde + csv クレートを使用）
+    // csv::Writer::from_path("prompt_experiment_results.csv").unwrap()...
+}
 ```
 
 **出力例**:
@@ -535,94 +478,87 @@ CSV.write("prompt_experiment_results.csv", results)
 
 #### 4.3.3 統計的有意性検定
 
-```julia
-using HypothesisTests
+```rust
+// 2つのプロンプト手法の精度差が統計的に有意かを検定（Welch's t-test）
+fn compare_methods(results: &[ExperimentResult], method1: &str, method2: &str) {
+    let extract = |m: &str| -> Vec<f64> {
+        results.iter()
+            .filter(|r| r.method == m)
+            .filter_map(|r| r.correct)
+            .map(|c| c as u8 as f64)
+            .collect()
+    };
+    let correct1 = extract(method1);
+    let correct2 = extract(method2);
 
-"""
-2つのプロンプト手法の精度差が統計的に有意かを検定
-"""
-function compare_methods(results::DataFrame, method1::String, method2::String)
-    df1 = filter(r -> r.method == method1, results)
-    df2 = filter(r -> r.method == method2, results)
+    let mean = |v: &[f64]| v.iter().sum::<f64>() / v.len() as f64;
+    let var  = |v: &[f64], m: f64| v.iter().map(|x| (x - m).powi(2)).sum::<f64>() / v.len() as f64;
 
-    # 正答率（各試行で0 or 1）
-    correct1 = collect(skipmissing(df1.correct))
-    correct2 = collect(skipmissing(df2.correct))
+    let m1 = mean(&correct1);
+    let m2 = mean(&correct2);
+    let v1 = var(&correct1, m1);
+    let v2 = var(&correct2, m2);
+    let n1 = correct1.len() as f64;
+    let n2 = correct2.len() as f64;
 
-    # 2標本t検定
-    t_test = UnequalVarianceTTest(correct1, correct2)
+    // Welch's t-statistic
+    let t_stat = (m1 - m2) / (v1 / n1 + v2 / n2).sqrt();
 
-    @info """
-    Comparing $method1 vs $method2:
-    - $method1: mean=$(mean(correct1)), std=$(std(correct1))
-    - $method2: mean=$(mean(correct2)), std=$(std(correct2))
-    - t-statistic: $(t_test.t)
-    - p-value: $(pvalue(t_test))
-    - Significant (α=0.05): $(pvalue(t_test) < 0.05)
-    """
+    println!("Comparing {} vs {}:", method1, method2);
+    println!("  {}: mean={:.3}, std={:.3}", method1, m1, v1.sqrt());
+    println!("  {}: mean={:.3}, std={:.3}", method2, m2, v2.sqrt());
+    println!("  t-statistic: {:.3}", t_stat);
+    // NOTE: p-value requires t-distribution CDF; use `statrs` crate for full testing
+}
 
-    return t_test
-end
-
-# Few-shot CoT vs Direct の比較
-compare_methods(results, "Few-shot CoT", "Direct")
+// Few-shot CoT vs Direct の比較
+// compare_methods(&results, "Few-shot CoT", "Direct");
 ```
 
 ### 4.4 XML vs Markdown トークン比較実験
 
-```julia
-"""
-XML vs Markdown のトークン数比較
-"""
-function compare_formats()
-    # 同じ内容をXMLとMarkdownで表現
-    xml_prompt = """
-    <task>
-      <role>あなたは数学の家庭教師です</role>
-      <instruction>以下の問題を解いてください</instruction>
-      <constraints>
-        <constraint>ステップごとに計算過程を示すこと</constraint>
-        <constraint>最終的な答えを数値で示すこと</constraint>
-      </constraints>
-      <input>
-        <problem>太郎は12個のリンゴを持っていて、花子に3個あげました。その後、母親から5個もらいました。太郎は今何個のリンゴを持っていますか？</problem>
-      </input>
-    </task>
-    """
+```rust
+// XML vs Markdown のトークン数比較
+fn compare_formats() -> (usize, usize, f64) {
+    // 同じ内容をXMLとMarkdownで表現
+    let xml_prompt = r#"<task>
+  <role>あなたは数学の家庭教師です</role>
+  <instruction>以下の問題を解いてください</instruction>
+  <constraints>
+    <constraint>ステップごとに計算過程を示すこと</constraint>
+    <constraint>最終的な答えを数値で示すこと</constraint>
+  </constraints>
+  <input>
+    <problem>太郎は12個のリンゴを持っていて、花子に3個あげました。その後、母親から5個もらいました。太郎は今何個のリンゴを持っていますか？</problem>
+  </input>
+</task>"#;
 
-    md_prompt = """
-    # タスク
+    let md_prompt = "# タスク
 
-    あなたは数学の家庭教師です。以下の問題を解いてください。
+あなたは数学の家庭教師です。以下の問題を解いてください。
 
-    ## 制約
-    - ステップごとに計算過程を示すこと
-    - 最終的な答えを数値で示すこと
+## 制約
+- ステップごとに計算過程を示すこと
+- 最終的な答えを数値で示すこと
 
-    ## 問題
-    太郎は12個のリンゴを持っていて、花子に3個あげました。その後、母親から5個もらいました。太郎は今何個のリンゴを持っていますか？
-    """
+## 問題
+太郎は12個のリンゴを持っていて、花子に3個あげました。その後、母親から5個もらいました。太郎は今何個のリンゴを持っていますか？";
 
-    # トークン数を近似（空白・改行で分割）
-    xml_tokens = length(split(xml_prompt))
-    md_tokens = length(split(md_prompt))
+    // トークン数を近似（空白・改行で分割）
+    let xml_tokens = xml_prompt.split_whitespace().count();
+    let md_tokens  = md_prompt.split_whitespace().count();
+    let reduction  = (xml_tokens - md_tokens) as f64 / xml_tokens as f64 * 100.0;
 
-    reduction = (xml_tokens - md_tokens) / xml_tokens * 100
+    println!("Token Count Comparison:");
+    println!("  XML: {} tokens", xml_tokens);
+    println!("  Markdown: {} tokens", md_tokens);
+    println!("  Reduction: {:.1}%", reduction);
 
-    @info """
-    Token Count Comparison:
-    - XML: $xml_tokens tokens
-    - Markdown: $md_tokens tokens
-    - Reduction: $(round(reduction, digits=1))%
-    """
-
-    return (xml=xml_tokens, md=md_tokens, reduction=reduction)
-end
-
-compare_formats()
+    (xml_tokens, md_tokens, reduction)
+}
 ```
 
-> **Note:** **実装ゾーン終了** 🦀 Rust Template Engineで型安全なプロンプト管理を実現。⚡ Juliaで定量実験環境を構築し、統計検定まで実装した。
+> **Note:** **実装ゾーン終了** 🦀 Rust Template Engineで型安全なプロンプト管理を実現。🦀 Rustで定量実験環境を構築し、統計検定まで実装した。
 
 > **Note:** **進捗: 70% 完了** 実装基盤が完成した。次は実験ゾーンで、SmolVLM2-256Mを使ったプロンプト最適化を実演する。
 
@@ -660,134 +596,94 @@ ollama pull smolvlm:256m
 pip install transformers pillow torch
 ```
 
-**Julia から呼び出し**:
-```julia
-using HTTP, JSON3, Base64
-
-"""
-SmolVLM2 に画像+テキストを送信
-"""
-function call_smolvlm(prompt::String, image_path::Union{String,Nothing}=nothing)
-    url = "http://localhost:11434/api/generate"
-
-    body_dict = Dict(
-        "model" => "smolvlm:256m",
-        "prompt" => prompt,
-        "stream" => false
-    )
-
-    # 画像がある場合はBase64エンコード
-    if image_path !== nothing
-        img_bytes = read(image_path)
-        img_base64 = base64encode(img_bytes)
-        body_dict["images"] = [img_base64]
-    end
-
-    body = JSON3.write(body_dict)
-    response = HTTP.post(url, ["Content-Type" => "application/json"], body)
-    result = JSON3.read(String(response.body))
-
-    result.response
-end
+**Rust から呼び出し**:
+```rust
+// SmolVLM2 に画像+テキストを送信
+fn call_smolvlm(prompt: &str, image_path: Option<&str>) -> Result<String, Box<dyn std::error::Error>> {
+    let client = reqwest::blocking::Client::new();
+    let mut body = serde_json::json!({
+        "model": "smolvlm:256m",
+        "prompt": prompt,
+        "stream": false
+    });
+    // 画像がある場合はBase64エンコード
+    if let Some(path) = image_path {
+        let img_bytes = std::fs::read(path)?;
+        let img_base64 = base64::encode(&img_bytes);
+        body["images"] = serde_json::json!([img_base64]);
+    }
+    let result: serde_json::Value = client
+        .post("http://localhost:11434/api/generate")
+        .json(&body)
+        .send()?
+        .json()?;
+    Ok(result["response"].as_str().unwrap_or("").to_owned())
+}
 ```
 
 ### 5.2 実験1: Zero-shot vs Few-shot (テキスト推論)
 
 **タスク**: 算数問題の正答率を測定
 
-```julia
-using DataFrames, Statistics
+```rust
+fn zero_shot_prompt(question: &str) -> String {
+    format!("次の計算問題を解いてください。\n\n問題: {}\n答え:", question)
+}
 
-# テストケース
-test_cases = [
-    ("5 + 3 = ?", 8),
-    ("12 - 7 = ?", 5),
-    ("4 × 6 = ?", 24),
-    ("15 ÷ 3 = ?", 5),
-    ("(8 + 2) × 3 = ?", 30),
-]
-
-# Zero-shot プロンプト
-function zero_shot_prompt(question::String)
-    return """
-    次の計算問題を解いてください。
-
-    問題: $question
-    答え:
-    """
-end
-
-# Few-shot プロンプト
-function few_shot_prompt(question::String)
-    return """
-    次の計算問題を解いてください。
-
-    # 例1
-    問題: 2 + 3 = ?
-    答え: 5
-
-    # 例2
-    問題: 10 - 4 = ?
-    答え: 6
-
-    # 例3
-    問題: 3 × 5 = ?
-    答え: 15
-
-    # 問題
-    問題: $question
-    答え:
-    """
-end
-
-# 実験実行
-function run_math_experiment()
-    results = DataFrame(
-        method=String[],
-        question=String[],
-        ground_truth=Int[],
-        predicted=Union{Int,Missing}[],
-        correct=Union{Bool,Missing}[]
+fn few_shot_prompt(question: &str) -> String {
+    format!(
+        "次の計算問題を解いてください。\n\n# 例1\n問題: 2 + 3 = ?\n答え: 5\n\n# 例2\n問題: 10 - 4 = ?\n答え: 6\n\n# 例3\n問題: 3 × 5 = ?\n答え: 15\n\n# 問題\n問題: {}\n答え:",
+        question
     )
+}
 
-    for (question, truth) in test_cases
-        # Zero-shot
-        prompt_z = zero_shot_prompt(question)
-        response_z = call_smolvlm(prompt_z)
-        pred_z = extract_answer(response_z)
-        push!(results, (
-            method="Zero-shot",
-            question=question,
-            ground_truth=truth,
-            predicted=pred_z,
-            correct=pred_z !== nothing ? (pred_z == truth) : missing
-        ))
+#[derive(Debug)]
+struct MathResult {
+    method: String,
+    question: String,
+    ground_truth: i64,
+    predicted: Option<i64>,
+    correct: Option<bool>,
+}
 
-        # Few-shot
-        prompt_f = few_shot_prompt(question)
-        response_f = call_smolvlm(prompt_f)
-        pred_f = extract_answer(response_f)
-        push!(results, (
-            method="Few-shot",
-            question=question,
-            ground_truth=truth,
-            predicted=pred_f,
-            correct=pred_f !== nothing ? (pred_f == truth) : missing
-        ))
-    end
+fn run_math_experiment() -> Vec<MathResult> {
+    let test_cases: &[(&str, i64)] = &[
+        ("5 + 3 = ?", 8),
+        ("12 - 7 = ?", 5),
+        ("4 × 6 = ?", 24),
+        ("15 ÷ 3 = ?", 5),
+        ("(8 + 2) × 3 = ?", 30),
+    ];
+    let mut results = Vec::new();
+    for &(question, truth) in test_cases {
+        for (method, prompt_fn) in [
+            ("Zero-shot", zero_shot_prompt as fn(&str) -> String),
+            ("Few-shot",  few_shot_prompt),
+        ] {
+            if let Ok(resp) = call_smolvlm(&prompt_fn(question), None) {
+                let pred = extract_answer(&resp);
+                results.push(MathResult {
+                    method: method.into(), question: question.into(),
+                    ground_truth: truth, predicted: pred,
+                    correct: pred.map(|p| p == truth),
+                });
+            }
+        }
+    }
+    results
+}
 
-    return results
-end
-
-results = run_math_experiment()
-
-# 集計
-summary = combine(groupby(results, :method)) do df
-    accuracy = mean(skipmissing(df.correct)) * 100
-    (accuracy=accuracy, n_valid=count(!ismissing, df.correct))
-end
-
-println(summary)
+fn summarize_by_method(results: &[MathResult]) {
+    for method in &["Zero-shot", "Few-shot"] {
+        let valid: Vec<bool> = results.iter()
+            .filter(|r| r.method == *method)
+            .filter_map(|r| r.correct)
+            .collect();
+        let accuracy = if valid.is_empty() { 0.0 }
+            else { valid.iter().filter(|&&c| c).count() as f64 / valid.len() as f64 * 100.0 };
+        println!("{}: accuracy={:.1}%, n_valid={}", method, accuracy, valid.len());
+    }
+}
 ```
 
 **期待される結果**:
@@ -804,96 +700,66 @@ println(summary)
 
 **タスク**: 複数ステップの推論が必要な問題
 
-```julia
-# 複雑な問題
-complex_cases = [
-    ("太郎は12個のリンゴを持っていて、花子に3個あげました。その後、母親から5個もらいました。太郎は今何個のリンゴを持っていますか？", 14),
-    ("教室に生徒が25人います。5人が帰りました。その後、3人が来ました。今、教室には何人いますか？", 23),
-    ("りんごが8個、みかんが5個あります。りんごを2個食べ、みかんを1個食べました。残りは合わせて何個ですか？", 10),
-]
+```rust
+fn direct_prompt(question: &str) -> String {
+    format!("問題: {}\n答え:", question)
+}
 
-# Direct プロンプト
-function direct_prompt(question::String)
-    return """
-    問題: $question
-    答え:
-    """
-end
+fn cot_prompt(question: &str) -> String {
+    format!("問題: {}\n\nステップごとに考えましょう:", question)
+}
 
-# CoT プロンプト
-function cot_prompt(question::String)
-    return """
-    問題: $question
-
-    ステップごとに考えましょう:
-    """
-end
-
-# Few-shot CoT プロンプト
-function few_shot_cot_prompt(question::String)
-    return """
-    以下の算数問題を解いてください。
-
-    # 例1
-    問題: リンゴが5個あります。2個食べました。残りは何個ですか？
-    推論:
-    - 最初にリンゴが5個ある
-    - 2個食べたので、5 - 2 = 3
-    答え: 3個
-
-    # 例2
-    問題: 太郎は10個のみかんを持っています。花子に3個あげ、さらに母親から4個もらいました。太郎は今何個のみかんを持っていますか？
-    推論:
-    - 最初に10個
-    - 花子に3個あげたので、10 - 3 = 7個
-    - 母親から4個もらったので、7 + 4 = 11個
-    答え: 11個
-
-    # 問題
-    問題: $question
-    推論:
-    """
-end
-
-function run_cot_experiment()
-    results = DataFrame(
-        method=String[],
-        question_id=Int[],
-        predicted=Union{Int,Missing}[],
-        correct=Union{Bool,Missing}[]
+fn few_shot_cot_prompt(question: &str) -> String {
+    format!(
+        "以下の算数問題を解いてください。\n\n# 例1\n問題: リンゴが5個あります。2個食べました。残りは何個ですか？\n推論:\n- 最初にリンゴが5個ある\n- 2個食べたので、5 - 2 = 3\n答え: 3個\n\n# 例2\n問題: 太郎は10個のみかんを持っています。花子に3個あげ、さらに母親から4個もらいました。太郎は今何個のみかんを持っていますか？\n推論:\n- 最初に10個\n- 花子に3個あげたので、10 - 3 = 7個\n- 母親から4個もらったので、7 + 4 = 11個\n答え: 11個\n\n# 問題\n問題: {}\n推論:",
+        question
     )
+}
 
-    for (q_id, (question, truth)) in enumerate(complex_cases)
+#[derive(Debug)]
+struct CotResult {
+    method: String,
+    question_id: usize,
+    predicted: Option<i64>,
+    correct: Option<bool>,
+}
+
+fn run_cot_experiment() -> Vec<CotResult> {
+    let complex_cases: &[(&str, i64)] = &[
+        ("太郎は12個のリンゴを持っていて、花子に3個あげました。その後、母親から5個もらいました。太郎は今何個のリンゴを持っていますか？", 14),
+        ("教室に生徒が25人います。5人が帰りました。その後、3人が来ました。今、教室には何人いますか？", 23),
+        ("りんごが8個、みかんが5個あります。りんごを2個食べ、みかんを1個食べました。残りは合わせて何個ですか？", 10),
+    ];
+    let mut results = Vec::new();
+    for (q_id, &(question, truth)) in complex_cases.iter().enumerate() {
         for (method, prompt_fn) in [
-            ("Direct", direct_prompt),
+            ("Direct",        direct_prompt as fn(&str) -> String),
             ("Zero-shot CoT", cot_prompt),
-            ("Few-shot CoT", few_shot_cot_prompt)
-        ]
-            prompt = prompt_fn(question)
-            response = call_smolvlm(prompt)
-            pred = extract_answer(response)
+            ("Few-shot CoT",  few_shot_cot_prompt),
+        ] {
+            if let Ok(response) = call_smolvlm(&prompt_fn(question), None) {
+                let pred = extract_answer(&response);
+                results.push(CotResult {
+                    method: method.into(), question_id: q_id,
+                    predicted: pred, correct: pred.map(|p| p == truth),
+                });
+            }
+        }
+    }
+    results
+}
 
-            push!(results, (
-                method=method,
-                question_id=q_id,
-                predicted=pred,
-                correct=pred !== nothing ? (pred == truth) : missing
-            ))
-        end
-    end
-
-    return results
-end
-
-cot_results = run_cot_experiment()
-
-# 集計
-cot_summary = combine(groupby(cot_results, :method)) do df
-    accuracy = mean(skipmissing(df.correct)) * 100
-    (accuracy=accuracy, n_total=nrow(df))
-end
-
-println(cot_summary)
+fn summarize_cot(results: &[CotResult]) {
+    for method in &["Direct", "Zero-shot CoT", "Few-shot CoT"] {
+        let valid: Vec<bool> = results.iter()
+            .filter(|r| r.method == *method)
+            .filter_map(|r| r.correct)
+            .collect();
+        let accuracy = if valid.is_empty() { 0.0 }
+            else { valid.iter().filter(|&&c| c).count() as f64 / valid.len() as f64 * 100.0 };
+        println!("{}: accuracy={:.1}%, n_total={}", method, accuracy, valid.len());
+    }
+}
 ```
 
 **期待される結果**:
@@ -909,98 +775,67 @@ println(cot_summary)
 
 ### 5.4 実験3: XML vs Markdown構造化比較
 
-```julia
-# 同じタスクをXMLとMarkdownで比較
-function xml_structured_prompt(question::String)
-    return """
-    <task>
-      <role>あなたは数学の家庭教師です</role>
-      <instruction>以下の問題を解いてください</instruction>
-      <constraints>
-        <constraint>ステップごとに計算過程を示すこと</constraint>
-      </constraints>
-      <input>
-        <problem>$question</problem>
-      </input>
-    </task>
-    """
-end
-
-function md_structured_prompt(question::String)
-    return """
-    # タスク
-
-    あなたは数学の家庭教師です。以下の問題を解いてください。
-
-    ## 制約
-    - ステップごとに計算過程を示すこと
-
-    ## 問題
-    $question
-    """
-end
-
-function run_format_experiment()
-    results = DataFrame(
-        format=String[],
-        question_id=Int[],
-        tokens_approx=Int[],
-        predicted=Union{Int,Missing}[],
-        correct=Union{Bool,Missing}[]
+```rust
+fn xml_structured_prompt(question: &str) -> String {
+    format!(
+        "<task>\n  <role>あなたは数学の家庭教師です</role>\n  <instruction>以下の問題を解いてください</instruction>\n  <constraints>\n    <constraint>ステップごとに計算過程を示すこと</constraint>\n  </constraints>\n  <input>\n    <problem>{}</problem>\n  </input>\n</task>",
+        question
     )
+}
 
-    for (q_id, (question, truth)) in enumerate(complex_cases)
-        # XML
-        prompt_xml = xml_structured_prompt(question)
-        tokens_xml = length(split(prompt_xml))
-        response_xml = call_smolvlm(prompt_xml)
-        pred_xml = extract_answer(response_xml)
-
-        push!(results, (
-            format="XML",
-            question_id=q_id,
-            tokens_approx=tokens_xml,
-            predicted=pred_xml,
-            correct=pred_xml !== nothing ? (pred_xml == truth) : missing
-        ))
-
-        # Markdown
-        prompt_md = md_structured_prompt(question)
-        tokens_md = length(split(prompt_md))
-        response_md = call_smolvlm(prompt_md)
-        pred_md = extract_answer(response_md)
-
-        push!(results, (
-            format="Markdown",
-            question_id=q_id,
-            tokens_approx=tokens_md,
-            predicted=pred_md,
-            correct=pred_md !== nothing ? (pred_md == truth) : missing
-        ))
-    end
-
-    return results
-end
-
-format_results = run_format_experiment()
-
-# 集計
-format_summary = combine(groupby(format_results, :format)) do df
-    (
-        accuracy=mean(skipmissing(df.correct)) * 100,
-        avg_tokens=mean(df.tokens_approx),
-        token_reduction=0.0  # 後で計算
+fn md_structured_prompt(question: &str) -> String {
+    format!(
+        "# タスク\n\nあなたは数学の家庭教師です。以下の問題を解いてください。\n\n## 制約\n- ステップごとに計算過程を示すこと\n\n## 問題\n{}",
+        question
     )
-end
+}
 
-# トークン削減率を計算
-xml_tokens = format_summary[format_summary.format .== "XML", :avg_tokens][1]
-md_tokens = format_summary[format_summary.format .== "Markdown", :avg_tokens][1]
-reduction = (xml_tokens - md_tokens) / xml_tokens * 100
+#[derive(Debug)]
+struct FormatResult {
+    format: String,
+    question_id: usize,
+    tokens_approx: usize,
+    predicted: Option<i64>,
+    correct: Option<bool>,
+}
 
-format_summary[format_summary.format .== "Markdown", :token_reduction] .= reduction
+fn run_format_experiment() -> Vec<FormatResult> {
+    let complex_cases: &[(&str, i64)] = &[
+        ("太郎は12個のリンゴを持っていて、花子に3個あげました。その後、母親から5個もらいました。太郎は今何個のリンゴを持っていますか？", 14),
+        ("教室に生徒が25人います。5人が帰りました。その後、3人が来ました。今、教室には何人いますか？", 23),
+        ("りんごが8個、みかんが5個あります。りんごを2個食べ、みかんを1個食べました。残りは合わせて何個ですか？", 10),
+    ];
+    let mut results = Vec::new();
+    for (q_id, &(question, truth)) in complex_cases.iter().enumerate() {
+        for (fmt, prompt_fn) in [
+            ("XML",      xml_structured_prompt as fn(&str) -> String),
+            ("Markdown", md_structured_prompt),
+        ] {
+            let prompt = prompt_fn(question);
+            let tokens = prompt.split_whitespace().count();
+            if let Ok(resp) = call_smolvlm(&prompt, None) {
+                let pred = extract_answer(&resp);
+                results.push(FormatResult {
+                    format: fmt.into(), question_id: q_id, tokens_approx: tokens,
+                    predicted: pred, correct: pred.map(|p| p == truth),
+                });
+            }
+        }
+    }
+    results
+}
 
-println(format_summary)
+fn summarize_format(results: &[FormatResult]) {
+    for fmt in &["XML", "Markdown"] {
+        let records: Vec<&FormatResult> = results.iter().filter(|r| r.format == *fmt).collect();
+        let valid: Vec<bool> = records.iter().filter_map(|r| r.correct).collect();
+        let accuracy = if valid.is_empty() { 0.0 }
+            else { valid.iter().filter(|&&c| c).count() as f64 / valid.len() as f64 * 100.0 };
+        let avg_tokens = records.iter().map(|r| r.tokens_approx).sum::<usize>() as f64
+            / records.len().max(1) as f64;
+        println!("{}: accuracy={:.1}%, avg_tokens={:.1}", fmt, accuracy, avg_tokens);
+    }
+}
 ```
 
 **期待される結果**:
@@ -1015,52 +850,41 @@ println(format_summary)
 
 ### 5.5 実験4: Self-Consistency の精度向上測定
 
-```julia
-function run_self_consistency_experiment()
-    results = DataFrame(
-        n_samples=Int[],
-        question_id=Int[],
-        majority_answer=Union{Int,Missing}[],
-        correct=Union{Bool,Missing}[],
-        agreement_rate=Float64[]
-    )
+```rust
+fn run_self_consistency_experiment() -> Vec<(usize, usize, Option<i64>, bool, f64)> {
+    let complex_cases: &[(&str, i64)] = &[
+        ("太郎は12個のリンゴを持っていて、花子に3個あげました。その後、母親から5個もらいました。太郎は今何個のリンゴを持っていますか？", 14),
+        ("教室に生徒が25人います。5人が帰りました。その後、3人が来ました。今、教室には何人いますか？", 23),
+        ("りんごが8個、みかんが5個あります。りんごを2個食べ、みかんを1個食べました。残りは合わせて何個ですか？", 10),
+    ];
+    let mut results = Vec::new();
+    for (q_id, &(question, truth)) in complex_cases.iter().enumerate() {
+        let prompt = few_shot_cot_prompt(question);
+        for &n in &[1usize, 3, 5, 10] {
+            let answers: Vec<i64> = (0..n)
+                .filter_map(|_| call_smolvlm(&prompt, None).ok().and_then(|r| extract_answer(&r)))
+                .collect();
+            if !answers.is_empty() {
+                let mut counts: std::collections::HashMap<i64, usize> = std::collections::HashMap::new();
+                for &a in &answers { *counts.entry(a).or_default() += 1; }
+                let (&majority, &max_count) = counts.iter().max_by_key(|(_, &c)| c).unwrap();
+                let agreement = max_count as f64 / answers.len() as f64;
+                results.push((n, q_id, Some(majority), majority == truth, agreement));
+            }
+        }
+    }
+    results
+}
 
-    for (q_id, (question, truth)) in enumerate(complex_cases)
-        prompt = few_shot_cot_prompt(question)
-
-        for n in [1, 3, 5, 10]
-            answers = filter(!isnothing, extract_answer.(call_smolvlm.([prompt for _ in 1:n])))
-
-            if !isempty(answers)
-                counts = countmap(answers)
-                majority = argmax(counts)
-                agreement = counts[majority] / length(answers)
-
-                push!(results, (
-                    n_samples=n,
-                    question_id=q_id,
-                    majority_answer=majority,
-                    correct=majority == truth,
-                    agreement_rate=agreement
-                ))
-            end
-        end
-    end
-
-    return results
-end
-
-sc_results = run_self_consistency_experiment()
-
-# 集計
-sc_summary = combine(groupby(sc_results, :n_samples)) do df
-    (
-        accuracy=mean(df.correct) * 100,
-        avg_agreement=mean(df.agreement_rate) * 100
-    )
-end
-
-println(sc_summary)
+fn summarize_self_consistency(results: &[(usize, usize, Option<i64>, bool, f64)]) {
+    for &n in &[1usize, 3, 5, 10] {
+        let records: Vec<_> = results.iter().filter(|r| r.0 == n).collect();
+        if records.is_empty() { continue; }
+        let accuracy  = records.iter().filter(|r| r.3).count() as f64 / records.len() as f64 * 100.0;
+        let agreement = records.iter().map(|r| r.4).sum::<f64>() / records.len() as f64 * 100.0;
+        println!("N={}: accuracy={:.1}%, avg_agreement={:.1}%", n, accuracy, agreement);
+    }
+}
 ```
 
 **期待される結果**:
@@ -1082,48 +906,34 @@ println(sc_summary)
 
 ### 5.6 実験結果の可視化
 
-```julia
-using Plots
+```rust
+// 精度比較プロット（plotters クレートで実装可能; ここはターミナル出力で代替）
+fn plot_accuracy_comparison() {
+    let methods  = ["Direct", "Zero-shot CoT", "Few-shot CoT"];
+    let accuracies = [33.3f64, 66.7, 100.0];
+    println!("Prompt Method Comparison (Accuracy %):");
+    for (method, &acc) in methods.iter().zip(accuracies.iter()) {
+        let bar = "#".repeat((acc / 5.0) as usize);
+        println!("  {:15} | {:20} {:.1}%", method, bar, acc);
+    }
+    // savefig → use plotters::prelude::* for PNG output
+}
 
-# 精度比較プロット
-function plot_accuracy_comparison()
-    methods = ["Direct", "Zero-shot CoT", "Few-shot CoT"]
-    accuracies = [33.3, 66.7, 100.0]
+// Self-Consistency効果プロット
+fn plot_self_consistency() {
+    let n_samples  = [1usize, 3, 5, 10];
+    let accuracies = [66.7f64, 83.3, 100.0, 100.0];
+    println!("Self-Consistency Effect:");
+    for (&n, &acc) in n_samples.iter().zip(accuracies.iter()) {
+        let bar = "#".repeat((acc / 5.0) as usize);
+        println!("  N={:2} | {:20} {:.1}%", n, bar, acc);
+    }
+}
 
-    bar(methods, accuracies,
-        xlabel="Method",
-        ylabel="Accuracy (%)",
-        title="Prompt Method Comparison",
-        legend=false,
-        color=:steelblue,
-        ylim=(0, 110))
-
-    hline!([80.0], linestyle=:dash, color=:red, label="Target (80%)")
-
-    savefig("prompt_accuracy_comparison.png")
-end
-
-# Self-Consistency効果プロット
-function plot_self_consistency()
-    n_samples = [1, 3, 5, 10]
-    accuracies = [66.7, 83.3, 100.0, 100.0]
-
-    plot(n_samples, accuracies,
-        marker=:circle,
-        markersize=8,
-        xlabel="Number of Samples (N)",
-        ylabel="Accuracy (%)",
-        title="Self-Consistency Effect",
-        legend=false,
-        color=:darkgreen,
-        linewidth=2,
-        ylim=(60, 105))
-
-    savefig("self_consistency_effect.png")
-end
-
-plot_accuracy_comparison()
-plot_self_consistency()
+fn main() {
+    plot_accuracy_comparison();
+    plot_self_consistency();
+}
 ```
 
 ### 5.7 実験のまとめ
@@ -1158,41 +968,44 @@ Few-shot CoT (3例) + Markdown構造化 + Self-Consistency (N=3~5)
 Khattab et al. (2023)[^7]のDSPy (Declarative Self-improving Python)は、**プロンプトをコードで記述し、自動最適化**するフレームワーク。
 
 **従来のプロンプトエンジニアリング**:
-```julia
-# 手作業で文字列を調整（Julia）
-prompt = """
-Translate the following text to Japanese:
-
-Text: $(text)
-Translation:
-"""
+```rust
+// 手作業で文字列を調整
+let text = "...";
+let prompt = format!(
+    "Translate the following text to Japanese:\n\nText: {}\nTranslation:",
+    text
+);
 ```
 
 **DSPy**:
-```julia
-# 構造化プロンプト: Julia + HTTP.jlで同等の概念を実装
-using HTTP, JSON3
+```rust
+// 構造化プロンプト: serde_json + reqwest で型安全な呼び出し（DSPyのSignatureに相当）
+use serde::Serialize;
 
-# タスク定義（DSPyのSignatureに相当）
-struct TranslationTask
-    text::String
-end
+// タスク定義（DSPyのSignatureに相当）
+#[derive(Serialize)]
+struct TranslationTask {
+    text: String,
+}
 
-function chain_of_thought(task::TranslationTask)::String
-    prompt = """
-    Translate the following text to Japanese.
-    Think step by step, then provide the translation.
-
-    Text: $(task.text)
-    Translation:"""
-
-    resp = HTTP.post("https://api.openai.com/v1/chat/completions",
-        ["Authorization" => "Bearer $(ENV["OPENAI_API_KEY"])",
-         "Content-Type" => "application/json"],
-        JSON3.write(Dict("model" => "gpt-4",
-                        "messages" => [Dict("role" => "user", "content" => prompt)])))
-    return JSON3.read(resp.body)["choices"][1]["message"]["content"]
-end
+fn chain_of_thought(task: &TranslationTask) -> Result<String, Box<dyn std::error::Error>> {
+    let prompt = format!(
+        "Translate the following text to Japanese.\nThink step by step, then provide the translation.\n\nText: {}\nTranslation:",
+        task.text
+    );
+    let client = reqwest::blocking::Client::new();
+    let body = serde_json::json!({
+        "model": "gpt-4",
+        "messages": [{ "role": "user", "content": prompt }]
+    });
+    let result: serde_json::Value = client
+        .post("https://api.openai.com/v1/chat/completions")
+        .header("Authorization", format!("Bearer {}", std::env::var("OPENAI_API_KEY")?))
+        .json(&body)
+        .send()?
+        .json()?;
+    Ok(result["choices"][0]["message"]["content"].as_str().unwrap_or("").to_owned())
+}
 ```
 
 **DSPyの利点**:
@@ -1208,19 +1021,22 @@ end
 #### 6.1.2 DSPyの基本構造
 
 **Signature**: タスクの入出力定義
-```julia
-# 数学推論タスクの構造化（DSPyのSignatureに相当）
-struct MathTask
-    question::String
-end
-struct MathResult
-    reasoning::String
-    answer::Float64
-end
+```rust
+// 数学推論タスクの構造化（DSPyのSignatureに相当）
+#[derive(Debug)]
+struct MathTask {
+    question: String,
+}
+
+#[derive(Debug)]
+struct MathResult {
+    reasoning: String,
+    answer: f64,
+}
 ```
 
 **Module**: 推論パイプライン
-> **Note:** DSPyはPython専用フレームワーク。Julia実装では `HTTP.jl` + `JSON3.jl` で同等の構造化呼び出しを実現する（上記参照）。
+> **Note:** DSPyはPython専用フレームワーク。Rust実装では `HTTP.jl` + `serde_json` で同等の構造化呼び出しを実現する（上記参照）。
 
 **Optimizer**: プロンプト自動最適化
 > **Note:** Few-shot最適化は、訓練データから高スコア例を選択してコンテキストに挿入する操作。数式: $p^* = \arg\max_p \mathbb{E}_{(x,y)\sim\mathcal{D}}[\text{score}(f_p(x), y)]$
@@ -1243,40 +1059,1140 @@ end
 | FEVER | 72.1% | **79.3%** | +7.2% |
 
 **DSPyの実用例**:
-```julia
-# 感情分析: Julia + HTTP.jlによる構造化プロンプト
-using HTTP, JSON3
+```rust
+// 感情分析: serde_json + reqwest による構造化プロンプト
+use serde::{Deserialize, Serialize};
 
-struct SentimentTask
-    text::String
-end
+#[derive(Debug, Serialize)]
+struct SentimentTask {
+    text: String,
+}
 
-struct SentimentResult
-    sentiment::String   # "positive" | "negative" | "neutral"
-    confidence::Float64 # 0.0 ~ 1.0
-end
+#[derive(Debug, Deserialize)]
+struct SentimentResult {
+    sentiment: String,   // "positive" | "negative" | "neutral"
+    confidence: f64,     // 0.0 ~ 1.0
+}
 
-function analyze_sentiment(task::SentimentTask)::SentimentResult
-    prompt = """Analyze the sentiment of the following text.
+fn analyze_sentiment(task: &SentimentTask) -> Result<SentimentResult, Box<dyn std::error::Error>> {
+    let prompt = format!(
+        "Analyze the sentiment of the following text.\n\nText: {}\n\nRespond in JSON format: {{\"sentiment\": \"positive|negative|neutral\", \"confidence\": 0.0-1.0}}",
+        task.text
+    );
+    let client = reqwest::blocking::Client::new();
+    let body = serde_json::json!({
+        "model": "gpt-4o-mini",
+        "messages": [{ "role": "user", "content": prompt }],
+        "response_format": { "type": "json_object" }
+    });
+    let result: serde_json::Value = client
+        .post("https://api.openai.com/v1/chat/completions")
+        .header("Authorization", format!("Bearer {}", std::env::var("OPENAI_API_KEY")?))
+        .json(&body)
+        .send()?
+        .json()?;
+    let content = result["choices"][0]["message"]["content"].as_str().unwrap_or("{}");
+    Ok(serde_json::from_str(content)?)
+}
 
-Text: $(task.text)
+// 検算
+// let task = SentimentTask { text: "This movie is absolutely fantastic!".into() };
+// result.sentiment => "positive", result.confidence => ~0.95
+```hinelearning", "prompt", "rust", "rust", "llm"]
+published: true
+difficulty: "advanced"
+time_estimate: "90 minutes"
+languages: ["Rust", "Elixir"]
+keywords: ["機械学習", "深層学習", "生成モデル"]
+---
 
-Respond in JSON format: {"sentiment": "positive|negative|neutral", "confidence": 0.0-1.0}"""
+> **第28回【前編】**: [第28回【前編】](https://zenn.dev/fumishiki/ml-lecture-28-part1)
 
-    resp = HTTP.post("https://api.openai.com/v1/chat/completions",
-        ["Authorization" => "Bearer $(ENV["OPENAI_API_KEY"])",
-         "Content-Type" => "application/json"],
-        JSON3.write(Dict("model" => "gpt-4o-mini",
-                        "messages" => [Dict("role"=>"user","content"=>prompt)],
-                        "response_format" => Dict("type" => "json_object"))))
-    result = JSON3.read(resp.body)["choices"][1]["message"]["content"]
-    parsed = JSON3.read(result)
-    return SentimentResult(parsed["sentiment"], parsed["confidence"])
-end
+---
+title: "第28回: プロンプトエンジニアリング: 30秒の驚き→数式修行→実装マスター【後編】実装編"
+slug: "ml-lecture-28-part2"
+emoji: "💬"
+type: "tech"
+topics: ["machinelearning", "prompt", "rust", "julia", "llm"]
+published: true
+---
 
-# 検算
-task = SentimentTask("This movie is absolutely fantastic!")
-# result.sentiment => "positive", result.confidence => ~0.95
+## 💻 Z5. 試練（実装）（45分）— Template Engine + Rust実験
+
+**ゴール**: プロンプトを型安全に管理する🦀 Rust Template Engineと、プロンプト効果を定量測定する🦀 Rust実験環境を構築する。
+
+### 4.1 なぜTemplate Engineが必要なのか？
+
+Production環境でのプロンプト管理には、次の課題がある:
+
+| 課題 | 例 | リスク |
+|:-----|:---|:------|
+| **文字列結合の脆弱性** | `"Translate: " + user_input` | インジェクション攻撃 |
+| **型安全性の欠如** | 変数名タイポ、型ミスマッチ | 実行時エラー |
+| **テスト困難** | ベタ書き文字列 | 変更が壊れやすい |
+| **バージョン管理困難** | コードに埋め込み | A/Bテスト不可 |
+| **多言語対応困難** | ハードコード | i18n不可 |
+
+**解決策**: Template Engineで**構造化・型安全・テスト可能**にする。
+
+### 4.2 🦀 Rust Prompt Template Engine 実装
+
+#### 4.2.1 設計方針
+
+| 原則 | 実現方法 |
+|:-----|:--------|
+| **型安全** | `struct PromptTemplate<T>` でコンパイル時検証 |
+| **インジェクション防止** | 自動エスケープ + サニタイズ |
+| **テスト容易** | Template分離 + Mock変数 |
+| **バージョン管理** | YAML/TOML外部化 |
+| **Zero-copy** | `&str` / `Cow<str>` で不要なコピー回避 |
+
+#### 4.2.2 基本実装
+
+**Cargo.toml**:
+```toml
+[package]
+name = "prompt-template"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+serde = { version = "1.0", features = ["derive"] }
+toml = "0.8"
+thiserror = "1.0"
+```
+
+**src/lib.rs**:
+```rust
+use serde::{Deserialize, Serialize};
+use std::borrow::Cow;
+use std::collections::HashMap;
+use thiserror::Error;
+
+/// Template engine error types
+#[derive(Error, Debug)]
+pub enum TemplateError {
+    #[error("Missing variable: {0}")]
+    MissingVariable(String),
+    #[error("Invalid template syntax: {0}")]
+    InvalidSyntax(String),
+    #[error("Serialization error: {0}")]
+    SerializationError(#[from] toml::ser::Error),
+}
+
+/// Prompt template with typed variables
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PromptTemplate {
+    /// Template string with {{variable}} placeholders
+    template: String,
+    /// Variable names (for validation)
+    variables: Vec<String>,
+    /// Metadata (version, author, etc.)
+    #[serde(default)]
+    metadata: HashMap<String, String>,
+}
+
+impl PromptTemplate {
+    /// Create a new template
+    pub fn new(template: String) -> Result<Self, TemplateError> {
+        let variables = Self::extract_variables(&template)?;
+        Ok(Self {
+            template,
+            variables,
+            metadata: HashMap::new(),
+        })
+    }
+
+    /// Extract {{variable}} placeholders from template
+    fn extract_variables(template: &str) -> Result<Vec<String>, TemplateError> {
+        let mut vars = Vec::new();
+        let mut chars = template.chars().peekable();
+
+        while let Some(c) = chars.next() {
+            if c == '{' && chars.peek() == Some(&'{') {
+                chars.next(); // consume second '{'
+                let mut var_name = String::new();
+
+                while let Some(c) = chars.next() {
+                    if c == '}' && chars.peek() == Some(&'}') {
+                        chars.next(); // consume second '}'
+                        if !var_name.is_empty() {
+                            vars.push(var_name.trim().to_string());
+                        }
+                        break;
+                    }
+                    var_name.push(c);
+                }
+            }
+        }
+
+        Ok(vars)
+    }
+
+    /// Render template with provided variables
+    pub fn render(&self, vars: &HashMap<String, String>) -> Result<String, TemplateError> {
+        // Validate all required variables are provided
+        if let Some(var) = self.variables.iter().find(|v| !vars.contains_key(*v)) {
+            return Err(TemplateError::MissingVariable(var.clone()));
+        }
+
+        // Replace variables (with sanitization)
+        let result = vars.iter().fold(self.template.clone(), |acc, (key, value)| {
+            acc.replace(&format!("{{{{{}}}}}", key), &Self::sanitize(value))
+        });
+
+        Ok(result)
+    }
+
+    /// Sanitize user input (basic XML escaping)
+    fn sanitize(input: &str) -> Cow<str> {
+        if input.contains(&['<', '>', '&', '"', '\''][..]) {
+            Cow::Owned(
+                input
+                    .replace('&', "&amp;")
+                    .replace('<', "&lt;")
+                    .replace('>', "&gt;")
+                    .replace('"', "&quot;")
+                    .replace('\'', "&apos;"),
+            )
+        } else {
+            Cow::Borrowed(input)
+        }
+    }
+
+    /// Add metadata
+    pub fn with_metadata(mut self, key: String, value: String) -> Self {
+        self.metadata.insert(key, value);
+        self
+    }
+
+    /// Get required variables
+    pub fn variables(&self) -> &[String] {
+        &self.variables
+    }
+}
+
+/// Chain-of-Thought prompt builder
+#[derive(Debug)]
+pub struct CoTPromptBuilder {
+    task: String,
+    examples: Vec<(String, String, String)>, // (question, reasoning, answer)
+    question: String,
+}
+
+impl CoTPromptBuilder {
+    pub fn new(task: &str) -> Self {
+        Self {
+            task: task.to_string(),
+            examples: Vec::new(),
+            question: String::new(),
+        }
+    }
+
+    pub fn add_example(mut self, question: &str, reasoning: &str, answer: &str) -> Self {
+        self.examples.push((
+            question.to_string(),
+            reasoning.to_string(),
+            answer.to_string(),
+        ));
+        self
+    }
+
+    pub fn question(mut self, q: &str) -> Self {
+        self.question = q.to_string();
+        self
+    }
+
+    pub fn build(self) -> String {
+        let examples = self.examples.iter().enumerate()
+            .map(|(i, (q, r, a))| format!("# 例{}n問題: {}n推論:n{}n答え: {}nn", i + 1, q, r, a))
+            .collect::<String>();
+        format!("{}nn{}# 問題n問題: {}n推論:n", self.task, examples, self.question)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_template_extraction() {
+        let template = "Hello {{name}}, your task is {{task}}.";
+        let pt = PromptTemplate::new(template.to_string()).unwrap();
+        assert_eq!(pt.variables(), &["name", "task"]);
+    }
+
+    #[test]
+    fn test_template_render() {
+        let template = "Translate '{{text}}' to {{language}}.";
+        let pt = PromptTemplate::new(template.to_string()).unwrap();
+
+        let mut vars = HashMap::new();
+        vars.insert("text".to_string(), "Hello".to_string());
+        vars.insert("language".to_string(), "Japanese".to_string());
+
+        let result = pt.render(&vars).unwrap();
+        assert_eq!(result, "Translate 'Hello' to Japanese.");
+    }
+
+    #[test]
+    fn test_sanitization() {
+        let template = "Input: {{user_input}}";
+        let pt = PromptTemplate::new(template.to_string()).unwrap();
+
+        let mut vars = HashMap::new();
+        vars.insert("user_input".to_string(), "<script>alert('xss')</script>".to_string());
+
+        let result = pt.render(&vars).unwrap();
+        assert!(result.contains("&lt;script&gt;"));
+    }
+
+    #[test]
+    fn test_cot_builder() {
+        let prompt = CoTPromptBuilder::new("次の算数問題を解いてください。")
+            .add_example(
+                "5 + 3は？",
+                "5に3を足すと8になる。",
+                "8",
+            )
+            .question("12 - 7は？")
+            .build();
+
+        assert!(prompt.contains("例1"));
+        assert!(prompt.contains("5 + 3は？"));
+        assert!(prompt.contains("12 - 7は？"));
+    }
+}
+```
+
+#### 4.2.3 TOML Template外部化
+
+**prompts/math_cot.toml**:
+```toml
+[template]
+template = """
+あなたは{{role}}です。以下の問題を解いてください。
+
+## 制約
+{{#each constraints}}
+- {{this}}
+{{/each}}
+
+## 問題
+{{problem}}
+
+## 出力形式
+### ステップごとの計算
+[計算過程]
+
+### 最終的な答え
+答え: [数値]
+"""
+variables = ["role", "constraints", "problem"]
+
+[metadata]
+version = "1.0.0"
+author = "prompt-team"
+task = "math-reasoning"
+```
+
+**使用例**:
+```rust
+use std::fs;
+
+// Load template from file
+let toml_str = fs::read_to_string("prompts/math_cot.toml")?;
+let template: PromptTemplate = toml::from_str(&toml_str)?;
+
+// Render with variables
+let mut vars = HashMap::new();
+vars.insert("role".to_string(), "数学の家庭教師".to_string());
+vars.insert("problem".to_string(), "太郎は12個のリンゴを...".to_string());
+
+let prompt = template.render(&vars)?;
+```
+
+### 4.3 🦀 Rust Prompt実験環境
+
+#### 4.3.1 実験設計
+
+プロンプト手法の効果を定量測定する実験環境を構築:
+
+```rust
+// Prompt実験モジュール: LLM呼び出し + Self-Consistency
+use std::collections::HashMap;
+
+/// LLM API呼び出し（Ollama前提）
+fn call_llm(prompt: &str, model: &str, temperature: f64) -> Result<String, Box<dyn std::error::Error>> {
+    let client = reqwest::blocking::Client::new();
+    let body = serde_json::json!({
+        "model": model,
+        "prompt": prompt,
+        "stream": false,
+        "options": { "temperature": temperature }
+    });
+    let result: serde_json::Value = client
+        .post("http://localhost:11434/api/generate")
+        .json(&body)
+        .send()?
+        .json()?;
+    Ok(result["response"].as_str().unwrap_or("").to_owned())
+}
+
+/// 答えを抽出（簡易パーサー）: "答え: N" / "N個" / 単独の数字
+fn extract_answer(response: &str) -> Option<i64> {
+    for pattern in [r"答え[：:]\s*(\d+)", r"(\d+)個", r"^\d+$"] {
+        let re = regex::Regex::new(pattern).unwrap();
+        if let Some(cap) = re.captures(response) {
+            if let Ok(n) = cap[1].parse() {
+                return Some(n);
+            }
+        }
+    }
+    None
+}
+
+/// Self-Consistency: n回サンプリングして多数決
+fn self_consistency(prompt: &str, n: usize, model: &str) -> Option<i64> {
+    let answers: Vec<i64> = (0..n)
+        .filter_map(|_| call_llm(prompt, model, 0.8).ok().and_then(|r| extract_answer(&r)))
+        .collect();
+    if answers.is_empty() { return None; }
+    let mut counts: HashMap<i64, usize> = HashMap::new();
+    for &a in &answers { *counts.entry(a).or_default() += 1; }
+    counts.into_iter().max_by_key(|(_, c)| *c).map(|(a, _)| a)
+}
+
+/// 実験結果レコード
+#[derive(Debug)]
+struct ExperimentResult {
+    method: String,
+    question_id: usize,
+    trial: usize,
+    answer: Option<i64>,
+    correct: Option<bool>,
+    latency_ms: f64,
+}
+
+/// プロンプト手法の比較実験
+fn run_experiment(
+    experiments: &[(&str, &dyn Fn(&str) -> String)],
+    questions: &[(&str, i64)],
+    model: &str,
+    n_trials: usize,
+) -> Vec<ExperimentResult> {
+    let mut results = Vec::new();
+    for &(method_name, prompt_fn) in experiments {
+        for (q_id, &(question, truth)) in questions.iter().enumerate() {
+            let prompt = prompt_fn(question);
+            for trial in 0..n_trials {
+                let start = std::time::Instant::now();
+                let response = call_llm(&prompt, model, 0.7).unwrap_or_default();
+                let latency_ms = start.elapsed().as_secs_f64() * 1000.0;
+                let answer = extract_answer(&response);
+                let correct = answer.map(|a| a == truth);
+                results.push(ExperimentResult {
+                    method: method_name.to_string(),
+                    question_id: q_id, trial, answer, correct, latency_ms,
+                });
+            }
+        }
+    }
+    results
+}
+
+/// 結果を集計: method → (accuracy%, mean_latency_ms)
+fn summarize_results(results: &[ExperimentResult]) -> Vec<(String, f64, f64)> {
+    let mut by_method: HashMap<&str, Vec<&ExperimentResult>> = HashMap::new();
+    for r in results { by_method.entry(&r.method).or_default().push(r); }
+    by_method.into_iter().map(|(method, records)| {
+        let correct: Vec<f64> = records.iter()
+            .filter_map(|r| r.correct)
+            .map(|c| c as u8 as f64)
+            .collect();
+        let accuracy = if correct.is_empty() { 0.0 }
+                       else { correct.iter().sum::<f64>() / correct.len() as f64 * 100.0 };
+        let mean_latency = records.iter().map(|r| r.latency_ms).sum::<f64>()
+            / records.len() as f64;
+        (method.to_string(), accuracy, mean_latency)
+    }).collect()
+}
+```
+
+#### 4.3.2 実験実行例
+
+```rust
+fn main() {
+    // テストケース（算数問題）
+    let questions: &[(&str, i64)] = &[
+        ("太郎は12個のリンゴを持っていて、花子に3個あげました。その後、母親から5個もらいました。太郎は今何個のリンゴを持っていますか？", 14),
+        ("教室に生徒が25人います。5人が帰りました。その後、3人が来ました。今、教室には何人いますか？", 23),
+        ("りんごが8個、みかんが5個あります。合わせて何個ですか？", 13),
+        ("100円のノートを3冊買いました。1000円出したらおつりはいくらですか？", 700),
+        ("1時間は60分です。2時間30分は何分ですか？", 150),
+    ];
+
+    // プロンプト手法の定義
+    let direct:       &dyn Fn(&str) -> String = &|q| format!("次の問題を解いてください。\n\n問題: {}\n答え:", q);
+    let zero_cot:     &dyn Fn(&str) -> String = &|q| format!("次の問題を解いてください。\n\n問題: {}\n\nLet's think step by step.", q);
+    let few_cot:      &dyn Fn(&str) -> String = &|q| format!(
+        "以下の算数問題を解いてください。\n\n# 例1\n問題: リンゴが5個あります。2個食べました。残りは何個ですか？\n推論:\n- 最初にリンゴが5個ある\n- 2個食べたので、5 - 2 = 3\n答え: 3個\n\n# 問題\n問題: {}\n推論:", q
+    );
+
+    let experiments: &[(&str, &dyn Fn(&str) -> String)] = &[
+        ("Direct",        direct),
+        ("Zero-shot CoT", zero_cot),
+        ("Few-shot CoT",  few_cot),
+    ];
+
+    // 実験実行
+    let results = run_experiment(experiments, questions, "llama3.2:3b", 3);
+
+    // 結果集計
+    let mut summary = summarize_results(&results);
+    summary.sort_by(|a, b| a.0.cmp(&b.0));
+    for (method, accuracy, latency) in &summary {
+        println!("{}: accuracy={:.1}%, mean_latency={:.1}ms", method, accuracy, latency);
+    }
+
+    // CSV保存（serde + csv クレートを使用）
+    // csv::Writer::from_path("prompt_experiment_results.csv").unwrap()...
+}
+```
+
+**出力例**:
+```
+3×5 DataFrame
+ Row │ method          accuracy  latency_mean  latency_std  n_valid
+     │ String          Float64   Float64       Float64      Int64
+─────┼────────────────────────────────────────────────────────────
+   1 │ Direct              46.7         823.2         45.3       15
+   2 │ Zero-shot CoT       73.3        1245.8         67.1       15
+   3 │ Few-shot CoT        86.7        1456.3         52.8       15
+```
+
+#### 4.3.3 統計的有意性検定
+
+```rust
+// 2つのプロンプト手法の精度差が統計的に有意かを検定（Welch's t-test）
+fn compare_methods(results: &[ExperimentResult], method1: &str, method2: &str) {
+    let extract = |m: &str| -> Vec<f64> {
+        results.iter()
+            .filter(|r| r.method == m)
+            .filter_map(|r| r.correct)
+            .map(|c| c as u8 as f64)
+            .collect()
+    };
+    let correct1 = extract(method1);
+    let correct2 = extract(method2);
+
+    let mean = |v: &[f64]| v.iter().sum::<f64>() / v.len() as f64;
+    let var  = |v: &[f64], m: f64| v.iter().map(|x| (x - m).powi(2)).sum::<f64>() / v.len() as f64;
+
+    let m1 = mean(&correct1);
+    let m2 = mean(&correct2);
+    let v1 = var(&correct1, m1);
+    let v2 = var(&correct2, m2);
+    let n1 = correct1.len() as f64;
+    let n2 = correct2.len() as f64;
+
+    // Welch's t-statistic
+    let t_stat = (m1 - m2) / (v1 / n1 + v2 / n2).sqrt();
+
+    println!("Comparing {} vs {}:", method1, method2);
+    println!("  {}: mean={:.3}, std={:.3}", method1, m1, v1.sqrt());
+    println!("  {}: mean={:.3}, std={:.3}", method2, m2, v2.sqrt());
+    println!("  t-statistic: {:.3}", t_stat);
+    // NOTE: p-value requires t-distribution CDF; use `statrs` crate for full testing
+}
+
+// Few-shot CoT vs Direct の比較
+// compare_methods(&results, "Few-shot CoT", "Direct");
+```
+
+### 4.4 XML vs Markdown トークン比較実験
+
+```rust
+// XML vs Markdown のトークン数比較
+fn compare_formats() -> (usize, usize, f64) {
+    // 同じ内容をXMLとMarkdownで表現
+    let xml_prompt = r#"<task>
+  <role>あなたは数学の家庭教師です</role>
+  <instruction>以下の問題を解いてください</instruction>
+  <constraints>
+    <constraint>ステップごとに計算過程を示すこと</constraint>
+    <constraint>最終的な答えを数値で示すこと</constraint>
+  </constraints>
+  <input>
+    <problem>太郎は12個のリンゴを持っていて、花子に3個あげました。その後、母親から5個もらいました。太郎は今何個のリンゴを持っていますか？</problem>
+  </input>
+</task>"#;
+
+    let md_prompt = "# タスク
+
+あなたは数学の家庭教師です。以下の問題を解いてください。
+
+## 制約
+- ステップごとに計算過程を示すこと
+- 最終的な答えを数値で示すこと
+
+## 問題
+太郎は12個のリンゴを持っていて、花子に3個あげました。その後、母親から5個もらいました。太郎は今何個のリンゴを持っていますか？";
+
+    // トークン数を近似（空白・改行で分割）
+    let xml_tokens = xml_prompt.split_whitespace().count();
+    let md_tokens  = md_prompt.split_whitespace().count();
+    let reduction  = (xml_tokens - md_tokens) as f64 / xml_tokens as f64 * 100.0;
+
+    println!("Token Count Comparison:");
+    println!("  XML: {} tokens", xml_tokens);
+    println!("  Markdown: {} tokens", md_tokens);
+    println!("  Reduction: {:.1}%", reduction);
+
+    (xml_tokens, md_tokens, reduction)
+}
+```
+
+> **Note:** **実装ゾーン終了** 🦀 Rust Template Engineで型安全なプロンプト管理を実現。🦀 Rustで定量実験環境を構築し、統計検定まで実装した。
+
+> **Note:** **進捗: 70% 完了** 実装基盤が完成した。次は実験ゾーンで、SmolVLM2-256Mを使ったプロンプト最適化を実演する。
+
+---
+---
+title: "第28回: プロンプトエンジニアリング: 30秒の驚き→数式修行→実装マスター【後編】実装編"
+slug: "ml-lecture-28-part2"
+emoji: "💬"
+type: "tech"
+topics: ["machinelearning", "prompt", "rust", "julia", "llm"]
+published: true
+---
+
+
+> Progress: [85%]
+> **理解度チェック**
+> 1. RustのPrompt Template EngineでJSONスキーマバリデーションを実装する型安全上の理由は？
+> 2. Few-shot例の類似度ベース選択（Semantic Similarity）で過適合が起きる条件は？
+
+### 🔬 実験・検証（30分）— SmolVLM2 Prompt最適化
+
+**ゴール**: 軽量VLM (SmolVLM2-256M)を使って、プロンプト手法の効果を実測する。
+
+### 5.1 実験環境のセットアップ
+
+#### 5.1.1 SmolVLM2のセットアップ
+
+SmolVLM2-256Mは、HuggingFace Transformersのマルチモーダルモデル。256Mパラメータで軽量ながら、画像+テキストの推論が可能。
+
+```bash
+# Ollamaでモデルをダウンロード
+ollama pull smolvlm:256m
+
+# または HuggingFace Transformers
+pip install transformers pillow torch
+```
+
+**Rust から呼び出し**:
+```rust
+// SmolVLM2 に画像+テキストを送信
+fn call_smolvlm(prompt: &str, image_path: Option<&str>) -> Result<String, Box<dyn std::error::Error>> {
+    let client = reqwest::blocking::Client::new();
+    let mut body = serde_json::json!({
+        "model": "smolvlm:256m",
+        "prompt": prompt,
+        "stream": false
+    });
+    // 画像がある場合はBase64エンコード
+    if let Some(path) = image_path {
+        let img_bytes = std::fs::read(path)?;
+        let img_base64 = base64::encode(&img_bytes);
+        body["images"] = serde_json::json!([img_base64]);
+    }
+    let result: serde_json::Value = client
+        .post("http://localhost:11434/api/generate")
+        .json(&body)
+        .send()?
+        .json()?;
+    Ok(result["response"].as_str().unwrap_or("").to_owned())
+}
+```
+
+### 5.2 実験1: Zero-shot vs Few-shot (テキスト推論)
+
+**タスク**: 算数問題の正答率を測定
+
+```rust
+fn zero_shot_prompt(question: &str) -> String {
+    format!("次の計算問題を解いてください。\n\n問題: {}\n答え:", question)
+}
+
+fn few_shot_prompt(question: &str) -> String {
+    format!(
+        "次の計算問題を解いてください。\n\n# 例1\n問題: 2 + 3 = ?\n答え: 5\n\n# 例2\n問題: 10 - 4 = ?\n答え: 6\n\n# 例3\n問題: 3 × 5 = ?\n答え: 15\n\n# 問題\n問題: {}\n答え:",
+        question
+    )
+}
+
+#[derive(Debug)]
+struct MathResult {
+    method: String,
+    question: String,
+    ground_truth: i64,
+    predicted: Option<i64>,
+    correct: Option<bool>,
+}
+
+fn run_math_experiment() -> Vec<MathResult> {
+    let test_cases: &[(&str, i64)] = &[
+        ("5 + 3 = ?", 8),
+        ("12 - 7 = ?", 5),
+        ("4 × 6 = ?", 24),
+        ("15 ÷ 3 = ?", 5),
+        ("(8 + 2) × 3 = ?", 30),
+    ];
+    let mut results = Vec::new();
+    for &(question, truth) in test_cases {
+        for (method, prompt_fn) in [
+            ("Zero-shot", zero_shot_prompt as fn(&str) -> String),
+            ("Few-shot",  few_shot_prompt),
+        ] {
+            if let Ok(resp) = call_smolvlm(&prompt_fn(question), None) {
+                let pred = extract_answer(&resp);
+                results.push(MathResult {
+                    method: method.into(), question: question.into(),
+                    ground_truth: truth, predicted: pred,
+                    correct: pred.map(|p| p == truth),
+                });
+            }
+        }
+    }
+    results
+}
+
+fn summarize_by_method(results: &[MathResult]) {
+    for method in &["Zero-shot", "Few-shot"] {
+        let valid: Vec<bool> = results.iter()
+            .filter(|r| r.method == *method)
+            .filter_map(|r| r.correct)
+            .collect();
+        let accuracy = if valid.is_empty() { 0.0 }
+            else { valid.iter().filter(|&&c| c).count() as f64 / valid.len() as f64 * 100.0 };
+        println!("{}: accuracy={:.1}%, n_valid={}", method, accuracy, valid.len());
+    }
+}
+```
+
+**期待される結果**:
+```
+2×2 DataFrame
+ Row │ method     accuracy  n_valid
+     │ String     Float64   Int64
+─────┼──────────────────────────────
+   1 │ Zero-shot      60.0        5
+   2 │ Few-shot       100.0       5
+```
+
+### 5.3 実験2: Chain-of-Thought効果の測定
+
+**タスク**: 複数ステップの推論が必要な問題
+
+```rust
+fn direct_prompt(question: &str) -> String {
+    format!("問題: {}\n答え:", question)
+}
+
+fn cot_prompt(question: &str) -> String {
+    format!("問題: {}\n\nステップごとに考えましょう:", question)
+}
+
+fn few_shot_cot_prompt(question: &str) -> String {
+    format!(
+        "以下の算数問題を解いてください。\n\n# 例1\n問題: リンゴが5個あります。2個食べました。残りは何個ですか？\n推論:\n- 最初にリンゴが5個ある\n- 2個食べたので、5 - 2 = 3\n答え: 3個\n\n# 例2\n問題: 太郎は10個のみかんを持っています。花子に3個あげ、さらに母親から4個もらいました。太郎は今何個のみかんを持っていますか？\n推論:\n- 最初に10個\n- 花子に3個あげたので、10 - 3 = 7個\n- 母親から4個もらったので、7 + 4 = 11個\n答え: 11個\n\n# 問題\n問題: {}\n推論:",
+        question
+    )
+}
+
+#[derive(Debug)]
+struct CotResult {
+    method: String,
+    question_id: usize,
+    predicted: Option<i64>,
+    correct: Option<bool>,
+}
+
+fn run_cot_experiment() -> Vec<CotResult> {
+    let complex_cases: &[(&str, i64)] = &[
+        ("太郎は12個のリンゴを持っていて、花子に3個あげました。その後、母親から5個もらいました。太郎は今何個のリンゴを持っていますか？", 14),
+        ("教室に生徒が25人います。5人が帰りました。その後、3人が来ました。今、教室には何人いますか？", 23),
+        ("りんごが8個、みかんが5個あります。りんごを2個食べ、みかんを1個食べました。残りは合わせて何個ですか？", 10),
+    ];
+    let mut results = Vec::new();
+    for (q_id, &(question, truth)) in complex_cases.iter().enumerate() {
+        for (method, prompt_fn) in [
+            ("Direct",        direct_prompt as fn(&str) -> String),
+            ("Zero-shot CoT", cot_prompt),
+            ("Few-shot CoT",  few_shot_cot_prompt),
+        ] {
+            if let Ok(response) = call_smolvlm(&prompt_fn(question), None) {
+                let pred = extract_answer(&response);
+                results.push(CotResult {
+                    method: method.into(), question_id: q_id,
+                    predicted: pred, correct: pred.map(|p| p == truth),
+                });
+            }
+        }
+    }
+    results
+}
+
+fn summarize_cot(results: &[CotResult]) {
+    for method in &["Direct", "Zero-shot CoT", "Few-shot CoT"] {
+        let valid: Vec<bool> = results.iter()
+            .filter(|r| r.method == *method)
+            .filter_map(|r| r.correct)
+            .collect();
+        let accuracy = if valid.is_empty() { 0.0 }
+            else { valid.iter().filter(|&&c| c).count() as f64 / valid.len() as f64 * 100.0 };
+        println!("{}: accuracy={:.1}%, n_total={}", method, accuracy, valid.len());
+    }
+}
+```
+
+**期待される結果**:
+```
+3×2 DataFrame
+ Row │ method          accuracy  n_total
+     │ String          Float64   Int64
+─────┼──────────────────────────────────
+   1 │ Direct              33.3        3
+   2 │ Zero-shot CoT       66.7        3
+   3 │ Few-shot CoT       100.0        3
+```
+
+### 5.4 実験3: XML vs Markdown構造化比較
+
+```rust
+fn xml_structured_prompt(question: &str) -> String {
+    format!(
+        "<task>\n  <role>あなたは数学の家庭教師です</role>\n  <instruction>以下の問題を解いてください</instruction>\n  <constraints>\n    <constraint>ステップごとに計算過程を示すこと</constraint>\n  </constraints>\n  <input>\n    <problem>{}</problem>\n  </input>\n</task>",
+        question
+    )
+}
+
+fn md_structured_prompt(question: &str) -> String {
+    format!(
+        "# タスク\n\nあなたは数学の家庭教師です。以下の問題を解いてください。\n\n## 制約\n- ステップごとに計算過程を示すこと\n\n## 問題\n{}",
+        question
+    )
+}
+
+#[derive(Debug)]
+struct FormatResult {
+    format: String,
+    question_id: usize,
+    tokens_approx: usize,
+    predicted: Option<i64>,
+    correct: Option<bool>,
+}
+
+fn run_format_experiment() -> Vec<FormatResult> {
+    let complex_cases: &[(&str, i64)] = &[
+        ("太郎は12個のリンゴを持っていて、花子に3個あげました。その後、母親から5個もらいました。太郎は今何個のリンゴを持っていますか？", 14),
+        ("教室に生徒が25人います。5人が帰りました。その後、3人が来ました。今、教室には何人いますか？", 23),
+        ("りんごが8個、みかんが5個あります。りんごを2個食べ、みかんを1個食べました。残りは合わせて何個ですか？", 10),
+    ];
+    let mut results = Vec::new();
+    for (q_id, &(question, truth)) in complex_cases.iter().enumerate() {
+        for (fmt, prompt_fn) in [
+            ("XML",      xml_structured_prompt as fn(&str) -> String),
+            ("Markdown", md_structured_prompt),
+        ] {
+            let prompt = prompt_fn(question);
+            let tokens = prompt.split_whitespace().count();
+            if let Ok(resp) = call_smolvlm(&prompt, None) {
+                let pred = extract_answer(&resp);
+                results.push(FormatResult {
+                    format: fmt.into(), question_id: q_id, tokens_approx: tokens,
+                    predicted: pred, correct: pred.map(|p| p == truth),
+                });
+            }
+        }
+    }
+    results
+}
+
+fn summarize_format(results: &[FormatResult]) {
+    for fmt in &["XML", "Markdown"] {
+        let records: Vec<&FormatResult> = results.iter().filter(|r| r.format == *fmt).collect();
+        let valid: Vec<bool> = records.iter().filter_map(|r| r.correct).collect();
+        let accuracy = if valid.is_empty() { 0.0 }
+            else { valid.iter().filter(|&&c| c).count() as f64 / valid.len() as f64 * 100.0 };
+        let avg_tokens = records.iter().map(|r| r.tokens_approx).sum::<usize>() as f64
+            / records.len().max(1) as f64;
+        println!("{}: accuracy={:.1}%, avg_tokens={:.1}", fmt, accuracy, avg_tokens);
+    }
+}
+```
+
+**期待される結果**:
+```
+2×4 DataFrame
+ Row │ format    accuracy  avg_tokens  token_reduction
+     │ String    Float64   Float64     Float64
+─────┼──────────────────────────────────────────────────
+   1 │ XML           100.0        65.3             0.0
+   2 │ Markdown      100.0        54.7            16.2
+```
+
+### 5.5 実験4: Self-Consistency の精度向上測定
+
+```rust
+fn run_self_consistency_experiment() -> Vec<(usize, usize, Option<i64>, bool, f64)> {
+    let complex_cases: &[(&str, i64)] = &[
+        ("太郎は12個のリンゴを持っていて、花子に3個あげました。その後、母親から5個もらいました。太郎は今何個のリンゴを持っていますか？", 14),
+        ("教室に生徒が25人います。5人が帰りました。その後、3人が来ました。今、教室には何人いますか？", 23),
+        ("りんごが8個、みかんが5個あります。りんごを2個食べ、みかんを1個食べました。残りは合わせて何個ですか？", 10),
+    ];
+    let mut results = Vec::new();
+    for (q_id, &(question, truth)) in complex_cases.iter().enumerate() {
+        let prompt = few_shot_cot_prompt(question);
+        for &n in &[1usize, 3, 5, 10] {
+            let answers: Vec<i64> = (0..n)
+                .filter_map(|_| call_smolvlm(&prompt, None).ok().and_then(|r| extract_answer(&r)))
+                .collect();
+            if !answers.is_empty() {
+                let mut counts: std::collections::HashMap<i64, usize> = std::collections::HashMap::new();
+                for &a in &answers { *counts.entry(a).or_default() += 1; }
+                let (&majority, &max_count) = counts.iter().max_by_key(|(_, &c)| c).unwrap();
+                let agreement = max_count as f64 / answers.len() as f64;
+                results.push((n, q_id, Some(majority), majority == truth, agreement));
+            }
+        }
+    }
+    results
+}
+
+fn summarize_self_consistency(results: &[(usize, usize, Option<i64>, bool, f64)]) {
+    for &n in &[1usize, 3, 5, 10] {
+        let records: Vec<_> = results.iter().filter(|r| r.0 == n).collect();
+        if records.is_empty() { continue; }
+        let accuracy  = records.iter().filter(|r| r.3).count() as f64 / records.len() as f64 * 100.0;
+        let agreement = records.iter().map(|r| r.4).sum::<f64>() / records.len() as f64 * 100.0;
+        println!("N={}: accuracy={:.1}%, avg_agreement={:.1}%", n, accuracy, agreement);
+    }
+}
+```
+
+**期待される結果**:
+```
+4×3 DataFrame
+ Row │ n_samples  accuracy  avg_agreement
+     │ Int64      Float64   Float64
+─────┼─────────────────────────────────────
+   1 │         1      66.7           100.0
+   2 │         3      83.3            88.9
+   3 │         5     100.0            92.0
+   4 │        10     100.0            96.5
+```
+
+**観察**:
+- サンプル数が増えるほど精度向上
+- $N=5$で飽和（それ以上は改善小）
+- Agreement rate（多数決の一致度）も向上 → 信頼性の指標
+
+### 5.6 実験結果の可視化
+
+```rust
+// 精度比較プロット（plotters クレートで実装可能; ここはターミナル出力で代替）
+fn plot_accuracy_comparison() {
+    let methods  = ["Direct", "Zero-shot CoT", "Few-shot CoT"];
+    let accuracies = [33.3f64, 66.7, 100.0];
+    println!("Prompt Method Comparison (Accuracy %):");
+    for (method, &acc) in methods.iter().zip(accuracies.iter()) {
+        let bar = "#".repeat((acc / 5.0) as usize);
+        println!("  {:15} | {:20} {:.1}%", method, bar, acc);
+    }
+    // savefig → use plotters::prelude::* for PNG output
+}
+
+// Self-Consistency効果プロット
+fn plot_self_consistency() {
+    let n_samples  = [1usize, 3, 5, 10];
+    let accuracies = [66.7f64, 83.3, 100.0, 100.0];
+    println!("Self-Consistency Effect:");
+    for (&n, &acc) in n_samples.iter().zip(accuracies.iter()) {
+        let bar = "#".repeat((acc / 5.0) as usize);
+        println!("  N={:2} | {:20} {:.1}%", n, bar, acc);
+    }
+}
+
+fn main() {
+    plot_accuracy_comparison();
+    plot_self_consistency();
+}
+```
+
+### 5.7 実験のまとめ
+
+| 実験 | 発見 | 実用的示唆 |
+|:-----|:-----|:----------|
+| **Zero vs Few** | Few-shotで精度+40% | 3-5例で十分 |
+| **CoT効果** | 複雑問題でDirect比+66.7% | 推論ステップが必須 |
+| **XML vs MD** | トークン16%削減、精度同等 | Markdown優先 |
+| **Self-Consistency** | N=5で精度+33.3% | コスト5倍で大幅改善 |
+
+**Production推奨構成**:
+```
+Few-shot CoT (3例) + Markdown構造化 + Self-Consistency (N=3~5)
+→ 精度: 90%+ | コスト: 3-5x baseline
+```
+
+> **Note:** **実験ゾーン終了** SmolVLM2-256Mを使い、プロンプト手法の効果を定量測定した。Few-shot CoT + Self-Consistencyの威力を実証。
+
+> **Note:** **進捗: 85% 完了** 実験により理論を検証した。次は発展ゾーンで、DSPy・圧縮・Negative Promptingを学ぶ。
+
+---
+
+## 🔬 Z6. 新たな冒険へ（研究動向）
+
+**ゴール**: DSPy、Prompt Compression、Negative Promptingの最先端技術を学ぶ。
+
+### 6.1 DSPy: Prompt as Code
+
+#### 6.1.1 DSPyとは？
+
+Khattab et al. (2023)[^7]のDSPy (Declarative Self-improving Python)は、**プロンプトをコードで記述し、自動最適化**するフレームワーク。
+
+**従来のプロンプトエンジニアリング**:
+```rust
+// 手作業で文字列を調整
+let text = "...";
+let prompt = format!(
+    "Translate the following text to Japanese:\n\nText: {}\nTranslation:",
+    text
+);
+```
+
+**DSPy**:
+```rust
+// 構造化プロンプト: serde_json + reqwest で型安全な呼び出し（DSPyのSignatureに相当）
+use serde::Serialize;
+
+// タスク定義（DSPyのSignatureに相当）
+#[derive(Serialize)]
+struct TranslationTask {
+    text: String,
+}
+
+fn chain_of_thought(task: &TranslationTask) -> Result<String, Box<dyn std::error::Error>> {
+    let prompt = format!(
+        "Translate the following text to Japanese.\nThink step by step, then provide the translation.\n\nText: {}\nTranslation:",
+        task.text
+    );
+    let client = reqwest::blocking::Client::new();
+    let body = serde_json::json!({
+        "model": "gpt-4",
+        "messages": [{ "role": "user", "content": prompt }]
+    });
+    let result: serde_json::Value = client
+        .post("https://api.openai.com/v1/chat/completions")
+        .header("Authorization", format!("Bearer {}", std::env::var("OPENAI_API_KEY")?))
+        .json(&body)
+        .send()?
+        .json()?;
+    Ok(result["choices"][0]["message"]["content"].as_str().unwrap_or("").to_owned())
+}
+```
+
+**DSPyの利点**:
+
+| 従来 | DSPy |
+|:-----|:-----|
+| 文字列編集 | Pythonコード |
+| 手動最適化 | 自動最適化 |
+| バージョン管理困難 | Gitで管理可能 |
+| テスト困難 | ユニットテスト可能 |
+| 型チェックなし | 型ヒント活用 |
+
+#### 6.1.2 DSPyの基本構造
+
+**Signature**: タスクの入出力定義
+```rust
+// 数学推論タスクの構造化（DSPyのSignatureに相当）
+#[derive(Debug)]
+struct MathTask {
+    question: String,
+}
+
+#[derive(Debug)]
+struct MathResult {
+    reasoning: String,
+    answer: f64,
+}
+```
+
+**Module**: 推論パイプライン
+> **Note:** DSPyはPython専用フレームワーク。Rust実装では `HTTP.jl` + `serde_json` で同等の構造化呼び出しを実現する（上記参照）。
+
+**Optimizer**: プロンプト自動最適化
+> **Note:** Few-shot最適化は、訓練データから高スコア例を選択してコンテキストに挿入する操作。数式: $p^* = \arg\max_p \mathbb{E}_{(x,y)\sim\mathcal{D}}[\text{score}(f_p(x), y)]$
+
+#### 6.1.3 DSPyの最適化手法
+
+| 手法 | 概要 | 使いどころ |
+|:-----|:-----|:----------|
+| **BootstrapFewShot** | 訓練データから最適な例を自動選択 | Few-shot最適化 |
+| **BootstrapFewShotWithRandomSearch** | ランダムサーチで例を探索 | 探索的最適化 |
+| **COPRO** | LLMでプロンプト自体を生成・改善 | メタ最適化 |
+| **MIPRO** | 複数指標を同時最適化 | Multi-objective |
+
+**実験結果（Khattab et al. 2023[^7]）**:
+
+| タスク | 手動プロンプト | DSPy最適化 | 向上幅 |
+|:------|:-------------|:----------|:------|
+| HotPotQA | 58.3% | **67.1%** | +8.8% |
+| GSM8K | 62.4% | **71.9%** | +9.5% |
+| FEVER | 72.1% | **79.3%** | +7.2% |
+
+**DSPyの実用例**:
+```rust
+// 感情分析: serde_json + reqwest による構造化プロンプト
+use serde::{Deserialize, Serialize};
+
+#[derive(Debug, Serialize)]
+struct SentimentTask {
+    text: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct SentimentResult {
+    sentiment: String,   // "positive" | "negative" | "neutral"
+    confidence: f64,     // 0.0 ~ 1.0
+}
+
+fn analyze_sentiment(task: &SentimentTask) -> Result<SentimentResult, Box<dyn std::error::Error>> {
+    let prompt = format!(
+        "Analyze the sentiment of the following text.\n\nText: {}\n\nRespond in JSON format: {{\"sentiment\": \"positive|negative|neutral\", \"confidence\": 0.0-1.0}}",
+        task.text
+    );
+    let client = reqwest::blocking::Client::new();
+    let body = serde_json::json!({
+        "model": "gpt-4o-mini",
+        "messages": [{ "role": "user", "content": prompt }],
+        "response_format": { "type": "json_object" }
+    });
+    let result: serde_json::Value = client
+        .post("https://api.openai.com/v1/chat/completions")
+        .header("Authorization", format!("Bearer {}", std::env::var("OPENAI_API_KEY")?))
+        .json(&body)
+        .send()?
+        .json()?;
+    let content = result["choices"][0]["message"]["content"].as_str().unwrap_or("{}");
+    Ok(serde_json::from_str(content)?)
+}
+
+// 検算
+// let task = SentimentTask { text: "This movie is absolutely fantastic!".into() };
+// result.sentiment => "positive", result.confidence => ~0.95
 ```
 
 ### 6.2 Prompt Compression
@@ -1306,34 +2222,39 @@ Jiang et al. (2024)[^8]のLongLLMLinguaは、**プロンプトを圧縮してコ
    - User query → 圧縮しない（情報損失を防ぐ）
 
 **実装例**:
-```julia
-# プロンプト圧縮: Julia + HTTP.jlによる実装（LongLLMLinguaの概念）
-using HTTP, JSON3
+```rust
+// プロンプト圧縮: LongLLMLinguaの概念をRustで実装
 
-# 重要度スコア計算: 小モデルでの対数尤度（情報量）を利用
-function token_importance(token::String, context::String)::Float64
-    # importance(tᵢ) = -log P_small(tᵢ | t₁..tᵢ₋₁)
-    # ここでは簡易近似: 出現頻度の逆数
-    words = split(lowercase(context))
-    freq = count(==(lowercase(token)), words)
-    return freq > 0 ? -log(freq / length(words)) : Inf
-end
+// 重要度スコア計算: 情報量（出現頻度の逆数で近似）
+// importance(tᵢ) = -log P_small(tᵢ | t₁..tᵢ₋₁)
+fn token_importance(token: &str, context: &str) -> f64 {
+    let words: Vec<&str> = context.to_lowercase().split_whitespace().collect();
+    let freq = words.iter().filter(|&&w| w == &token.to_lowercase()).count();
+    if freq > 0 { -(freq as f64 / words.len() as f64).ln() } else { f64::INFINITY }
+}
 
-# 段階的圧縮（system > few-shot > query の順に積極圧縮）
-function compress_prompt(prompt::String; rate::Float64=0.2)::String
-    sentences = split(prompt, ". ")
-    scores = [(s, sum(token_importance(w, prompt) for w in split(s))) for s in sentences]
-    sort!(scores, by=x->x[2], rev=true)
-    target = max(1, round(Int, length(sentences) * rate))
-    return join(first.(scores[1:target]), ". ")
-end
+// 段階的圧縮（system > few-shot > query の順に積極圧縮）
+fn compress_prompt(prompt: &str, rate: f64) -> String {
+    let sentences: Vec<&str> = prompt.split(". ").collect();
+    let mut scored: Vec<(&str, f64)> = sentences.iter()
+        .map(|&s| {
+            let score: f64 = s.split_whitespace()
+                .map(|w| { let i = token_importance(w, prompt); if i.is_finite() { i } else { 10.0 } })
+                .sum();
+            (s, score)
+        })
+        .collect();
+    scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
+    let target = ((sentences.len() as f64 * rate).round() as usize).max(1);
+    scored[..target].iter().map(|&(s, _)| s).collect::<Vec<_>>().join(". ")
+}
 
-original = """You are a helpful assistant specialized in math tutoring.
-Example: John has 12 apples, gives 3 to Mary, gets 5 from mother. Answer: 14."""
-
-compressed = compress_prompt(original, rate=0.2)
-println("Original tokens: $(length(split(original)))")
-println("Compressed tokens: $(length(split(compressed)))")
+fn main() {
+    let original = "You are a helpful assistant specialized in math tutoring.                     Example: John has 12 apples, gives 3 to Mary, gets 5 from mother. Answer: 14.";
+    let compressed = compress_prompt(original, 0.2);
+    println!("Original tokens: {}", original.split_whitespace().count());
+    println!("Compressed tokens: {}", compressed.split_whitespace().count());
+}
 ```
 
 **圧縮例**:
@@ -1360,26 +2281,34 @@ Math tutor. Solve step-by-step, show calculations.
 
 長いコンテキスト（RAGの検索結果など）から重要部分のみを抽出:
 
-```julia
-# Selective Context Pruning: クエリ関連文を重要度順に抽出
-function selective_pruning(context::String, query::String, target_length::Int)::String
-    sentences = split(context, ". ")
-    query_words = Set(split(lowercase(query)))
+```rust
+// Selective Context Pruning: クエリ関連文を重要度順に抽出
+fn selective_pruning(context: &str, query: &str, target_length: usize) -> String {
+    let sentences: Vec<&str> = context.split(". ").collect();
+    let query_words: std::collections::HashSet<String> = query.split_whitespace()
+        .map(|w| w.to_lowercase())
+        .collect();
+    // 各文のクエリとの関連度（共通単語比率）
+    let mut scored: Vec<(&str, f64)> = sentences.iter()
+        .map(|&s| {
+            let sent_words: std::collections::HashSet<String> = s.split_whitespace()
+                .map(|w| w.to_lowercase())
+                .collect();
+            let overlap = sent_words.intersection(&query_words).count();
+            (s, overlap as f64 / query_words.len().max(1) as f64)
+        })
+        .collect();
+    scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
 
-    # 各文のクエリとの関連度（共通単語比率）
-    scored = [(s, length(intersect(Set(split(lowercase(s))), query_words)) / length(query_words))
-              for s in sentences]
-    sort!(scored, by=x->x[2], rev=true)
-
-    selected = String[]
-    current_len = 0
-    for (sent, _) in scored
-        current_len + length(sent) > target_length && break
-        push!(selected, sent)
-        current_len += length(sent)
-    end
-    return join(selected, ". ")
-end
+    let mut selected = Vec::new();
+    let mut current_len = 0;
+    for (sent, _) in scored {
+        if current_len + sent.len() > target_length { break; }
+        selected.push(sent);
+        current_len += sent.len();
+    }
+    selected.join(". ")
+}
 ```
 
 ### 6.3 Negative Prompting
@@ -1500,7 +2429,7 @@ Output:
 従来のプロンプトエンジニアリングは、試行錯誤で文字列を調整する作業だった。本講義では、プロンプトを**型安全・構造化・自動最適化可能**な対象として扱う方法を学んだ。
 
 - 🦀 **Rust Template Engine**: 型安全性とインジェクション防止
-- ⚡ **Julia実験**: 定量評価と統計検定
+- 🦀 **Rust実験**: 定量評価と統計検定
 - **DSPy**: プログラマティック最適化
 
 #### 2. 推論ステップの明示化が性能を決定的に向上
@@ -1582,7 +2511,7 @@ OpenAI内部実験（非公開データ）:
 - **Query Transformation**: HyDE / Query Rewriting / Multi-Query
 - **Advanced RAG**: Self-RAG / FLARE / Adaptive-RAG
 - **🦀 Rust Vector Store実装**
-- **⚡ Julia Embedding + Retrieval実験**
+- **🦀 Rust Embedding + Retrieval実験**
 - **Production RAG Pipeline構築**
 
 RAGは、LLMの知識を**動的に拡張**する技術。プロンプト × RAG で、実用的なLLMアプリケーションが完成する。
@@ -1620,20 +2549,24 @@ RAGは、LLMの知識を**動的に拡張**する技術。プロンプト × RAG
 
 **未来**: プロンプトとコードの境界が曖昧になり、**統合的な開発環境**が生まれる。
 
-```julia
-# Julia: マクロでプロンプトを定義（概念的な未来像）
-macro prompt(fn_def)
-    # コンパイラがプロンプトを最適化し、
-    # 型チェックで入出力を検証し、
-    # ユニットテストで品質保証する
-    quote
-        $(esc(fn_def))
-    end
-end
+```rust
+// Rustのトレイトでプロンプトを型安全に定義（概念的な未来像）
+// コンパイラが型チェックで入出力を検証
+// ユニットテストで品質保証
 
-@prompt function translate(text::String)::String
-    """Translate $(text) to Japanese"""
-end
+trait PromptTemplate {
+    fn render(&self) -> String;
+}
+
+struct Translate {
+    text: String,
+}
+
+impl PromptTemplate for Translate {
+    fn render(&self) -> String {
+        format!("Translate {} to Japanese", self.text)
+    }
+}
 ```
 
 あなたはどう思うか？ プロンプトは"言葉の魔法"か、それとも"新しいプログラミング"か？

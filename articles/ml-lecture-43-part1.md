@@ -2,12 +2,12 @@
 title: "第43回: Diffusion Transformers & 高速生成: 30秒の驚き→数式修行→実装マスター"
 emoji: "🎨"
 type: "tech"
-topics: ["machinelearning", "deeplearning", "diffusiontransformers", "julia", "dit"]
+topics: ["machinelearning", "deeplearning", "diffusiontransformers", "rust", "dit"]
 published: true
 slug: "ml-lecture-43-part1"
 difficulty: "advanced"
 time_estimate: "90 minutes"
-languages: ["Julia", "Rust"]
+languages: ["Rust"]
 keywords: ["機械学習", "深層学習", "生成モデル"]
 ---
 
@@ -64,49 +64,58 @@ graph TD
 
 DiT の核心は **AdaLN-Zero** — 拡散ステップ $t$ と条件 $c$ を正規化層に注入することで、時間的・条件的制御を実現する。
 
-```julia
-using LinearAlgebra, Statistics
+```rust
+// AdaLN-Zero: Adaptive Layer Normalization with Zero Initialization
+// Used in DiT to inject diffusion timestep t and condition c into normalization layers
+use candle_core::{Tensor, Result, Device};
+use candle_nn::Module;
 
-# AdaLN-Zero: Adaptive Layer Normalization with Zero Initialization
-function adaln_zero(x, t, c, γ_mlp, β_mlp)
-    # x: [B, N, D] — input features (B=batch, N=tokens, D=dims)
-    # t: [B, D_t] — timestep embedding
-    # c: [B, D_c] — condition embedding
-    # γ_mlp, β_mlp: MLPs for scale and shift parameters
+fn adaln_zero(
+    x: &Tensor,        // [B, N, D] — input features (B=batch, N=tokens, D=dims)
+    t: &Tensor,        // [B, D_t] — timestep embedding
+    c: &Tensor,        // [B, D_c] — condition embedding (class, text, etc.)
+    gamma_mlp: &impl Module,  // MLP: cond → scale γ ∈ ℝ^D (zero-init → starts at 1)
+    beta_mlp:  &impl Module,  // MLP: cond → shift β ∈ ℝ^D (zero-init → starts at 0)
+) -> Result<Tensor> {
+    // 1. Concatenate timestep and condition: [t; c] ∈ ℝ^{D_t + D_c}
+    let cond = Tensor::cat(&[t, c], 1)?;           // [B, D_t + D_c]
 
-    # 1. Concatenate timestep and condition
-    cond = hcat(t, c)               # [B, D_t + D_c]
+    // 2. Generate scale γ and shift β (zero-initialized → identity at start)
+    let gamma = gamma_mlp.forward(&cond)?;          // [B, D]
+    let beta  = beta_mlp.forward(&cond)?;           // [B, D]
 
-    # 2. Generate scale γ and shift β (initialized to zero)
-    γ = γ_mlp(cond)                 # [B, D] → scale
-    β = β_mlp(cond)                 # [B, D] → shift
+    // 3. Layer Normalization along D dimension
+    let mu    = x.mean_keepdim(2)?;                 // [B, N, 1]
+    let var   = x.var_keepdim(2)?;                  // [B, N, 1]
+    let eps   = Tensor::new(1e-6_f32, x.device())?;
+    let x_hat = x.sub(&mu)?.div(&var.add(&eps)?.sqrt()?)?;  // [B, N, D]
 
-    # 3. Layer Normalization
-    μ  = mean(x, dims=3)            # [B, N, 1]
-    σ² = var(x, dims=3, corrected=false)  # [B, N, 1]
-    ε  = 1e-6
-    x̂  = @. (x - μ) / sqrt(σ² + ε) # [B, N, D]
+    // 4. Adaptive modulation: γ·x̂ + β (broadcast over token dim N)
+    let gamma_b = gamma.unsqueeze(1)?;              // [B, 1, D]
+    let beta_b  = beta.unsqueeze(1)?;               // [B, 1, D]
+    x_hat.mul(&gamma_b)?.add(&beta_b)
+}
 
-    # 4. Adaptive scaling and shifting
-    @. γ' * x̂ + β'                  # broadcasting: [B, N, D]
-end
+fn main() -> Result<()> {
+    let dev = &Device::Cpu;
+    // Test: 2D image patches as tokens
+    let (b, n, d) = (2usize, 4usize, 8usize);  // 2 images, 4 patches, 8 dims
+    let x = Tensor::randn(0f32, 1f32, (b, n, d), dev)?;
+    let t = Tensor::randn(0f32, 1f32, (b, 4), dev)?;   // timestep embedding (D_t=4)
+    let c = Tensor::randn(0f32, 1f32, (b, 4), dev)?;   // condition embedding (D_c=4)
 
-# Dummy MLPs (initialized to output zeros)
-γ_mlp(cond) = ones(size(cond, 1), 8)   # scale starts at 1.0
-β_mlp(cond) = zeros(size(cond, 1), 8)  # shift starts at 0.0
+    // Dummy MLPs: scale starts at 1, shift starts at 0 (zero-init)
+    let gamma_mlp = candle_nn::linear(8, d, candle_nn::VarBuilder::zeros(DType::F32, dev))?;
+    let beta_mlp  = candle_nn::linear(8, d, candle_nn::VarBuilder::zeros(DType::F32, dev))?;
 
-# Test: 2D image patches as tokens
-B, N, D = 2, 4, 8  # 2 images, 4 patches, 8 dims
-x = randn(B, N, D)  # input features
-t = randn(B, 4)     # timestep embedding (D_t=4)
-c = randn(B, 4)     # condition embedding (D_c=4)
-
-x_out = adaln_zero(x, t, c, γ_mlp, β_mlp)
-println("Input shape:  ", size(x))
-println("Output shape: ", size(x_out))
-println("Condition-adaptive normalization applied!")
-println("Mean (should be ≈0 for each token): ", mean(x_out, dims=3))
-println("Variance (should be ≈1 for each token): ", var(x_out, dims=3, corrected=false))
+    let x_out = adaln_zero(&x, &t, &c, &gamma_mlp, &beta_mlp)?;
+    println!("Input shape:  {:?}", x.shape());
+    println!("Output shape: {:?}", x_out.shape());
+    println!("Condition-adaptive normalization applied!");
+    println!("Mean (should be ≈0 for each token): {:?}", x_out.mean_keepdim(2)?.to_vec3::<f32>()?);
+    println!("Variance (should be ≈1 for each token): {:?}", x_out.var_keepdim(2)?.to_vec3::<f32>()?);
+    Ok(())
+}
 ```
 
 出力:
@@ -226,7 +235,7 @@ SD3 と FLUX は **MM-DiT (Multimodal DiT)** — 画像とテキストを **同�
 
 **修了時の到達目標**:
 1. **全モダリティでの生成システム実装** — 画像・音声・動画・3D・モーション・科学
-2. **3言語フルスタック能力** — ⚡Julia (訓練) + 🦀Rust (推論) + 🔮Elixir (配信)
+2. **3言語フルスタック能力** — 🦀Rust (訓練) + 🦀Rust (推論) + 🔮Elixir (配信)
 3. **2025-2026 フロンティア理解** — Flow Matching / Inference-Time Scaling / Modal Unification
 4. **論文が書ける + システムが作れる** — Course IV (理論) + Course V (応用) の両輪
 
@@ -234,7 +243,7 @@ SD3 と FLUX は **MM-DiT (Multimodal DiT)** — 画像とテキストを **同�
 - **松尾研**: 画像生成のみ (Diffusion 理論2回)
 - **本シリーズ**: 全モダリティ (Diffusion 理論10回 + 応用8回)
 - **松尾研**: Python のみ
-- **本シリーズ**: 3言語フルスタック (Julia/Rust/Elixir)
+- **本シリーズ**: 3言語フルスタック (Rust/Rust/Elixir)
 - **松尾研**: 2023 年時点
 - **本シリーズ**: 2025-2026 最新フロンティア
 
@@ -357,22 +366,22 @@ FID が低いほど生成画像の統計量が実画像に近い。FID < 5 は�
 - **U-Net**: 各楽器が「隣の楽器」だけ聞いて演奏
 - **DiT**: 指揮者が全楽器を統率 (Self-Attention = 指揮者)
 
-### 2.5 Trojan Horse — Python から Julia/Rust へ
+### 2.5 Trojan Horse — Python から Rust/Rust へ
 
 **これまでの言語構成**:
 - **第1-8回 (Course I)**: 🐍Python 100%
-- **第9-16回 (Course II)**: 🐍Python → ⚡Julia 登場 (第9回) → 🦀Rust 登場 (第11回)
-- **第17-24回 (Course III)**: ⚡Julia + 🦀Rust + 🔮Elixir (第15回登場)
-- **第33-42回 (Course IV)**: ⚡Julia + 🦀Rust + 🔮Elixir (3言語フルスタック)
-- **第43-50回 (Course V)**: ⚡Julia + 🦀Rust + 🔮Elixir (継続)
+- **第9-16回 (Course II)**: 🐍Python → 🦀Rust 登場 (第9回) → 🦀Rust 登場 (第11回)
+- **第17-24回 (Course III)**: 🦀Rust + 🦀Rust + 🔮Elixir (第15回登場)
+- **第33-42回 (Course IV)**: 🦀Rust + 🦀Rust + 🔮Elixir (3言語フルスタック)
+- **第43-50回 (Course V)**: 🦀Rust + 🦀Rust + 🔮Elixir (継続)
 
 **Course V での3言語役割**:
-- **⚡Julia**: 訓練パイプライン (Lux.jl + Reactant.jl / GPU最適化)
+- **🦀Rust**: 訓練パイプライン (Candle + Burn / GPU最適化)
 - **🦀Rust**: 推論サーバー (Candle / 低レイテンシ / バッチ処理)
 - **🔮Elixir**: 分散サービング (Phoenix / 耐障害性 / A/Bテスト)
 
 **本講義での登場**:
-- Zone 4: ⚡Julia — Mini-DiT 訓練パイプライン
+- Zone 4: 🦀Rust — Mini-DiT 訓練パイプライン
 - Zone 4: 🦀Rust — DiT 推論サーバー (Candle)
 - Zone 4: 🔮Elixir — 分散サービング (OTP supervision)
 
@@ -1108,7 +1117,7 @@ $$
 
 **ボス撃破！** DiT の Forward Pass を完全実装した。Patchify → DiT Blocks → Unpatchify の流れで、画像からノイズ予測まで辿り着いた。
 
-> **Note:** **ここまでで全体の50%完了！** 数式修行ゾーン完走。DiT・MM-DiT・SiT の数式を完全導出した。次は実装ゾーン — Julia/Rust/Elixir で DiT を動かす。
+> **Note:** **ここまでで全体の50%完了！** 数式修行ゾーン完走。DiT・MM-DiT・SiT の数式を完全導出した。次は実装ゾーン — Rust/Rust/Elixir で DiT を動かす。
 
 ### 3.7 Scaling Laws for Diffusion Transformers
 
@@ -1199,7 +1208,7 @@ $$
 - SP: モデルサイズごとに学習率を調整しないと発散
 - $\mu$P: 同じ学習率で100M → 10Bまでスケール可能
 
-**実装（Julia概念コード）**:
+**実装（Rust概念コード）**:
 
 
 #### μP の理論的背景: 無限幅極限と特徴学習
@@ -1290,7 +1299,7 @@ $$
 
 **効果**: 10ステップでDDIM 50ステップ相当の品質達成。
 
-**実装（Julia概念コード）**:
+**実装（Rust概念コード）**:
 
 #### DPM-Solver++ のステップサイズスケジュールの最適化
 
@@ -1384,7 +1393,7 @@ $$
 
 CFGの$w$を学習時に蒸留 → 推論時にguidance-freeで高品質生成可能（4-8ステップ）。
 
-**実装の核心（Julia概念コード）**:
+**実装の核心（Rust概念コード）**:
 
 
 #### RoPE の相対位置符号化の数学的証明
@@ -1472,7 +1481,7 @@ t \sim \text{Logit-Normal}(\mu, \sigma^2), \quad t = \text{sigmoid}(u),\; u \sim
 $$
 $\mu = 0, \sigma = 1$（デフォルト）では $t$ が $[0.3, 0.7]$ 付近に集中する。直感: 全拡散ステップ中で最も「難しい」中間時刻での学習を強調することで、訓練効率が向上する。$t \approx 0$（ほぼ清浄）と $t \approx 1$（ほぼノイズ）は比較的容易なため均等サンプリングは非効率だ。
 
-### 4.1 完全なDiTブロック実装（Lux.jl）
+### 4.1 完全なDiTブロック実装（Candle）
 
 
 ### 4.2 MM-DiT実装（SD3/FLUXスタイル）
@@ -1541,7 +1550,7 @@ $\mu = 0, \sigma = 1$（デフォルト）では $t$ が $[0.3, 0.7]$ 付近に�
 - DPM-Solver++: CFG安定化 + 15-20ステップ高速サンプリング
 
 **実装スキル**:
-- Lux.jlでのDiT完全実装（Patchify/Unpatchify/DiTBlock/AdaLN）
+- CandleでのDiT完全実装（Patchify/Unpatchify/DiTBlock/AdaLN）
 - MM-DiT dual-stream architecture
 - DPM-Solver++ 2nd-order sampler
 - Scaling Laws実験フレームワーク

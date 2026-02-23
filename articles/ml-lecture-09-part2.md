@@ -363,30 +363,25 @@ pub fn elbo_ndarray<'a>(
     let mut rng = thread_rng();
     epsilon.iter_mut().for_each(|x| *x = StandardNormal.sample(&mut rng));
 
-    let sigma = logvar.mapv(|lv| (0.5 * lv).exp());  // sigma = exp(0.5 * logvar)
-    let z = mu + &(sigma * &epsilon);  // Broadcasting: (batch, latent) + (batch, latent)
+    let sigma = logvar.mapv(|lv| (0.5 * lv).exp());  // σ = exp(½ log σ²)
+    let z = mu + &(sigma * &epsilon);  // z = μ + σ⊙ε  [reparameterization trick]
 
     // ===== Reconstruction Loss =====
-    // recon_loss = -mean(sum((x - x_recon)^2, axis=1))
-    // - `diff` is **owned** (temporary)
-    // - `squared` is **owned** (element-wise operation)
-    // - `sum_axis` is **owned** (reduction along axis 1)
+    // E_q[log p(x|z)] ∝ -||x - x̂||²  (Gaussian仮定)
     let diff = x - x_recon;
     let squared = diff.mapv(|v| v * v);
-    let sum_axis1 = squared.sum_axis(Axis(1));  // (batch,) — sum over input_dim
-    let recon_loss = -sum_axis1.mean().unwrap_or_else(|| 0.0);
+    let sum_axis1 = squared.sum_axis(Axis(1));  // (batch,) — Σ over input_dim
+    let recon_loss = -sum_axis1.mean().unwrap_or(0.0);  // -E[||x - x̂||²]
 
     // ===== KL Divergence =====
-    // kl = -0.5 * mean(sum(1 + logvar - mu^2 - exp(logvar), axis=1))
-    // - All intermediate arrays are **owned**
-    // - Compiler optimizes with move semantics (no unnecessary copies)
-    let mu_sq = mu.mapv(|m| m * m);
-    let exp_logvar = logvar.mapv(|lv| lv.exp());
-    let kl_terms = 1.0 + logvar - &mu_sq - &exp_logvar;  // Broadcasting
+    // KL[q||p] = -½ Σ(1 + log σ² - μ² - σ²)
+    let mu_sq = mu.mapv(|m| m * m);           // μ²
+    let exp_logvar = logvar.mapv(|lv| lv.exp()); // σ² = exp(log σ²)
+    let kl_terms = 1.0 + logvar - &mu_sq - &exp_logvar;  // 1 + log σ² - μ² - σ²
     let kl_sum = kl_terms.sum_axis(Axis(1));  // (batch,)
-    let kl_loss = -0.5 * kl_sum.mean().unwrap_or_else(|| 0.0);
+    let kl_loss = -0.5 * kl_sum.mean().unwrap_or(0.0);  // KL[q(z|x) || p(z)]
 
-    // ===== ELBO =====
+    // ===== ELBO = E[log p(x|z)] - KL[q(z|x) || p(z)] =====
     let elbo = recon_loss - kl_loss;
 
     // Return value is **moved** to caller (no heap allocation for struct)
@@ -1190,11 +1185,12 @@ pub fn elbo_simd(
     assert_eq!(x_flat.len(), batch_size * input_dim);
 
     // Process 4 elements at a time via iterator chains
+    // Σ(x - x̂)² per 4 elements using SIMD f64x4
     let recon_sum = x_flat.chunks_exact(4)
         .zip(x_recon_flat.chunks_exact(4))
         .map(|(xc, xrc)| {
-            let d = f64x4::from_slice(xc) - f64x4::from_slice(xrc);
-            d * d
+            let d = f64x4::from_slice(xc) - f64x4::from_slice(xrc);  // x - x̂
+            d * d  // (x - x̂)²
         })
         .fold(f64x4::splat(0.0), |acc, v| acc + v);
 
@@ -1208,7 +1204,7 @@ pub fn elbo_simd(
     // ...
 
     let recon_loss = -(recon_sum.reduce_sum() + recon_scalar) / batch_size as f64;
-    // ...
+    // recon_loss = -½ Σ(x - x̂)² / batch_size  ∝ E_q[log p(x|z)]
 
     recon_loss  // Simplified
 }
@@ -1456,7 +1452,7 @@ $\log p(x)$ のこと。ベイズ統計では周辺尤度を "evidence" と呼�
 - β-VAE / FactorVAE — Disentanglement の数理
 - VQ-VAE — 離散潜在変数と Straight-Through Estimator
 - FSQ (Finite Scalar Quantization) — シンプルで高性能な量子化
-- Julia 実装: Flux.jl で VAE を構築し、MNIST で潜在空間可視化
+- Rust 実装: Candle で VAE を構築し、MNIST で潜在空間可視化
 
 **Boss Battle**: 変分推論（第9回）の ELBO を、ニューラルネットワークでスケーラブルに解く。
 

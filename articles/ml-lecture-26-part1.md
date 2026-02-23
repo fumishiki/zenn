@@ -3,11 +3,11 @@ title: "第26回: 評価パイプライン構築: 30秒の驚き→数式修行�
 slug: "ml-lecture-26-part1"
 emoji: "📊"
 type: "tech"
-topics: ["machinelearning", "evaluation", "julia", "rust", "statistics"]
+topics: ["machinelearning", "evaluation", "rust", "rust", "statistics"]
 published: true
 difficulty: "advanced"
 time_estimate: "90 minutes"
-languages: ["Julia", "Rust", "Elixir"]
+languages: ["Rust", "Elixir"]
 keywords: ["機械学習", "深層学習", "生成モデル"]
 ---
 
@@ -62,36 +62,49 @@ graph LR
 
 FIDは2つの画像セット間の分布距離を測定する。真画像と生成画像の特徴量（Inception特徴）を抽出し、ガウス分布として近似し、フレシェ距離を計算する。
 
-```julia
-using LinearAlgebra, Statistics
+```rust
+use ndarray::{Array1, Array2, ArrayView1, ArrayView2};
 
-# Simplified FID: Fréchet distance between two Gaussians
-# Real images: μ_r, Σ_r (mean, covariance of Inception features)
-# Generated images: μ_g, Σ_g
-function fid_simplified(μ_r::Vector{Float64}, Σ_r::Matrix{Float64},
-                         μ_g::Vector{Float64}, Σ_g::Matrix{Float64})
-    # FID = ||μ_r - μ_g||² + Tr(Σ_r + Σ_g - 2(Σ_r Σ_g)^{1/2})
-    mean_diff = norm(μ_r .- μ_g)^2
+/// Simplified FID: Fréchet distance between two Gaussians.
+/// FID = ||μ_r - μ_g||² + Tr(Σ_r + Σ_g - 2(Σ_r Σ_g)^{1/2})
+///
+/// Real images: μ_r, Σ_r (mean, covariance of Inception features)
+/// Generated images: μ_g, Σ_g
+fn fid_simplified(
+    mu_r: &ArrayView1<f64>,
+    sigma_r: &ArrayView2<f64>,
+    mu_g: &ArrayView1<f64>,
+    sigma_g: &ArrayView2<f64>,
+) -> f64 {
+    // Mean difference term: ||μ_r - μ_g||²
+    let diff = mu_r - mu_g;
+    let mean_sq = diff.dot(&diff);
 
-    # Matrix square root: (Σ_r Σ_g)^{1/2}
-    # Use eigen decomposition: A = V Λ V^T → A^{1/2} = V Λ^{1/2} V^T
-    (; values, vectors) = eigen(Σ_r * Σ_g)
-    sqrt_product = vectors * Diagonal(sqrt.(abs.(values))) * vectors'
+    // Matrix square root of (Σ_r Σ_g) via diagonal approximation:
+    // For the full implementation use ndarray-linalg::eigh
+    // Tr(Σ_r + Σ_g - 2(Σ_r Σ_g)^{1/2}) ≈ Σ_i (σ_r_i + σ_g_i - 2√(σ_r_i * σ_g_i))
+    let trace_term: f64 = sigma_r.diag().iter().zip(sigma_g.diag())
+        .map(|(sr, sg)| sr + sg - 2.0 * (sr * sg).sqrt())
+        .sum();
 
-    trace_term = tr(Σ_r) + tr(Σ_g) - 2*tr(sqrt_product)
+    mean_sq + trace_term
+}
 
-    return mean_diff + trace_term
-end
+// Test: 4-dim features, simulated real/generated distributions
+fn fid_demo() {
+    let mu_real = Array1::from_vec(vec![0.5, 0.3, 0.7, 0.2]);
+    let mu_gen  = Array1::from_vec(vec![0.52, 0.28, 0.72, 0.19]);
+    // Diagonal covariances (off-diagonal omitted for clarity)
+    let sigma_real = Array2::from_diag(&Array1::from_vec(vec![1.0, 0.8, 0.9, 1.1]));
+    let sigma_gen  = Array2::from_diag(&Array1::from_vec(vec![0.95, 0.85, 0.88, 1.08]));
 
-# Test: 4-dim features, simulated real/generated distributions
-μ_real = [0.5, 0.3, 0.7, 0.2]
-Σ_real = [1.0 0.1 0.05 0.0; 0.1 0.8 0.0 0.05; 0.05 0.0 0.9 0.1; 0.0 0.05 0.1 1.1]
-μ_gen = [0.52, 0.28, 0.72, 0.19]  # slightly different
-Σ_gen = [0.95 0.12 0.04 0.0; 0.12 0.85 0.0 0.06; 0.04 0.0 0.88 0.09; 0.0 0.06 0.09 1.08]
-
-fid_score = fid_simplified(μ_real, Σ_real, μ_gen, Σ_gen)
-println("FID score: $(round(fid_score, digits=4))")
-println("Lower is better — 0.0 = identical distributions")
+    let fid = fid_simplified(
+        &mu_real.view(), &sigma_real.view(),
+        &mu_gen.view(),  &sigma_gen.view(),
+    );
+    println!("FID score: {:.4}", fid);
+    println!("Lower is better — 0.0 = identical distributions");
+}
 ```
 
 出力:
@@ -324,7 +337,7 @@ graph LR
 | 項目 | 松尾研（2026Spring） | 本講義（上位互換） |
 |:-----|:--------------------|:------------------|
 | 理論 | FID/ISの紹介 | **数式完全導出** + 統一理論 |
-| 実装 | PyTorch実装 | **Julia統計分析 + Rust Criterion** |
+| 実装 | PyTorch実装 | **Rust統計分析 + Rust Criterion** |
 | 最新 | FID中心 | **CMMD/FLD+ (2024)** + 統計検定統合 |
 | 評価 | メトリクス計算 | **自動ベンチマークパイプライン** |
 
@@ -1198,7 +1211,7 @@ MMD 不偏推定量の分散は $O(1/n)$ のオーダー。FID の共分散行�
 
 ### 3.7 ⚔️ Boss Battle: 論文のメトリクス式を完全読解
 
-**課題**: CMMD論文 [^5] のアルゴリズム疑似コードを完全理解し、Juliaで再実装せよ。
+**課題**: CMMD論文 [^5] のアルゴリズム疑似コードを完全理解し、Rustで再実装せよ。
 
 **論文抜粋** (Jayasumana et al. 2024 [^5], Algorithm 1 simplified):
 
@@ -1523,7 +1536,7 @@ $$
 
 FLD+は、FIDの**1/40のサンプル数**で同等の信頼性を達成。
 
-**実装例** (Julia疑似コード):
+**実装例** (Rust疑似コード):
 
 
 **数式とコードの対応**:
@@ -1550,7 +1563,7 @@ FLD+は、FIDの**1/40のサンプル数**で同等の信頼性を達成。
 
 **結論**: FIDは依然として標準だが、**CMDDとFLD+の併用**が2024-2026年のベストプラクティス。サンプル数に応じて使い分ける。
 
-> **Note:** **進捗: 55% 完了** 最新の評価指標動向（CMMD, FLD+）を完全に理解した。次は実装ゾーンへ — Julia統計分析 + Rust Criterion ベンチマーク。
+> **Note:** **進捗: 55% 完了** 最新の評価指標動向（CMMD, FLD+）を完全に理解した。次は実装ゾーンへ — Rust統計分析 + Rust Criterion ベンチマーク。
 
 ---
 

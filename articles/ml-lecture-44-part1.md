@@ -2,12 +2,12 @@
 title: "第44回: 音声生成: 30秒の驚き→数式修行→実装マスター"
 emoji: "🎙️"
 type: "tech"
-topics: ["machinelearning", "deeplearning", "audio", "julia", "tts"]
+topics: ["machinelearning", "deeplearning", "audio", "rust", "tts"]
 published: true
 slug: "ml-lecture-44-part1"
 difficulty: "advanced"
 time_estimate: "90 minutes"
-languages: ["Julia", "Rust"]
+languages: ["Rust"]
 keywords: ["機械学習", "深層学習", "生成モデル"]
 ---
 
@@ -28,7 +28,7 @@ keywords: ["機械学習", "深層学習", "生成モデル"]
 4. **Flow Matching for Audio** — 音声生成のパラダイムシフト
 5. **評価指標** (FAD → KAD / CLAP Score) — 音質の定量評価
 
-そして、Julia/Rust/Elixir 3言語で音声生成パイプラインを構築する。
+そして、Rust/Rust/Elixir 3言語で音声生成パイプラインを構築する。
 
 > **Note:** **このシリーズについて**: 東京大学 松尾・岩澤研究室動画講義の**完全上位互換**の全50回シリーズ。理論（論文が書ける）、実装（Production-ready）、最新（2024-2026 SOTA）の3軸で差別化する。本講義は **Course V 第44回** — 音声モダリティの完全攻略だ。
 
@@ -65,70 +65,148 @@ graph LR
 
 Neural Audio Codec の進化は、**圧縮率の極限追求**だった。SoundStream（320トークン/秒）→ EnCodec（150トークン/秒）→ **WavTokenizer（75トークン/秒）**[^1]。1秒間の24kHz音声（24,000サンプル）を、たった75トークンで表現する。圧縮率は**320倍**だ。
 
-```julia
-using LinearAlgebra, Statistics, FFTW
+```rust
+use ndarray::Array2;
+use num_complex::Complex32;
+use rand::Rng;
+use rustfft::FftPlanner;
+use std::f32::consts::PI;
 
-# WavTokenizer の核心: VQ (Vector Quantization) を1層に圧縮
-# Input: 1秒の音声 (24000 samples @ 24kHz)
-# Output: 75 discrete tokens (1 quantizer, 320x compression)
+// WavTokenizer の核心: VQ (Vector Quantization) を1層に圧縮
+// Input: 1秒の音声 (24000 samples @ 24kHz)
+// Output: 75 discrete tokens (1 quantizer, 320x compression)
 
-function wavtokenizer_encode(audio::Vector{Float32}, sample_rate=24000, target_tokens=75)
-    # 1. 音声を潜在表現に変換 (Encoder: Conv1D stack)
-    # Frame size = sample_rate / target_tokens ≈ 320 samples/token
-    frame_size = div(sample_rate, target_tokens)
-    n_frames   = min(target_tokens, div(length(audio), frame_size))
+fn wavtokenizer_encode(
+    audio: &[f32],
+    sample_rate: usize,
+    target_tokens: usize,
+) -> (Vec<usize>, Array2<f32>) {
+    // 1. 音声を潜在表現に変換 (Encoder: Conv1D stack)
+    // Frame size = sample_rate / target_tokens ≈ 320 samples/token
+    let frame_size = sample_rate / target_tokens;
+    let n_frames = target_tokens.min(audio.len() / frame_size);
 
-    # Simplified encoder: FFT magnitude spectrum as latent
-    pad(f)      = length(f) < frame_size ? vcat(f, zeros(Float32, frame_size - length(f))) : f
-    get_frame(i) = pad(@view audio[(i-1)*frame_size+1 : min(i*frame_size, length(audio))])
-    encode(f)   = (sp = abs.(fft(f)); sp[1:128] ./ (maximum(sp[1:128]) .+ 1f-8))
-    latent      = reduce(vcat, [reshape(encode(get_frame(i)), 1, :) for i in 1:n_frames])
+    // Simplified encoder: FFT magnitude spectrum as latent
+    let mut planner = FftPlanner::<f32>::new();
+    let fft = planner.plan_fft_forward(frame_size);
 
-    # 2. Vector Quantization: 各latentを最近傍コードブックエントリに置き換え
-    codebook_size = 1024  # WavTokenizer uses 1024-entry codebook
-    codebook      = randn(Float32, codebook_size, 128) ./ 10  # Dummy codebook
+    let mut latent = Array2::<f32>::zeros((n_frames, 128));
+    for i in 0..n_frames {
+        let start = i * frame_size;
+        let end = (start + frame_size).min(audio.len());
+        // フレームを複素数バッファにコピー (ゼロパディング)
+        let mut buf: Vec<Complex32> = audio[start..end]
+            .iter()
+            .map(|&x| Complex32::new(x, 0.0))
+            .collect();
+        buf.resize(frame_size, Complex32::new(0.0, 0.0));
+        fft.process(&mut buf);
+        // FFT magnitude の最初の 128 bins を正規化
+        let sp: Vec<f32> = buf[..128].iter().map(|c| c.norm()).collect();
+        let max_val = sp.iter().cloned().fold(f32::NEG_INFINITY, f32::max) + 1e-8;
+        for (j, &v) in sp.iter().enumerate() {
+            latent[[i, j]] = v / max_val;
+        }
+    }
 
-    tokens    = [argmin([norm(@view(latent[i,:]) .- @view(codebook[j,:])) for j in 1:codebook_size])
-                 for i in 1:n_frames]
-    quantized = codebook[tokens, :]
+    // 2. Vector Quantization: 各latentを最近傍コードブックエントリに置き換え
+    let codebook_size = 1024usize; // WavTokenizer uses 1024-entry codebook
+    let mut rng = rand::thread_rng();
+    let codebook_data: Vec<f32> = (0..codebook_size * 128)
+        .map(|_| rng.gen_range(-0.1_f32..0.1)) // Dummy codebook (randn / 10 相当)
+        .collect();
+    let codebook = Array2::from_shape_vec((codebook_size, 128), codebook_data).unwrap();
 
-    return tokens, quantized
-end
+    let tokens: Vec<usize> = (0..n_frames)
+        .map(|i| {
+            let row = latent.row(i);
+            // 最近傍コードブックエントリを探索 (L2距離)
+            (0..codebook_size)
+                .min_by(|&ja, &jb| {
+                    let dist = |j: usize| -> f32 {
+                        row.iter()
+                            .zip(codebook.row(j).iter())
+                            .map(|(&a, &b)| (a - b) * (a - b))
+                            .sum::<f32>()
+                            .sqrt()
+                    };
+                    dist(ja).partial_cmp(&dist(jb)).unwrap()
+                })
+                .unwrap()
+        })
+        .collect();
 
-function wavtokenizer_decode(quantized::Matrix{Float32}, sample_rate=24000, target_tokens=75)
-    # Decoder: iFFT + overlap-add reconstruction
-    frame_size = div(sample_rate, target_tokens)
-    n_frames   = size(quantized, 1)
+    let quantized_flat: Vec<f32> = tokens
+        .iter()
+        .flat_map(|&t| codebook.row(t).to_vec())
+        .collect();
+    let quantized = Array2::from_shape_vec((n_frames, 128), quantized_flat).unwrap();
 
-    # Simplified decoder: iFFT with phase randomization
-    function make_frame(i)
-        sp = zeros(ComplexF32, frame_size)
-        sp[1:128]          .= @view(quantized[i,:]) .* exp.(1im .* 2π .* rand(Float32, 128))
-        sp[129:frame_size] .= conj.(reverse(sp[2:frame_size-127]))  # Hermitian symmetry
-        real.(ifft(sp))
-    end
+    (tokens, quantized)
+}
 
-    reduce(vcat, [make_frame(i) for i in 1:n_frames])
-end
+fn wavtokenizer_decode(
+    quantized: &Array2<f32>,
+    sample_rate: usize,
+    target_tokens: usize,
+) -> Vec<f32> {
+    // Decoder: iFFT + overlap-add reconstruction
+    let frame_size = sample_rate / target_tokens;
+    let n_frames = quantized.nrows();
 
-# Test: 1秒の音声 (簡単なサイン波)
-sample_rate = 24000
-duration    = 1.0
-t           = 0:1/sample_rate:duration-1/sample_rate
-audio_input = Float32.(sin.(2π .* 440 .* t))  # 440 Hz sine wave (A4 note)
+    let mut planner = FftPlanner::<f32>::new();
+    let ifft = planner.plan_fft_inverse(frame_size);
+    let mut rng = rand::thread_rng();
+    let scale = 1.0 / frame_size as f32; // iFFT 正規化係数
 
-# Encode: 24000 samples → 75 tokens
-tokens, quantized = wavtokenizer_encode(audio_input, sample_rate, 75)
+    let mut output = Vec::with_capacity(n_frames * frame_size);
+    for i in 0..n_frames {
+        // Simplified decoder: iFFT with phase randomization
+        let mut sp: Vec<Complex32> = vec![Complex32::new(0.0, 0.0); frame_size];
+        // ランダム位相でスペクトル設定
+        for j in 0..128 {
+            let phase = rng.gen::<f32>() * 2.0 * PI;
+            sp[j] = Complex32::new(quantized[[i, j]], 0.0)
+                * Complex32::new(phase.cos(), phase.sin());
+        }
+        // Hermitian symmetry (実数信号の復元): X[k] = conj(X[N-1-k]) for k in 128..N
+        for j in 128..frame_size {
+            sp[j] = sp[frame_size - 1 - j].conj();
+        }
+        ifft.process(&mut sp);
+        output.extend(sp.iter().map(|c| c.re * scale));
+    }
 
-# Decode: 75 tokens → 24000 samples
-audio_reconstructed = wavtokenizer_decode(quantized, sample_rate, 75)
+    output
+}
 
-println("【WavTokenizer 圧縮・再構成】")
-println("Input:  $(length(audio_input)) samples")
-println("Tokens: $(length(tokens)) discrete codes")
-println("Compression ratio: $(div(length(audio_input), length(tokens)))x")
-println("Reconstruction MSE: $(mean((audio_input .- audio_reconstructed[1:length(audio_input)]).^2))")
-println("\n音声1秒 = 75トークン。画像の「16x16パッチ=256トークン」と同様の離散化")
+fn main() {
+    // Test: 1秒の音声 (簡単なサイン波)
+    let sample_rate: usize = 24000;
+    let freq = 440.0_f32; // 440 Hz sine wave (A4 note)
+    let audio_input: Vec<f32> = (0..sample_rate)
+        .map(|i| (2.0 * PI * freq * i as f32 / sample_rate as f32).sin())
+        .collect();
+
+    // Encode: 24000 samples → 75 tokens
+    let (tokens, quantized) = wavtokenizer_encode(&audio_input, sample_rate, 75);
+
+    // Decode: 75 tokens → 24000 samples
+    let audio_reconstructed = wavtokenizer_decode(&quantized, sample_rate, 75);
+
+    println!("【WavTokenizer 圧縮・再構成】");
+    println!("Input:  {} samples", audio_input.len());
+    println!("Tokens: {} discrete codes", tokens.len());
+    println!("Compression ratio: {}x", audio_input.len() / tokens.len());
+    let mse: f32 = audio_input
+        .iter()
+        .zip(audio_reconstructed.iter())
+        .map(|(&a, &b)| (a - b) * (a - b))
+        .sum::<f32>()
+        / audio_input.len() as f32;
+    println!("Reconstruction MSE: {mse}");
+    println!("\n音声1秒 = 75トークン。画像の「16x16パッチ=256トークン」と同様の離散化");
+}
 ```
 
 出力:
@@ -315,26 +393,26 @@ graph TD
 | **音声の扱い** | なし（画像生成のみ） | **音声専用講義** (第44回) |
 | **扱う手法** | なし | Codec (EnCodec/WavTokenizer) + TTS (F5/VALL-E 2) + Music (MusicGen/Stable Audio) |
 | **理論** | なし | **Flow Matching for Audio** の完全導出 |
-| **実装** | なし | **Julia (Flow Matching TTS) + Rust (リアルタイム推論) + Elixir (配信)** |
+| **実装** | なし | **Rust (Flow Matching TTS) + Rust (リアルタイム推論) + Elixir (配信)** |
 | **最新性** | 2023年まで | **2025-2026**: WavTokenizer / F5-TTS / Stable Audio / KAD metric |
 
 **本講義の独自性**:
 1. **Neural Audio Codec 進化史** を完全整理（SoundStream → WavTokenizer）
-2. **Flow Matching for Audio** の数式導出 + Julia実装
+2. **Flow Matching for Audio** の数式導出 + Rust実装
 3. **Zero-shot TTS** の原理と実装（VALL-E 2 / F5-TTS）
 4. **Music Generation** の最新手法（MusicGen / Stable Audio）
 5. **評価指標** の最新動向（FAD → KAD[^10]）
 
-<details><summary>トロイの木馬振り返り: 第17回で Julia/Rust/Elixir が当たり前に</summary>
+<details><summary>トロイの木馬振り返り: 第17回で Rust/Rust/Elixir が当たり前に</summary>
 
-第17回で Julia/Rust/Elixir の3言語が揃い、もう Python に戻ることはなかった。
+第17回で Rust/Rust/Elixir の3言語が揃い、もう Python に戻ることはなかった。
 
 **Before (第16回まで)**:
 - Python 100% — NumPy/PyTorch で実装
 - 「遅いけど仕方ない」
 
 **After (第44回)**:
-- **Julia**: Audio Flow Matching 訓練（数式→コードが1:1）
+- **Rust**: Audio Flow Matching 訓練（数式→コードが1:1）
 - **Rust**: リアルタイム音声推論（ゼロコピー・低レイテンシ）
 - **Elixir**: 分散音声配信（ストリーミング・耐障害性）
 - **Python**: 査読者用（読むだけ）
@@ -1530,7 +1608,7 @@ $$
 Pareto フロンティア上の点は「ある指標を改善するためには別の指標を悪化させざるを得ない」最適解の集合であり、音声生成モデルの選択では用途（TTS の了解度重視 vs 音楽生成の品質重視）に応じてフロンティア上の異なる点を選択することが実践的なアプローチとなる。
 
 
-> **Note:** **ここまでで全体の70%完了！** Zone 3 完走おめでとう。Neural Audio Codec（VQ-VAE → RVQ → WavTokenizer）、Flow Matching TTS（F5-TTS）、Codec LM（VALL-E 2）、Music Generation（MusicGen / Stable Audio）、評価指標（FAD → KAD）の全理論を導出した。ペンと紙で追った数式は、音声生成の最先端を完全に理解する武器だ。次は Zone 4 — 実装ゾーンで、これらを Julia/Rust/Elixir で動かす。
+> **Note:** **ここまでで全体の70%完了！** Zone 3 完走おめでとう。Neural Audio Codec（VQ-VAE → RVQ → WavTokenizer）、Flow Matching TTS（F5-TTS）、Codec LM（VALL-E 2）、Music Generation（MusicGen / Stable Audio）、評価指標（FAD → KAD）の全理論を導出した。ペンと紙で追った数式は、音声生成の最先端を完全に理解する武器だ。次は Zone 4 — 実装ゾーンで、これらを Rust/Rust/Elixir で動かす。
 
 ---
 

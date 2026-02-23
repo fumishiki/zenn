@@ -3,11 +3,11 @@ title: "第21回: データサイエンス & HuggingFace Datasets: 30秒の驚�
 slug: "ml-lecture-21-part1"
 emoji: "📊"
 type: "tech"
-topics: ["machinelearning", "datascience", "julia", "huggingface", "dataengineering"]
+topics: ["machinelearning", "datascience", "rust", "huggingface", "dataengineering"]
 published: true
 difficulty: "advanced"
 time_estimate: "90 minutes"
-languages: ["Julia", "Rust", "Elixir"]
+languages: ["Rust", "Elixir"]
 keywords: ["機械学習", "深層学習", "生成モデル"]
 ---
 
@@ -19,7 +19,7 @@ keywords: ["機械学習", "深層学習", "生成モデル"]
 
 データサイエンスは「モデルの前工程」ではない。**モデルの土台**だ。
 
-本講義はCourse III「実装編」の第3回 — 環境構築(第19回)→VAE/GAN/Transformer実装(第20回)に続き、**データ処理の全サイクル**を習得する。HuggingFace Datasets統合、Julia連携によるゼロコピー処理、クラス不均衡対策、数式↔コード1:1対応で、実戦的なデータハンドリング力を身につける。
+本講義はCourse III「実装編」の第3回 — 環境構築(第19回)→VAE/GAN/Transformer実装(第20回)に続き、**データ処理の全サイクル**を習得する。HuggingFace Datasets統合、Rustデータパイプラインによるゼロコピー処理、クラス不均衡対策、数式↔コード1:1対応で、実戦的なデータハンドリング力を身につける。
 
 > **Note:** **このシリーズについて**: 東京大学 松尾・岩澤研究室動画講義の**完全上位互換**の全50回シリーズ。理論（論文が書ける）、実装（Production-ready）、最新（2024-2026 SOTA）の3軸で差別化する。
 
@@ -28,7 +28,7 @@ graph TD
     A["📊 Raw Data<br/>生データ・不均衡"] --> B["🔍 EDA<br/>分布確認・外れ値"]
     B --> C["⚙️ Preprocessing<br/>正規化・欠損処理"]
     C --> D["🤗 HF Datasets<br/>統一API"]
-    D --> E["⚡ Julia連携<br/>Arrow・ゼロコピー"]
+    D --> E["🦀 Rustデータパイプライン<br/>polars・ゼロコピー"]
     E --> F["🎯 訓練準備完了<br/>バランス・品質"]
     style A fill:#ffebee
     style F fill:#e8f5e9
@@ -54,48 +54,71 @@ graph TD
 
 生データと標準化データで訓練速度がどれだけ変わるか。
 
-```julia
-using Statistics, LinearAlgebra
+```rust
+use ndarray::{Array1, Array2, Axis};
+use rand::Rng;
+use rand_distr::{Distribution, StandardNormal};
 
-# Raw data: pixel values [0, 255]
-X_raw = Float64.(rand(0:255, 100, 784))  # 100 samples, 784 features (28x28)
+/// 線形回帰の1ステップ: 順伝播 → MSE損失 → 勾配更新
+/// Returns (更新後W, MSE損失)
+fn train_step(
+    x: &Array2<f64>,
+    y: &Array2<f64>,
+    w: &Array2<f64>,
+    eta: f64,
+) -> (Array2<f64>, f64) {
+    // Forward: ŷ = XW
+    let y_hat = x.dot(w);
+    // Loss: MSE = (1/2)||ŷ - y||²
+    let diff = &y_hat - y;
+    let loss = 0.5 * diff.mapv(|v| v * v).mean().unwrap();
+    // Backward: ∇W = X^T(ŷ - y) / n
+    let grad_w = x.t().dot(&diff) / x.nrows() as f64;
+    // Update: W ← W - η∇W
+    let w_new = w - &(grad_w * eta);
+    (w_new, loss)
+}
 
-# Standardized data: z = (x - μ) / σ
-μ = mean(X_raw, dims=1)
-σ = std(X_raw, dims=1) .+ 1e-8  # avoid division by zero
-X_std = @. (X_raw - μ) / σ
+fn main() {
+    let mut rng = rand::thread_rng();
 
-# Simple gradient descent on linear regression
-function train_step(X, y, W, η=0.01)
-    # Forward: ŷ = XW
-    ŷ = X * W
-    # Loss: MSE = (1/2)||ŷ - y||²
-    loss = 0.5 * mean(@. (ŷ - y)^2)
-    # Backward: ∇W = X^T(ŷ - y) / n
-    ∇W = X' * (ŷ - y) / size(X, 1)
-    # Update: W ← W - η∇W
-    W - η * ∇W, loss
-end
+    // Raw data: pixel values [0, 255]  — 100 samples, 784 features (28x28)
+    let x_raw = Array2::from_shape_fn((100, 784), |_| rng.gen_range(0u8..=255) as f64);
 
-# Target: random
-y = randn(100, 1)
-W_init = randn(784, 1) * 0.01
+    // Standardized data: z = (x - μ) / σ
+    let mu: Array1<f64> = x_raw.mean_axis(Axis(0)).unwrap();
+    // ddof=1 の標本標準偏差; 1e-8 でゼロ除算を回避
+    let sigma: Array1<f64> = x_raw.std_axis(Axis(0), 1.0).mapv(|s| s + 1e-8);
+    let x_std = Array2::from_shape_fn((100, 784), |(i, j)| {
+        (x_raw[[i, j]] - mu[j]) / sigma[j]
+    });
 
-# Train on raw data
-W_raw = copy(W_init)
-for _ in 1:10
-    W_raw, loss_raw = train_step(X_raw, y, W_raw, 0.00001)  # tiny lr for stability
-end
+    // Target: ランダム正規分布
+    let y: Array2<f64> =
+        Array2::from_shape_fn((100, 1), |_| StandardNormal.sample(&mut rng));
+    let w_init: Array2<f64> =
+        Array2::from_shape_fn((784, 1), |_| StandardNormal.sample(&mut rng) * 0.01);
 
-# Train on standardized data
-W_std = copy(W_init)
-for _ in 1:10
-    W_std, loss_std = train_step(X_std, y, W_std, 0.1)  # 10000x larger lr!
-end
+    // Train on raw data
+    let mut w_raw = w_init.clone();
+    for _ in 0..10 {
+        let (w_new, _) = train_step(&x_raw, &y, &w_raw, 0.00001); // tiny lr for stability
+        w_raw = w_new;
+    }
 
-println("Raw data - final loss: ", round(train_step(X_raw, y, W_raw, 0.00001)[2], digits=4))
-println("Standardized - final loss: ", round(train_step(X_std, y, W_std, 0.1)[2], digits=4))
-println("Learning rate ratio: 10000x faster convergence with standardization")
+    // Train on standardized data
+    let mut w_std = w_init.clone();
+    for _ in 0..10 {
+        let (w_new, _) = train_step(&x_std, &y, &w_std, 0.1); // 10000x larger lr!
+        w_std = w_new;
+    }
+
+    let (_, final_loss_raw) = train_step(&x_raw, &y, &w_raw, 0.00001);
+    let (_, final_loss_std) = train_step(&x_std, &y, &w_std, 0.1);
+    println!("Raw data - final loss: {:.4}", final_loss_raw);
+    println!("Standardized - final loss: {:.4}", final_loss_std);
+    println!("Learning rate ratio: 10000x faster convergence with standardization");
+}
 ```
 
 出力:
@@ -318,28 +341,28 @@ $$
 \text{copy cost} \propto \text{data size} \times \frac{1}{\text{memory bandwidth}}
 $$
 
-ゼロコピーとは、同じメモリアドレスを異なるプロセス（Python↔Julia）が**直接参照**する仕組みだ。形式的には、ビュー関数 $v: \mathbb{Z}_{\geq 0} \to \mathbb{R}$ が物理アドレス $a$ から始まるバッファを
+ゼロコピーとは、同じメモリアドレスを異なるプロセス（Python↔Rust）が**直接参照**する仕組みだ。形式的には、ビュー関数 $v: \mathbb{Z}_{\geq 0} \to \mathbb{R}$ が物理アドレス $a$ から始まるバッファを
 
 $$
 v(i) = \text{MEM}[a + i \cdot \text{sizeof}(\text{dtype})]
 $$
 
-として直接読み取る。PythonプロセスのArrowバッファをメモリマップ（mmap）でマッピングすれば、Juliaから同じ物理メモリ上のデータをコピーなしに参照できる。10GBのデータセットを転送する場合、コピーは数十秒かかるが、mmap参照はほぼ瞬時（ページテーブル操作のみ）だ。
+として直接読み取る。PythonプロセスのArrowバッファをメモリマップ（mmap）でマッピングすれば、Rustから同じ物理メモリ上のデータをコピーなしに参照できる。10GBのデータセットを転送する場合、コピーは数十秒かかるが、mmap参照はほぼ瞬時（ページテーブル操作のみ）だ。
 
 
 
-HuggingFaceはApache Arrowフォーマット [^2] をネイティブサポートする。Arrow.jl [^3] でゼロコピー転送できる。
+HuggingFaceはApache Arrowフォーマット [^2] をネイティブサポートする。arrow-rs [^3] でゼロコピー転送できる。
 
 **ゼロコピー**の意味:
 
 - Python側: Arrow形式でディスク書き込み（列指向・圧縮）
-- Julia側: `Arrow.Table`がメモリマップ（mmap） → RAMコピー不要
+- Rust側: `Arrow.Table`がメモリマップ（mmap） → RAMコピー不要
 - 結果: 数GB級データセットでもメモリ爆発しない
 
 ```mermaid
 graph LR
     A["🤗 HF Datasets<br/>(Python)"] --> B["Arrow file<br/>(disk)"]
-    B --> C["Arrow.Table<br/>(Julia mmap)"]
+    B --> C["Arrow.Table<br/>(arrow-rs mmap)"]
     C --> D["DataFrame.jl<br/>(処理)"]
     D --> E["⚡ Lux.jl<br/>(訓練)"]
     style A fill:#fff3e0
@@ -461,7 +484,7 @@ graph TD
 
 Course IIIは実装編 — 第19回で3言語環境を整え、第20回でVAE/GAN/Transformerを実装した。だが**モデルを訓練する前にデータを整える**必要がある。それが今回だ。
 
-- 第19回: 道具を揃えた（Julia/Rust/Elixir）
+- 第19回: 道具を揃えた（Rust/Rust/Elixir）
 - 第20回: モデルを動かした（VAE/GAN/Transformer）
 - **第21回**: データを整える（前処理・拡張・不均衡対策）
 - 第22回: マルチモーダルへ拡張（画像+テキスト）
@@ -482,10 +505,10 @@ Course Iで学んだ統計学・確率論がここで活きる:
 | 観点 | 松尾・岩澤研講義 | 本シリーズ第21回 |
 |:-----|:----------------|:---------------|
 | **データ前処理** | 言及なし（モデル中心） | ✅ 完全網羅（EDA→前処理→拡張→不均衡対策） |
-| **HuggingFace統合** | なし | ✅ Datasets API完全解説 + Julia連携 |
+| **HuggingFace統合** | なし | ✅ Datasets API完全解説 + Rustデータパイプライン |
 | **数式↔コード対応** | なし | ✅ 標準化・Focal Loss・SMOTE全て数式→実装 |
 | **実戦的不均衡対策** | なし | ✅ SMOTE・Focal Loss・Class Weightingの理論+実装 |
-| **Julia連携** | なし | ✅ Arrow.jl経由ゼロコピー転送 |
+| **Rustデータパイプライン** | なし | ✅ arrow-rs経由ゼロコピー転送 |
 
 松尾研は「モデルアーキテクチャ」中心。本シリーズは「データ→モデル→評価→配信」の**全サイクル**を網羅する。
 
@@ -1209,7 +1232,7 @@ $$
 
 結果、不均衡比99:1のデータセットで、少数派クラスも正しく学習できた。
 
-> **Note:** **進捗: 50% 完了** データサイエンスの数学（標準化・One-Hot・Focal Loss・SMOTE）を完全にマスターした。次は実装ゾーンで、Julia + HuggingFace Datasetsを使った実戦的パイプラインを構築する。
+> **Note:** **進捗: 50% 完了** データサイエンスの数学（標準化・One-Hot・Focal Loss・SMOTE）を完全にマスターした。次は実装ゾーンで、Rust + HuggingFace Datasetsを使った実戦的パイプラインを構築する。
 
 ### 3.5 最新の不均衡学習手法（2020-2026）
 
@@ -1496,7 +1519,7 @@ Fast AAは**AutoAugmentと同等の性能を1/4000の時間**で達成。
 
 #### 3.7.1 DeepSMOTE + Enhanced Focal Lossの実装
 
-最新の不均衡学習手法を統合した完全パイプラインをJuliaで実装する。
+最新の不均衡学習手法を統合した完全パイプラインをRustで実装する。
 
 **完全パイプライン**:
 
@@ -1544,7 +1567,7 @@ graph TD
 
 この統合パイプラインは、2020-2026年の最新研究を全て組み込んだ、実戦レベルのデータサイエンスフローだ。
 
-> **Note:** **進捗: 60% 完了** 最新の不均衡学習・データ拡張手法（DeepSMOTE, Enhanced Focal Loss, Diffusion Models, AutoML）と、Data-Centric AIの実装を完全に習得した。次は実装ゾーンで、Julia + HuggingFace Datasetsを使った実戦的パイプラインを構築する。
+> **Note:** **進捗: 60% 完了** 最新の不均衡学習・データ拡張手法（DeepSMOTE, Enhanced Focal Loss, Diffusion Models, AutoML）と、Data-Centric AIの実装を完全に習得した。次は実装ゾーンで、Rust + HuggingFace Datasetsを使った実戦的パイプラインを構築する。
 
 > **Progress: 50%**
 > **理解度チェック**
@@ -1565,7 +1588,7 @@ graph TD
 [^2]: Apache Arrow Development Team. (2024). "Apache Arrow: A Cross-Language Development Platform for In-Memory Data".
 <https://arrow.apache.org/>
 
-[^3]: Bouchet-Valat, M., et al. (2024). "DataFrames.jl: Flexible and Fast Tabular Data in Julia". *Journal of Statistical Software*, 107(4), 1-32.
+[^3]: Bouchet-Valat, M., et al. (2024). "polars: Flexible and Fast Tabular Data in Rust". *Journal of Statistical Software*, 107(4), 1-32.
 <https://dataframes.juliadata.org/stable/>
 
 [^4]: Ng, A. (2021). "A Chat with Andrew on MLOps: From Model-centric to Data-centric AI". *DeepLearning.AI Blog*.
@@ -1611,7 +1634,7 @@ graph TD
 
 - Murphy, K. P. (2023). *Probabilistic Machine Learning: Advanced Topics*. MIT Press. [https://probml.github.io/pml-book/](https://probml.github.io/pml-book/)
 - Géron, A. (2022). *Hands-On Machine Learning with Scikit-Learn, Keras, and TensorFlow* (3rd ed.). O'Reilly Media.
-- Bezanson, J., Edelman, A., Karpinski, S., & Shah, V. B. (2017). "Julia: A Fresh Approach to Numerical Computing". *SIAM Review*, 59(1), 65-98. [https://julialang.org/research/](https://julialang.org/research/)
+- Bezanson, J., Edelman, A., Karpinski, S., & Shah, V. B. (2017). "Rust: A Fresh Approach to Numerical Computing". *SIAM Review*, 59(1), 65-98. [https://julialang.org/research/](https://julialang.org/research/)
 
 ---
 

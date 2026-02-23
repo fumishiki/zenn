@@ -1,13 +1,13 @@
 ---
 title: "第27回: 推論最適化 & Production品質: 30秒の驚き→数式修行→実装マスター【前編】理論編"
 slug: "ml-lecture-27-part1"
-emoji: "⚡"
+emoji: "🦀"
 type: "tech"
 topics: ["machinelearning", "optimization", "rust", "elixir", "production"]
 published: true
 difficulty: "advanced"
 time_estimate: "90 minutes"
-languages: ["Julia", "Rust", "Elixir"]
+languages: ["Rust", "Elixir"]
 keywords: ["機械学習", "深層学習", "生成モデル"]
 ---
 
@@ -261,7 +261,7 @@ graph TD
 | 量子化深掘り | ❌INT8のみ触れる | ⭕INT4/FP8/KV-Cache完全版 |
 | Production設計 | ❌なし | ⭕Rust error/log/metrics/test完全版 |
 | 分散推論 | ❌なし | ⭕Elixir負荷分散/Circuit Breaker深掘り |
-| 言語統合 | 🐍Python単独 | 🦀Rust + 🔮Elixir + ⚡Julia 3言語 |
+| 言語統合 | 🐍Python単独 | 🦀Rust + 🔮Elixir + 🦀Rust 3言語 |
 
 ### 2.3 推論最適化の3つのメタファー
 
@@ -311,7 +311,7 @@ Speculative Decodingは**楽観的並行制御** (Optimistic Concurrency Control
 
 ### 2.4 Trojan Horse — 3言語が全て登場する最初の講義
 
-Course I (第1-8回) は🐍Python 100%だった。Course II (第9-16回) で⚡Julia, 🦀Rustが登場。Course III (第17-26回) で🔮Elixirも加わった。
+Course I (第1-8回) は🐍Python 100%だった。Course II (第9-16回) で🦀Rust, 🦀Rustが登場。Course III (第17-26回) で🔮Elixirも加わった。
 
 本講義は**3言語が完全統合される最初の講義**だ:
 
@@ -320,12 +320,12 @@ Course I (第1-8回) は🐍Python 100%だった。Course II (第9-16回) で⚡
 | Part A-B | 🦀 Rust | 量子化カーネル実装 (ゼロコピー/unsafe FFI) |
 | Part C | 🦀 Rust | Production品質ライブラリ設計 (error/log/metrics) |
 | Part D | 🔮 Elixir | 分散推論サーバー (OTP/耐障害性) |
-| Part E | ⚡ Julia | 訓練最適化 (Mixed Precision/自動微分) |
+| Part E | 🦀 Rust | 訓練最適化 (Mixed Precision/自動微分) |
 
 **なぜ3言語か?**
 - 🦀 Rust: 推論カーネル (C++の安全版)
 - 🔮 Elixir: APIサーバー (並行性+耐障害性)
-- ⚡ Julia: 訓練スクリプト (NumPy+MATLAB+速度)
+- 🦀 Rust: 訓練スクリプト (NumPy+MATLAB+速度)
 
 Pythonは**いない**。第9回で「Pythonの限界」を体感し、第19回で完全に卒業した。
 
@@ -642,7 +642,7 @@ $$\frac{\partial \mathcal{L}_\text{soft}}{\partial z_i^S} = T^2 \cdot \frac{1}{T
 
 $T$が大きいほど勾配が大きく、学習が安定。
 
-**数式↔コード対応 (Julia)**:
+**数式↔コード対応 (Rust)**:
 
 
 出力:
@@ -721,7 +721,7 @@ p'(x \mid x_{<i}) & \text{with prob } 1-\alpha_i
 where:
 $$p'(x) = \frac{\max(0, p(x) - q(x))}{\sum_y \max(0, p(y) - q(y))}$$
 
-**数式↔コード対応 (Julia)**:
+**数式↔コード対応 (Rust)**:
 
 
 出力例:
@@ -1597,7 +1597,7 @@ $$\text{delay} = \text{base} \times 2^{\text{attempt}} + \text{jitter}$$
 
 ### Part E: 推論サーバー最適化 & プロファイリング (~200行)
 
-#### 3.E.2 ⚡ Julia訓練最適化
+#### 3.E.2 🦀 Rust訓練最適化
 
 ##### Mixed Precision Training
 

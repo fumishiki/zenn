@@ -2,12 +2,12 @@
 title: "第45回: Video生成: 30秒の驚き→数式修行→実装マスター"
 emoji: "🎬"
 type: "tech"
-topics: ["machinelearning","deeplearning","video","julia","rust","elixir"]
+topics: ["machinelearning","deeplearning","video","rust","rust","elixir"]
 published: true
 slug: "ml-lecture-45-part1"
 difficulty: "advanced"
 time_estimate: "90 minutes"
-languages: ["Julia", "Rust"]
+languages: ["Rust"]
 keywords: ["機械学習", "深層学習", "生成モデル"]
 ---
 
@@ -23,23 +23,45 @@ keywords: ["機械学習", "深層学習", "生成モデル"]
 
 たった3行のコードで動画diffusionの本質を体感しましょう。静止画Diffusionに「時間軸」が加わると何が起きるか？
 
-```julia
-using VideoIO, Images, Random
+```rust
+use rand::Rng;
 
-# 静止画Diffusionと同じノイズスケジュール
-βₜ = LinRange(1e-4, 0.02, 50)  # 50フレーム
-αₜ = cumprod(1 .- βₜ)
+// 静止画Diffusionと同じノイズスケジュール
+let n = 50;
+// beta_t: LinRange(1e-4, 0.02, 50) — 50フレーム
+let beta_t: Vec<f32> = (0..n)
+    .map(|i| 1e-4_f32 + (0.02 - 1e-4) * (i as f32 / (n - 1) as f32))
+    .collect();
+// alpha_t: cumprod(1 .- beta_t)
+let alpha_t: Vec<f32> = beta_t
+    .iter()
+    .scan(1.0_f32, |acc, &x| { *acc *= 1.0 - x; Some(*acc) })
+    .collect();
 
-# Clean video → Noisy video (forward process)
-clean_video = [repeat(fill(i/50, 64, 64), 1, 1, 3) for i in 1:50]  # 50フレーム、64x64 RGB
-noisy_video = [clean_video[t] .+ sqrt(1 - αₜ[t]) .* randn(size(clean_video[t])) for t in 1:50]
+// Clean video → Noisy video (forward process)
+// clean_video: 50フレーム、64x64 RGB (各フレームは i/50 で塗りつぶし)
+let clean_video: Vec<Vec<f32>> = (1..=n)
+    .map(|i| vec![i as f32 / n as f32; 64 * 64 * 3])
+    .collect();
 
-# 時間的一貫性がないノイズ → フレーム間で独立にノイズが入る（ちらつく）
-save_video("noisy_video.mp4", noisy_video, framerate=10)
+let mut rng = rand::thread_rng();
+// noisy_video: 各フレームに独立ノイズを加算
+let noisy_video: Vec<Vec<f32>> = (0..n)
+    .map(|t| {
+        let noise_std = (1.0 - alpha_t[t]).sqrt();
+        clean_video[t]
+            .iter()
+            .map(|&v| v + noise_std * rng.gen::<f32>())
+            .collect()
+    })
+    .collect();
 
-# 💡 ここがVideo Diffusionの本質:
-# 静止画Diffusion: 単一画像にノイズ → 単一画像を復元
-# Video Diffusion: 50フレームの時系列にノイズ → 時間的一貫性を保って復元
+// 時間的一貫性がないノイズ → フレーム間で独立にノイズが入る（ちらつく）
+// save_video("noisy_video.mp4", noisy_video, framerate=10) — use video crate
+
+// 💡 ここがVideo Diffusionの本質:
+// 静止画Diffusion: 単一画像にノイズ → 単一画像を復元
+// Video Diffusion: 50フレームの時系列にノイズ → 時間的一貫性を保って復元
 ```
 
 **出力**: ノイズまみれだがフレーム間で相関のある動画。時間軸の追加で「時間的一貫性（Temporal Coherence）」という新たな制約が生まれた。
@@ -73,7 +95,7 @@ $$
 \text{Attention}_{\text{temporal}}(Q, K, V) = \text{softmax}\left(\frac{QK^\top}{\sqrt{d}}\right)V \quad (\text{時間軸方向})
 $$
 
-**Julia実装**:
+**Rust実装**:
 
 
 **挙動の違い**:
@@ -85,7 +107,7 @@ $$
 
 **数式↔コード対応表**:
 
-| 数式 | Julia | 意味 |
+| 数式 | Rust | 意味 |
 |:-----|:------|:-----|
 | $QK^\top/\sqrt{d}$ | `(Q * K') / sqrt(Float32(C))` | スケーリング付き内積 |
 | $\text{softmax}(\cdot)$ | `softmax(scores, dims=2)` | 行方向で確率化 |
@@ -101,7 +123,7 @@ $$
 - $(i,j,k)$: 時間・高さ・幅のカーネルサイズ（例: 3×3×3）
 - $c'$: 入力チャネル、$c$: 出力チャネル
 
-**Julia実装**:
+**Rust実装**:
 
 
 **2D vs 3D Convの違い**:
@@ -123,7 +145,7 @@ $$
 - $\mathbf{f}_{t \to t+1}$: フレーム$t$から$t+1$への光学フロー（ピクセルごとの動きベクトル）
 - $\text{Warp}(\mathbf{x}_t, \mathbf{f})$: フローに従って$\mathbf{x}_t$を変形
 
-**Julia実装**:
+**Rust実装**:
 
 
 **Optical Flowの直感**:
@@ -1291,21 +1313,21 @@ $$
 
 ---
 
-## 🔧 4. 実装ゾーン（45分）— Rustで3D Conv + Julia DiT訓練
+## 🔧 4. 実装ゾーン（45分）— Rustで3D Conv + Rust DiT訓練
 
-**ゴール**: 3D Convolution カーネルをRustで実装し、DiT訓練をJuliaで高速化する。
+**ゴール**: 3D Convolution カーネルをRustで実装し、DiT訓練をRustで高速化する。
 
 ### 4.1 Rust 3D Convolution: C Pointer Modelで高速化
 
 Zone 1で学んだ3D Convの数式をRustで実装する。C Pointer Modelに従い、zero-copy設計を徹底する。
 
 
-### 4.2 Julia DiT訓練: Lux + Reactant GPU加速
+### 4.2 Rust DiT訓練: Lux + Burn GPU加速
 
-Zone 3のDiT理論をJuliaで実装する。Lux.jl (Flux後継) + Reactant.jl (XLA AOT GPU) でGPU訓練を実現。
+Zone 3のDiT理論をRustで実装する。Candle (Candle後継) + Burn (XLA AOT GPU) でGPU訓練を実現。
 
 
-### 4.3 3言語統合: Julia訓練 → Rust推論 → Elixir配信
+### 4.3 3言語統合: Rust訓練 → Rust推論 → Elixir配信
 
 Course III第19回の3言語FFIパターンを動画生成に適用する。
 
@@ -1431,7 +1453,7 @@ $$
 | **Zone 1** | 体験ゾーン — Spatial/Temporal/3D Conv/Optical Flow実装 | ✅ / ⚠️ / ❌ |
 | **Zone 2** | 直感ゾーン — 3つの困難・3つのパラダイム | ✅ / ⚠️ / ❌ |
 | **Zone 3** | 数式修行 — Video Diffusion/DiT/3D VAE/Optical Flow導出 | ✅ / ⚠️ / ❌ |
-| **Zone 4** | 実装ゾーン — Rust 3D Conv + Julia DiT訓練 | ✅ / ⚠️ / ❌ |
+| **Zone 4** | 実装ゾーン — Rust 3D Conv + Rust DiT訓練 | ✅ / ⚠️ / ❌ |
 | **Zone 5** | 実験ゾーン — SmolVLM2 + LTX-Video統合デモ | ✅ / ⚠️ / ❌ |
 | **Zone 6** | 発展ゾーン — TurboDiffusion/Pyramidal/Survey/Frontier | ✅ / ⚠️ / ❌ |
 
@@ -1444,11 +1466,11 @@ $$
 ```mermaid
 graph TD
     A["Course I<br/>第2回: 線形代数"] -.->|"QKᵀ / softmax"| B["Zone 1: Temporal Attention"]
-    C["Course I<br/>第4回: 微積分"] -.->|"∂/∂θ backprop"| D["Zone 4: Julia訓練"]
+    C["Course I<br/>第4回: 微積分"] -.->|"∂/∂θ backprop"| D["Zone 4: Rust訓練"]
     E["Course II<br/>第16回: Transformer"] -.->|"Self-Attention"| B
     F["Course IV<br/>第36回: DDPM"] -.->|"ノイズ予測"| G["Zone 3: Video Diffusion"]
     H["Course IV<br/>第38回: Flow Matching"] -.->|"Rectified Flow"| I["Zone 6: Pyramidal FM"]
-    J["Course III<br/>第19回: FFI"] -.->|"Julia→Rust"| D
+    J["Course III<br/>第19回: FFI"] -.->|"Rust強化"| D
     K["Course V<br/>第43回: DiT"] -.->|"Spacetime DiT"| G
 
     style B fill:#ffe6f0
@@ -1460,11 +1482,11 @@ graph TD
 **全50回の統合例**:
 
 - **第2回 線形代数** → Zone 1 Temporal Attention の $QK^\top$ 計算
-- **第4回 微積分** → Zone 4 Julia訓練の勾配降下
+- **第4回 微積分** → Zone 4 Rust訓練の勾配降下
 - **第16回 Transformer** → Zone 1 Spatial/Temporal Attention の基礎
 - **第36回 DDPM** → Zone 3 Video Diffusion のノイズ予測
 - **第38回 Flow Matching** → Zone 6 Pyramidal Flow Matching
-- **第19回 FFI** → Zone 4 Julia→Rust 3D Conv呼び出し
+- **第19回 FFI** → Zone 4 Rust→Rust 3D Conv呼び出し
 - **第43回 DiT** → Zone 3 Spacetime DiT
 
 ### 7.3 次のステップ: 第46回「3D生成」へ
@@ -1512,10 +1534,10 @@ graph LR
 - 処理: SmolVLM2で理解 → LLM (GPT-4等) でプロンプト改善 → LTX-Video生成
 - 出力: 生成動画ダウンロード
 
-**課題2: Rust 3D Conv + Julia DiT訓練パイプライン** (難易度: ★★★★☆)
+**課題2: Rust 3D Conv + Rust DiT訓練パイプライン** (難易度: ★★★★☆)
 
 - Zone 4のRust 3D ConvをCUDA対応に拡張 (cuDNN C API呼び出し)
-- Julia側でLux + Reactant GPUパイプライン構築
+- Rust側でLux + Burn GPUパイプライン構築
 - 小規模データセット (UCF-101等) で訓練 → 推論速度計測
 
 **課題3: TurboDiffusion実装** (難易度: ★★★★★)
@@ -1536,18 +1558,18 @@ graph LR
 
 **第45回完走おめでとうございます！** 時空間Diffusionの理論・実装・最新研究を完全習得しました。次は第46回「3D生成」で空間3Dを征服しましょう。
 
-### 7.7 補足資料: Juliaパッケージエコシステム
+### 7.7 補足資料: Rustパッケージエコシステム
 
-動画生成に役立つJuliaパッケージをまとめます。
+動画生成に役立つRustパッケージをまとめます。
 
 | パッケージ | 用途 | インストール |
 |:----------|:-----|:-----------|
-| **Lux.jl** | Neural network framework (Flux後継) | `using Pkg; Pkg.add("Lux")` |
-| **Reactant.jl** | XLA AOT GPU compilation | `Pkg.add("Reactant")` |
+| **Candle** | Neural network framework (Candle後継) | `using Pkg; Pkg.add("Lux")` |
+| **Burn** | XLA AOT GPU compilation | `Pkg.add("Burn")` |
 | **VideoIO.jl** | 動画読み込み・書き込み | `Pkg.add("VideoIO")` |
 | **Transformers.jl** | HuggingFace互換推論 | `Pkg.add("Transformers")` |
 | **CUDA.jl** | NVIDIA GPU programming | `Pkg.add("CUDA")` |
-| **Optimisers.jl** | Adam, AdamW, etc. | `Pkg.add("Optimisers")` |
+| **burn::optim** | Adam, AdamW, etc. | `Pkg.add("burn::optim")` |
 
 実装時のトラブルシューティング:
 

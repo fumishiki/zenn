@@ -2,12 +2,12 @@
 title: "第42回: 全生成モデル理論の統一的整理 + Course IV 総括: 30秒の驚き→数式修行→実装マスター"
 emoji: "🏆"
 type: "tech"
-topics: ["machinelearning", "deeplearning", "generativemodels", "julia", "unifiedtheory"]
+topics: ["machinelearning", "deeplearning", "generativemodels", "rust", "unifiedtheory"]
 published: true
 slug: "ml-lecture-42-part1"
 difficulty: "advanced"
 time_estimate: "90 minutes"
-languages: ["Julia", "Rust"]
+languages: ["Rust"]
 keywords: ["機械学習", "深層学習", "生成モデル"]
 ---
 
@@ -65,69 +65,73 @@ graph TD
 
 全ての生成モデルは、「2つの分布 $p_{\text{data}}(x)$ と $p_{\theta}(x)$ を近づける」という問題を解いている。その距離関数が違うだけだ。
 
-```julia
-using LinearAlgebra, Statistics
+```rust
+// 4つの生成モデル損失関数の統一的表現
+// Input: データサンプル x, モデルサンプル x_gen, パラメータ θ
+use candle_core::{Tensor, Result};
 
-# 4つの生成モデル損失関数の統一的表現
-# Input: データサンプル x, モデルサンプル x_gen, パラメータ θ
+// VAE: ELBO = 𝔼[log p(x|z)] - KL[q(z|x) || p(z)]
+fn vae_loss(x: &Tensor, z_mean: &Tensor, z_logvar: &Tensor) -> Result<Tensor> {
+    let x_recon = decode(z_mean)?;
+    // Reconstruction: −||x − x_recon||²
+    let recon = x.sub(&x_recon)?.sqr()?.sum_all()?.neg()?;
+    // KL: −½ Σ(1 + log σ² − μ² − σ²)
+    let kl = z_logvar.exp()?.add(z_mean.sqr()?)?.sub(z_logvar)?
+              .affine(1.0, -1.0)?.sum_all()?.affine(-0.5, 0.)?;
+    recon.sub(&kl)?.neg()  // negative ELBO (minimized)
+}
 
-# VAE: ELBO = 𝔼[log p(x|z)] - KL[q(z|x) || p(z)]
-function vae_loss(x, z_mean, z_logvar)
-    # Reconstruction term + KL regularization
-    recon = -sum((x .- decode(z_mean)).^2)  # -||x - x_recon||²
-    kl = -0.5 * sum(1 .+ z_logvar .- z_mean.^2 .- exp.(z_logvar))
-    return -(recon - kl)  # negative ELBO
-end
+// GAN: Minimax ⟺ JS divergence minimization
+fn gan_loss(x_real: &Tensor, x_gen: &Tensor, discriminator: impl Fn(&Tensor) -> Result<Tensor>)
+    -> Result<Tensor>
+{
+    // 𝔼[log D(x_real)] + 𝔼[log(1 − D(G(z)))]
+    let real_score = discriminator(x_real)?.log()?;
+    let fake_score = discriminator(x_gen)?.neg()?.affine(1.0, 1.0)?.log()?;
+    real_score.mean_all()?.add(&fake_score.mean_all()?)?.neg()  // generator loss
+}
 
-# GAN: Minimax game ⟺ JS divergence minimization
-function gan_loss(x_real, x_gen, D)
-    # Discriminator tries to maximize: 𝔼[log D(x)] + 𝔼[log(1-D(G(z)))]
-    real_score = log.(D(x_real))
-    fake_score = log.(1 .- D(x_gen))
-    return -(mean(real_score) + mean(fake_score))  # generator loss
-end
+// Flow Matching: directly learn velocity field u_t = x1 − x0
+fn flow_matching_loss(x0: &Tensor, x1: &Tensor, t: f32, v_theta: impl Fn(&Tensor, f32) -> Result<Tensor>)
+    -> Result<Tensor>
+{
+    // x_t = (1-t)·x0 + t·x1  (linear interpolation)
+    let xt = x0.affine(1.0 - t as f64, 0.)?.add(&x1.affine(t as f64, 0.)?)?;
+    let ut = x1.sub(x0)?;             // Target velocity: u_t = x1 − x0
+    let v_pred = v_theta(&xt, t)?;
+    v_pred.sub(&ut)?.sqr()?.mean_all()? // MSE between predicted and target flow
+}
 
-# Flow Matching: 直接ベクトル場を学習
-function flow_matching_loss(x0, x1, t, v_θ)
-    # xt = (1-t)x0 + t·x1 (linear interpolation)
-    # ut = x1 - x0 (target vector field)
-    xt = (1 .- t) .* x0 .+ t .* x1
-    ut = x1 .- x0
-    v_pred = v_θ(xt, t)
-    return mean((v_pred .- ut).^2)  # MSE between predicted and target flow
-end
+// Diffusion (DDPM): Denoising score matching
+fn ddpm_loss(x0: &Tensor, noise: &Tensor, t: f32, eps_theta: impl Fn(&Tensor, f32) -> Result<Tensor>)
+    -> Result<Tensor>
+{
+    // x_t = √ᾱ_t·x0 + √(1−ᾱ_t)·ε
+    let alpha_bar = get_alpha_bar(t);
+    let xt = x0.affine(alpha_bar.sqrt() as f64, 0.)?
+               .add(&noise.affine((1.0 - alpha_bar).sqrt() as f64, 0.)?)?;
+    let eps_pred = eps_theta(&xt, t)?;
+    eps_pred.sub(noise)?.sqr()?.mean_all()?  // MSE between predicted and true noise
+}
 
-# Diffusion (DDPM): Denoising score matching
-function ddpm_loss(x0, ϵ, t, ϵ_θ)
-    # xt = √ᾱt·x0 + √(1-ᾱt)·ϵ
-    # Goal: predict noise ϵ
-    ᾱ_t = get_alpha_bar(t)
-    xt = sqrt.(ᾱ_t) .* x0 .+ sqrt.(1 .- ᾱ_t) .* ϵ
-    ϵ_pred = ϵ_θ(xt, t)
-    return mean((ϵ_pred .- ϵ).^2)  # MSE between predicted and true noise
-end
+fn get_alpha_bar(t: f32) -> f32 { 1.0 - t }  // Linear noise schedule
 
-# Dummy functions for demonstration
-decode(z) = z  # VAE decoder
-D(x) = sigmoid.(sum(x, dims=2))  # Discriminator
-v_θ(x, t) = x  # Flow network
-ϵ_θ(x, t) = x  # Noise prediction network
-get_alpha_bar(t) = 1 .- t  # Noise schedule
-sigmoid(x) = 1 ./ (1 .+ exp.(-x))
+// Test
+fn main() -> Result<()> {
+    let dev = &candle_core::Device::Cpu;
+    let x       = Tensor::randn(0f32, 1f32, (4, 2), dev)?;
+    let z_mean  = Tensor::randn(0f32, 1f32, (4, 2), dev)?;
+    let z_logvar= Tensor::randn(0f32, 1f32, (4, 2), dev)?;
+    let noise   = Tensor::randn(0f32, 1f32, (4, 2), dev)?;
+    let x_gen   = Tensor::randn(0f32, 1f32, (4, 2), dev)?;
 
-# Test: 2D data
-x = randn(4, 2)
-x_gen = randn(4, 2)
-z_mean = randn(4, 2)
-z_logvar = randn(4, 2)
-ϵ = randn(4, 2)
-t = [0.5]
-
-println("VAE loss: ", vae_loss(x, z_mean, z_logvar))
-println("GAN loss: ", gan_loss(x, x_gen, D))
-println("FM loss:  ", flow_matching_loss(x, x_gen, t, v_θ))
-println("DDPM loss:", ddpm_loss(x, ϵ, t, ϵ_θ))
-println("\n全ての損失関数は '予測 vs 真値' の距離 — 本質は同じ")
+    println!("VAE loss:  {:.3}", vae_loss(&x, &z_mean, &z_logvar)?.to_scalar::<f32>()?);
+    println!("FM loss:   {:.3}", flow_matching_loss(&x, &x_gen, 0.5, |xt,_| Ok(xt.clone()))?.to_scalar::<f32>()?);
+    println!("DDPM loss: {:.3}", ddpm_loss(&x, &noise, 0.5, |xt,_| Ok(xt.clone()))?.to_scalar::<f32>()?);
+    println!("
+全ての損失関数は '予測 vs 真値' の距離 — 本質は同じ");
+    Ok(())
+}
 ```
 
 出力:
@@ -288,7 +292,7 @@ $\alpha=1, \beta=-1$ なら Score-based Diffusion、$\alpha=\beta$ なら GAN �
 | **理論の深さ** | 導出スキップ、結果の紹介 | **完全導出**: 伊藤の補題→Fokker-Planck→PF-ODE |
 | **数学的厳密性** | 直感的説明 | **測度論**的基盤 (第5回) から積み上げ |
 | **統一理論** | 個別手法の羅列 | **数学的等価性の証明**: Score↔Flow↔Diffusion↔ODE↔EBM↔OT |
-| **実装** | PyTorch デモ | **Julia (訓練) + Rust (推論) + Elixir (配信)** 3言語フルスタック |
+| **実装** | PyTorch デモ | **Rust (訓練) + Rust (推論) + Elixir (配信)** 3言語フルスタック |
 | **最新性** | 2023年まで | **2025-2026 SOTA**: Stochastic Interpolants, DiffFlow, Energy Matching |
 
 **本講義の独自性**:
@@ -298,14 +302,14 @@ $\alpha=1, \beta=-1$ なら Score-based Diffusion、$\alpha=\beta$ なら GAN �
 
 <details><summary>トロイの木馬振り返り: 第9回の「Rust地獄」はどうなった？</summary>
 
-第9回で Python → Rust の高速化に驚き、型パズルに苦しんだあなた。第10回で Julia の多重ディスパッチに感動し、以降はもう Python に戻ることはなかった。
+第9回で Python → Rust の高速化に驚き、型パズルに苦しんだあなた。第10回で Rust のゼロコスト抽象化に感動し、以降はもう Python に戻ることはなかった。
 
 **Before (第8回まで)**:
 - Python 100% — NumPy/PyTorch/JAX で実装
 - 「Python 遅いな…でも他に選択肢ないし」
 
 **After (第42回)**:
-- **Julia**: 訓練ループ・プロトタイプ (数式が1:1でコードに)
+- **Rust**: 訓練ループ・プロトタイプ (数式が1:1でコードに)
 - **Rust**: 推論エンジン・本番 (ゼロコピーで最速)
 - **Elixir**: 分散サービング (OTP で耐障害性)
 - **Python**: 査読者用（読むだけ）

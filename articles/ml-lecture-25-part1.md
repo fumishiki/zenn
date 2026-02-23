@@ -3,11 +3,11 @@ title: "第25回: 因果推論: 30秒の驚き→数式修行→実装マスタ�
 slug: "ml-lecture-25-part1"
 emoji: "🔗"
 type: "tech"
-topics: ["machinelearning", "causalinference", "julia", "statistics", "experiment"]
+topics: ["machinelearning", "causalinference", "rust", "statistics", "experiment"]
 published: true
 difficulty: "advanced"
 time_estimate: "90 minutes"
-languages: ["Julia", "Rust", "Elixir"]
+languages: ["Rust", "Elixir"]
 keywords: ["機械学習", "深層学習", "生成モデル"]
 ---
 
@@ -20,7 +20,7 @@ keywords: ["機械学習", "深層学習", "生成モデル"]
 
 第24回で統計の基礎が固まった。だが相関は因果ではない。アイスクリーム売上と溺死者数に相関があっても、アイスクリームが溺死を引き起こすわけではない。真の因果効果を測定するには、**交絡**を制御し、**選択バイアス**を排除し、**反実仮想**を正しく推定する必要がある。
 
-本講義では、Rubin因果モデル（潜在的結果フレームワーク）とPearl因果理論（構造因果モデル・do-演算）の2大理論を完全習得し、傾向スコア・操作変数法・RDD・DiDといった実践手法を、数式からJulia実装まで一貫して学ぶ。
+本講義では、Rubin因果モデル（潜在的結果フレームワーク）とPearl因果理論（構造因果モデル・do-演算）の2大理論を完全習得し、傾向スコア・操作変数法・RDD・DiDといった実践手法を、数式からRust実装まで一貫して学ぶ。
 
 > **Note:** **このシリーズについて**: 東京大学 松尾・岩澤研究室動画講義の**完全上位互換**の全50回シリーズ。理論（論文が書ける）、実装（Production-ready）、最新（2024-2026 SOTA）の3軸で差別化する。
 
@@ -57,48 +57,65 @@ graph TD
 
 観測データから因果効果を推定する最もポピュラーな手法の1つ、傾向スコアマッチングを3行で動かす。
 
-```julia
-using Statistics, LinearAlgebra
+```rust
+// use rand_distr::{Normal, Distribution};
+// use ndarray::{Array1, Array2, ArrayView2};
 
-# Simulated observational data
-# Treatment D: 1=treated, 0=control
-# Confounders X: [age, income]
-# Outcome Y: health improvement score
-function generate_observational_data(n::Int=1000)
-    X = randn(n, 2)  # confounders: age, income (standardized)
-    # Treatment assignment depends on confounders (selection bias)
-    @views propensity = @. 1 / (1 + exp(-X[:,1] - 0.5X[:,2]))
-    D = rand(n) .< propensity  # biased treatment assignment
+// Simulated observational data
+// Treatment D: 1=treated, 0=control
+// Confounders X: [age, income]
+// Outcome Y: health improvement score
 
-    # True causal effect: treatment adds +2 to outcome
-    # Outcome also depends on confounders (confounding)
-    @views Y = 2 .* D .+ X[:,1] .+ 0.5 .* X[:,2] .+ randn(n) .* 0.5
+fn logistic(x: f64) -> f64 { 1.0 / (1.0 + (-x).exp()) }
 
-    return D, X, Y, propensity
-end
+fn mean(v: &[f64]) -> f64 { v.iter().sum::<f64>() / v.len() as f64 }
 
-# Naive comparison (WRONG - confounded)
-D, X, Y, true_e = generate_observational_data(1000)
-naive_ate = mean(Y[D]) - mean(Y[.!D])
-println("Naive ATE (confounded): $(round(naive_ate, digits=3))")
+/// Generate observational data: returns (treatment, x1, x2, outcome, propensity)
+fn generate_observational_data(
+    x1: &[f64],   // confounder: age (standardized)
+    x2: &[f64],   // confounder: income (standardized)
+    d:  &[bool],  // treatment assignments
+) -> (Vec<f64>, Vec<f64>) {
+    // Propensity: e(X) = σ(-x1 - 0.5*x2)
+    let propensity: Vec<f64> = x1.iter().zip(x2)
+        .map(|(a, b)| logistic(-a - 0.5 * b))
+        .collect();
+    // Outcome: Y = 2D + x1 + 0.5*x2 + noise (true causal effect = 2.0)
+    let outcome: Vec<f64> = d.iter().zip(x1).zip(x2)
+        .map(|((di, a), b)| 2.0 * (*di as u8 as f64) + a + 0.5 * b)
+        .collect();
+    (propensity, outcome)
+}
 
-# Propensity score matching (CORRECT)
-function propensity_score_matching(D, X, Y)
-    # Estimate propensity scores e(X) = P(D=1|X)
-    @views e_hat = @. 1 / (1 + exp(-X[:,1] - 0.5X[:,2]))  # simplified: use logistic regression
+// Naive comparison (WRONG - confounded)
+fn naive_ate(d: &[bool], y: &[f64]) -> f64 {
+    let treated: Vec<f64> = d.iter().zip(y).filter(|(di, _)| **di).map(|(_, yi)| *yi).collect();
+    let control: Vec<f64> = d.iter().zip(y).filter(|(di, _)| !*di).map(|(_, yi)| *yi).collect();
+    mean(&treated) - mean(&control)
+}
 
-    # Inverse Probability Weighting (IPW) estimator
-    # ATE = E[Y(1) - Y(0)] = E[D*Y/e(X)] - E[(1-D)*Y/(1-e(X))]
-    weights_treated = D ./ e_hat
-    weights_control = (1 .- D) ./ (1 .- e_hat)
+// Propensity score matching — IPW estimator (CORRECT)
+// ATE = E[Y(1) - Y(0)] = E[D*Y/e(X)] - E[(1-D)*Y/(1-e(X))]
+fn propensity_score_matching(d: &[bool], y: &[f64], e_hat: &[f64]) -> f64 {
+    let n = d.len() as f64;
+    let treated_sum: f64 = d.iter().zip(y).zip(e_hat)
+        .filter(|((di, _), _)| **di)
+        .map(|((_, yi), ei)| yi / ei)
+        .sum::<f64>() / n;
+    let control_sum: f64 = d.iter().zip(y).zip(e_hat)
+        .filter(|((di, _), _)| !*di)
+        .map(|((_, yi), ei)| yi / (1.0 - ei))
+        .sum::<f64>() / n;
+    treated_sum - control_sum
+}
 
-    ate_ipw = mean(weights_treated .* Y) - mean(weights_control .* Y)
-    return ate_ipw
-end
-
-ate_corrected = propensity_score_matching(D, X, Y)
-println("IPW ATE (debiased): $(round(ate_corrected, digits=3))")
-println("True ATE: 2.0")
+// Usage:
+// let (propensity, outcome) = generate_observational_data(&x1, &x2, &d);
+// let naive = naive_ate(&d, &outcome);
+// println!("Naive ATE (confounded): {:.3}", naive);
+// let ate_ipw = propensity_score_matching(&d, &outcome, &propensity);
+// println!("IPW ATE (debiased): {:.3}", ate_ipw);
+// println!("True ATE: 2.0");
 ```
 
 出力:
@@ -282,7 +299,7 @@ graph TD
 | **Zone 3.6** RDD | 250 | ★★★ | Sharp/Fuzzy RDD |
 | **Zone 3.7** DiD | 300 | ★★★ | Staggered DiD |
 | **Zone 3.8** ML×因果推論 | 400 | ★★★★★ | Causal Forest/DML |
-| **Zone 4** Julia実装 | 600 | ★★★★ | CausalInference.jl |
+| **Zone 4** Rust実装 | 600 | ★★★★ | ndarray |
 
 ### 2.4 学習戦略 — 3つのフェーズ
 
@@ -304,12 +321,12 @@ graph LR
 | Day 3 | Zone 3.4-3.5 (傾向スコア/IV) | 2h |
 | Day 4 | Zone 3.6-3.7 (RDD/DiD) | 2h |
 | Day 5 | Zone 3.8 (ML×因果) | 2h |
-| Day 6 | Zone 4 (Julia実装) | 3h |
+| Day 6 | Zone 4 (Rust実装) | 3h |
 | Day 7 | Zone 5-7 (実験/復習) | 2h |
 
-<details><summary>トロイの木馬: Juliaでの因果推論実装</summary>
+<details><summary>トロイの木馬: Rustでの因果推論実装</summary>
 
-本講義では**Julia + CausalInference.jl**を使う。PythonのdoWhyより:
+本講義では**Rust + ndarray**を使う。PythonのdoWhyより:
 
 - **DAG操作が直感的**: LightGraphs.jlベース
 - **速度**: 100万サンプルのIPW推定が10倍速
@@ -1634,7 +1651,7 @@ $$
 4. ✅ **標準誤差**: ブートストラップまたはクラスタ頑健標準誤差
 5. ✅ **可視化**: 傾向スコア分布・共変量バランス・効果の異質性
 
-> **Note:** **進捗: 50% 完了** 因果推論理論 + 最新の因果発見手法（HLCD, Differentiable Constraint-Based, Recursive, 時系列）+ 実践応用例まで完全習得した。次は実装ゾーンでJulia + CausalInference.jlで全手法を実装する。
+> **Note:** **進捗: 50% 完了** 因果推論理論 + 最新の因果発見手法（HLCD, Differentiable Constraint-Based, Recursive, 時系列）+ 実践応用例まで完全習得した。次は実装ゾーンでRust + ndarrayで全手法を実装する。
 
 ---
 

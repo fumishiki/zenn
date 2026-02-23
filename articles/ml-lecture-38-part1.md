@@ -2,12 +2,12 @@
 title: "第38回: Flow Matching & 生成モデル統一理論: 30秒の驚き→数式修行→実装マスター"
 emoji: "🌀"
 type: "tech"
-topics: ["machinelearning", "deeplearning", "flowmatching", "julia", "diffusion"]
+topics: ["machinelearning", "deeplearning", "flowmatching", "rust", "diffusion"]
 published: true
 slug: "ml-lecture-38-part1"
 difficulty: "advanced"
 time_estimate: "90 minutes"
-languages: ["Julia", "Rust"]
+languages: ["Rust"]
 keywords: ["機械学習", "深層学習", "生成モデル"]
 ---
 
@@ -25,62 +25,91 @@ keywords: ["機械学習", "深層学習", "生成モデル"]
 
 Flow Matchingの本質を3行で動かす。拡散モデルが「ノイズ→データ」へ複雑な経路をたどるのに対し、Flow Matchingは**直線的な輸送**を学習する。
 
-```julia
-using Lux, Random, Zygote, Statistics, Plots
+```rust
+use candle_core::{Device, Result, Tensor};
+use candle_nn::{linear, seq, Activation, Module, VarBuilder};
+use rand::Rng;
+use rand_distr::StandardNormal;
 
-# Conditional Flow Matching (CFM) の1次元デモ
-rng = Random.default_rng()
+// Conditional Flow Matching (CFM) の1次元デモ
 
-# データ分布: 標準正規分布
-x_data = randn(rng, Float32, 1000)
+// Conditional Probability Path (ガウシアン確率パス)
+// p_t(x|x₁) = N(tx₁, (1-t)²σ²)
+fn conditional_path(t: f32, x1: f32, x0: f32) -> f32 {
+    t * x1 + (1.0 - t) * x0  // μ_t(x₁, x₀)
+}
 
-# ソース分布: p_0 = N(0, 1)
-# ターゲット分布: p_1 = データの経験分布
+// Conditional Vector Field (ターゲット方向への速度)
+// u_t(x|x₁) = dx_t/dt = x₁ - x₀
+fn conditional_vector_field(_t: f32, x1: f32, x0: f32) -> f32 {
+    x1 - x0
+}
 
-# Conditional Probability Path (ガウシアン確率パス)
-# p_t(x|x₁) = N(tx₁, (1-t)²σ²)
-conditional_path(t, x₁, x₀) = @. t * x₁ + (1 - t) * x₀  # μ_t(x₁, x₀)
+// Marginal Vector Field (周辺化後の速度場)
+// v_t(x) = E_{x₁~p₁}[u_t(x|x₁) | x_t = x]
+// CFM Loss: L_CFM(θ) = E_{t,x₀,x₁}[||v_θ(t, xₜ) - u_t(x|x₁)||²]
 
-# Conditional Vector Field (ターゲット方向への速度)
-# u_t(x|x₁) = dx_t/dt = x₁ - x₀
-conditional_vector_field(t, x₁, x₀) = x₁ .- x₀
+// 簡易ベクトル場ネットワーク: v_θ(t, x) = MLP([t, x])
+fn build_velocity_net(vb: VarBuilder) -> Result<impl Module> {
+    Ok(seq()
+        .add(linear(2, 64, vb.pp("l1"))?)
+        .add(Activation::Tanh)
+        .add(linear(64, 64, vb.pp("l2"))?)
+        .add(Activation::Tanh)
+        .add(linear(64, 1, vb.pp("l3"))?))
+}
 
-# Marginal Vector Field (周辺化後の速度場)
-# v_t(x) = E_{x₁~p₁}[u_t(x|x₁) | x_t = x]
-# CFM Loss: L_CFM(θ) = E_{t,x₀,x₁}[||v_θ(t, xₜ) - u_t(x|x₁)||²]
+// CFM損失計算（バッチサンプル）
+fn cfm_loss(
+    model: &impl Module,
+    x_data: &[f32],
+    batch_size: usize,
+    device: &Device,
+) -> Result<f32> {
+    let mut rng = rand::thread_rng();
+    let t: Vec<f32>  = (0..batch_size).map(|_| rng.gen::<f32>()).collect();       // t ~ U[0,1]
+    let x0: Vec<f32> = (0..batch_size).map(|_| rng.sample(StandardNormal)).collect(); // source: N(0,1)
+    let x1: Vec<f32> = (0..batch_size)
+        .map(|_| x_data[rng.gen_range(0..x_data.len())])
+        .collect();                                                                // target: data
 
-# 簡易ベクトル場ネットワーク: v_θ(t, x) = MLP([t, x])
-model = Chain(
-    Dense(2 => 64, tanh),
-    Dense(64 => 64, tanh),
-    Dense(64 => 1)
-)
-ps, st = Lux.setup(rng, model)
+    let xt: Vec<f32> = (0..batch_size)
+        .map(|i| conditional_path(t[i], x1[i], x0[i]))
+        .collect();                                                                // conditional path
+    let ut: Vec<f32> = (0..batch_size)
+        .map(|i| conditional_vector_field(t[i], x1[i], x0[i]))
+        .collect();                                                                // conditional vector field (target velocity)
 
-# CFM損失計算（バッチサンプル）
-function cfm_loss(ps, st, batch_size=32)
-    t  = rand(rng, Float32, batch_size)       # t ~ U[0,1]
-    x₀ = randn(rng, Float32, batch_size)      # source: N(0,1)
-    x₁ = rand(rng, x_data, batch_size)        # target: data
-    xₜ = @. t * x₁ + (1 - t) * x₀           # conditional path
-    uₜ = x₁ .- x₀                            # conditional vector field (target velocity)
+    // Network prediction: input = [t, x_t] as [batch_size, 2]
+    let input_data: Vec<f32> = (0..batch_size).flat_map(|i| [t[i], xt[i]]).collect();
+    let input = Tensor::from_slice(&input_data, (batch_size, 2), device)?;
+    let v_pred = model.forward(&input)?;
 
-    # Network prediction
-    input = hcat(t', xₜ')'  # [2, batch_size]
-    v_θ, st = model(input, ps, st)
+    // MSE loss
+    let ut_tensor = Tensor::from_slice(&ut, (batch_size, 1), device)?;
+    let loss = (v_pred - ut_tensor)?.sqr()?.mean_all()?.to_scalar::<f32>()?;
+    Ok(loss)
+}
 
-    # MSE loss
-    loss = mean(@. (v_θ - uₜ')^2)
-    return loss, st
-end
+fn main() -> Result<()> {
+    let device = Device::Cpu;
+    // データ分布: 標準正規分布 (1000サンプル)
+    let x_data: Vec<f32> = (0..1000)
+        .map(|_| rand::thread_rng().sample::<f32, _>(StandardNormal))
+        .collect();
 
-# Loss計算
-loss_val, _ = cfm_loss(ps, st)
-println("CFM Loss: ", loss_val)
-# CFM Loss: 0.21834567
+    let vb = VarBuilder::zeros(candle_core::DType::F32, &device);
+    let model = build_velocity_net(vb)?;
 
-# 訓練後、ODEソルバーでサンプリング
-# dx_t/dt = v_θ(t, xₜ), x₀ ~ p₀ -> x₁ ~ p₁
+    // Loss計算
+    let loss_val = cfm_loss(&model, &x_data, 32, &device)?;
+    println!("CFM Loss: {}", loss_val);
+    // CFM Loss: 0.21834567
+
+    // 訓練後、ODEソルバーでサンプリング
+    // dx_t/dt = v_θ(t, xₜ), x₀ ~ p₀ -> x₁ ~ p₁
+    Ok(())
+}
 ```
 
 **出力**:
@@ -274,7 +303,7 @@ graph TD
     E --> F[Zone 3.5: **統一理論: Score↔Flow↔Diffusion↔ODE**]
     F --> G[Zone 3.6: DiffFlow統一理論]
     G --> H[Zone 3.7: Wasserstein勾配流]
-    H --> I[Zone 4-5: Julia実装 & 演習]
+    H --> I[Zone 4-5: Rust実装 & 演習]
     I --> J[Zone 6-7: 最新研究 & まとめ]
 ```
 

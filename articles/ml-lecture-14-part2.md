@@ -2,31 +2,35 @@
 title: "第14回: Attention — 化石からの脱却: 30秒の驚き→数式修行→実装マスター 【後編】実装編"
 emoji: "🔍"
 type: "tech"
-topics: ["machinelearning", "deeplearning", "transformer", "julia", "rust"]
+topics: ["machinelearning", "deeplearning", "transformer", "rust", "rust"]
 published: true
 slug: "ml-lecture-14-part2"
 difficulty: "advanced"
 time_estimate: "90 minutes"
-languages: ["Julia", "Rust"]
+languages: ["Rust"]
 keywords: ["機械学習", "深層学習", "生成モデル"]
 ---
 
-## 💻 Z5. 試練（実装）（45分）— Julia完全実装 + Rust推論
+## 💻 Z5. 試練（実装）（45分）— Rust完全実装 + Rust推論
 
 ### 4.1 環境セットアップ
 
-**Julia** (1.11+):
+**Rust** (1.11+):
 
 ```bash
-# Install Julia via juliaup
+# Install Rust via rustup
 curl -fsSL https://install.julialang.org | sh
 julia --version  # 1.11.x or later
 ```
 
-```julia
-# Julia packages
-using Pkg
-Pkg.add(["Lux", "Reactant", "Optimisers", "Zygote", "Random", "Statistics", "LinearAlgebra"])
+```rust
+// Cargo.toml dependencies:
+// [dependencies]
+// candle-core = "0.8"
+// candle-nn = "0.8"
+// ndarray = "0.16"
+// rand = "0.8"
+// rand_distr = "0.4"
 ```
 
 **Rust** (1.85+):
@@ -47,9 +51,9 @@ cd attention_demo
 ndarray = "0.16"
 ```
 
-### 4.2 数式→コード対応パターン（LaTeX↔Julia 7パターン）
+### 4.2 数式→コード対応パターン（LaTeX↔Rust 7パターン）
 
-| 数式 | Julia実装 | パターン |
+| 数式 | Rust実装 | パターン |
 |:-----|:----------|:---------|
 | $Y = WX + b$ | `Y = W * X .+ b` | 行列積 + ブロードキャスト加算 |
 | $S = \frac{QK^\top}{\sqrt{d_k}}$ | `S = (Q * K') / sqrt(d_k)` | 行列積 + スカラー除算 |
@@ -59,179 +63,166 @@ ndarray = "0.16"
 | $\mu = \frac{1}{d}\sum_i x_i$ | `μ = mean(X, dims=2)` | 行ごと平均 |
 | $\tilde{X} = \frac{X - \mu}{\sigma}$ | `X_norm = (X .- μ) ./ (σ .+ 1e-5)` | 正規化（ブロードキャスト） |
 
-**Juliaの `.` (broadcast)**: 要素ごと演算を自動でベクトル化。
+**Rustの `.` (broadcast)**: 要素ごと演算を自動でベクトル化。
 
-### 4.3 Micro-GPT (Tiny Transformer) Julia完全実装
+### 4.3 Micro-GPT (Tiny Transformer) Rust完全実装
 
 **目標**: GPT-2アーキテクチャのミニマル版（1層、2 heads、d_model=32）を訓練可能な形で実装する。
 
-```julia
-using Lux, Random, Optimisers, Zygote, Statistics, LinearAlgebra
+```rust
+use candle_core::{DType, Device, Result, Tensor, D};
+use candle_nn::{embedding, linear_no_bias, layer_norm, Embedding, Linear, LayerNorm,
+                Module, VarBuilder, VarMap};
 
-# --- Scaled Dot-Product Attention ---
-struct ScaledDotProductAttention <: Lux.AbstractExplicitLayer
-    d_k::Int
-end
+// Attn(Q,K,V) = softmax(QKᵀ / √d_k) · V
+// Q, K, V: (batch * num_heads, seq_len, d_k)
+fn scaled_dot_product_attention(
+    q: &Tensor, k: &Tensor, v: &Tensor,
+    mask: Option<&Tensor>,
+) -> Result<(Tensor, Tensor)> {
+    let d_k = q.dim(D::Minus1)? as f64;
+    // scores = QKᵀ / √d_k: (batch*heads, seq, seq)
+    let mut scores = q.matmul(&k.transpose(D::Minus2, D::Minus1)?)? / d_k.sqrt();
+    if let Some(m) = mask {
+        scores = scores.broadcast_add(m)?;  // add causal mask (-∞ for future)
+    }
+    let attn_weights = candle_nn::ops::softmax(&scores, D::Minus1)?;  // softmax(·)
+    let output = attn_weights.matmul(v)?;                              // · V
+    Ok((output, attn_weights))
+}
 
-function (attn::ScaledDotProductAttention)(Q, K, V, mask=nothing)
-    # Q, K, V: (seq_len, d_k, batch)
-    seq_len, d_k, batch = size(Q)
+// --- Multi-Head Attention ---
+struct MultiHeadAttention {
+    w_q: Linear, w_k: Linear, w_v: Linear, w_o: Linear,
+    num_heads: usize,
+    d_k:       usize,
+}
 
-    # Scores: (seq_len, seq_len, batch)
-    scores = batched_mul(permutedims(Q, (2, 1, 3)), K) / sqrt(Float32(d_k))
+impl MultiHeadAttention {
+    fn new(d_model: usize, num_heads: usize, vb: VarBuilder) -> Result<Self> {
+        let d_k = d_model / num_heads;
+        Ok(Self {
+            w_q: linear_no_bias(d_model, d_model, vb.pp("w_q"))?,
+            w_k: linear_no_bias(d_model, d_model, vb.pp("w_k"))?,
+            w_v: linear_no_bias(d_model, d_model, vb.pp("w_v"))?,
+            w_o: linear_no_bias(d_model, d_model, vb.pp("w_o"))?,
+            num_heads, d_k,
+        })
+    }
 
-    # Apply mask if provided
-    if !isnothing(mask)
-        scores = scores .+ mask
-    end
+    fn forward(&self, x: &Tensor, mask: Option<&Tensor>) -> Result<Tensor> {
+        let (batch, seq_len, d_model) = x.dims3()?;
+        let h = self.num_heads;
 
-    # Softmax over keys (dim 2)
-    attn_weights = softmax(scores, dims=2)
+        // Project → split heads: (batch, seq, d_model) → (batch*heads, seq, d_k)
+        let project = |w: &Linear| -> Result<Tensor> {
+            w.forward(x)?
+                .reshape((batch, seq_len, h, self.d_k))?
+                .transpose(1, 2)?                         // (batch, h, seq, d_k)
+                .reshape((batch * h, seq_len, self.d_k))
+        };
+        let q = project(&self.w_q)?;
+        let k = project(&self.w_k)?;
+        let v = project(&self.w_v)?;
 
-    # Output: (seq_len, d_k, batch)
-    output = batched_mul(attn_weights, permutedims(V, (2, 1, 3)))
-    return permutedims(output, (2, 1, 3)), attn_weights
-end
+        // Attention
+        let (attn_out, _) = scaled_dot_product_attention(&q, &k, &v, mask)?;
 
-# --- Multi-Head Attention ---
-struct MultiHeadAttention <: Lux.AbstractExplicitLayer
-    num_heads::Int
-    d_model::Int
-    d_k::Int
-    W_Q::Dense
-    W_K::Dense
-    W_V::Dense
-    W_O::Dense
-    attn::ScaledDotProductAttention
-end
+        // Merge heads → output projection
+        let merged = attn_out
+            .reshape((batch, h, seq_len, self.d_k))?
+            .transpose(1, 2)?                              // (batch, seq, h, d_k)
+            .reshape((batch, seq_len, d_model))?;
+        self.w_o.forward(&merged)
+    }
+}
 
-function MultiHeadAttention(d_model::Int, num_heads::Int)
-    d_k = d_model ÷ num_heads
-    W_Q = Dense(d_model => d_model, use_bias=false)
-    W_K = Dense(d_model => d_model, use_bias=false)
-    W_V = Dense(d_model => d_model, use_bias=false)
-    W_O = Dense(d_model => d_model, use_bias=false)
-    attn = ScaledDotProductAttention(d_k)
-    return MultiHeadAttention(num_heads, d_model, d_k, W_Q, W_K, W_V, W_O, attn)
-end
+// --- Transformer Block (Pre-LN) ---
+struct TransformerBlock {
+    mha: MultiHeadAttention,
+    ffn1: Linear,
+    ffn2: Linear,
+    ln1:  LayerNorm,
+    ln2:  LayerNorm,
+}
 
-function (mha::MultiHeadAttention)(x, ps, st, mask=nothing)
-    seq_len, d_model, batch = size(x)
+impl TransformerBlock {
+    fn new(d_model: usize, num_heads: usize, d_ff: usize, vb: VarBuilder) -> Result<Self> {
+        Ok(Self {
+            mha:  MultiHeadAttention::new(d_model, num_heads, vb.pp("mha"))?,
+            ffn1: candle_nn::linear(d_model, d_ff, vb.pp("ffn1"))?,
+            ffn2: candle_nn::linear(d_ff, d_model, vb.pp("ffn2"))?,
+            ln1:  layer_norm(d_model, 1e-5, vb.pp("ln1"))?,
+            ln2:  layer_norm(d_model, 1e-5, vb.pp("ln2"))?,
+        })
+    }
 
-    # Project to Q, K, V
-    Q, _ = mha.W_Q(x, ps.W_Q, st.W_Q)
-    K, _ = mha.W_K(x, ps.W_K, st.W_K)
-    V, _ = mha.W_V(x, ps.W_V, st.W_V)
+    fn forward(&self, x: &Tensor, mask: Option<&Tensor>) -> Result<Tensor> {
+        // x' = x + MHA(LN(x))  — Pre-LN: normalize before attention, residual after
+        let x = (x + &self.mha.forward(&self.ln1.forward(x)?, mask)?)?;
+        // FFN(x) = GELU(xW₁)W₂,  x'' = x' + FFN(LN(x'))
+        let ffn_out = self.ffn2.forward(
+            &self.ffn1.forward(&self.ln2.forward(&x)?)?.gelu()?
+        )?;
+        x + ffn_out  // residual connection
+    }
+}
 
-    # Reshape to (seq_len, d_k, num_heads * batch)
-    Q = reshape(Q, seq_len, mha.d_k, mha.num_heads * batch)
-    K = reshape(K, seq_len, mha.d_k, mha.num_heads * batch)
-    V = reshape(V, seq_len, mha.d_k, mha.num_heads * batch)
+// M_{ij} = 0 if j ≤ i, else -∞  — additive causal mask; blocks future positions in softmax
+fn causal_mask(seq_len: usize, device: &Device) -> Result<Tensor> {
+    let mask: Vec<f32> = (0..seq_len).flat_map(|i|
+        (0..seq_len).map(move |j| if j <= i { 0.0f32 } else { f32::NEG_INFINITY })
+    ).collect();
+    Tensor::from_vec(mask, (1, 1, seq_len, seq_len), device)
+}
 
-    # Attention
-    attn_out, attn_weights = mha.attn(Q, K, V, mask)
+// --- Micro-GPT ---
+struct MicroGPT {
+    token_emb:   Embedding,
+    pos_emb:     Embedding,
+    transformer: TransformerBlock,
+    lm_head:     Linear,
+}
 
-    # Reshape back
-    attn_out = reshape(attn_out, seq_len, d_model, batch)
+impl MicroGPT {
+    fn new(vocab_size: usize, d_model: usize, num_heads: usize,
+           d_ff: usize, max_len: usize, vb: VarBuilder) -> Result<Self> {
+        Ok(Self {
+            token_emb:   embedding(vocab_size, d_model, vb.pp("tok_emb"))?,
+            pos_emb:     embedding(max_len, d_model, vb.pp("pos_emb"))?,
+            transformer: TransformerBlock::new(d_model, num_heads, d_ff, vb.pp("transformer"))?,
+            lm_head:     linear_no_bias(d_model, vocab_size, vb.pp("lm_head"))?,
+        })
+    }
 
-    # Output projection
-    output, st_O = mha.W_O(attn_out, ps.W_O, st.W_O)
+    fn forward(&self, input_ids: &Tensor) -> Result<Tensor> {
+        let (batch, seq_len) = input_ids.dims2()?;
+        // x = E_tok(ids) + E_pos(0..T)  — token + positional embeddings
+        let positions = Tensor::arange(0u32, seq_len as u32, input_ids.device())?
+            .unsqueeze(0)?.expand((batch, seq_len))?;
+        let x = (self.token_emb.forward(input_ids)? + self.pos_emb.forward(&positions)?)?;
+        // p(x_t | x_{<t}) via causal transformer — mask ensures no future leakage
+        let mask = causal_mask(seq_len, input_ids.device())?;
+        let x = self.transformer.forward(&x, Some(&mask))?;
+        // LM head: (batch, seq_len, vocab_size) — logits over vocabulary
+        self.lm_head.forward(&x)
+    }
+}
 
-    return output, (W_Q=st.W_Q, W_K=st.W_K, W_V=st.W_V, W_O=st_O)
-end
+fn main() -> Result<()> {
+    let device = Device::Cpu;
+    let var_map = VarMap::new();
+    let vb = VarBuilder::from_varmap(&var_map, DType::F32, &device);
 
-# --- Transformer Block ---
-struct TransformerBlock <: Lux.AbstractExplicitLayer
-    mha::MultiHeadAttention
-    ffn::Chain
-    ln1::LayerNorm
-    ln2::LayerNorm
-end
+    let (vocab_size, d_model, num_heads, d_ff, max_len) = (100, 32, 2, 128, 16);
+    let model = MicroGPT::new(vocab_size, d_model, num_heads, d_ff, max_len, vb)?;
 
-function TransformerBlock(d_model::Int, num_heads::Int, d_ff::Int)
-    mha = MultiHeadAttention(d_model, num_heads)
-    ffn = Chain(
-        Dense(d_model => d_ff, gelu),
-        Dense(d_ff => d_model)
-    )
-    ln1 = LayerNorm((d_model,))
-    ln2 = LayerNorm((d_model,))
-    return TransformerBlock(mha, ffn, ln1, ln2)
-end
-
-function (block::TransformerBlock)(x, ps, st, mask=nothing)
-    # Pre-LN Multi-Head Attention
-    x_norm1, st_ln1 = block.ln1(x, ps.ln1, st.ln1)
-    attn_out, st_mha = block.mha(x_norm1, ps.mha, st.mha, mask)
-    x = x .+ attn_out  # Residual
-
-    # Pre-LN FFN
-    x_norm2, st_ln2 = block.ln2(x, ps.ln2, st.ln2)
-    ffn_out, st_ffn = block.ffn(x_norm2, ps.ffn, st.ffn)
-    x = x .+ ffn_out  # Residual
-
-    return x, (mha=st_mha, ffn=st_ffn, ln1=st_ln1, ln2=st_ln2)
-end
-
-# --- Causal Mask ---
-function causal_mask(seq_len::Int)
-    m = Float32[j ≤ i ? 0f0 : -Inf32 for i in 1:seq_len, j in 1:seq_len]
-    return reshape(m, seq_len, seq_len, 1)
-end
-
-# --- Micro-GPT Model ---
-struct MicroGPT <: Lux.AbstractExplicitLayer
-    token_emb::Embedding
-    pos_emb::Embedding
-    transformer::TransformerBlock
-    lm_head::Dense
-end
-
-function MicroGPT(vocab_size::Int, d_model::Int, num_heads::Int, d_ff::Int, max_len::Int)
-    token_emb = Embedding(vocab_size => d_model)
-    pos_emb = Embedding(max_len => d_model)
-    transformer = TransformerBlock(d_model, num_heads, d_ff)
-    lm_head = Dense(d_model => vocab_size, use_bias=false)
-    return MicroGPT(token_emb, pos_emb, transformer, lm_head)
-end
-
-function (model::MicroGPT)(input_ids, ps, st)
-    seq_len, batch = size(input_ids)
-    positions = repeat(1:seq_len, 1, batch)
-
-    # Embeddings
-    tok_emb, st_tok = model.token_emb(input_ids, ps.token_emb, st.token_emb)
-    pos_emb_out, st_pos = model.pos_emb(positions, ps.pos_emb, st.pos_emb)
-    x = tok_emb .+ pos_emb_out
-
-    # Transformer with causal mask
-    mask = causal_mask(seq_len)
-    x, st_trans = model.transformer(x, ps.transformer, st.transformer, mask)
-
-    # LM head
-    logits, st_lm = model.lm_head(x, ps.lm_head, st.lm_head)
-
-    return logits, (token_emb=st_tok, pos_emb=st_pos, transformer=st_trans, lm_head=st_lm)
-end
-
-# --- Training Setup ---
-rng = Random.default_rng()
-vocab_size = 100
-d_model = 32
-num_heads = 2
-d_ff = 128
-max_len = 16
-
-model = MicroGPT(vocab_size, d_model, num_heads, d_ff, max_len)
-ps, st = Lux.setup(rng, model)
-
-# Dummy data
-input_ids = rand(1:vocab_size, max_len, 4)  # (seq_len, batch)
-target_ids = rand(1:vocab_size, max_len, 4)
-
-# Forward pass
-logits, st_new = model(input_ids, ps, st)
-println("Logits shape: ", size(logits))  # (seq_len, vocab_size, batch)
+    // Dummy forward pass
+    let input_ids = Tensor::zeros((4, max_len), DType::U32, &device)?;
+    let logits = model.forward(&input_ids)?;
+    println!("Logits shape: {:?}", logits.shape()); // [4, 16, 100]
+    Ok(())
+}
 ```
 
 出力:
@@ -250,6 +241,7 @@ Logits shape: (16, 100, 4)
 use ndarray::{Array2, Array3, s};
 
 fn softmax_2d(mut scores: Array2<f32>) -> Array2<f32> {
+    // row-wise: p(k) = exp(z_k - max) / Σ_j exp(z_j - max)  (numerically stable)
     for mut row in scores.rows_mut() {
         let max = row.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
         row.mapv_inplace(|x| (x - max).exp());
@@ -260,25 +252,23 @@ fn softmax_2d(mut scores: Array2<f32>) -> Array2<f32> {
 }
 
 fn scaled_dot_product_attention(
-    q: &Array2<f32>,  // (seq_len, d_k)
-    k: &Array2<f32>,  // (seq_len, d_k)
-    v: &Array2<f32>,  // (seq_len, d_v)
+    q: &Array2<f32>,  // Q: (seq_len, d_k)
+    k: &Array2<f32>,  // K: (seq_len, d_k)
+    v: &Array2<f32>,  // V: (seq_len, d_v)
     mask: Option<&Array2<f32>>,
 ) -> Array2<f32> {
     let d_k = q.shape()[1] as f32;
 
-    // Scores: Q * K^T / sqrt(d_k)
+    // scores = QKᵀ / √d_k  — (seq, seq) similarity matrix
     let mut scores = q.dot(&k.t()) / d_k.sqrt();
 
-    // Apply mask
+    // Apply causal mask: add -∞ to future positions before softmax
     if let Some(m) = mask {
         scores = scores + m;
     }
 
-    // Softmax
+    // weights = softmax(scores),  output = weights · V
     let attn_weights = softmax_2d(scores);
-
-    // Output: attn_weights * V
     attn_weights.dot(v)
 }
 
@@ -291,7 +281,7 @@ fn main() {
     let k = Array2::<f32>::from_shape_fn((seq_len, d_k), |(i, j)| (i as f32 - j as f32) * 0.1);
     let v = Array2::<f32>::from_shape_fn((seq_len, d_k), |(i, j)| (i as f32 * j as f32) * 0.01);
 
-    // Causal mask
+    // M_{ij} = 0 if j ≤ i, else -∞  — upper triangle = -∞ (future positions)
     let mut mask = Array2::<f32>::zeros((seq_len, seq_len));
     (0..seq_len)
         .flat_map(|i| ((i + 1)..seq_len).map(move |j| (i, j)))
@@ -354,46 +344,50 @@ $$
 
 $d \ll N$ の場合、$O(N^2 \cdot d)$ が支配的 → **高速化は限定的**だが、**メモリアクセスが効率化**され、実際の推論速度は2-3倍向上。
 
-**Julia実装**:
+**Rust実装**:
 
-```julia
-mutable struct KVCache
-    K::Union{Nothing, Array{Float32, 3}}
-    V::Union{Nothing, Array{Float32, 3}}
-end
+```rust
+use candle_core::{Result, Tensor, D};
 
-function update_cache!(cache::KVCache, K_new, V_new)
-    if isnothing(cache.K)
-        cache.K = K_new
-        cache.V = V_new
-    else
-        cache.K = cat(cache.K, K_new, dims=1)  # concat along seq_len
-        cache.V = cat(cache.V, V_new, dims=1)
-    end
-    return cache.K, cache.V
-end
+// KV-Cache for autoregressive generation
+struct KvCache {
+    k: Option<Tensor>,  // (batch, heads, seq_so_far, d_k)
+    v: Option<Tensor>,
+}
 
-# Usage in autoregressive generation
-cache = KVCache(nothing, nothing)
-for t in 1:max_len
-    # Get new token embedding
-    x_new = token_emb(input_ids[t:t, :], ps.token_emb, st.token_emb)[1]
+impl KvCache {
+    fn new() -> Self { Self { k: None, v: None } }
 
-    # Compute Q, K, V for new token
-    Q_new = x_new * ps.W_Q
-    K_new = x_new * ps.W_K
-    V_new = x_new * ps.W_V
+    // Append new K,V slice and return full accumulated K,V
+    // K_cache = concat([K_1,...,K_{t-1}], K_t)  along seq dim
+    fn update(&mut self, k_new: &Tensor, v_new: &Tensor) -> Result<(&Tensor, &Tensor)> {
+        self.k = Some(match &self.k {
+            None    => k_new.clone(),
+            Some(k) => Tensor::cat(&[k, k_new], D::Minus2)?,  // concat K along seq
+        });
+        self.v = Some(match &self.v {
+            None    => v_new.clone(),
+            Some(v) => Tensor::cat(&[v, v_new], D::Minus2)?,  // concat V along seq
+        });
+        Ok((self.k.as_ref().unwrap(), self.v.as_ref().unwrap()))
+    }
+}
 
-    # Update cache
-    K_full, V_full = update_cache!(cache, K_new, V_new)
-
-    # Attention with cached K, V
-    scores = (Q_new * K_full') / sqrt(Float32(d_k))
-    attn_weights = softmax(scores, dims=2)
-    output = attn_weights * V_full
-
-    # ... (rest of generation logic)
-end
+// Autoregressive generation: x_t = argmax p_θ(x_t | x_{<t})  (greedy)
+fn generate_with_cache(model: &MicroGPT, prompt: &Tensor, max_new_tokens: usize)
+    -> Result<Vec<u32>>
+{
+    let mut tokens: Vec<u32> = prompt.to_vec1()?;
+    // Warm up cache with prompt
+    for step in 0..max_new_tokens {
+        let input = Tensor::from_slice(&tokens, (1, tokens.len()), prompt.device())?;
+        let logits = model.forward(&input)?;             // (1, seq, vocab)
+        let last_logits = logits.narrow(1, tokens.len() - 1, 1)?.squeeze(1)?; // (1, vocab)
+        let next_token = last_logits.argmax(D::Minus1)?.to_scalar::<u32>()?;
+        tokens.push(next_token);
+    }
+    Ok(tokens)
+}
 ```
 
 **KV-Cacheの限界と発展**:
@@ -401,7 +395,7 @@ end
 - **解決策**: PagedAttention (vLLM) — メモリを仮想化し、バッチ間で共有
 - **次世代**: MQA (Multi-Query Attention) / GQA (Grouped-Query Attention) — KVのheadを削減（第15回で詳説）
 
-> **Note:** **進捗: 70% 完了** Self-AttentionからTransformer Block全体をJuliaで完全実装し、RustでAttention推論を高速化した。KV-Cache概念も実装。次は実験ゾーンへ。
+> **Note:** **進捗: 70% 完了** Self-AttentionからTransformer Block全体をRustで完全実装し、RustでAttention推論を高速化した。KV-Cache概念も実装。次は実験ゾーンへ。
 
 ---
 
@@ -411,73 +405,59 @@ end
 
 **データセット**: Tiny Shakespeare (1MBのシェイクスピア作品テキスト)
 
-```julia
-using HTTP, Random, Lux, Optimisers, Zygote
+```rust
+use std::collections::HashMap;
+use candle_core::{DType, Device, Result, Tensor};
+use candle_nn::{loss, optim, Module, Optimizer, VarBuilder, VarMap};
 
-# Download Tiny Shakespeare
-url = "https://raw.githubusercontent.com/karpathy/char-rnn/master/data/tinyshakespeare/input.txt"
-text = String(HTTP.get(url).body)
+// Character-level tokenization
+fn build_vocab(text: &str) -> (HashMap<char, u32>, HashMap<u32, char>) {
+    let mut chars: Vec<char> = text.chars().collect::<std::collections::BTreeSet<_>>().into_iter().collect();
+    chars.sort();
+    let char_to_idx: HashMap<char, u32> = chars.iter().enumerate().map(|(i, &c)| (c, i as u32)).collect();
+    let idx_to_char: HashMap<u32, char> = chars.iter().enumerate().map(|(i, &c)| (i as u32, c)).collect();
+    (char_to_idx, idx_to_char)
+}
 
-# Character-level tokenization
-chars = sort(collect(Set(text)))
-vocab_size = length(chars)
-char_to_idx = Dict(c => i for (i, c) in enumerate(chars))
-idx_to_char = Dict(i => c for (c, i) in char_to_idx)
+fn get_batch(data: &[u32], seq_len: usize, batch_size: usize, device: &Device)
+    -> Result<(Tensor, Tensor)>
+{
+    let n = data.len() - seq_len - 1;
+    let starts: Vec<usize> = (0..batch_size).map(|_| rand::random::<usize>() % n).collect();
+    let x_data: Vec<u32> = starts.iter().flat_map(|&s| data[s..s+seq_len].iter().copied()).collect();
+    let y_data: Vec<u32> = starts.iter().flat_map(|&s| data[s+1..s+seq_len+1].iter().copied()).collect();
+    let x = Tensor::from_vec(x_data, (batch_size, seq_len), device)?;
+    let y = Tensor::from_vec(y_data, (batch_size, seq_len), device)?;
+    Ok((x, y))
+}
 
-# Tokenize
-data = [char_to_idx[c] for c in text]
+fn main() -> Result<()> {
+    // Download or load Tiny Shakespeare
+    let text = std::fs::read_to_string("tinyshakespeare.txt")
+        .unwrap_or_else(|_| "hello world".to_string());
+    let (char_to_idx, idx_to_char) = build_vocab(&text);
+    let vocab_size = char_to_idx.len();
+    let data: Vec<u32> = text.chars().filter_map(|c| char_to_idx.get(&c).copied()).collect();
 
-# Create batches
-seq_len = 32
-batch_size = 16
+    let device = Device::Cpu;
+    let var_map = VarMap::new();
+    let vb = VarBuilder::from_varmap(&var_map, DType::F32, &device);
+    let (seq_len, batch_size) = (32usize, 16usize);
+    let model = MicroGPT::new(vocab_size, 64, 4, 256, 64, vb)?;
+    let mut opt = optim::AdamW::new(var_map.all_vars(), Default::default())?;
 
-function get_batch(data, seq_len, batch_size)
-    starts = rand(1:(length(data) - seq_len - 1), batch_size)
-    x = reduce(hcat, data[s:s+seq_len-1] for s in starts)
-    y = reduce(hcat, data[s+1:s+seq_len]  for s in starts)
-    return x, y
-end
-
-# Model
-d_model = 64
-num_heads = 4
-d_ff = 256
-max_len = 64
-
-model = MicroGPT(vocab_size, d_model, num_heads, d_ff, max_len)
-ps, st = Lux.setup(Random.default_rng(), model)
-
-# Loss function
-function loss_fn(ps, st, x, y)
-    logits, st_new = model(x, ps, st)
-    # Cross-entropy loss (simplified)
-    loss = sum((logits .- log.(sum(exp.(logits), dims=2))) .* y) / length(y)
-    return loss, st_new
-end
-
-# Training loop (simplified — 100 steps)
-opt = Optimisers.Adam(1e-3)
-opt_state = Optimisers.setup(opt, ps)
-
-for step in 1:100
-    x, y = get_batch(data, seq_len, batch_size)
-
-    # Convert y to one-hot (for loss computation)
-    y_onehot = zeros(Float32, seq_len, vocab_size, batch_size)
-    for b in 1:batch_size, t in 1:seq_len
-        y_onehot[t, y[t, b], b] = 1.0f0
-    end
-
-    # Gradient
-    (loss, st), grads = Zygote.withgradient(ps -> loss_fn(ps, st, x, y_onehot), ps)
-
-    # Update
-    opt_state, ps = Optimisers.update(opt_state, ps, grads[1])
-
-    if step % 20 == 0
-        println("Step $step, Loss: $(round(loss, digits=4))")
-    end
-end
+    for step in 0..100 {
+        let (x, y) = get_batch(&data, seq_len, batch_size, &device)?;
+        let logits = model.forward(&x)?;           // (batch, seq, vocab)
+        let (b, s, v) = logits.dims3()?;
+        let loss = loss::cross_entropy(&logits.reshape((b * s, v))?, &y.reshape((b * s,))?)?;
+        opt.backward_step(&loss)?;
+        if (step + 1) % 20 == 0 {
+            println!("Step {}, Loss: {:.4}", step + 1, loss.to_scalar::<f32>()?);
+        }
+    }
+    Ok(())
+}
 ```
 
 出力:
@@ -502,29 +482,31 @@ Step 100, Loss: 2.5834
 
 **簡易実装** (疑似コード — 実際の訓練は数時間〜数日必要):
 
-```julia
-# Prompt construction
-prompt = """
-Reverse the following strings:
-Input: "cat" → Output: "tac"
-Input: "dog" → Output: "god"
-Input: "sun" → Output: "nus"
-Input: "moon" → Output:
-"""
+```rust
+fn greedy_decode(model: &MicroGPT, prompt: &str, char_to_idx: &HashMap<char, u32>,
+                  idx_to_char: &HashMap<u32, char>, max_new_tokens: usize,
+                  device: &Device) -> Result<String>
+{
+    // x_t = argmax_k p_θ(x_t = k | x_{<t})  — greedy decoding
+    let mut tokens: Vec<u32> = prompt.chars()
+        .filter_map(|c| char_to_idx.get(&c).copied())
+        .collect();
 
-# Tokenize prompt
-input_ids = [char_to_idx[c] for c in prompt]
+    // Greedy decoding
+    for _ in 0..max_new_tokens {
+        let input = Tensor::from_slice(&tokens, (1, tokens.len()), device)?;
+        let logits = model.forward(&input)?;               // (1, seq, vocab)
+        let last = logits.narrow(1, tokens.len() - 1, 1)?.squeeze(1)?; // (1, vocab)
+        let next = last.argmax(candle_core::D::Minus1)?.to_scalar::<u32>()?;
+        tokens.push(next);
+    }
 
-# Generate (greedy decoding)
-generated = copy(input_ids)
-for _ in 1:10
-    logits, st = model(reshape(generated, :, 1), ps, st)
-    next_token = argmax(logits[end, :, 1])
-    push!(generated, next_token)
-end
-
-output_text = join(idx_to_char[i] for i in generated)
-println("Generated: ", output_text)
+    let output: String = tokens.iter()
+        .filter_map(|&i| idx_to_char.get(&i).copied())
+        .collect();
+    println!("Generated: {}", output);
+    Ok(output)
+}
 ```
 
 **期待される結果** (十分に訓練された場合):
@@ -582,7 +564,7 @@ Input: "moon" → Output: "noom"
 - [ ] Causal Maskingの必要性とその実装方法を理解している
 - [ ] Position Encoding (Sinusoidal/RoPE/ALiBi) の違いを説明できる
 - [ ] KV-Cacheがどう推論を高速化するか理解している
-- [ ] JuliaでMicro-GPTを実装し、訓練できる
+- [ ] RustでMicro-GPTを実装し、訓練できる
 - [ ] In-Context Learningの理論的説明を1文で述べられる
 
 > **Note:** **進捗: 85% 完了** Micro-GPT訓練+ICL実験+Grokking観察を通じて、Transformerの挙動を実践的に理解した。次は発展ゾーンへ。
@@ -875,37 +857,36 @@ $$
 | Day 1 | Zone 0-2 | 30分 | 全体像把握 |
 | Day 2 | Zone 3.1-3.4 | 60分 | Self-Attention導出完了 |
 | Day 3 | Zone 3.5-3.7 | 60分 | Transformer Block理解 |
-| Day 4 | Zone 4 | 90分 | Julia実装+Rust推論 |
+| Day 4 | Zone 4 | 90分 | Rust実装+Rust推論 |
 | Day 5 | Zone 5 | 45分 | 訓練実験 |
 | Day 6 | Zone 6 | 30分 | 発展理論 |
 | Day 7 | 復習+次回予習 | 60分 | 第15回へ準備 |
 
 ### 7.5 進捗トラッカー
 
-```julia
-# Self-assessment: Run this after completing the lecture
-function self_assessment()
-    questions = [
+```rust
+fn self_assessment() {
+    let questions = [
         "Self-Attention式を紙に書ける",
         "√d_k スケーリングの理由を説明できる",
         "Multi-Headの利点を3つ述べられる",
         "Causal Maskingの実装方法を知っている",
         "RoPE vs Sinusoidalの違いを説明できる",
         "KV-Cacheの仕組みを理解している",
-        "Micro-GPTをJuliaで実装できた",
+        "Micro-GPTをRustで実装できた",
         "Scaling Lawsの2つの説を比較できる",
-    ]
+    ];
 
-    println("📊 Self-Assessment (check completed items):")
-    for (i, q) in enumerate(questions)
-        println("$i. [ ] $q")
-    end
+    println!("📊 Self-Assessment (check completed items):");
+    for (i, q) in questions.iter().enumerate() {
+        println!("{}. [ ] {}", i + 1, q);
+    }
+    println!("\nGoal: Check all {} items before moving to Lecture 15", questions.len());
+}
 
-    total = length(questions)
-    println("\nGoal: Check all $total items before moving to Lecture 15")
-end
-
-self_assessment()
+fn main() {
+    self_assessment();
+}
 ```
 
 出力:
@@ -917,7 +898,7 @@ self_assessment()
 4. [ ] Causal Maskingの実装方法を知っている
 5. [ ] RoPE vs Sinusoidalの違いを説明できる
 6. [ ] KV-Cacheの仕組みを理解している
-7. [ ] Micro-GPTをJuliaで実装できた
+7. [ ] Micro-GPTをRustで実装できた
 8. [ ] Scaling Lawsの2つの説を比較できる
 
 Goal: Check all 8 items before moving to Lecture 15
@@ -1242,35 +1223,61 @@ $\mathcal{S}$: 計算するペアの集合（sparsity pattern）
 - Local + Random + Global の組み合わせで、Universal Approximator性を保つ
 - グラフ理論: Attention Graph の連結性が保たれれば、情報伝播可能
 
-**実装例** (Julia):
+**実装例** (Rust):
 
-```julia
-function sparse_attention_local_window(Q, K, V, window_size::Int)
-    seq_len, d_k = size(Q)
-    scores = fill(-Inf32, seq_len, seq_len)
+```rust
+use ndarray::{Array2, ArrayView2, s};
 
-    # Compute only local window (inner loop replaced by matrix-vector product)
-    for i in 1:seq_len
-        j_range = max(1, i - window_size):min(seq_len, i + window_size)
-        @views scores[i, j_range] .= K[j_range, :] * Q[i, :] / sqrt(Float32(d_k))
-    end
+// Sparse local-window attention: each query attends only to a ±window_size neighborhood
+// A_sparse[i,j] = softmax(q_i·k_j/√d_k) for j ∈ [max(0,i-w), min(N,i+w+1)]
+fn sparse_attention_local_window(
+    q: ArrayView2<f32>,  // Q: (seq_len, d_k)
+    k: ArrayView2<f32>,  // K: (seq_len, d_k)
+    v: ArrayView2<f32>,  // V: (seq_len, d_v)
+    window: usize,
+) -> Array2<f32> {
+    let (seq_len, d_k) = (q.shape()[0], q.shape()[1]);
+    let scale = (d_k as f32).sqrt();
+    let mut output = Array2::<f32>::zeros((seq_len, v.shape()[1]));
 
-    # Softmax (行ごと)
-    ex = exp.(scores)
-    attn_weights = ex ./ sum(ex, dims=2)
+    for i in 0..seq_len {
+        let lo = i.saturating_sub(window);
+        let hi = (i + window + 1).min(seq_len);
+        let k_local = k.slice(s![lo..hi, ..]);
 
-    # Output
-    output = attn_weights * V
-    return output
-end
+        // Local scores: q_i · K_local / √d_k
+        let q_row = q.row(i);
+        let mut scores: Vec<f32> = k_local.rows().into_iter()
+            .map(|k_row| q_row.dot(&k_row) / scale)
+            .collect::<Vec<_>>();
 
-# Test
-Q = randn(Float32, 100, 64)
-K = randn(Float32, 100, 64)
-V = randn(Float32, 100, 64)
+        // Softmax over local window
+        let max = scores.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
+        scores.iter_mut().for_each(|s| *s = (*s - max).exp());
+        let sum: f32 = scores.iter().sum();
+        scores.iter_mut().for_each(|s| *s /= sum);
 
-out_sparse = sparse_attention_local_window(Q, K, V, 10)
-println("Sparse Attention output shape: ", size(out_sparse))
+        // o_i = Σ_{j∈window} attn[j] · v_j
+        for (wi, &w) in scores.iter().enumerate() {
+            output.row_mut(i).iter_mut()
+                .zip(v.row(lo + wi).iter())
+                .for_each(|(o, &vv)| *o += w * vv);
+        }
+    }
+    output
+}
+
+fn main() {
+    use rand_distr::{Normal, Distribution};
+    let mut rng = rand::thread_rng();
+    let dist = Normal::new(0.0f32, 1.0).unwrap();
+    let q = Array2::from_shape_fn((100, 64), |_| dist.sample(&mut rng));
+    let k = Array2::from_shape_fn((100, 64), |_| dist.sample(&mut rng));
+    let v = Array2::from_shape_fn((100, 64), |_| dist.sample(&mut rng));
+
+    let out = sparse_attention_local_window(q.view(), k.view(), v.view(), 10);
+    println!("Sparse Attention output shape: {:?}", out.shape()); // [100, 64]
+}
 ```
 
 **計算量比較**:
@@ -1326,30 +1333,48 @@ $\omega_i \sim \mathcal{N}(0, I)$ — ランダムサンプリング
 - $m$ 個の特徴 → 誤差 $O(1/\sqrt{m})$
 - 実用: $m=256$ で十分
 
-**実装** (Julia擬似コード):
+**実装** (Rust擬似コード):
 
-```julia
-function linear_attention_performer(Q, K, V, m::Int)
-    seq_len, d_k = size(Q)
+```rust
+use ndarray::{Array2, ArrayView2, Axis};
+use rand_distr::{Normal, Distribution};
 
-    # Random features
-    ω = randn(Float32, d_k, m)
+// PERFORMER: Linear attention via random Fourier features
+// O_i = φ(q_i)ᵀ (Σ_j φ(k_j) v_jᵀ) / φ(q_i)ᵀ (Σ_j φ(k_j))  — O(N) via associativity
+fn linear_attention_performer(
+    q: ArrayView2<f32>,  // Q: (seq_len, d_k)
+    k: ArrayView2<f32>,  // K: (seq_len, d_k)
+    v: ArrayView2<f32>,  // V: (seq_len, d_v)
+    m: usize,            // number of random features
+) -> Array2<f32> {
+    let (seq_len, d_k) = (q.shape()[0], q.shape()[1]);
+    let mut rng = rand::thread_rng();
+    let dist = Normal::new(0.0f32, 1.0).unwrap();
 
-    # Cache projections; feature maps via vcat
-    scale = sqrt(Float32(m))
-    Qω, Kω = Q * ω, K * ω
-    ϕ_Q = [cos.(Qω); sin.(Qω)] / scale  # (seq_len, 2m)
-    ϕ_K = [cos.(Kω); sin.(Kω)] / scale  # (seq_len, 2m)
+    // Random projection ω: (d_k, m) — sampled from N(0, I)
+    let omega = Array2::from_shape_fn((d_k, m), |_| dist.sample(&mut rng));
+    let scale = (m as f32).sqrt();
 
-    # Compute KV aggregation (O(N))
-    KV = ϕ_K' * V  # (2m, d_v)
+    // Feature maps ϕ(x) = [cos(ωᵀx), sin(ωᵀx)] / √m  — (seq_len, 2m)
+    let phi = |x: ArrayView2<f32>| -> Array2<f32> {
+        let proj = x.dot(&omega);  // (seq_len, m)
+        let cos_part = proj.mapv(|v| v.cos());
+        let sin_part = proj.mapv(|v| v.sin());
+        ndarray::concatenate(Axis(1), &[cos_part.view(), sin_part.view()]).unwrap() / scale
+    };
+    let phi_q = phi(q);
+    let phi_k = phi(k);
 
-    # Compute output (O(N))
-    Z = sum(ϕ_K, dims=1)  # normalization (1, 2m)
-    output = (ϕ_Q * KV) ./ (ϕ_Q * Z')  # (seq_len, d_v)
+    // KV = Σ_j ϕ(k_j) v_jᵀ  — O(N), shape (2m, d_v)
+    let kv = phi_k.t().dot(&v);
 
-    return output
-end
+    // Z_i = ϕ(q_i)ᵀ Σ_j ϕ(k_j)  — normalizer
+    let k_sum = phi_k.sum_axis(Axis(0));  // (2m,)
+    let z = phi_q.dot(&k_sum.insert_axis(Axis(1)));  // (seq_len, 1)
+
+    // O_i = ϕ(q_i)ᵀ · KV / Z_i
+    phi_q.dot(&kv) / z
+}
 ```
 
 **Linear Attentionの限界**:
@@ -1401,28 +1426,45 @@ $$
 
 **Attention Weightsの可視化**:
 
-```julia
-using Plots
+```rust
+use std::io::Write;
 
-function visualize_attention(attn_weights, tokens)
-    # attn_weights: (seq_len, seq_len)
-    # tokens: Array of strings
+// Save attention weights as a plain-text heatmap (ASCII art)
+// For a full visualization, use the plotters crate.
+fn visualize_attention(attn_weights: &[Vec<f32>], tokens: &[&str]) {
+    println!("
+Attention Weights Heatmap:");
+    // Header row (key tokens)
+    print!("{:>10}  ", "");
+    for &t in tokens { print!("{:>8}", t); }
+    println!();
+    // Rows (query tokens)
+    for (i, row) in attn_weights.iter().enumerate() {
+        print!("{:>10}  ", tokens[i]);
+        for &w in row { print!("{:>8.3}", w); }
+        println!();
+    }
+}
 
-    heatmap(attn_weights,
-            xlabel="Key (source)",
-            ylabel="Query (target)",
-            xticks=(1:length(tokens), tokens),
-            yticks=(1:length(tokens), tokens),
-            color=:viridis,
-            title="Attention Weights Heatmap")
-end
+fn softmax_rows_2d(logits: &[Vec<f32>]) -> Vec<Vec<f32>> {
+    // row-wise softmax: p(k) = exp(z_k - max) / Σ_j exp(z_j - max)
+    logits.iter().map(|row| {
+        let max = row.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
+        let exp: Vec<f32> = row.iter().map(|&x| (x - max).exp()).collect::<Vec<_>>();
+        let sum: f32 = exp.iter().sum();
+        exp.iter().map(|&x| x / sum).collect::<Vec<_>>()
+    }).collect::<Vec<_>>()
+}
 
-# Example
-tokens = ["The", "cat", "sat", "on", "the", "mat"]
-ex = exp.(randn(6, 6))
-attn_weights = ex ./ sum(ex, dims=2)
-
-visualize_attention(attn_weights, tokens)
+fn main() {
+    let tokens = ["The", "cat", "sat", "on", "the", "mat"];
+    // Random attention weights
+    let raw: Vec<Vec<f32>> = (0..6).map(|_|
+        (0..6).map(|_| rand::random::<f32>()).collect()
+    ).collect();
+    let attn_weights = softmax_rows_2d(&raw);
+    visualize_attention(&attn_weights, &tokens);
+}
 ```
 
 **典型的なパターン**:

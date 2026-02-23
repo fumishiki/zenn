@@ -3,11 +3,11 @@ title: "第23回: Post-Training & Alignment（SFT/RLHF/CPT + PEFT）: 30秒の�
 slug: "ml-lecture-23-part1"
 emoji: "🔧"
 type: "tech"
-topics: ["machinelearning", "deeplearning", "finetuning", "julia", "rust"]
+topics: ["machinelearning", "deeplearning", "finetuning", "rust", "rust"]
 published: true
 difficulty: "advanced"
 time_estimate: "90 minutes"
-languages: ["Julia", "Rust", "Elixir"]
+languages: ["Rust", "Elixir"]
 keywords: ["機械学習", "深層学習", "生成モデル"]
 ---
 
@@ -21,7 +21,7 @@ keywords: ["機械学習", "深層学習", "生成モデル"]
 
 2022年、MicrosoftのHuらがLoRA [^1] を発表した。**全パラメータの0.01%だけを訓練**してGPT-3をFine-tuningし、Full Fine-tuningと同等性能を達成した。2023年、DettmersらのQLoRA [^2] は4-bit量子化と組み合わせ、65BモデルをGPU 1枚（48GB）で訓練可能にした。
 
-本講義はCourse III「実践編」の中核 — LoRA/QLoRA/DreamBooth/Adapterの数式と実装を完全マスターする。そして**Julia LoRA訓練 + Rust LoRA推論**で3言語制覇の旅を続ける。
+本講義はCourse III「実践編」の中核 — LoRA/QLoRA/DreamBooth/Adapterの数式と実装を完全マスターする。そして**Rust LoRA訓練 + Rust LoRA推論**で3言語制覇の旅を続ける。
 
 > **Note:** **このシリーズについて**: 東京大学 松尾・岩澤研究室動画講義の**完全上位互換**の全50回シリーズ。理論（論文が書ける）、実装（Production-ready）、最新（2024-2026 SOTA）の3軸で差別化する。
 
@@ -60,26 +60,31 @@ graph TD
 
 事前学習済み重み $W_0$ を固定し、低ランク分解 $\Delta W = BA$ だけを訓練する。
 
-```julia
-using LinearAlgebra
+```rust
+use ndarray::{Array1, Array2};
+use ndarray_rand::RandomExt;
+use ndarray_rand::rand_distr::StandardNormal;
 
-# Pretrained weight W₀ ∈ ℝ^(d×k) (frozen)
-d, k, r = 512, 512, 8  # d=出力dim, k=入力dim, r=rank
-W0 = randn(d, k) / √k  # frozen pretrained weight
+// Pretrained weight W₀ ∈ ℝ^(d×k) (frozen)
+let d: usize = 512;
+let k: usize = 512;
+let r: usize = 8; // d=出力dim, k=入力dim, r=rank
+let w0: Array2<f64> = Array2::random((d, k), StandardNormal) / (k as f64).sqrt(); // frozen pretrained weight
 
-# LoRA: ΔW = BA, B ∈ ℝ^(d×r), A ∈ ℝ^(r×k)
-B = randn(d, r) / √r  # trainable
-A = zeros(r, k)             # init to zero (ΔW starts at 0)
+// LoRA: ΔW = BA, B ∈ ℝ^(d×r), A ∈ ℝ^(r×k)
+let b: Array2<f64> = Array2::random((d, r), StandardNormal) / (r as f64).sqrt(); // trainable
+let a: Array2<f64> = Array2::<f64>::zeros((r, k)); // init to zero (ΔW starts at 0)
 
-# Forward pass: h = (W₀ + ΔW)x = W₀x + BAx
-x = randn(k)
-h_full = (W0 + B * A) * x     # conceptual (full matrix)
-h_lora = W0 * x + B * (A * x) # efficient (no W₀+BA materialization)
+// Forward pass: h = (W₀ + ΔW)x = W₀x + BAx
+let x: Array1<f64> = Array1::random(k, StandardNormal);
+let h_full = (&w0 + &b.dot(&a)).dot(&x);     // conceptual (full matrix)
+let h_lora = w0.dot(&x) + b.dot(&a.dot(&x)); // efficient (no W₀+BA materialization)
 
-println("W₀ params: $(d*k) = $(d*k)")
-println("LoRA params: $(d*r + r*k) = $(d*r + r*k)")
-println("Reduction: $(round(d*k / (d*r + r*k), digits=1))x")
-println("Output identical: $(isapprox(h_full, h_lora))")
+println!("W₀ params: {} = {}", d * k, d * k);
+println!("LoRA params: {} = {}", d * r + r * k, d * r + r * k);
+println!("Reduction: {:.1}x", (d * k) as f64 / (d * r + r * k) as f64);
+let identical = h_full.iter().zip(h_lora.iter()).all(|(a, b)| (a - b).abs() < 1e-10);
+println!("Output identical: {}", identical);
 ```
 
 出力:
@@ -302,7 +307,7 @@ Course IIIは「実践編」 — 第17-24回で実装・最適化・評価を学
 | LoRA数式導出 | なし | 完全導出（低ランク近似→初期化→スケーリング） |
 | QLoRA実装 | なし | 4-bit NF量子化の数式↔コード対応 |
 | DreamBooth | なし | Prior Preservation Lossの完全分解 |
-| 3言語実装 | Pythonのみ | ⚡Julia訓練 + 🦀Rust推論 |
+| 3言語実装 | Pythonのみ | 🦀Rust訓練 + 🦀Rust推論 |
 | 行数 | ~10行 | ~3000行（本講義目標） |
 
 ### 2.5 3つの比喩で捉える「Fine-tuning」

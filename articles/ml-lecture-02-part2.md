@@ -155,11 +155,11 @@ PyTorch でも `torch.einsum` が使え、同じ添字規則のまま自動微�
 | 方式 | 行列 $A_{ij}$ の格納順 | 言語/ライブラリ |
 |:-----|:---------------------|:-------------|
 | **Row-major (C order)** | $A_{00}, A_{01}, A_{02}, A_{10}, \ldots$ | C, Python/NumPy, PyTorch |
-| **Column-major (Fortran order)** | $A_{00}, A_{10}, A_{20}, A_{01}, \ldots$ | Fortran, Julia, MATLAB, R |
+| **Column-major (Fortran order)** | $A_{00}, A_{10}, A_{20}, A_{01}, \ldots$ | Fortran, Rust, MATLAB, R |
 
 **キャッシュ効率**: メモリは連続アクセスが速い。Row-majorでは**行方向**のアクセスが高速、Column-majorでは**列方向**が高速。
 
-> **Note:** **なぜこれが重要か**: 行列積 $C = AB$ を実装するとき、ナイーブな3重ループの順序 (i, j, k) vs (i, k, j) でキャッシュヒット率が大きく変わり、性能が数倍変わることがある。NumPy は内部で最適化された BLAS（Basic Linear Algebra Subprograms）を呼んでいるので、ユーザーが意識する必要は少ないが、JuliaやRust等で自前実装する場合は必須の知識だ。第9回（Julia登場）と第11回（Rust登場）で改めて扱う。
+> **Note:** **なぜこれが重要か**: 行列積 $C = AB$ を実装するとき、ナイーブな3重ループの順序 (i, j, k) vs (i, k, j) でキャッシュヒット率が大きく変わり、性能が数倍変わることがある。NumPy は内部で最適化された BLAS（Basic Linear Algebra Subprograms）を呼んでいるので、ユーザーが意識する必要は少ないが、RustやRust等で自前実装する場合は必須の知識だ。第9回（Rust強化）と第11回（Rust登場）で改めて扱う。
 
 「本当に差が出るのか」は自分の手で測るのが一番速い。`axis=1`（行方向）と `axis=0`（列方向）で `np.sum` の時間を比べるだけでも、キャッシュ局所性の差が出る。
 

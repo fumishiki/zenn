@@ -3,11 +3,11 @@ title: "第29回: RAG (検索増強生成): 30秒の驚き→数式修行→実�
 slug: "ml-lecture-29-part1"
 emoji: "🔍"
 type: "tech"
-topics: ["machinelearning", "rag", "vectordatabase", "julia", "rust"]
+topics: ["machinelearning", "rag", "vectordatabase", "rust", "rust"]
 published: true
 difficulty: "advanced"
 time_estimate: "90 minutes"
-languages: ["Julia", "Rust", "Elixir"]
+languages: ["Rust", "Elixir"]
 keywords: ["機械学習", "深層学習", "生成モデル"]
 ---
 
@@ -59,44 +59,58 @@ graph LR
 
 最もシンプルなRAGパイプライン: BM25検索 + LLM生成を3行で動かす。
 
-```julia
-using LinearAlgebra, Statistics
+```rust
+// RAG pipeline - zero-copy embedding search
+fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
+    let dot: f32 = a.iter().zip(b).map(|(x, y)| x * y).sum();
+    let na: f32 = a.iter().map(|x| x * x).sum::<f32>().sqrt();
+    let nb: f32 = b.iter().map(|x| x * x).sum::<f32>().sqrt();
+    dot / (na * nb + 1e-8)
+}
 
-# Simplified RAG pipeline (BM25 retrieval + generation)
+// BM25検索（簡易版: 単語頻度ベース）
+fn simple_bm25<'a>(query: &str, documents: &[&'a str]) -> (&'a str, usize) {
+    let query_terms: Vec<String> = query.split_whitespace()
+        .map(|t| t.to_lowercase())
+        .collect();
+    let scores: Vec<usize> = documents.iter()
+        .map(|doc| {
+            let doc_lower = doc.to_lowercase();
+            query_terms.iter()
+                .map(|t| doc_lower.split_whitespace().filter(|&w| w == t.as_str()).count())
+                .sum()
+        })
+        .collect();
+    let top_idx = scores.iter().enumerate()
+        .max_by_key(|(_, &s)| s)
+        .map(|(i, _)| i)
+        .unwrap_or(0);
+    (documents[top_idx], scores[top_idx])
+}
 
-# Knowledge base (documents)
-documents = [
-    "Paris is the capital of France. It is known for the Eiffel Tower.",
-    "Tokyo is the capital of Japan. It has a population of 14 million.",
-    "Berlin is the capital of Germany. The Berlin Wall fell in 1989.",
-    "London is the capital of England. Big Ben is a famous landmark.",
-]
+fn main() {
+    let documents = [
+        "Paris is the capital of France. It is known for the Eiffel Tower.",
+        "Tokyo is the capital of Japan. It has a population of 14 million.",
+        "Berlin is the capital of Germany. The Berlin Wall fell in 1989.",
+        "London is the capital of England. Big Ben is a famous landmark.",
+    ];
+    let query = "What is the capital of France?";
 
-# Query
-query = "What is the capital of France?"
+    // Step 1: BM25 retrieval
+    let (retrieved_doc, score) = simple_bm25(query, &documents);
+    println!("Query: {}", query);
+    println!("Retrieved: {}", retrieved_doc);
+    println!("BM25 Score: {}", score);
 
-# Step 1: BM25 retrieval (simplified - term frequency based)
-function simple_bm25(query::String, documents::Vector{String})
-    query_terms = lowercase.(split(query))
-    scores = [sum(count(==(t), lowercase.(split(doc))) for t in query_terms)
-              for doc in documents]
-    top_idx = argmax(scores)
-    return documents[top_idx], scores[top_idx]
-end
-
-retrieved_doc, score = simple_bm25(query, documents)
-println("Query: $query")
-println("Retrieved: $retrieved_doc")
-println("BM25 Score: $score")
-
-# Step 2: Generation (simplified - template-based)
-# In real RAG, this would call an LLM; here we simulate with template
-generate_answer(query::String, context::String) =
-    "Based on the context: \"$context\", the answer is: Paris is the capital of France."
-
-answer = generate_answer(query, retrieved_doc)
-println("\nGenerated Answer:")
-println(answer)
+    // Step 2: Generation（実際はLLM呼び出し、ここではテンプレートで代用）
+    let answer = format!(
+        "Based on the context: \"{}\"，the answer is: Paris is the capital of France.",
+        retrieved_doc
+    );
+    println!("\nGenerated Answer:");
+    println!("{}", answer);
+}
 ```
 
 出力:
@@ -388,7 +402,7 @@ $$
 | **Zone 3.5** Reranking | 300 | ★★★★★ | Cross-Encoder/ColBERT |
 | **Zone 3.6** Agentic RAG | 350 | ★★★★★ | Self-RAG/CRAG/Adaptive |
 | **Zone 4** 🦀Rust Vector DB | 600 | ★★★★ | HNSW/Qdrant統合 |
-| **Zone 4** ⚡Julia検索 | 400 | ★★★★ | BM25/Embedding/Rerank |
+| **Zone 4** 🦀Rust検索 | 400 | ★★★★ | BM25/Embedding/Rerank |
 | **Zone 4** 🔮Elixir RAGサービング | 300 | ★★★★ | 分散検索・キャッシング |
 | **Zone 5** RAG評価 | 300 | ★★★ | RAGAS/Faithfulness |
 
@@ -399,7 +413,7 @@ graph LR
     P1["📖 Phase 1<br/>理論習得<br/>(Zone 3)"] --> P2["💻 Phase 2<br/>実装<br/>(Zone 4)"]
     P2 --> P3["🔬 Phase 3<br/>評価<br/>(Zone 5)"]
     P1 -.BM25/Dense/Hybrid.-> P2
-    P2 -.Rust/Julia/Elixir.-> P3
+    P2 -.Rust/Elixir.-> P3
     P3 -.RAGAS評価.-> P1
 ```
 
@@ -411,16 +425,16 @@ graph LR
 | Day 2 | Zone 3.3-3.4 (Dense/Hybrid) | 2h |
 | Day 3 | Zone 3.5-3.6 (Reranking/Agentic) | 2h |
 | Day 4 | Zone 4 Rust Vector DB実装 | 3h |
-| Day 5 | Zone 4 Julia検索パイプライン | 2h |
+| Day 5 | Zone 4 Rust検索パイプライン | 2h |
 | Day 6 | Zone 4 Elixir RAGサービング | 2h |
 | Day 7 | Zone 5-7 (評価/実験/復習) | 2h |
 
 <details><summary>トロイの木馬: 3言語RAGフルスタック</summary>
 
-本講義では**Rust + Julia + Elixir**でRAGを実装:
+本講義では**Rust + Rust + Elixir**でRAGを実装:
 
 - **🦀 Rust**: ベクトルDB (HNSW実装, Qdrant統合)
-- **⚡ Julia**: 検索パイプライン (BM25, Embedding, Reranking)
+- **🦀 Rust**: 検索パイプライン (BM25, Embedding, Reranking)
 - **🔮 Elixir**: 分散RAGサービング (GenServer, キャッシング, スケーリング)
 
 第28回のプロンプトエンジニアリングと、本講義のRAGを組み合わせれば、**Production-readyなRAGシステム**が構築できる。
@@ -1267,13 +1281,13 @@ $$
 > 6. **評価**: RAGAS metricsで評価（Faithfulness, Context Relevance）
 >
 > **タスク**:
-> - 各モジュールをRust/Julia/Elixirで実装
+> - 各モジュールをRust/Rust/Elixirで実装
 > - 1,000文書の知識ベースで検索精度を測定
 > - Latency/Throughputを最適化
 >
 > これができれば数式修行ゾーン完全クリア！
 
-> **Note:** **進捗: 50% 完了** RAG理論を完全習得した。Embedding/BM25/Dense/Hybrid/Reranking/Agentic RAGを数式から導出した。次は実装ゾーンでRust/Julia/Elixirで全手法を実装する。
+> **Note:** **進捗: 50% 完了** RAG理論を完全習得した。Embedding/BM25/Dense/Hybrid/Reranking/Agentic RAGを数式から導出した。次は実装ゾーンでRust/Rust/Elixirで全手法を実装する。
 
 ### 3.7 RAG評価メトリクスの完全版 — RAGAS深掘り
 

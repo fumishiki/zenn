@@ -2,12 +2,12 @@
 title: "第41回: World Models & 環境シミュレータ理論🌍: 30秒の驚き→数式修行→実装マスター"
 emoji: "🌍"
 type: "tech"
-topics: ["machinelearning", "deeplearning", "worldmodels", "julia", "jepa"]
+topics: ["machinelearning", "deeplearning", "worldmodels", "rust", "jepa"]
 published: true
 slug: "ml-lecture-41-part1"
 difficulty: "advanced"
 time_estimate: "90 minutes"
-languages: ["Julia", "Rust"]
+languages: ["Rust"]
 keywords: ["機械学習", "深層学習", "生成モデル"]
 ---
 
@@ -23,25 +23,33 @@ keywords: ["機械学習", "深層学習", "生成モデル"]
 
 単に画像を生成することではない。**環境の構造を理解し、未来を予測し、行動の結果をシミュレートすること**だ。
 
-```julia
-# World Modelの本質: 1フレーム → 未来の予測
-using Lux, Random
+```rust
+// World Modelの本質: 1フレーム → 未来の予測
+// [JEPA-style: encode observation → predict next latent]
+use candle_core::{Tensor, Device};
+use candle_nn::Module;
 
-# 観測 x_t から潜在表現 z_t を抽出
-encoder = Chain(Conv((3,3), 3 => 64, relu), AdaptiveMeanPool((1,1)), FlattenLayer())
+// 観測 x_t から潜在表現 z_t を抽出 (encoder)
+fn encode(encoder: &impl Module, x: &Tensor) -> candle_core::Result<Tensor> {
+    encoder.forward(x)  // x: [1, 3, 64, 64] → z: [1, 64]
+}
 
-# 潜在空間で次状態を予測 (action条件付き)
-predictor = Dense(64 + 4 => 64, tanh)  # 4次元action space
+// 潜在空間で次状態を予測 (action条件付き predictor)
+// 4次元 action space
+fn predict_next(predictor: &impl Module, z: &Tensor, a: &Tensor) -> candle_core::Result<Tensor> {
+    let za = Tensor::cat(&[z, a], 1)?;  // [z; a] ∈ ℝ^{64+4}
+    predictor.forward(&za)              // → z_next ∈ ℝ^64
+}
 
-# 初期観測
-x = rand(Float32, 64, 64, 3, 1)
-a = rand(Float32, 4, 1)  # action
+// 初期観測: x_t ∈ ℝ^{3×64×64}
+let x = Tensor::randn(0f32, 1f32, (1, 3, 64, 64), &Device::Cpu)?;
+let a = Tensor::randn(0f32, 1f32, (1, 4), &Device::Cpu)?;  // action
 
-# 潜在状態抽出 → action条件付き予測
-z = encoder(x, ps, st)[1]
-z_next = predictor(vcat(z, a), ps_pred, st_pred)[1]
+// 潜在状態抽出 → action条件付き予測
+let z      = encode(&encoder, &x)?;
+let z_next = predict_next(&predictor, &z, &a)?;
 
-# 出力: z_next ∈ ℝ^64 (predicted next latent state)
+// 出力: z_next ∈ ℝ^64 (predicted next latent state)
 ```
 
 **これが何をしているか？**
@@ -88,7 +96,7 @@ World Modelsは**行動の結果を予測できる**最高レベルだ。
 
 <details><summary>PyTorchとの対応（参考）</summary>
 
-Juliaでは型システムでこれを自然に表現できる。
+Rustでは型システムでこれを自然に表現できる。
 
 </details>
 
@@ -145,7 +153,7 @@ graph TD
 | **JEPA** | 触れない | I-JEPA / V-JEPA / VL-JEPA完全解説 |
 | **Transfusion** | 扱わない | **AR+Diffusion統一理論の数学** |
 | **物理法則学習** | 扱わない | Physics-Informed World Models深掘り |
-| **実装** | なし | Julia JEPAコンセプト実装 |
+| **実装** | なし | Rust JEPAコンセプト実装 |
 
 ### 2.4 学習戦略
 
@@ -1035,7 +1043,7 @@ $$
 
 $\lambda$はハイパーパラメータ（論文では$\lambda=1$を使用）。
 
-**Step 5**: 実装コード（Julia）
+**Step 5**: 実装コード（Rust）
 
 **Step 6: Attention Mask 構造の証明**
 
@@ -1176,7 +1184,7 @@ $$
 
 ここで$z_{t+k}$はworld modelで予測。
 
-**実装（Julia概念コード）**:
+**実装（Rust概念コード）**:
 
 
 **実験結果**: Atariゲームで従来のmodel-free RL（PPO）を上回る性能（sample efficiency 3x向上）。
@@ -1530,7 +1538,7 @@ $$
 - EB-JEPAとPredictive Codingによる認知科学的定式化
 
 **実装スキル**:
-- 4つの主要アーキテクチャ（I-JEPA、V-JEPA、HNN、Energy-Based WM）のJulia実装
+- 4つの主要アーキテクチャ（I-JEPA、V-JEPA、HNN、Energy-Based WM）のRust実装
 - EMA更新、Stop gradient、NCE、Gradient-based inferenceの実践
 
 ### 5.2 Part 2への接続

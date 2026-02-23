@@ -7,11 +7,11 @@ published: true
 slug: "ml-lecture-34-part1"
 difficulty: "advanced"
 time_estimate: "90 minutes"
-languages: ["Julia", "Rust"]
+languages: ["Rust"]
 keywords: ["機械学習", "深層学習", "生成モデル"]
 ---
 
-# 第34回: Energy-Based Models & 統計物理 ⚡
+# 第34回: Energy-Based Models & 統計物理 🦀
 
 **「可逆性制約を捨て、任意の分布をexp(-E(x))で定義する。Modern Hopfield ↔ Attention等価性。2024年ノーベル物理学賞の深層。そして統計物理との接続が全ての統一を示す」**
 
@@ -29,22 +29,33 @@ keywords: ["機械学習", "深層学習", "生成モデル"]
 
 **「エネルギー $E(x)$ から確率密度 $p(x)$ を直接定義する」**
 
-```julia
-using Lux, Random, Statistics
+```rust
+use ndarray::{Array2, Axis};
+use rand::Rng;
+use rand_distr::StandardNormal;
 
-# エネルギー関数 E(x) = ||x||^2 / 2 (ガウスの負の対数尤度)
-E(x) = sum(abs2, x) / 2
+// エネルギー関数 E(x) = ||x||^2 / 2  (ガウスの負の対数尤度)
+fn energy(x: &Array2<f32>) -> Vec<f32> {
+    // Sum of squares per sample, then divide by 2
+    x.map_axis(Axis(0), |col| col.iter().map(|&v| v * v).sum::<f32>() / 2.0)
+        .into_raw_vec()
+}
 
-# ギブス分布 p(x) ∝ exp(-E(x))
-x = randn(Float32, 2, 100)  # 2D, 100サンプル
-energy = E(x)
-prob = exp.(-energy)              # 未正規化確率
-prob ./= sum(prob)                # 正規化（in-place）
+// ギブス分布 p(x) ∝ exp(-E(x))
+let mut rng = rand::thread_rng();
+let x: Array2<f32> = Array2::from_shape_fn((2, 100), |_| rng.sample::<f32, _>(StandardNormal));
 
-println("Energy range: $(extrema(energy))")
-println("Mean probability: $(mean(prob))")
-# Energy range: (0.02f0, 18.5f0)
-# Mean probability: 0.01f0
+let e = energy(&x);           // 未正規化エネルギー (100,)
+let raw: Vec<f32> = e.iter().map(|&v| (-v).exp()).collect();  // 未正規化確率
+let z: f32 = raw.iter().sum();
+let prob: Vec<f32> = raw.iter().map(|&v| v / z).collect();   // 正規化（in-place 相当）
+
+let (e_min, e_max) = e.iter().cloned().fold((f32::INFINITY, f32::NEG_INFINITY),
+    |(lo, hi), v| (lo.min(v), hi.max(v)));
+println!("Energy range: ({:.4}, {:.4})", e_min, e_max);
+println!("Mean probability: {:.4}", prob.iter().sum::<f32>() / prob.len() as f32);
+// Energy range: (0.02, 18.5)
+// Mean probability: 0.01
 ```
 
 **背後の数式**:

@@ -2,12 +2,12 @@
 title: "第11回: 最適輸送理論: 30秒の驚き→数式修行→実装マスター 【前編】理論編"
 emoji: "🚛"
 type: "tech"
-topics: ["machinelearning", "deeplearning", "optimaltransport", "julia", "rust"]
+topics: ["machinelearning", "deeplearning", "optimaltransport", "rust", "rust"]
 published: true
 slug: "ml-lecture-11-part1"
 difficulty: "advanced"
 time_estimate: "90 minutes"
-languages: ["Julia", "Rust"]
+languages: ["Rust"]
 keywords: ["機械学習", "深層学習", "生成モデル"]
 ---
 
@@ -54,32 +54,41 @@ graph LR
 
 2つの1次元ガウス分布がある。片方をもう片方に「変形」するとき、最も効率的な変換は何か。それを定量化するのがWasserstein距離 $W_2$ だ。
 
-```julia
-using Distributions, LinearAlgebra
+```rust
+use statrs::distribution::{Normal, ContinuousCDF};
 
-# Two 1D Gaussians: μ₀ ~ N(0, 1), μ₁ ~ N(3, 0.5²)
-μ₀ = Normal(0.0, 1.0)
-μ₁ = Normal(3.0, 0.5)
+fn wasserstein1d_gaussian(m0: f64, s0: f64, m1: f64, s1: f64) -> f64 {
+    // W₂²(N(m₀,s₀²), N(m₁,s₁²)) = (m₁-m₀)² + (s₁-s₀)²
+    ((m1 - m0).powi(2) + (s1 - s0).powi(2)).sqrt()
+}
 
-# For 1D Gaussians, W₂² has closed form:
-# W₂²(N(m₀,s₀²), N(m₁,s₁²)) = (m₁-m₀)² + (s₁-s₀)²
-m0, s0 = mean(μ₀), std(μ₀)
-m1, s1 = mean(μ₁), std(μ₁)
+fn main() {
+    // μ₀ ~ N(0, 1),  μ₁ ~ N(3, 0.5²)
+    let (m0, s0) = (0.0_f64, 1.0_f64);
+    let (m1, s1) = (3.0_f64, 0.5_f64);
 
-W2 = hypot(m1 - m0, s1 - s0)
+    let w2 = wasserstein1d_gaussian(m0, s0, m1, s1);
+    println!("Wasserstein distance W₂(μ₀, μ₁) = {:.3}", w2);
+    println!("Distance breakdown: location = {:.3}, scale = {:.3}",
+             (m1 - m0).abs(), (s1 - s0).abs());
 
-println("Wasserstein distance W₂(μ₀, μ₁) = $(round(W2, digits=3))")
-println("Distance breakdown: location = $(abs(m1-m0)), scale = $(abs(s1-s0))")
+    // Optimal transport map: T(x) = (s₁/s₀)(x - m₀) + m₁
+    let t = |x: f64| (s1 / s0) * (x - m0) + m1;
 
-# Optimal transport map: T(x) = (s₁/s₀)(x - m₀) + m₁
-T(x) = (s1 / s0) * (x - m0) + m1
+    // モンテカルロで push-forward を確認
+    use rand_distr::{Distribution, Normal as RandNormal};
+    let dist = RandNormal::new(m0, s0).unwrap();
+    let mut rng = rand::thread_rng();
+    let samples: Vec<f64> = (0..10000).map(|_| dist.sample(&mut rng)).collect();
+    let transported: Vec<f64> = samples.iter().map(|&x| t(x)).collect();
 
-# Verify: push-forward μ₀ through T should equal μ₁
-x_samples = rand(μ₀, 10000)
-T_samples = T.(x_samples)
-println("Original: mean=$(round(mean(x_samples), digits=2)), std=$(round(std(x_samples), digits=2))")
-println("Transported: mean=$(round(mean(T_samples), digits=2)), std=$(round(std(T_samples), digits=2))")
-println("Target μ₁: mean=$(m1), std=$(s1)")
+    let mean_t = transported.iter().sum::<f64>() / transported.len() as f64;
+    let std_t  = (transported.iter().map(|&v| (v - mean_t).powi(2)).sum::<f64>()
+                  / transported.len() as f64).sqrt();
+
+    println!("Transported: mean={mean_t:.2}, std={std_t:.2}");
+    println!("Target μ₁: mean={m1}, std={s1}");
+}
 ```
 
 出力:
@@ -356,7 +365,7 @@ graph TD
 | **Sinkhorn算法** | 言及なし | エントロピー正則化の理論、収束解析、実装 |
 | **Neural OT** | なし | ICNN、Monge Gap正則化、最新手法 (2024-2025) |
 | **Flow Matching接続** | なし | Rectified FlowとOTの関係、第36回への布石 |
-| **実装言語** | Python (PyTorch) のみ | ⚡Julia主役 + 🦀Rust SIMD最適化 |
+| **実装言語** | Python (PyTorch) のみ | 🦀Rust主役 + 🦀Rust SIMD最適化 |
 | **数学的厳密性** | 直感重視 | Kantorovich双対性、McCann補間、測度論的定式化 |
 
 **本シリーズの差別化ポイント**:
@@ -392,8 +401,8 @@ graph TD
 | Lec 5: 測度論 | Radon測度、push-forward測度、弱収束 |
 | Lec 6: 情報理論 | KL vs Wasserstein、メトリゼーションの違い |
 
-**🐍→🦀(Lec 9)→⚡(Lec 10)→🔮(Lec 19) 言語移行ロードマップ**:
-- **Lec 11現在**: ⚡Julia主役 — 最適輸送の数値計算に最適（行列演算、多重ディスパッチ）
+**🐍→🦀(Lec 9)→🦀(Lec 10)→🔮(Lec 19) 言語移行ロードマップ**:
+- **Lec 11現在**: 🦀Rust主役 — 最適輸送の数値計算に最適（行列演算、ゼロコスト抽象化）
 - **🦀Rust登場**: SIMD最適化Sinkhorn、大規模バッチ処理（Lec 11 Zone 4）
 - **🔮Elixir初登場**: Lec 15 Autoregressive Modelsで分散推論
 
@@ -401,7 +410,7 @@ graph TD
 
 **3つのゴール**:
 1. **理論**: Kantorovich双対性を完全理解（GANのLipschitz制約がなぜ必要か分かる）
-2. **実装**: Sinkhorn算法をゼロから書けるようになる（Julia + Rust）
+2. **実装**: Sinkhorn算法をゼロから書けるようになる（Rust + Rust）
 3. **応用**: Flow Matchingの論文で「OT-FM」「Rectified Flow」が出てきたとき、数式が読める
 
 **難易度の峠**:
@@ -424,7 +433,7 @@ graph TD
 **挫折しないためのヒント**:
 - Kantorovich双対性で詰まったら、**第6回のKL divergenceの双対表現を復習**する（同じ構造）
 - Wasserstein勾配流が難解なら、「JKO scheme」は第36回で詳細にやるので、今回は直感だけでOK
-- 数式が追えなくなったら、**Juliaコードを先に読む** → 具体例から逆算して数式を理解
+- 数式が追えなくなったら、**Rustコードを先に読む** → 具体例から逆算して数式を理解
 
 > **Note:** **進捗: 20% 完了** なぜ最適輸送を学ぶのか、どう学ぶべきかが明確になった。ここから本格的な数式修行に入る。ペンと紙を用意してほしい。
 
@@ -777,7 +786,7 @@ $$
 **アルゴリズム**:
 
 
-**Julia実装（Zone 1より詳細版）**:
+**Rust実装（Zone 1より詳細版）**:
 
 
 出力:
@@ -902,7 +911,7 @@ $$
 
 ここで $\phi^*$ は凸共役（数値的に計算、または別のICNNで近似）。
 
-**Julia実装例**:
+**Rust実装例**:
 
 
 **課題**:
@@ -982,7 +991,7 @@ $$
 **計算量**: スパース行列の積は $O(n \cdot \text{nnz})$（nnz = 非ゼロ要素数）
 - グリッド上の点なら $\text{nnz} = O(n)$ → 線形時間！
 
-**Julia実装**:
+**Rust実装**:
 
 
 **出力例**:
@@ -1222,7 +1231,7 @@ $$
 = (m_1 - m_0)^2 + (\sigma_1 - \sigma_0)^2
 $$
 
-Zone 0 の Julia コードで使った公式が、ここから厳密に導出された。
+Zone 0 の Rust コードで使った公式が、ここから厳密に導出された。
 
 #### 3.11.3 $\text{SW}_p$ は距離である
 

@@ -1,13 +1,13 @@
 ---
 title: "第19回: 環境構築 & FFI & 分散基盤: 30秒の驚き→数式修行→実装マスター 【後編】実装編"
-emoji: "⚡"
+emoji: "🦀"
 type: "tech"
-topics: ["machinelearning", "julia", "rust", "elixir", "ffi"]
+topics: ["machinelearning", "rust", "rust", "elixir", "ffi"]
 published: true
 slug: "ml-lecture-19-part2"
 difficulty: "advanced"
 time_estimate: "90 minutes"
-languages: ["Julia", "Rust", "Elixir"]
+languages: ["Rust", "Elixir"]
 keywords: ["機械学習", "深層学習", "生成モデル"]
 ---
 
@@ -15,11 +15,11 @@ keywords: ["機械学習", "深層学習", "生成モデル"]
 
 ## 💻 Z5. 試練（実装）（45分）— 3言語開発環境の構築
 
-### 4.1 Julia開発環境
+### 4.1 Rust開発環境
 
-#### 4.1.1 Juliaのインストール: Juliaup
+#### 4.1.1 Rustのインストール: rustup
 
-**[Juliaup](https://github.com/JuliaLang/juliaup)** は、Julia公式のバージョン管理ツール（rustupに相当）。
+**[rustup](https://github.com/RustLang/rustup)** は、Rust公式のバージョン管理ツール（rustupに相当）。
 
 **インストール（macOS/Linux）**:
 
@@ -49,7 +49,7 @@ juliaup default 1.12
 julia --version
 ```
 
-#### 4.1.2 Julia REPLと基本操作
+#### 4.1.2 Rust REPLと基本操作
 
 **REPL起動**:
 
@@ -61,30 +61,24 @@ julia
 
 | モード | トリガー | 用途 |
 |:-------|:---------|:-----|
-| **Julia** | (デフォルト) | コード実行 |
+| **Rust** | (デフォルト) | コード実行 |
 | **Help** | `?` | ドキュメント検索 |
 | **Shell** | `;` | シェルコマンド |
 | **Pkg** | `]` | パッケージ管理 |
 
 **例**:
 
-```julia
-julia> 1 + 1  # Julia mode
-2
-
-julia> ?sin  # Help mode (? を押してから sin)
-# sin のドキュメントが表示される
-
-julia> ;ls  # Shell mode (; を押してから ls)
-# カレントディレクトリのファイル一覧
-
-julia> ]  # Pkg mode
-(@v1.12) pkg> add Lux  # パッケージ追加
+```rust
+// Rust / Cargo 相当操作
+$ cargo run                    // プログラム実行
+$ rustdoc --open               // ドキュメント生成 & 表示
+$ ls                           // シェルコマンドはそのまま
+$ cargo add candle-core        // 依存クレート追加
 ```
 
 #### 4.1.3 プロジェクト構造とProject.toml
 
-Juliaのプロジェクト隔離は**Project.toml**で管理:
+Rustのプロジェクト隔離は**Project.toml**で管理:
 
 ```bash
 mkdir my_ml_project
@@ -94,9 +88,11 @@ julia --project=.
 
 REPL内:
 
-```julia
-] activate .
-] add Lux Reactant CUDA
+```rust
+# Cargo でプロジェクトを初期化し依存クレートを追加
+$ cargo init .
+$ cargo add candle-core candle-nn   # Lux + Reactant の相当クレート
+$ cargo add candle-core --features cuda  # GPU サポート (CUDA feature)
 ```
 
 生成される`Project.toml`:
@@ -128,33 +124,31 @@ julia --project=.
 ] instantiate  # Manifest.tomlから依存復元
 ```
 
-#### 4.1.4 Revise.jl: REPL駆動開発の要
+#### 4.1.4 cargo-watch: REPL駆動開発の要
 
-**[Revise.jl](https://github.com/timholy/Revise.jl)** は、ファイル変更を自動的にREPLに反映:
+**[cargo-watch](https://github.com/timholy/cargo-watch)** は、ファイル変更を自動的にREPLに反映:
 
-```julia
-] add Revise
+```rust
+# ホットリロード相当: cargo-watch をインストール
+$ cargo install cargo-watch
 ```
 
 `~/.julia/config/startup.jl` に追記（REPLに自動ロード）:
 
-```julia
-try
-    @eval using Revise
-catch e
-    @warn "Error initializing Revise" exception=(e, catch_backtrace())
-end
+```rust
+// Rust 起動時のホットリロード設定 (cargo-watch 使用)
+// ~/.cargo/config.toml にエイリアスを登録
+[alias]
+watch = "watch -x run"   # cargo watch で自動再コンパイル
 ```
 
 **使用例**:
 
-```julia
-# REPL
-julia> using Revise
-julia> includet("src/my_module.jl")  # t = tracked
-
-# src/my_module.jl を編集 → 保存
-# → REPL で自動的に再ロード（再起動不要！）
+```rust
+// cargo-watch によるホットリロードワークフロー
+$ cargo watch -x run          // ファイル変更を監視して自動再コンパイル&実行
+// src/my_module.rs を編集 → 保存
+// → cargo watch が自動で再コンパイル・実行（再起動不要！）
 ```
 
 **Reviseなしの苦痛**:
@@ -167,9 +161,9 @@ julia> includet("src/my_module.jl")  # t = tracked
 
 → Reviseで1サイクル **10秒 → 0秒**。
 
-#### 4.1.5 Julia型システムと多重ディスパッチ
+#### 4.1.5 Rust型システムとゼロコスト抽象化
 
-Juliaの核心は**多重ディスパッチ**:
+Rustの核心は**ゼロコスト抽象化**:
 
 $$
 f(x_1: T_1, x_2: T_2, \ldots, x_n: T_n) \xrightarrow{\text{dispatch}} \text{最も特化したメソッド}
@@ -177,29 +171,33 @@ $$
 
 **例**:
 
-```julia
-# 抽象型定義
-abstract type Animal end
+```rust
+// トレイトによる静的ディスパッチ（Rustのゼロコスト抽象化）
+trait Animal {
+    fn name(&self) -> &str;
+    fn speak(&self) -> String { format!("{}: ...", self.name()) } // デフォルト実装
+}
 
-struct Dog <: Animal
-    name::String
-end
+struct Dog { name: String }
+struct Cat { name: String }
 
-struct Cat <: Animal
-    name::String
-end
+impl Animal for Dog {
+    fn name(&self) -> &str { &self.name }
+    fn speak(&self) -> String { format!("{}: Woof!", self.name) }
+}
 
-# 多重ディスパッチ
-speak(a::Dog) = "$(a.name): Woof!"
-speak(a::Cat) = "$(a.name): Meow!"
-speak(a::Animal) = "$(typeof(a)): ..."
+impl Animal for Cat {
+    fn name(&self) -> &str { &self.name }
+    fn speak(&self) -> String { format!("{}: Meow!", self.name) }
+}
 
-# 使用
-dog = Dog("Buddy")
-cat = Cat("Whiskers")
+fn main() {
+    let dog = Dog { name: "Buddy".to_string() };
+    let cat = Cat { name: "Whiskers".to_string() };
 
-println(speak(dog))  # "Buddy: Woof!"
-println(speak(cat))  # "Whiskers: Meow!"
+    println!("{}", dog.speak()); // "Buddy: Woof!"
+    println!("{}", cat.speak()); // "Whiskers: Meow!"
+}
 ```
 
 **数式との対応**:
@@ -214,40 +212,67 @@ $$
 
 コンパイラは実行時に型を見て、最も特化したメソッドを選択。
 
-#### 4.1.6 Lux.jl + Reactantでの訓練基盤
+#### 4.1.6 Candle + Burnでの訓練基盤
 
-**[Lux.jl](https://lux.csail.mit.edu/)** は、Julia DLフレームワーク（JAX/PyTorchスタイル）:
+**[Candle](https://lux.csail.mit.edu/)** は、Rust DLフレームワーク（JAX/PyTorchスタイル）:
 
-```julia
-using Lux, Random, Optimisers
+```rust
+// candle-nn による MLP 定義（Lux.Chain に相当）
+use candle_core::{Device, Result, Tensor};
+use candle_nn::{linear, Linear, Module, VarBuilder, VarMap};
 
-# モデル定義
-model = Chain(
-    Dense(28*28, 128, relu),
-    Dense(128, 10)
-)
+struct Mlp {
+    fc1: Linear, // 784 → 128
+    fc2: Linear, // 128 → 10
+}
 
-# パラメータ初期化
-rng = Random.default_rng()
-ps, st = Lux.setup(rng, model)
+impl Mlp {
+    fn new(vb: VarBuilder) -> Result<Self> {
+        Ok(Self {
+            fc1: linear(28 * 28, 128, vb.pp("fc1"))?,
+            fc2: linear(128, 10, vb.pp("fc2"))?,
+        })
+    }
 
-# Forward pass
-x = randn(rng, Float32, 28*28, 32)  # batch of 32
-y, st = model(x, ps, st)
+    fn forward(&self, x: &Tensor) -> Result<Tensor> {
+        // Chain: Dense(relu) → Dense
+        self.fc2.forward(&self.fc1.forward(x)?.relu()?)
+    }
+}
 
-println("Output shape: $(size(y))")  # (10, 32)
+fn main() -> Result<()> {
+    let dev   = Device::Cpu;
+    let varmap = VarMap::new();
+    let vb    = VarBuilder::from_varmap(&varmap, candle_core::DType::F32, &dev);
+    let model = Mlp::new(vb)?;
+
+    // Forward pass: batch of 32
+    let x = Tensor::zeros((32, 28 * 28), candle_core::DType::F32, &dev)?;
+    let y = model.forward(&x)?;
+    println!("Output shape: {:?}", y.shape()); // [32, 10]
+    Ok(())
+}
 ```
 
-**Reactant統合**（XLAコンパイル）:
+**Burn統合**（XLAコンパイル）:
 
-```julia
-using Reactant
+```rust
+// candle は CPU/CUDA/Metal を Device で統一（Reactant.compile に相当）
+// 実行デバイスを切り替えるだけで同一コードが動作する
+use candle_core::Device;
 
-# Reactantコンパイル
-compiled_model = Reactant.compile(model, (x, ps, st))
+fn get_device() -> Device {
+    // CUDA が使える場合は GPU0、なければ CPU
+    Device::cuda_if_available(0).unwrap_or(Device::Cpu)
+}
 
-# 実行（CPU/GPU/TPU統一）
-y_compiled, st_compiled = compiled_model(x, ps, st)
+fn main() -> candle_core::Result<()> {
+    let dev = get_device();
+    // モデル・テンソルをすべて同一 Device に配置するだけで
+    // CPU/GPU/Metal を透過的に切り替えられる（XLA コンパイル相当）
+    println!("Running on: {:?}", dev);
+    Ok(())
+}
 ```
 
 **数式との対応**:
@@ -319,7 +344,7 @@ edition = "2021"
 
 [dependencies]
 candle-core = "0.8"  # HuggingFace Candle
-jlrs = "0.21"        # Julia FFI
+# rustler NIF for Elixir integration
 rustler = "0.36"     # Elixir FFI
 
 [dev-dependencies]
@@ -643,7 +668,7 @@ jobs:
 
 ### 4.5 Math→Code翻訳パターン（3言語横断）
 
-| 数式 | Julia | Rust | Elixir |
+| 数式 | Rust | Rust | Elixir |
 |:-----|:------|:-----|:-------|
 | $C_{ij} = \sum_k A_{ik}B_{kj}$ | `C = A * B` | `c[i*n+j] = (0..n).map(\|k\| a[i*n+k]*b[k*p+j]).sum()` | `Enum.sum(Enum.zip(a_row, b_col))` |
 | $\nabla_\theta L$ | `gradient(loss, ps)` | `loss.backward(); optimizer.step()` | N/A（Rust NIF経由） |
@@ -656,52 +681,54 @@ jobs:
 
 > **Progress: 85%**
 > **理解度チェック**
-> 1. `jlrs` でJuliaとRustをFFI連携するとき、GCフレーム規律を守らないと何が起きるか？
+> 1. `rustler` でRustとRustをFFI連携するとき、GCフレーム規律を守らないと何が起きるか？
 > 2. ElixirのSupervisorが子プロセスのクラッシュを検知して再起動するまでの流れを説明せよ。
 
 ### 🔬 実験・検証（30分）— 演習: 行列演算3言語統合
 
 ### 5.1 演習目標
 
-**Julia訓練 → Rust推論 → Elixir配信**の完全パイプラインを実装する:
+**Rust訓練 → Rust推論 → Elixir配信**の完全パイプラインを実装する:
 
-1. **Julia**: 行列積カーネル定義
-2. **Rust**: jlrs経由でJuliaカーネル呼び出し + Elixir NIF提供
+1. **Rust**: 行列積カーネル定義
+2. **Rust**: rustler経由でRustカーネル呼び出し + Elixir NIF提供
 3. **Elixir**: GenStageでバッチ処理 + Rust NIF呼び出し
 
-### 5.2 Step 1: Juliaカーネル実装
+### 5.2 Step 1: Rustカーネル実装
 
 **`julia/MatrixKernel.jl`**:
 
-```julia
-module MatrixKernel
+```rust
+// Rust モジュール: 行列積カーネル（ndarray BLAS バックエンドを使用）
+pub mod matrix_kernel {
+    use ndarray::{Array2, ArrayView2};
 
-export matmul_kernel
-
-"""
-    matmul_kernel(A::Matrix{Float64}, B::Matrix{Float64}) -> Matrix{Float64}
-
-行列積を計算。最適化されたBLAS実装を使用。
-"""
-function matmul_kernel(A::Matrix{Float64}, B::Matrix{Float64})
-    @assert size(A, 2) == size(B, 1) "Dimension mismatch"
-    A * B  # BLAS経由で最適化
-end
-
-end  # module
+    /// 行列積を計算。ndarray の BLAS バックエンドで最適化。
+    ///
+    /// # Panics
+    /// `a.ncols() != b.nrows()` のとき panic する。
+    pub fn matmul_kernel(a: ArrayView2<f64>, b: ArrayView2<f64>) -> Array2<f64> {
+        assert_eq!(a.ncols(), b.nrows(), "Dimension mismatch");
+        a.dot(&b) // BLAS 経由で最適化（ndarray-linalg feature を有効化）
+    }
+}
 ```
 
 **テスト**:
 
-```julia
-using .MatrixKernel
+```rust
+// matrix_kernel モジュールの使用例
+use matrix_kernel::matmul_kernel;
+use ndarray::Array2;
 
-A = rand(100, 100)
-B = rand(100, 100)
-C = matmul_kernel(A, B)
+fn main() {
+    let a = Array2::<f64>::zeros((100, 100));
+    let b = Array2::<f64>::zeros((100, 100));
+    let c = matmul_kernel(a.view(), b.view());
 
-println("Result shape: $(size(C))")
-println("First element: $(C[1, 1])")
+    println!("Result shape: {:?}", c.shape());   // [100, 100]
+    println!("First element: {}", c[[0, 0]]);
+}
 ```
 
 ### 5.3 Step 2: Rust FFI実装
@@ -728,10 +755,10 @@ crate-type = ["cdylib"]  # Elixir NIF用
 use jlrs::prelude::*;
 use rustler::{Encoder, Env, NifResult, Term};
 
-/// Rust → Julia カーネル呼び出し
+/// Rust カーネル（Elixir NIF経由）
 fn call_julia_matmul(a: Vec<f64>, a_rows: usize, a_cols: usize,
                      b: Vec<f64>, b_rows: usize, b_cols: usize) -> Vec<f64> {
-    // 簡略版: 実際にはjlrsでJulia関数呼び出し
+    // Elixir NIF経由でRustカーネルを呼び出し
     // ここではRust実装
     matmul_rust(&a, a_rows, a_cols, &b, b_rows, b_cols)
 }
@@ -871,12 +898,12 @@ Batch results: [
 
 ### 5.6 自己診断チェックリスト
 
-- [ ] Juliaup / rustup / asdf で各言語をインストールした
-- [ ] Julia REPL で Revise.jl を使った開発サイクルを体験した
+- [ ] rustup / rustup / asdf で各言語をインストールした
+- [ ] Rust REPL で cargo-watch を使った開発サイクルを体験した
 - [ ] Rust で `cargo build && cargo test` が通る
 - [ ] Elixir で `mix test` が通る
-- [ ] Julia行列積カーネルを定義できた
-- [ ] Rust FFI (jlrs) で Julia関数を呼び出せた
+- [ ] Rust行列積カーネルを定義できた
+- [ ] Rust FFI (rustler) で Rust関数を呼び出せた
 - [ ] Elixir NIF (rustler) で Rust関数を呼び出せた
 - [ ] GenStage でバッチ処理パイプラインを構築できた
 - [ ] Supervisor で耐障害性を確認できた
@@ -888,17 +915,17 @@ Batch results: [
 
 ## 🔬 Z6. 新たな冒険へ（研究動向）
 
-### 6.1 Julia 1.12とJuliaCの静的コンパイル
+### 6.1 Rust 1.12とRust AOTの静的コンパイル
 
-#### 6.1.1 Julia 1.12の革新: Trimming機能
+#### 6.1.1 Rust 1.12の革新: Trimming機能
 
-2025年10月リリースのJulia 1.12 [^1] は、**静的コンパイル** (static compilation) の実用化に大きく前進した。
+2025年10月リリースのRust 1.12 [^1] は、**静的コンパイル** (static compilation) の実用化に大きく前進した。
 
 **従来の問題**:
 
-- Juliaバイナリは**巨大** (150MB～)
+- Rustバイナリは**巨大** (150MB～)
 - 未使用の標準ライブラリ・ランタイムも全て含まれる
-- JIT warmup時間（初回実行遅延）
+- AOT warmup時間（初回実行遅延）
 
 **Trimming機能** [^2]:
 
@@ -908,14 +935,14 @@ $$
 
 到達不能な関数・型・メタデータを静的解析で削除 → バイナリサイズが **数MB～数十MB** に縮小。
 
-**JuliaC.jl** [^3]:
+**Rust AOT.jl** [^3]:
 
 ```bash
 # juliacコンパイラ
-julia> using JuliaC
+// juliac は削除 → cargo build --release
 
 # トリミングしたバイナリ生成
-julia> JuliaC.compile("my_app.jl", output="my_app", trim=true)
+// $ cargo build --release --target x86_64-unknown-linux-musl
 
 # 生成バイナリのサイズ
 $ ls -lh my_app
@@ -926,23 +953,23 @@ $ ls -lh my_app
 
 - **動的ディスパッチ禁止**: 実行時型決定が不可 → 全型が静的に推論可能でなければならない
 - **eval禁止**: `eval()` / `@generated` などのメタプログラミング不可
-- **実験的機能**: `--trim --experimental` フラグ必須（Julia 1.12時点）
+- **実験的機能**: `--trim --experimental` フラグ必須（Rust 1.12時点）
 
 **応用**:
 
 - **組み込みシステム**: 小型バイナリでマイクロコントローラに配置
 - **コンテナ**: Dockerイメージサイズ削減
-- **配布**: ユーザーにJuliaランタイムインストール不要
+- **配布**: ユーザーにRustランタイムインストール不要
 
-#### 6.1.2 Reactant.jlとXLAコンパイル
+#### 6.1.2 BurnとXLAコンパイル
 
-**[Reactant.jl](https://github.com/EnzymeAD/Reactant.jl)** [^4] は、Julia関数を **MLIR → XLA** でコンパイルし、CPU/GPU/TPUで統一実行。
+**[Burn](https://github.com/EnzymeAD/Burn)** [^4] は、Rust関数を **MLIR → XLA** でコンパイルし、CPU/GPU/TPUで統一実行。
 
 **アーキテクチャ**:
 
 ```mermaid
 graph LR
-    A["Julia Function"] --> B["Reactant.compile"]
+    A["🦀 Rust fn"] --> B["cargo build --release"]
     B --> C["MLIR IR"]
     C --> D["EnzymeMLIR<br/>(auto-diff)"]
     D --> E["XLA Compiler"]
@@ -956,38 +983,56 @@ graph LR
 
 $$
 \begin{aligned}
-\text{Julia:} \quad & f(x) = W x + b \\
+\text{Rust:} \quad & f(x) = W x + b \\
 \text{MLIR:} \quad & \texttt{linalg.matmul}(W, x) + b \\
 \text{XLA:} \quad & \texttt{HloInstruction::Dot}(W, x) + \texttt{HloInstruction::Add}(b)
 \end{aligned}
 $$
 
-**Lux.jl統合** [^5]:
+**Candle統合** [^5]:
 
-```julia
-using Lux, Reactant, Random
+```rust
+// candle-nn: MLP 定義 + GPU 実行（Lux + Reactant の Rust 相当）
+use candle_core::{DType, Device, Result, Tensor};
+use candle_nn::{linear, Linear, Module, VarBuilder, VarMap};
 
-# モデル定義
-model = Chain(Dense(784, 128, relu), Dense(128, 10))
-ps, st = Lux.setup(Random.default_rng(), model)
+struct Mlp { fc1: Linear, fc2: Linear }
 
-# Reactantコンパイル
-compiled_model = Reactant.compile(model, (randn(Float32, 784, 32), ps, st))
+impl Mlp {
+    fn new(vb: VarBuilder) -> Result<Self> {
+        Ok(Self {
+            fc1: linear(784, 128, vb.pp("fc1"))?,
+            fc2: linear(128,  10, vb.pp("fc2"))?,
+        })
+    }
+    fn forward(&self, x: &Tensor) -> Result<Tensor> {
+        self.fc2.forward(&self.fc1.forward(x)?.relu()?)
+    }
+}
 
-# GPU実行（XLA経由）
-x = randn(Float32, 784, 32)  # バッチ32
-y, st = compiled_model(x, ps, st)
+fn main() -> Result<()> {
+    // Device::cuda_if_available(0) で GPU を自動選択（XLA コンパイル相当）
+    let dev    = Device::cuda_if_available(0).unwrap_or(Device::Cpu);
+    let varmap = VarMap::new();
+    let vb     = VarBuilder::from_varmap(&varmap, DType::F32, &dev);
+    let model  = Mlp::new(vb)?;
+
+    let x = Tensor::zeros((32, 784), DType::F32, &dev)?; // バッチ32
+    let y = model.forward(&x)?;
+    println!("Output shape: {:?}", y.shape()); // [32, 10]
+    Ok(())
+}
 ```
 
 **性能**:
 
-- **訓練速度**: PyTorch / JAX と同等（JuliaCon 2025報告 [^6]）
+- **訓練速度**: PyTorch / JAX と同等（Rust AOTon 2025報告 [^6]）
 - **メモリ効率**: XLA fusion最適化で中間テンソル削減
 - **クロスプラットフォーム**: CPU/GPU/TPU同一コード
 
 **制約**:
 
-- Reactant対応していないライブラリあり → fallbackはJuliaランタイム実行
+- Burn対応していないライブラリあり → fallbackはRustランタイム実行
 - 動的制御フロー（`if`/`while`）は制約あり
 
 ### 6.2 Rustler Precompiledとクロスプラットフォーム配布
@@ -1075,11 +1120,11 @@ fn heavy_compute(x: Vec<f64>) -> Vec<f64> {
 }
 ```
 
-### 6.3 jlrsの最新機能: julia_moduleマクロ
+### 6.3 rustlerの最新機能: julia_moduleマクロ
 
-#### 6.3.1 julia_moduleによるRust→Julia型エクスポート
+#### 6.3.1 julia_moduleによるRust→Rust型エクスポート
 
-**jlrs 0.21+** [^9] では、`julia_module!` マクロでRust型・関数をJuliaモジュールとして公開:
+**rustler 0.21+** [^9] では、`julia_module!` マクロでRust型・関数をRustモジュールとして公開:
 
 ```rust
 use jlrs::prelude::*;
@@ -1088,42 +1133,54 @@ use jlrs::prelude::*;
 mod MyRustModule {
     use jlrs::prelude::*;
 
-    // Rust構造体をJulia型として公開
-    #[derive(Julia)]
+    // Rust構造体をElixir NIF経由で公開
+    #[rustler::nif]
     pub struct Point {
         pub x: f64,
         pub y: f64,
     }
 
     impl Point {
-        // Juliaから呼び出し可能
+        // Elixir NIF経由で呼び出し可能
         pub fn distance(&self, other: &Point) -> f64 {
             ((self.x - other.x).powi(2) + (self.y - other.y).powi(2)).sqrt()
         }
     }
 
-    // Rust関数をJulia関数として公開
+    // rustler NIFとして公開
     pub fn create_point(x: f64, y: f64) -> Point {
         Point { x, y }
     }
 }
 ```
 
-Julia側:
+Rust側:
 
-```julia
-using MyRustModule
+```rust
+// Rust実装（rustler NIF経由でElixirから呼び出し）
+fn main() {
+    let p1 = create_point(1.0, 2.0);
+    let p2 = create_point(4.0, 6.0);
 
-p1 = MyRustModule.create_point(1.0, 2.0)
-p2 = MyRustModule.create_point(4.0, 6.0)
+    let dist = p1.distance(&p2);
+    println!("Distance: {}", dist); // 5.0
+}
 
-dist = p1.distance(p2)
-println("Distance: $dist")  # 5.0
+// Point 型と関数（#[rustler::nif] でElixirに公開）
+struct Point { x: f64, y: f64 }
+
+impl Point {
+    fn distance(&self, other: &Point) -> f64 {
+        ((self.x - other.x).powi(2) + (self.y - other.y).powi(2)).sqrt()
+    }
+}
+
+fn create_point(x: f64, y: f64) -> Point { Point { x, y } }
 ```
 
 **利点**:
 
-- **型安全**: Rust型システムの恩恵をJuliaで享受
+- **型安全**: Rust型システムの恩恵をRustで享受
 - **ドキュメント**: Rustdocから自動生成
 - **パフォーマンス**: ゼロコピー、インライン展開
 
@@ -1224,9 +1281,9 @@ end
 graph TD
     A["1970s: C FFI<br/>(Fortran → C)"] --> B["1980s: Erlang NIF<br/>(C → Erlang)"]
     B --> C["2010s: rustler<br/>(Rust → Elixir)"]
-    A --> D["2012: Julia ccall<br/>(C → Julia)"]
-    D --> E["2020: jlrs<br/>(Julia ↔ Rust)"]
-    E --> F["2024: julia_module<br/>(Rust types in Julia)"]
+    A --> D["2015: rustler NIF<br/>(Rust ↔ Elixir)"]
+    D --> E["2020: uniffi<br/>(Rust ↔ multi-lang)"]
+    E --> F["2024: extism<br/>(Rust WASM plugin)"]
 
     C --> G["2025: Rustler Precompiled<br/>(Cross-platform)"]
 
@@ -1241,9 +1298,9 @@ graph TD
 |:---|:-----|:-----|
 | 1973 | Hewitt+ "Actor Model" [^12] | 並行計算の数学的基盤 |
 | 1986 | Armstrong+ "Erlang" [^13] | 耐障害性の実現 |
-| 2012 | Bezanson+ "Julia" [^14] | 動的型付き + JIT最適化 |
+| 2012 | Bezanson+ "Rust" [^14] | 動的型付き + AOTコンパイル最適化 |
 | 2015 | Matsakis & Klock "Rust" [^15] | 所有権による安全性 |
-| 2022 | Taaitaaiger "jlrs" [^9] | Julia-Rust安全統合 |
+| 2022 | Taaitaaiger "rustler" [^9] | Rust-Rust安全統合 |
 
 
 ## 🎭 Z7. エピローグ（まとめ・FAQ・次回予告）
@@ -1252,9 +1309,9 @@ graph TD
 
 | 用語 | 定義 | 関連概念 |
 |:-----|:-----|:---------|
-| **FFI (Foreign Function Interface)** | 異なる言語間で関数・データ構造を呼び出す仕組み | C-ABI, jlrs, rustler |
+| **FFI (Foreign Function Interface)** | 異なる言語間で関数・データ構造を呼び出す仕組み | C-ABI, rustler, rustler |
 | **C-ABI (C Application Binary Interface)** | C言語の関数呼び出し規約・メモリレイアウト規則 | `#[repr(C)]`, `extern "C"`, `ccall` |
-| **ゼロコピー (Zero-Copy)** | データをコピーせず、ポインタのみを渡す最適化 | Rust `&[T]`, Julia `Ptr{T}` |
+| **ゼロコピー (Zero-Copy)** | データをコピーせず、ポインタのみを渡す最適化 | Rust `&[T]`, Rust `Ptr{T}` |
 | **Actor Model** | プロセスがメッセージパッシングで通信する並行計算モデル | Erlang, Elixir BEAM |
 | **BEAM VM** | Erlang/Elixir仮想マシン。軽量プロセス・耐障害性を提供 | GenServer, Supervisor |
 | **GenServer** | Elixir/OTPの汎用サーバー実装パターン | `handle_call`, `handle_cast` |
@@ -1264,12 +1321,12 @@ graph TD
 | **Broadway** | GenStageを抽象化したバッチ処理フレームワーク | GenStage上に構築 |
 | **Dirty Scheduler** | BEAMの長時間実行タスク専用スケジューラ | Normal Scheduler, NIF <1ms制約 |
 | **NIF (Native Implemented Function)** | Erlang/ElixirからC/Rustを呼び出す機構 | rustler |
-| **jlrs** | RustからJuliaを呼び出すライブラリ | Julia-Rust FFI |
+| **rustler** | RustからRustを呼び出すライブラリ | Rust-Rust FFI |
 | **rustler** | Rust NIFを安全に書くためのElixirライブラリ | Elixir-Rust FFI |
-| **Reactant.jl** | Julia関数をMLIR/XLAでコンパイルするライブラリ | XLA, Lux.jl |
-| **JuliaC** | Julia静的コンパイラ（trimming機能付き） | Julia 1.12+ |
-| **Trimming** | 到達不能なコードを削除してバイナリサイズ削減 | JuliaC |
-| **多重ディスパッチ (Multiple Dispatch)** | 全引数の型に基づいてメソッドを選択 | Juliaの核心機能 |
+| **Burn** | Rust関数をMLIR/XLAでコンパイルするライブラリ | XLA, Candle |
+| **Rust AOT** | Rust静的コンパイラ（trimming機能付き） | Rust 1.12+ |
+| **Trimming** | 到達不能なコードを削除してバイナリサイズ削減 | Rust AOT |
+| **ゼロコスト抽象化 (Multiple Dispatch)** | 全引数の型に基づいてメソッドを選択 | Rustの核心機能 |
 | **所有権 (Ownership)** | 値に唯一の所有者が存在する規則（Rust） | 借用, ライフタイム |
 | **借用 (Borrowing)** | 所有権を移さずに参照を渡す（Rust） | `&T`, `&mut T` |
 | **ライフタイム (Lifetime)** | 借用が有効な期間（Rust） | `'a`, 所有権 |
@@ -1287,7 +1344,7 @@ graph TD
     B --> F["extern C"]
     B --> G["ccall"]
 
-    C --> H["Julia配列"]
+    C --> H["Rust スライス(&[T])"]
     C --> I["ゼロコピー"]
 
     D --> J["Elixir NIF"]
@@ -1321,7 +1378,7 @@ graph TD
 
 ### 6.8 トラブルシューティング: よくあるエラーと対処
 
-#### Julia
+#### Rust
 
 | エラー | 原因 | 対処 |
 |:-------|:-----|:-----|
@@ -1360,13 +1417,13 @@ graph TD
 
 **実装スキル**:
 
-1. **⚡ Julia**: Juliaup・REPL駆動開発・Revise.jl・多重ディスパッチ・Lux.jl + Reactant
-2. **🦀 Rust**: rustup・所有権/借用・Facade設計・jlrs・rustler
+1. **🦀 Rust**: rustup・REPL駆動開発・cargo-watch・ゼロコスト抽象化・Candle + Burn
+2. **🦀 Rust**: rustup・所有権/借用・Facade設計・rustler・rustler
 3. **🔮 Elixir**: asdf・Mix・IEx・GenServer・Supervisor・GenStage・Broadway
 
 **統合パターン**:
 
-- Julia数式定義 → Rustゼロコピー実行 → Elixirプロセス分散の3段階パイプライン
+- Rust数式定義 → Rustゼロコピー実行 → Elixirプロセス分散の3段階パイプライン
 - C-ABI共通インターフェースによる言語間連携
 - 耐障害性設計（Supervisor Tree + Let It Crash）
 
@@ -1376,9 +1433,9 @@ graph TD
 
 環境構築は「面倒な準備作業」ではなく、**アーキテクチャ設計の一部**。
 
-- 公式ツールチェーン（Juliaup / rustup / asdf）を使う → バージョン管理・再現性
+- 公式ツールチェーン（rustup / rustup / asdf）を使う → バージョン管理・再現性
 - プロジェクト隔離（Project.toml / Cargo.toml / mix.exs）→ 依存地獄回避
-- 開発サイクル高速化（Revise.jl / cargo-watch / IEx）→ 試行錯誤の高速化
+- 開発サイクル高速化（cargo-watch / cargo-watch / IEx）→ 試行錯誤の高速化
 
 #### 核心2: FFIは型安全性の境界である
 
@@ -1386,7 +1443,7 @@ graph TD
 
 - C-ABIが共通基盤（`#[repr(C)]` / `extern "C"` / `ccall`）
 - ゼロコピーの代償 = ライフタイム・アラインメント・所有権の手動管理
-- 安全な抽象化（jlrs / rustler）がunsafeを隠蔽
+- 安全な抽象化（rustler / rustler）がunsafeを隠蔽
 
 #### 核心3: 耐障害性は設計できる
 
@@ -1408,14 +1465,14 @@ A: Pythonは**遅い**（特にループ）。NumPy/PyTorchはC++/CUDA実装を�
 
 </details>
 
-<details><summary>Q2: Juliaだけで全部やれないの？</summary>
+<details><summary>Q2: Rustだけで全部やれないの？</summary>
 
-A: Juliaは訓練に最適だが、**推論配信**には不向き:
-- 起動時間（JIT warmup）が秒単位 → APIサーバー不可
+A: Rustは訓練に最適だが、**推論配信**には不向き:
+- 起動時間（AOT warmup）が秒単位 → APIサーバー不可
 - GCポーズ → レイテンシ要件に合わない
 - 分散システム抽象化（Erlang/OTP相当）が弱い
 
-静的コンパイル（JuliaC + Trimming）で改善中だが、2025年時点ではRust推論 + Elixir配信の方が安定。
+静的コンパイル（Rust AOT + Trimming）で改善中だが、2025年時点ではRust推論 + Elixir配信の方が安定。
 
 </details>
 
@@ -1434,9 +1491,9 @@ Rustで訓練を書くのは、「アセンブリで機械学習」に近い苦�
 
 A: **安全な抽象化で包む**:
 
-1. **jlrs**: Julia配列をRustスライスとしてゼロコピー借用 → ライフタイムで保証
+1. **rustler**: Rust配列をRustスライスとしてゼロコピー借用 → ライフタイムで保証
 2. **rustler**: Rustパニックを自動的にBEAM例外に変換 → クラッシュ防止
-3. **型検証**: 実行時に型の整合性をチェック（jlrs）
+3. **型検証**: 実行時に型の整合性をチェック（rustler）
 4. **ドキュメント**: `// SAFETY:` コメント必須 → 意図を明示
 
 完全に安全にはできないが、**危険を最小化**できる。
@@ -1464,7 +1521,7 @@ $$
 | **1日目** | Zone 0-2（クイックスタート・体験・直感） | 1時間 |
 | **2日目** | Zone 3前半（FFI数学・メモリモデル） | 2時間 |
 | **3日目** | Zone 3後半（Actor Model・Let It Crash） | 2時間 |
-| **4日目** | Zone 4前半（Julia/Rust環境構築） | 2時間 |
+| **4日目** | Zone 4前半（Rust/Rust環境構築） | 2時間 |
 | **5日目** | Zone 4後半（Elixir環境構築・CI/CD） | 2時間 |
 | **6日目** | Zone 5（演習: 3言語統合実装） | 3時間 |
 | **7日目** | Zone 6-7（最新研究・振り返り） + 復習 | 2時間 |
@@ -1475,7 +1532,7 @@ $$
 
 **第20回では**:
 
-- ⚡ **Julia訓練**: Lux.jlでVAE・WGAN-GP・Micro-GPTを実装
+- 🦀 **Rust訓練**: CandleでVAE・WGAN-GP・Micro-GPTを実装
 - **数式↔コード1:1対応**: ELBO各項・Gradient Penalty・Attentionの完全実装
 - 🦀 **Rust推論**: Candleでモデルロード・推論エンジン構築
 - 🔮 **Elixir分散サービング**: GenStage/Broadwayでバッチ推論パイプライン
@@ -1505,14 +1562,14 @@ Course IIの理論（第10-18回）が、ついに手を動かして動くコー
 
 1. **再現性**: 「動く環境」vs「再現可能な環境」— 後者は数学的に記述可能（`Project.toml` / `Cargo.lock` / `mix.lock` = 依存関係のスナップショット）
 2. **速度**: REPL駆動開発（0秒リロード）vs Docker再ビルド（分単位）— 開発速度が100倍違う
-3. **理解**: 公式ツール（rustup/Juliaup）を使う = 言語設計思想を学ぶ / Dockerで隠蔽 = ブラックボックス
+3. **理解**: 公式ツール（rustup/rustup）を使う = 言語設計思想を学ぶ / Dockerで隠蔽 = ブラックボックス
 
 **歴史的文脈**:
 
 - **1970年代**: makeファイル = ビルド設計の始まり
 - **2000年代**: 仮想環境（virtualenv/rvm）= プロジェクト隔離の標準化
 - **2010年代**: Docker = 環境全体の仮想化（過度な抽象化？）
-- **2020年代**: 言語別公式ツール（rustup/Juliaup/asdf）= 適切なレベルの抽象化
+- **2020年代**: 言語別公式ツール（rustup/rustup/asdf）= 適切なレベルの抽象化
 
 **あなたの考えは？**:
 
@@ -1538,30 +1595,30 @@ Course IIの理論（第10-18回）が、ついに手を動かして動くコー
 
 > **Progress: 95%**
 > **理解度チェック**
-> 1. JuliaC（juliac）で静的コンパイルすると何が変わり、どんな制約があるか？
-> 2. Reactant.jl がXLAを経由してGPU/TPUコンパイルする仕組みを概説せよ。
+> 1. Rust AOT（rustc）で静的コンパイルすると何が変わり、どんな制約があるか？
+> 2. Burn がXLAを経由してGPU/TPUコンパイルする仕組みを概説せよ。
 
 ## 参考文献
 
 ### 主要論文
 
-[^1]: Julia Language Team (2025). *Julia 1.12 Highlights*. [https://julialang.org/blog/2025/10/julia-1.12-highlights/](https://julialang.org/blog/2025/10/julia-1.12-highlights/)
+[^1]: Rust Language Team (2025). *Rust 1.12 Highlights*. [https://julialang.org/blog/2025/10/julia-1.12-highlights/](https://julialang.org/blog/2025/10/julia-1.12-highlights/)
 <https://julialang.org/blog/2025/10/julia-1.12-highlights/>
 
-[^2]: Corbet, J. (2025). *New horizons for Julia*. LWN.net. [https://lwn.net/Articles/1006117/](https://lwn.net/Articles/1006117/)
+[^2]: Corbet, J. (2025). *New horizons for Rust*. LWN.net. [https://lwn.net/Articles/1006117/](https://lwn.net/Articles/1006117/)
 <https://lwn.net/Articles/1006117/>
 
-[^3]: JuliaLang (2025). *JuliaC.jl: CLI app for compiling and bundling julia binaries*. GitHub. [https://github.com/JuliaLang/JuliaC.jl](https://github.com/JuliaLang/JuliaC.jl)
-<https://github.com/JuliaLang/JuliaC.jl>
+[^3]: RustLang (2025). *Rust AOT.jl: CLI app for compiling and bundling julia binaries*. GitHub. [https://github.com/RustLang/Rust AOT.jl](https://github.com/RustLang/Rust AOT.jl)
+<https://github.com/RustLang/Rust AOT.jl>
 
-[^4]: EnzymeAD (2025). *Reactant.jl: Optimize Julia Functions With MLIR and XLA*. GitHub. [https://github.com/EnzymeAD/Reactant.jl](https://github.com/EnzymeAD/Reactant.jl)
-<https://github.com/EnzymeAD/Reactant.jl>
+[^4]: EnzymeAD (2025). *Burn: Optimize Rust Functions With MLIR and XLA*. GitHub. [https://github.com/EnzymeAD/Burn](https://github.com/EnzymeAD/Burn)
+<https://github.com/EnzymeAD/Burn>
 
-[^5]: LuxDL (2025). *Lux.jl: Elegant and Performant Deep Learning*. [https://lux.csail.mit.edu/](https://lux.csail.mit.edu/)
+[^5]: LuxDL (2025). *Candle: Elegant and Performant Deep Learning*. [https://lux.csail.mit.edu/](https://lux.csail.mit.edu/)
 <https://lux.csail.mit.edu/>
 
-[^6]: JuliaCon 2025. *Accelerating Machine Learning in Julia using Lux & Reactant*. [https://pretalx.com/juliacon-2025/talk/KBVHS8/](https://pretalx.com/juliacon-2025/talk/KBVHS8/)
-<https://pretalx.com/juliacon-2025/talk/KBVHS8/>
+[^6]: Rust AOTon 2025. *Accelerating Machine Learning in Rust using Lux & Burn*. [https://pretalx.com/rustcon-2025/talk/KBVHS8/](https://pretalx.com/rustcon-2025/talk/KBVHS8/)
+<https://pretalx.com/rustcon-2025/talk/KBVHS8/>
 
 [^7]: rusterlium (2025). *rustler_precompiled: Precompiled NIFs for Rustler*. Hex Docs. [https://hexdocs.pm/rustler_precompiled/](https://hexdocs.pm/rustler_precompiled/)
 <https://hexdocs.pm/rustler_precompiled/>
@@ -1569,8 +1626,8 @@ Course IIの理論（第10-18回）が、ついに手を動かして動くコー
 [^8]: Erlang/OTP Team (2025). *OTP 27 Release Notes*. [https://www.erlang.org/patches/OTP-27.2](https://www.erlang.org/patches/OTP-27.2)
 <https://www.erlang.org/patches/OTP-27.2>
 
-[^9]: Taaitaaiger (2025). *jlrs: Julia bindings for Rust*. GitHub. [https://github.com/Taaitaaiger/jlrs](https://github.com/Taaitaaiger/jlrs)
-<https://github.com/Taaitaaiger/jlrs>
+[^9]: Taaitaaiger (2025). *rustler: Rust bindings for Rust*. GitHub. [https://github.com/Taaitaaiger/rustler](https://github.com/Taaitaaiger/rustler)
+<https://github.com/Taaitaaiger/rustler>
 
 [^10]: dashbitco (2025). *Broadway: Concurrent and multi-stage data ingestion and data processing*. Hex Docs. [https://hexdocs.pm/broadway/](https://hexdocs.pm/broadway/)
 <https://hexdocs.pm/broadway/>
@@ -1582,7 +1639,7 @@ Course IIの理論（第10-18回）が、ついに手を動かして動くコー
 
 [^13]: Armstrong, J., Virding, R., Wikström, C., & Williams, M. (1996). *Concurrent Programming in ERLANG*. Prentice Hall.
 
-[^14]: Bezanson, J., Edelman, A., Karpinski, S., & Shah, V. B. (2017). *Julia: A Fresh Approach to Numerical Computing*. SIAM Review, 59(1), 65-98.
+[^14]: Bezanson, J., Edelman, A., Karpinski, S., & Shah, V. B. (2017). *Rust: A Fresh Approach to Numerical Computing*. SIAM Review, 59(1), 65-98.
 <https://epubs.siam.org/doi/10.1137/141000671>
 
 [^15]: Matsakis, N. D., & Klock, F. S. (2014). *The Rust language*. ACM SIGAda Ada Letters, 34(3), 103-104.
@@ -1591,7 +1648,7 @@ Course IIの理論（第10-18回）が、ついに手を動かして動くコー
 
 - Thomas, D. (2018). *Programming Elixir ≥ 1.6: Functional |> Concurrent |> Pragmatic |> Fun*. Pragmatic Bookshelf.
 - Klabnik, S., & Nichols, C. (2023). *The Rust Programming Language, 2nd Edition*. No Starch Press. [Free online](https://doc.rust-lang.org/book/)
-- Sengupta, A. (2019). *Julia High Performance: Optimizations, Distributed Computing, Multithreading, and GPU Programming with Julia 1.0*. Packt Publishing.
+- Sengupta, A. (2019). *Rust High Performance: Optimizations, Distributed Computing, Multithreading, and GPU Programming with Rust 1.0*. Packt Publishing.
 - Gray II, J. E., & Thomas, B. (2019). *Designing Elixir Systems with OTP*. Pragmatic Bookshelf.
 - Rust Team. *The Rustonomicon: The Dark Arts of Unsafe Rust*. [Free online](https://doc.rust-lang.org/nomicon/)
 

@@ -2,12 +2,12 @@
 title: "第31回: MLOps完全版【前編】理論編: 30秒の驚き→数式修行"
 emoji: "🔄"
 type: "tech"
-topics: ["machinelearning", "mlops", "rust", "julia", "elixir"]
+topics: ["machinelearning", "mlops", "rust", "rust", "elixir"]
 published: true
 slug: "ml-lecture-31-part1"
 difficulty: "advanced"
 time_estimate: "90 minutes"
-languages: ["Julia", "Rust", "Elixir"]
+languages: ["Rust", "Elixir"]
 keywords: ["機械学習", "深層学習", "生成モデル"]
 ---
 
@@ -67,39 +67,63 @@ graph LR
 
 MLflowスタイルのメトリクス記録を3行で動かす。
 
-```julia
-using Dates, JSON3
+```rust
+use std::collections::HashMap;
+use std::fs;
+use std::time::{SystemTime, UNIX_EPOCH};
+use serde_json::{json, Value};
 
-# Experiment metadata logging (simplified MLflow-style)
-function log_experiment(name::String, params::Dict, metrics::Dict, artifacts::Vector{String})
-    experiment = Dict(
-        "name" => name,
-        "timestamp" => now(),
-        "params" => params,
-        "metrics" => metrics,
-        "artifacts" => artifacts,
-        "run_id" => string(rand(UInt64), base=16)
-    )
+// 実験メタデータを記録する関数 (簡略版 MLflow スタイル)
+fn log_experiment(
+    name: &str,
+    params: &HashMap<&str, Value>,
+    metrics: &HashMap<&str, Value>,
+    artifacts: &[&str],
+) -> String {
+    // ランダムな run_id を生成 (本物のMLflowはUUIDを使用)
+    let timestamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    let run_id = format!("{:x}", timestamp ^ 0xa3f9c2e1b4d8u64);
 
-    # Persist to JSON (real MLflow uses DB + artifact store)
-    filename = "experiments/$(experiment["run_id"]).json"
-    mkpath("experiments")
-    open(filename, "w") do io
-        JSON3.write(io, experiment)
-    end
+    let experiment = json!({
+        "name": name,
+        "timestamp": timestamp,
+        "params": params,
+        "metrics": metrics,
+        "artifacts": artifacts,
+        "run_id": &run_id,
+    });
 
-    println("✅ Logged experiment: $(experiment["name"]) (run_id: $(experiment["run_id"]))")
-    println("   Params: $(params)")
-    println("   Metrics: $(metrics)")
-    return experiment["run_id"]
-end
+    // JSONとしてファイルに永続化 (本物のMLflowはDB + artifact storeを使用)
+    let filename = format!("experiments/{}.json", run_id);
+    fs::create_dir_all("experiments").unwrap();
+    fs::write(&filename, experiment.to_string()).unwrap();
 
-# Example: Train a tiny model and log everything
-params = Dict("lr" => 0.001, "batch_size" => 32, "epochs" => 10)
-metrics = Dict("train_loss" => 0.023, "val_acc" => 0.952, "f1" => 0.948)
-artifacts = ["model_weights.pt", "config.yaml"]
+    println!("✅ Logged experiment: {} (run_id: {})", name, run_id);
+    println!("   Params: {:?}", params);
+    println!("   Metrics: {:?}", metrics);
+    run_id
+}
 
-run_id = log_experiment("tiny-classifier-v1", params, metrics, artifacts)
+fn main() {
+    // Example: 小さなモデルを訓練してすべてを記録する
+    let params = HashMap::from([
+        ("lr", json!(0.001)),
+        ("batch_size", json!(32)),
+        ("epochs", json!(10)),
+    ]);
+    let metrics = HashMap::from([
+        ("train_loss", json!(0.023)),
+        ("val_acc", json!(0.952)),
+        ("f1", json!(0.948)),
+    ]);
+    let artifacts = ["model_weights.pt", "config.yaml"];
+
+    let run_id = log_experiment("tiny-classifier-v1", &params, &metrics, &artifacts);
+    let _ = run_id;
+}
 ```
 
 出力:
@@ -333,7 +357,7 @@ MLでも同じはずなのに、**多くのチームがGitすら使っていな�
 
 | 項目 | 松尾研 | 本講義 (第31回) |
 |:-----|:------|:-------------|
-| MLflowの扱い | ⚠️スライド1枚で「こういうツールがある」 | ✅Julia統合実装 (200行) |
+| MLflowの扱い | ⚠️スライド1枚で「こういうツールがある」 | ✅Rust統合実装 (200行) |
 | DVCの扱い | ❌言及なし | ✅CLI操作 + S3統合 |
 | CI/CDの扱い | ❌言及なし | ✅GitHub Actions実装 |
 | A/Bテスト | ❌言及なし | ✅統計的検出力計算 + 実装 |
@@ -366,7 +390,7 @@ MLOpsは統計学・確率論・情報理論の応用問題だ。
 | **Part C** | A/Bテスト & カナリアリリース | 700 | ★★★ |
 | **Part D** | モニタリング & SLI/SLO | 600 | ★★★ |
 | **Part E** | DPO/RLHF基礎 | 400 | ★★★ |
-| **Part F** | 実装編 (⚡Julia + 🦀Rust + 🔮Elixir) | 600 | ★★★ |
+| **Part F** | 実装編 (🦀Rust + 🦀Rust + 🔮Elixir) | 600 | ★★★ |
 | **Part G** | 最新研究 (2024-2026) | 250 | ★★ |
 
 **推奨学習順序**:
@@ -1581,7 +1605,7 @@ $$
 
 **このループが自動化されていれば、MLシステムは "self-healing" になる。**
 
-> **Note:** **進捗: 50% 完了** MLOps全7領域の理論を完全網羅した。Zone 4で⚡Julia + 🦀Rust + 🔮Elixir実装へ。
+> **Note:** **進捗: 50% 完了** MLOps全7領域の理論を完全網羅した。Zone 4で🦀Rust + 🦀Rust + 🔮Elixir実装へ。
 
 ---
 
