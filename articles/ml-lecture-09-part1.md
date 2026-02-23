@@ -8,9 +8,15 @@ slug: "ml-lecture-09-part1"
 difficulty: "advanced"
 time_estimate: "90 minutes"
 languages: ["Python", "Rust"]
-keywords: ["機械学習", "深層学習", "生成モデル"]
+keywords: ["機械学習", "深層学習", "生成モデル", "変分推論", "ELBO", "ニューラルネットワーク", "MLP", "CNN", "RNN", "Reparameterization"]
 ---
 
+> **🎯 この記事で得られるもの**
+> - NN基礎（MLP/CNN/RNN）の数学的理解 — 順伝播・逆伝播・勾配消失の完全導出
+> - 変分推論の動機とELBO導出（3視点: Jensen / KL分解 / 重点サンプリング）
+> - ELBO分解（再構成項 + KL正則化項）の直感とRate-Distortion視点
+> - 勾配推定量（REINFORCE vs Reparameterization）の理論と分散の桁違いの差
+> - Amortized Inferenceの概念（VAEへの布石）とAmortization Gap
 
 # 第9回: NN基礎（MLP/CNN/RNN）& 変分推論 & ELBO
 
@@ -238,21 +244,21 @@ graph TD
 - **VAE/GAN/Diffusion の論文が「書ける」**
 - 手法セクションの数式を完全に導出できる
 - PyTorchコード ↔ 数式が1:1で対応できる
-- Rust/Rustで高速実装ができる
+- Rustで高速実装ができる
 
 ### 2.5 松尾・岩澤研究室「深層生成モデル2026Spring」との比較
 
 | 観点 | 松尾研 (8回) | 本シリーズ (10回) |
 |:-----|:------------|:-----------------|
 | **理論深度** | 論文が読める | **論文が書ける** (導出完全) |
-| **実装** | PyTorchのみ | **Python+Rust+Rust** (3言語) |
+| **実装** | PyTorchのみ | **Python+Rust** (2言語) |
 | **数学基礎** | 前提知識扱い | **Course I 8回で徹底**  |
 | **CNN/RNN** | スキップ | **第9回で基礎→第14回で限界を明示** |
 | **ELBO** | 概要のみ | **3つの導出 + Rate-Distortion視点** |
 | **OT理論** | なし | **第11回で完全展開** (WGAN/FM基盤) |
 | **Attention** | 2回 | **4回** (14-17回: Attention/SSM/Hybrid) |
 
-**差別化の本質**: 松尾研は「応用のための最低限の理論」、本シリーズは「理論の完全理解 + 3言語実装力」。
+**差別化の本質**: 松尾研は「応用のための最低限の理論」、本シリーズは「理論の完全理解 + 多言語実装力」。
 
 ### 2.6 3つのメタファーで捉える「変分推論」
 
@@ -1599,7 +1605,7 @@ Rate-Distortion 理論との対応:
 
 ---
 
----
+> **📖 後編（実装編）はこちら**: [【後編】第9回: NN基礎&変分推論&ELBO — 実装編](/articles/ml-lecture-09-part2)
 
 ## 著者リンク
 

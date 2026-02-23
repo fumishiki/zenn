@@ -8,14 +8,21 @@ slug: "ml-lecture-09-part2"
 difficulty: "advanced"
 time_estimate: "90 minutes"
 languages: ["Python", "Rust"]
-keywords: ["機械学習", "深層学習", "生成モデル"]
+keywords: ["機械学習", "深層学習", "生成モデル", "ELBO", "変分推論", "ゼロコピー", "所有権", "借用", "ライフタイム", "Rust", "Python比較", "Reparameterization", "REINFORCE"]
 ---
 
 > **📖 この記事は後編（実装編）です** 理論編は [【前編】第9回](/articles/ml-lecture-09-part1) をご覧ください。
 
+> **🎯 この記事で得られるもの**
+> - Python ELBO実装の限界を体感（GIL・メモリコピー問題）
+> - Rust所有権・借用・ライフタイムの基礎理解
+> - ゼロコピー（`&[f64]`）による50x高速化の実感
+> - ELBO各項のMath↔Code 1:1対応
+> - REINFORCE vs Reparameterization の分散比較実験
+
 ## 💻 Z5. 試練（実装）（45分）— Python の限界と Rust の力
 
-### 4.1 Python による ELBO 計算
+### 5.1 Python による ELBO 計算
 
 まずは Python で VAE の ELBO を実装してみる。NumPy と PyTorch の2パターンで書く。
 
@@ -215,7 +222,7 @@ Speedup (CPU → GPU): 2.75x
 - PyTorch CPU は遅い（0.245 ms）— 自動微分のコスト
 - PyTorch GPU で 2.75x 高速化 — バッチサイズが小さいため効果は限定的
 
-### 4.2 プロファイリング — どこが遅いのか？
+### 5.2 プロファイリング — どこが遅いのか？
 
 Python の **cProfile** でボトルネックを特定する。
 
@@ -280,7 +287,7 @@ if __name__ == "__main__":
 
 これらは NumPy の C 実装なので、**Python レベルでの最適化は限界**。
 
-### 4.3 Rust 実装 — 50x 高速化への道
+### 5.3 Rust 実装 — 50x 高速化への道
 
 Rust で同じ ELBO 計算を実装し、**所有権**・**借用**・**ライフタイム** を駆使してゼロコピーを実現する。
 
@@ -304,6 +311,18 @@ codegen-units = 1
 ```
 
 #### src/lib.rs
+
+以下のRust実装は、ELBO の各項を数式と1:1で対応させる。対応する数式:
+
+$$
+\mathcal{L}(\theta, \phi; x) = \underbrace{\mathbb{E}_{q_\phi(z|x)}[\log p_\theta(x|z)]}_{\text{再構成項}} - \underbrace{D_{\mathrm{KL}}(q_\phi(z|x) \| p(z))}_{\text{KL正則化項}}
+$$
+
+Reparameterization trick: $z = \mu + \sigma \odot \epsilon, \quad \epsilon \sim \mathcal{N}(0, I)$
+
+KL（ガウス閉形式）: $D_{\mathrm{KL}} = -\frac{1}{2}\sum_{j=1}^{J}(1 + \log \sigma_j^2 - \mu_j^2 - \sigma_j^2)$
+
+**記号↔変数名の対応**: $\mu$ → `mu`, $\log \sigma^2$ → `logvar`, $\sigma$ → `sigma`, $\epsilon$ → `epsilon`, $z$ → `z`
 
 ```rust
 //! ELBO computation with zero-copy operations
@@ -526,11 +545,11 @@ Speedup vs PyTorch GPU: 24.7x (0.089 ms → 0.0036 ms)
 - **PyTorch GPU をも 24.7倍上回る**（小バッチではGPU転送コストが支配的）
 - 10,000 イテレーションでも 36ms（Python は 1,820ms）
 
-### 4.4 Rust チュートリアル — 所有権・借用・ライフタイム
+### 5.4 Rust チュートリアル — 所有権・借用・ライフタイム
 
 Rust の **3大概念** を ELBO 実装から学ぶ。
 
-#### 4.4.1 所有権 (Ownership)
+#### 5.4.1 所有権 (Ownership)
 
 **ルール**:
 1. 各値には **唯一の所有者** がいる
@@ -564,7 +583,7 @@ let epsilon = Array2::<f64>::zeros((batch_size, latent_dim));
 // ↑ epsilon のメモリは関数リターン時に自動解放 (GC 不要)
 ```
 
-#### 4.4.2 借用 (Borrowing)
+#### 5.4.2 借用 (Borrowing)
 
 所有権を移動せずに **参照** を渡す。
 
@@ -610,7 +629,7 @@ pub fn elbo_ndarray<'a>(
 }
 ```
 
-#### 4.4.3 ライフタイム (Lifetimes)
+#### 5.4.3 ライフタイム (Lifetimes)
 
 参照が **いつまで有効か** をコンパイラに教える。
 
@@ -648,7 +667,7 @@ pub fn elbo_ndarray<'a>(
 }
 ```
 
-#### 4.4.4 ゼロコピー操作
+#### 5.4.4 ゼロコピー操作
 
 **スライスの威力**:
 ```rust
@@ -680,7 +699,7 @@ let x = ArrayView2::from_shape((batch_size, input_dim), x_flat).unwrap();
 //      ↑ x_flat へのポインタと shape 情報だけ持つ (16 bytes)
 ```
 
-#### 4.4.5 所有権とパフォーマンス
+#### 5.4.5 所有権とパフォーマンス
 
 **メモリレイアウトの最適化**:
 ```rust
@@ -704,7 +723,7 @@ let b = Array1::from_vec(vec![2.0; 1000]);
 let c = &a + &b;  // AVX2/AVX512 命令に自動変換 (4-8要素並列)
 ```
 
-### 4.5 Python vs Rust 比較表
+### 5.5 Python vs Rust 比較表
 
 | 項目 | Python (NumPy) | Rust (ndarray) | 備考 |
 |------|----------------|----------------|------|
@@ -717,7 +736,7 @@ let c = &a + &b;  // AVX2/AVX512 命令に自動変換 (4-8要素並列)
 | **型安全性** | 実行時エラー | コンパイル時エラー | バグの早期発見 |
 | **並列化** | GIL で制限 | Rayon で自動並列化 | マルチコア活用 |
 
-### 4.6 練習問題
+### 5.6 練習問題
 
 **Exercise 1**: Rust で IWAE (Importance Weighted ELBO) を実装せよ。
 
@@ -736,7 +755,7 @@ pub fn iwae_ndarray<'a>(
     k_samples: usize,
 ) -> f64 {
     // TODO: あなたの実装をここに書く
-    // Hint: Zone 3.7 の IWAE 式を参照
+    // Hint: 前編 Zone 4 の IWAE 式を参照
     unimplemented!()
 }
 ```
@@ -787,7 +806,7 @@ pub fn elbo_parallel<'a>(
 
 ### 🔬 実験・検証（30分）— 理解度チェック
 
-### 5.1 基礎問題
+### 5.7 基礎問題
 
 **Q1**: MLP の順伝播で、隠れ層の活性化関数に ReLU を使う理由を2つ答えよ。
 
@@ -894,7 +913,7 @@ VAE では通常 Reparameterization を使う（離散潜在変数の場合は G
 
 ---
 
-### 5.2 応用問題
+### 5.8 応用問題
 
 **Q6**: β-VAE の ELBO を書き、β の役割を Rate-Distortion 理論と結びつけて説明せよ。
 
@@ -1119,7 +1138,7 @@ $$\mathcal{J} = \sum_{(x, y) \in D_L} (\mathcal{L}(x, y) + \alpha \mathcal{C}(x,
 
 ---
 
-### 5.3 チャレンジ問題
+### 5.9 チャレンジ問題
 
 **Q11**: Variational Flow Matching (VFM, NeurIPS 2024) の ELBO を、Flow Matching の確率パスと結びつけて導出せよ。
 
@@ -1341,6 +1360,13 @@ $$\mathcal{L} = \mathbb{E}_{q(z|x_{\text{img}}, x_{\text{text}})}\left[\log p(x_
 - **SAP (Separated Attribute Predictability)**: 線形分類器での分離可能性
 - **DCI (Disentanglement, Completeness, Informativeness)**: 3軸評価
 
+#### 最新 arXiv（2024-2025）
+
+- **Function-Space VI** (arXiv:2406.04317, 2024) — 関数空間事前分布を用いた変分推論。過剰パラメータ化でも収束保証
+- **Brain-like VI** (arXiv:2410.19315, 2025) — 脳の推論と機械学習を統一。標準VAEより20%高いELBO
+- **Multimodal ELBO with Diffusion Decoders** (arXiv:2408.16883, 2025) — モダリティごとに異なるELBO。FID 30%改善
+- **VI Failures Under Model Symmetries** (arXiv:2408.05496, 2024) — 置換不変な変分事後分布で適合性改善
+
 ### 6.4 次のステップ
 
 1. **第10回: VAE (Variational Autoencoder)** — 基礎から離散表現（VQ-VAE/FSQ）まで
@@ -1385,7 +1411,28 @@ $$\mathcal{L} = \mathbb{E}_{q(z|x_{\text{img}}, x_{\text{text}})}\left[\log p(x_
 
 ## 🎭 Z7. エピローグ（まとめ・FAQ・次回予告）
 
-### 6.6 FAQ
+### 7.0 数式↔実装 対応表
+
+本講義で実装した ELBO の各項と、Python/Rust コードの対応を整理する。
+
+| 数式 | 意味 | Python (NumPy) | Rust (ndarray) |
+|:-----|:-----|:---------------|:---------------|
+| $z = \mu + \sigma \odot \epsilon$ | Reparameterization | `z = mu + sigma * epsilon` | `let z = mu + &(sigma * &epsilon);` |
+| $\sigma = \exp(\tfrac{1}{2}\log\sigma^2)$ | 標準偏差 | `sigma = np.exp(0.5 * logvar)` | `logvar.mapv(\|lv\| (0.5 * lv).exp())` |
+| $-\lVert x - \hat{x}\rVert^2$ | 再構成誤差 | `-((x - x_recon)**2).sum(1).mean()` | `-(diff.mapv(\|v\| v*v)).sum_axis(Axis(1)).mean()` |
+| $-\frac{1}{2}\sum(1+\log\sigma^2-\mu^2-\sigma^2)$ | KL ダイバージェンス | `(1 + logvar - mu**2 - np.exp(logvar))` | `1.0 + logvar - &mu_sq - &exp_logvar` |
+| $\text{ELBO} = \text{Recon} - \text{KL}$ | 変分下界 | `elbo = recon - kl` | `let elbo = recon_loss - kl_loss;` |
+
+**メモリモデルの違い**:
+
+| 操作 | Python | Rust |
+|:-----|:-------|:-----|
+| 配列参照 | コピー（暗黙的） | `&ArrayView2`（ゼロコピー） |
+| 形状変換 | `reshape()` → 新規配列 | `ArrayView2::from_shape()` → ポインタのみ |
+| 一時バッファ | GC が回収 | スコープ終了時に即解放（RAII） |
+| 並列化 | GIL でブロック | `par_iter()` でロックフリー |
+
+### 7.1 FAQ
 
 **Q: VAE と GAN の違いは？**
 
@@ -1423,7 +1470,7 @@ A:
 A:
 $\log p(x)$ のこと。ベイズ統計では周辺尤度を "evidence" と呼ぶ（潜在変数 $z$ を周辺化した後の、データ $x$ に関する尤度）。
 
-### 6.7 参考文献
+### 7.2 参考文献
 
 #### 教科書
 1. **Deep Learning** (Goodfellow et al., 2016) — 深層学習の聖書
@@ -1443,7 +1490,7 @@ $\log p(x)$ のこと。ベイズ統計では周辺尤度を "evidence" と呼�
 2. **Programming Rust** (O'Reilly, 2021) — 実践的パターン
 3. **ndarray Documentation** — 科学計算ライブラリ
 
-### 6.8 次回予告: 第10回 — VAE: 基礎から離散表現まで
+### 7.3 次回予告: 第10回 — VAE: 基礎から離散表現まで
 
 **テーマ**: 変分推論を深化させ、連続潜在空間から離散トークン空間へ
 
@@ -1456,14 +1503,14 @@ $\log p(x)$ のこと。ベイズ統計では周辺尤度を "evidence" と呼�
 
 **Boss Battle**: 変分推論（第9回）の ELBO を、ニューラルネットワークでスケーラブルに解く。
 
-### 6.9 謝辞
+### 7.4 謝辞
 
 この講義は以下の研究と実装に基づいています:
 - PyTorch/JAX コミュニティの VAE 実装
 - Rust ML エコシステム (ndarray, burn, candle)
 - Course I の数学的基盤（8講義分）
 
-### 6.10 最後のメッセージ
+### 7.5 最後のメッセージ
 
 **ELBO は単なる下界ではない。**
 
@@ -1481,118 +1528,29 @@ $\log p(x)$ のこと。ベイズ統計では周辺尤度を "evidence" と呼�
 
 ---
 
-## 付録: コード全文
+## パラダイム転換
 
-### A. Python ELBO 実装
+**「速さ」の正体はゼロコピー。メモリを制する者がパフォーマンスを制するのでは？**
 
-完全版は Zone 4.1 参照。
+NumPy が呼ばれるたびに、Python は裏で何をしているか。配列の形状チェック、一時バッファの確保、C関数へのディスパッチ、結果のPythonオブジェクトへのラッピング。これらすべてが「見えないコスト」として積み重なる。Rust の `&[f64]` はこのコストをゼロにする——ポインタと長さだけで、メモリの実体に直接触れるからだ。
 
-### B. Rust ELBO 実装
+50x の高速化は「Rust が速い」のではなく、「Python が遅い」のでもない。**メモリコピーが発生するかしないか** という、もっと根本的なアーキテクチャの違いだ。
 
-完全版は Zone 4.3 参照。
+<details><summary>歴史的背景: なぜ Python はメモリコピーを避けられないのか</summary>
 
-### C. ベンチマークスクリプト
+Python の参照カウント方式 GC は、すべてのオブジェクトにヘッダ（参照カウント + 型ポインタ）を付与する。NumPy 配列は C の連続メモリを持つが、Python の関数呼び出し境界をまたぐたびに一時配列が生成される。`a + b * c` という単純な式でも、`b * c` の一時配列 → `a + (結果)` の一時配列と、2回のアロケーションが発生する。Rust ではこの式が単一のイテレータチェーンにコンパイルされ、一時配列は存在しない。
 
-```bash
-#!/bin/bash
-# benchmark.sh — Python vs Rust 性能比較
-
-echo "=== Python (NumPy) ==="
-python3 -c "from elbo import benchmark_numpy; benchmark_numpy()"
-
-echo ""
-echo "=== Python (PyTorch CPU) ==="
-python3 -c "from elbo import benchmark_pytorch; benchmark_pytorch('cpu')"
-
-echo ""
-echo "=== Rust (ndarray) ==="
-cargo build --release
-./target/release/elbo-rust
-
-echo ""
-echo "=== Summary ==="
-echo "NumPy:        0.182 ms"
-echo "PyTorch CPU:  0.245 ms"
-echo "PyTorch GPU:  0.089 ms"
-echo "Rust:         0.0036 ms"
-echo ""
-echo "Speedup: 50.6x (NumPy → Rust)"
-```
-
----
-
-**ライセンス**: MIT License (コード) / CC BY 4.0 (文章)
-
-**リポジトリ**: https://github.com/your-username/ml-course-ii-lecture-09
-
-**Zenn**: https://zenn.dev/your-username/books/ml-course-ii
-
----
-
----
-
-## 🔬 最新研究動向（2024-2025）
-
-変分推論とELBOの理論・実装の両面で急速な進展が続いている。
-
-### Function-Space変分推論
-
-**Well-Defined Function-Space VI in Bayesian Neural Networks** (arXiv:2406.04317, 2024)
-- **問題**: 従来の重みパラメータ空間での変分推論は、有限次元に縛られる
-- **解決策**: 関数空間事前分布を用いた変分推論 + 正則化KL
-- **利点**: 過剰パラメータ化でも収束保証、スケーラブル
-- **実装**: PyTorchで公開
-<https://arxiv.org/html/2406.04317>
-
-### 生物学的妥当性を持つVI
-
-**Brain-like Variational Inference** (arXiv:2410.19315, 2025)
-- **核心**: 脳と機械学習の推論を統一 — どちらもELBO最大化（または変分自由エネルギー最小化）
-- **反復VAE**: 確率的基礎 + 生物学的に妥当な神経ダイナミクス
-- **結果**: 標準VAEより20%高いELBO、生物学的拘束下で動作
-<https://arxiv.org/html/2410.19315v2>
-
-### Quantum HyperNetworks での VI
-
-**Variational Inference for Quantum HyperNetworks** (arXiv:2506.05888, 2025)
-- **Binary Neural Networks (BiNNs)** に変分推論適用
-- **結果**: ELBOベースの変分法が最尤推定より訓練性・汎化性で優位
-- **理由**: 確率的正則化が離散重みの探索空間を効率化
-<https://arxiv.org/html/2506.05888>
-
-### マルチモーダルELBO
-
-**Multimodal ELBO with Diffusion Decoders** (arXiv:2408.16883, 2025)
-- **問題**: 従来のマルチモーダルVAEは単一ELBOで全モダリティを扱い、バランス崩壊
-- **提案**: モダリティごとに異なるELBO + Diffusionデコーダ
-- **性能**: FIDスコア30%改善（画像-テキスト生成タスク）
-<https://arxiv.org/html/2408.16883v2>
-
-### モデル対称性下でのVI
-
-**Variational Inference Failures Under Model Symmetries** (arXiv:2408.05496, 2024)
-- **問題**: ベイズNNのパラメータは置換対称性を持つが、標準変分事後分布は対称性を破る
-- **解決策**: 置換不変な変分事後分布 — 真の事後分布への適合が証明可能に改善
-- **修正**: 元のELBOの事前分布KL項を対称化
-<https://arxiv.org/html/2408.05496>
-
-### 理論と実装の最新ギャップ
-
-| 項目 | 理論的進展（2024-2025） | 実装での課題 |
-|:-----|:--------------------|:----------|
-| Function-space VI | 無限次元での収束保証 | メモリ効率的な実装 |
-| 生物学的妥当性 | 神経ダイナミクスとの統合 | ハードウェア制約 |
-| Quantum VI | 量子優位性の理論証明 | NISQデバイスのノイズ |
-| Multimodal ELBO | モダリティ間バランス改善 | 最適重み付けの自動化 |
-| 対称性保存 | 置換不変事後分布 | 計算コストO(K!) |
+</details>
 
 ---
 
 ## 参考文献
 
-本講義の参考文献は本文中の各セクション（§6.7）を参照。
+本講義の参考文献は本文中の各セクション（§7.2）を参照。
 
 ---
+
+> **📖 前編（理論編）はこちら:** [【前編】第9回: NN基礎&変分推論&ELBO](/articles/ml-lecture-09-part1)
 
 ## 著者リンク
 
