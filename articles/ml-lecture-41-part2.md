@@ -62,7 +62,7 @@ fn predictor(D, n_masks) {
 
 ```python
 # EMA update for target encoder: θ_target ← τ·θ_target + (1-τ)·θ_context
-@torch.no_grad()
+@torch.inference_mode()
 def update_ema(target: torch.Tensor, context: torch.Tensor, tau: float) -> torch.Tensor:
     return tau * target + (1.0 - tau) * context
 
@@ -90,7 +90,7 @@ def train_jepa(
             z_ctx = ctx_enc(x_context)
 
             # Target encoding — stop gradient (EMA encoder, no backprop)
-            with torch.no_grad():
+            with torch.inference_mode():
                 z_tgt = tgt_enc(x_target)
 
             # Predictor: concat context + mask tokens (zeros as placeholder)
@@ -555,7 +555,7 @@ def train_action_discovery(
     for epoch in range(epochs):
         for x_t, x_next in video_data:
             z_pred, _ = model(x_t, x_next)
-            with torch.no_grad():
+            with torch.inference_mode():
                 z_true = model.encoder(x_next)
 
             # ‖z_pred − z_true‖² (+ entropy term β·H[a] to maximize action diversity)
@@ -732,7 +732,7 @@ def simulate_hamiltonian(
     qp = qp0.clone()
     trajectory = [qp.clone()]
     for _ in range(steps):
-        with torch.no_grad():
+        with torch.inference_mode():
             dqp = model.dynamics(qp)
         qp = qp + dt * dqp
         trajectory.append(qp.clone())

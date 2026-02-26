@@ -253,7 +253,7 @@ def train_ldm(
         total_loss = 0.0
         for x in dataloader:
             x = x.to(device)
-            with torch.no_grad():
+            with torch.inference_mode():
                 z0 = encoder(x)
             t = torch.randint(0, big_t, (1,)).item()
             z_t, eps_true = forward_diffusion(z0, t, alpha_bar, device)

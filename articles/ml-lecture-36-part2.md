@@ -219,7 +219,7 @@ def train_ddpm(
 import math
 import torch
 
-@torch.no_grad()
+@torch.inference_mode()
 def ddpm_sample(
     model:     TinyUNet,
     x_t_init:  torch.Tensor,
@@ -244,7 +244,7 @@ def ddpm_sample(
             x_t = mu
     return x_t
 
-@torch.no_grad()
+@torch.inference_mode()
 def ddim_sample(
     model:     TinyUNet,
     x_t_init:  torch.Tensor,
@@ -526,7 +526,7 @@ if __name__ == "__main__":
 import math
 import torch
 
-@torch.no_grad()
+@torch.inference_mode()
 def test_reconstruction(
     model:     TinyUNet,
     x0:        torch.Tensor,
@@ -652,7 +652,7 @@ class Ema:
         self.shadow.eval()
         self.decay  = decay
 
-    @torch.no_grad()
+    @torch.inference_mode()
     def update(self, model: nn.Module) -> None:
         # shadow = decay * shadow + (1 − decay) * current
         for shadow_p, model_p in zip(
@@ -1024,7 +1024,7 @@ $$
 import math
 import torch
 
-@torch.no_grad()
+@torch.inference_mode()
 def dpm_solver_step(
     model:     TinyUNet,
     x_t:       torch.Tensor,
@@ -1116,7 +1116,7 @@ $$
 import math
 import torch
 
-@torch.no_grad()
+@torch.inference_mode()
 def ddim_step_cfg(
     model_cond:   TinyUNet,
     model_uncond: TinyUNet,
@@ -1201,7 +1201,7 @@ $$
 import math
 import torch
 
-@torch.no_grad()
+@torch.inference_mode()
 def probability_flow_ode(
     model:     TinyUNet,
     x_t_init:  torch.Tensor,
@@ -1256,7 +1256,7 @@ DDPMで画像の一部を修復:
 import math
 import torch
 
-@torch.no_grad()
+@torch.inference_mode()
 def ddpm_inpaint(
     model:        TinyUNet,
     x_t_init:     torch.Tensor,
@@ -1311,7 +1311,7 @@ import math
 import torch
 import torch.nn.functional as F
 
-@torch.no_grad()
+@torch.inference_mode()
 def ddpm_super_resolution(
     model:     TinyUNet,
     x_t_init:  torch.Tensor,

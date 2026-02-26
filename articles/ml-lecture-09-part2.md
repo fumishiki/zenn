@@ -137,9 +137,9 @@ def elbo_pytorch(
         kl_loss: Tensor — KL ダイバージェンス
     """
     # Reparameterization trick
-    std = torch.exp(0.5 * logvar)
-    eps = torch.randn_like(std)
-    z = mu + std * eps
+    sigma = torch.exp(0.5 * logvar)         # σ = exp(½ log σ²)
+    eps = torch.randn_like(sigma)           # ε ~ N(0, I)
+    z = mu + sigma * eps                   # z = μ + σ⊙ε (reparameterization)
 
     # Reconstruction loss: -||x - x_recon||^2
     recon_loss = -((x - x_recon).pow(2)).sum(dim=1).mean()

@@ -622,7 +622,7 @@ class JEPA(nn.Module):
         s_pred = self.predictor(s_ctx)
 
         # Encode target via EMA encoder (no gradient)
-        with torch.no_grad():
+        with torch.inference_mode():
             s_tgt = self.target_encoder(x_target)
 
         return s_pred, s_tgt

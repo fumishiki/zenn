@@ -756,7 +756,7 @@ for epoch in range(1000):
 
 
 # Sampling via Euler ODE integration: dx/dt = v_θ(x, t)
-@torch.no_grad()
+@torch.inference_mode()
 def sample_flow_matching(
     vnet: nn.Module,
     n_samples: int,

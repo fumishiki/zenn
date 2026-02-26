@@ -42,9 +42,9 @@ class VAE(nn.Module):
         return self.fc_mu(h), self.fc_logvar(h)
 
     def reparameterize(self, mu, logvar):
-        std = torch.exp(0.5 * logvar)
-        eps = torch.randn_like(std)
-        return mu + eps * std
+        sigma = torch.exp(0.5 * logvar)     # σ = exp(½ log σ²)
+        eps = torch.randn_like(sigma)       # ε ~ N(0, I)
+        return mu + eps * sigma             # z = μ + σ⊙ε
 
     def decode(self, z):
         h = F.relu(self.fc3(z))
@@ -978,7 +978,7 @@ let x_output = decoder.forward(&z_more_smile)?;
 def detect_posterior_collapse(model, train_loader) -> torch.Tensor:
     """KL per latent dimension — collapsed if KL < 0.01."""
     total_kl, n = 0, 0
-    with torch.no_grad():
+    with torch.inference_mode():
         for x_batch, _ in train_loader:
             mu, logvar = model.encode(x_batch)
             kl_per_dim = 0.5 * (mu.pow(2) + logvar.exp() - logvar - 1)

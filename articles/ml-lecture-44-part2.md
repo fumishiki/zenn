@@ -101,7 +101,7 @@ def train_flow_tts(n_epochs: int, n_samples: int) -> FlowMatchingTTS:
     return model
 
 # --- Sampling ---
-@torch.no_grad()
+@torch.inference_mode()
 def sample_flow_tts(
     model: FlowMatchingTTS, phoneme_id: int, steps: int, audio_dim: int
 ) -> list[float]:

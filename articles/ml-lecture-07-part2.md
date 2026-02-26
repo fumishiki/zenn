@@ -142,7 +142,7 @@ logits = torch.tensor([0.2, -0.1, 0.0])
 ref    = torch.logsumexp(logits, dim=0)
 print(f"torch ref  logsumexp = {ref.item():.6f}")
 if torch.cuda.is_available():
-    tri = logsumexp_triton(logits.cuda())
+    tri = logsumexp_triton(logits.to("cuda"))  # .to(device) preferred over .cuda()
     print(f"triton GPU logsumexp = {tri.item():.6f}")
     assert abs(tri.item() - ref.item()) < 1e-5
 # log softmax = logit_i - logsumexp → softmax sums to 1 ✅
@@ -360,7 +360,7 @@ def closure() -> Tensor:
 
 opt.step(closure)
 
-with torch.no_grad():
+with torch.inference_mode():
     pi1_logit, mu1, log_s1, mu2, log_s2 = params.unbind()
     pi1 = torch.sigmoid(pi1_logit)
     print(f"pi1={pi1:.3f}, mu1={mu1:.3f}, s1={log_s1.exp():.3f}")
